@@ -708,6 +708,70 @@ fn terminal_second_attempt_does_not_fall_back_to_the_older_live_id() {
 }
 
 #[test]
+fn duplicate_terminal_selects_reuse_the_same_replacement() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-dup", "task-dup");
+    let first = call(
+        &server,
+        "dup-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+    let click_a = call(
+        &server,
+        "dup-click-a",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(click_a["ok"], true, "{click_a}");
+    let replacement = click_a["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement, first_id);
+    let click_b = call(
+        &server,
+        "dup-click-b",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(click_b["ok"], true, "{click_b}");
+    assert_eq!(
+        click_b["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap(),
+        replacement
+    );
+    let live = server
+        .processor()
+        .store()
+        .attempts_for_task("task-dup")
+        .unwrap()
+        .into_iter()
+        .filter(|attempt| !attempt.state.is_terminal())
+        .count();
+    assert_eq!(live, 1, "a second click must not launch another Runtime");
+}
+
+#[test]
 fn s1_first_selection_commits() {
     let server = seed_server();
     let selected = select_seed_campaign(&server, "s1-select", None);

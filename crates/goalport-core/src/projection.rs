@@ -1518,12 +1518,17 @@ impl UiController {
             let created_new = self.store.get_attempt(&attempt_id).is_err();
             self.store.insert_attempt(&attempt).map_err(store_message)?;
             if created_new {
-                self.persist_event(
-                    &attempt_id,
-                    "attempt.created",
-                    json!({ "provider": provider }),
-                    None,
-                )?;
+                let mut created = json!({ "provider": provider });
+                if let Ok(source_id) = payload_text(&request.payload, "attemptId") {
+                    if source_id != attempt_id {
+                        if let Ok(source) = self.store.get_attempt(&source_id) {
+                            if source.state.is_terminal() && source.task_id == task.id {
+                                created["rolledFrom"] = json!(source_id);
+                            }
+                        }
+                    }
+                }
+                self.persist_event(&attempt_id, "attempt.created", created, None)?;
             }
         }
         // The registration stage needs no compensation of its own: `attempts` and
@@ -4379,6 +4384,40 @@ fn fresh_attempt_id(task_id: &str, provider: &str, request_id: &str) -> String {
     )
 }
 
+fn live_rollover_of(
+    store: &store::Store,
+    terminal_id: &str,
+    task_id: &str,
+    provider: &str,
+) -> Result<Option<String>, String> {
+    let attempts = store.attempts_for_task(task_id).map_err(store_message)?;
+    let mut found = None;
+    for attempt in attempts {
+        if attempt.id == terminal_id
+            || attempt.provider != provider
+            || attempt.state.is_terminal()
+        {
+            continue;
+        }
+        let records = store
+            .list_event_records(&attempt.id, 0)
+            .map_err(store_message)?;
+        let rolled_from_here = records.iter().any(|record| {
+            record.event.kind == "attempt.created"
+                && record
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("rolledFrom"))
+                    .and_then(Value::as_str)
+                    == Some(terminal_id)
+        });
+        if rolled_from_here {
+            found = Some(attempt.id);
+        }
+    }
+    Ok(found)
+}
+
 fn resolve_admission_attempt_id(
     store: &store::Store,
     runtime_manager: &RuntimeManager,
@@ -4394,7 +4433,13 @@ fn resolve_admission_attempt_id(
         Ok(row) if row.task_id != task_id => Err(format!(
             "attempt {requested} is registered for another task; the request is refused"
         )),
-        Ok(row) if row.state.is_terminal() => Ok(fresh_attempt_id(task_id, provider, request_id)),
+        Ok(row) if row.state.is_terminal() => {
+            if let Some(existing) = live_rollover_of(store, &requested, task_id, provider)? {
+                Ok(existing)
+            } else {
+                Ok(fresh_attempt_id(task_id, provider, request_id))
+            }
+        }
         Ok(row)
             if row.provider != provider
                 && row.state == AttemptState::Queued
@@ -4960,7 +5005,7 @@ mod coalesce_tests {
 mod resolve_admission_attempt_id_tests {
     use super::{fresh_attempt_id, resolve_admission_attempt_id};
     use crate::{
-        domain::Attempt,
+        domain::{Attempt, Event},
         runtime_manager::RuntimeManager,
         store::Store,
     };
@@ -5045,5 +5090,79 @@ mod resolve_admission_attempt_id_tests {
             fresh_attempt_id("task-1", "scenario", &long_a),
             fresh_attempt_id("task-1", "scenario", &long_b)
         );
+    }
+
+    #[test]
+    fn terminal_rollover_reuses_a_live_replacement_across_request_ids() {
+        let store = Store::memory().unwrap();
+        let manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-old",
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event(&Event {
+                id: "e-active".into(),
+                attempt_id: "attempt-old".into(),
+                seq: 1,
+                kind: "attempt.active".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+        store
+            .append_event(&Event {
+                id: "e-fail".into(),
+                attempt_id: "attempt-old".into(),
+                seq: 2,
+                kind: "attempt.failed".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+        let first = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "click-1",
+            true,
+        )
+        .unwrap();
+        store
+            .insert_attempt(&Attempt::new(
+                &first,
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event_json(
+                &Event {
+                    id: "e-created".into(),
+                    attempt_id: first.clone(),
+                    seq: 1,
+                    kind: "attempt.created".into(),
+                    payload_ref: None,
+                },
+                &json!({ "provider": "scenario", "rolledFrom": "attempt-old" }),
+            )
+            .unwrap();
+        let second = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "click-2",
+            true,
+        )
+        .unwrap();
+        assert_eq!(second, first);
+        assert_ne!(first, "attempt-old");
     }
 }
