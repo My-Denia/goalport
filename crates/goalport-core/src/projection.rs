@@ -1291,6 +1291,7 @@ impl UiController {
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
         let attempt_id = resolve_admission_attempt_id(
             &self.store,
+            &self.runtime_manager,
             &request.payload,
             &task.id,
             &provider,
@@ -1368,6 +1369,7 @@ impl UiController {
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
         let attempt_id = resolve_admission_attempt_id(
             &self.store,
+            &self.runtime_manager,
             &request.payload,
             &task.id,
             &provider,
@@ -4379,6 +4381,7 @@ fn fresh_attempt_id(task_id: &str, provider: &str, request_id: &str) -> String {
 
 fn resolve_admission_attempt_id(
     store: &store::Store,
+    runtime_manager: &RuntimeManager,
     payload: &Value,
     task_id: &str,
     provider: &str,
@@ -4393,7 +4396,9 @@ fn resolve_admission_attempt_id(
         )),
         Ok(row) if row.state.is_terminal() => Ok(fresh_attempt_id(task_id, provider, request_id)),
         Ok(row)
-            if row.provider != provider && row.state == AttemptState::Queued =>
+            if row.provider != provider
+                && row.state == AttemptState::Queued
+                && runtime_manager.registered_binding(&requested).is_none() =>
         {
             Ok(fresh_attempt_id(task_id, provider, request_id))
         }
@@ -4948,5 +4953,83 @@ mod coalesce_tests {
         ];
         let items = coalesce(&records);
         assert_eq!(message_bodies(&items), ["firstsecond"]);
+    }
+}
+
+#[cfg(test)]
+mod resolve_admission_attempt_id_tests {
+    use super::{fresh_attempt_id, resolve_admission_attempt_id};
+    use crate::{
+        domain::Attempt,
+        runtime_manager::RuntimeManager,
+        store::Store,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    fn payload(attempt_id: &str) -> serde_json::Value {
+        json!({ "attemptId": attempt_id })
+    }
+
+    #[test]
+    fn queued_without_registration_mints_on_provider_change() {
+        let store = Store::memory().unwrap();
+        let manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-queued",
+                "task-1",
+                "codex",
+                "codex-cap-v1",
+            ))
+            .unwrap();
+        let resolved = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-queued"),
+            "task-1",
+            "scenario",
+            "req-1",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            fresh_attempt_id("task-1", "scenario", "req-1")
+        );
+    }
+
+    #[test]
+    fn queued_with_registration_keeps_id_on_provider_change() {
+        let store = Store::memory().unwrap();
+        let mut manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-queued-kept",
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        manager
+            .select_runtime(
+                "attempt-queued-kept",
+                "scenario",
+                None,
+                "scenario-cap-v1",
+                Path::new("."),
+            )
+            .unwrap();
+        let resolved = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-queued-kept"),
+            "task-1",
+            "claude",
+            "req-2",
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved, "attempt-queued-kept");
     }
 }
