@@ -14,8 +14,8 @@
 //! campaign, task and granted authorization, inserted through the same `Store` the controller shares.
 
 use goalport_core::{
-    Project,
-    domain::{Campaign, Task, WorkStatus},
+    Event, Project,
+    domain::{AttemptState, Campaign, Task, WorkStatus},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     store::{CampaignAuthorization, Store},
 };
@@ -463,6 +463,82 @@ fn display_placeholder_is_not_persisted_across_two_campaign_first_selects() {
     assert_ne!(third_id, first_id);
     assert_ne!(third_id, second_id);
     assert_placeholder_not_persisted(&server, "after create_campaign first select");
+}
+
+fn fail_attempt(server: &CoreServer, attempt_id: &str) {
+    let store = server.processor().store();
+    if store.get_attempt(attempt_id).unwrap().state == AttemptState::Queued {
+        let seq = store.get_attempt(attempt_id).unwrap().last_event_seq + 1;
+        store
+            .append_event(&Event {
+                id: format!("event-active-{seq}"),
+                attempt_id: attempt_id.into(),
+                seq,
+                kind: "attempt.active".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+    }
+    let seq = store.get_attempt(attempt_id).unwrap().last_event_seq + 1;
+    store
+        .append_event(&Event {
+            id: format!("event-fail-{seq}"),
+            attempt_id: attempt_id.into(),
+            seq,
+            kind: "attempt.failed".into(),
+            payload_ref: None,
+        })
+        .unwrap();
+    assert!(
+        store.get_attempt(attempt_id).unwrap().state.is_terminal(),
+        "fixture must leave a terminal Attempt"
+    );
+}
+
+/// After a selected Attempt finishes, select_runtime must mint a new identity instead of
+/// reusing the terminal row. That is what the renderer instruction "select a Runtime to
+/// start a new Attempt" requires.
+#[test]
+fn terminal_attempt_id_does_not_block_a_new_runtime_select() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-term", "task-term");
+    let first = call(
+        &server,
+        "term-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term",
+            "taskId": "task-term"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+
+    let again = call(
+        &server,
+        "term-again",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term",
+            "taskId": "task-term",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    let second_id = again["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, first_id);
+    let store = server.processor().store();
+    assert!(store.get_attempt(&first_id).unwrap().state.is_terminal());
+    assert!(!store.get_attempt(&second_id).unwrap().state.is_terminal());
 }
 
 #[test]

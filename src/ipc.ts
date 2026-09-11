@@ -22,6 +22,16 @@ export function persistedAttemptId(attemptId: string | undefined | null): string
   return trimmed;
 }
 
+/** Identities Core may reuse on select_runtime. Terminal and display placeholders are omitted so Core can mint a new Attempt. */
+export function reusableAttemptId(
+  attempt: { id?: string | null; state?: string | null } | null | undefined
+): string | undefined {
+  const id = persistedAttemptId(attempt?.id);
+  if (!id) return undefined;
+  if (attempt?.state === "active" || attempt?.state === "waiting") return id;
+  return undefined;
+}
+
 export interface CloseChoicePayload {
   requestId: string;
   choice: "continue" | "stop";

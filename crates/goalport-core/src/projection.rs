@@ -1281,18 +1281,13 @@ impl UiController {
         let task_id = payload_text_default(&request.payload, "taskId", "");
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_attempt_id(
+        let attempt_id = resolve_admission_attempt_id(
+            &self.store,
             &request.payload,
-            &format!(
-                "attempt-{}-{}",
-                stable_suffix(if task_id.is_empty() {
-                    "queued"
-                } else {
-                    &task_id
-                }),
-                provider
-            ),
-        );
+            if task_id.is_empty() { "queued" } else { &task_id },
+            &provider,
+            &request.request_id,
+        )?;
         let mut stored = request.payload.clone();
         if let Some(obj) = stored.as_object_mut() {
             obj.insert("projectId".into(), json!(project_id));
@@ -1364,10 +1359,13 @@ impl UiController {
         }
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_attempt_id(
+        let attempt_id = resolve_admission_attempt_id(
+            &self.store,
             &request.payload,
-            &format!("attempt-{}-{}", stable_suffix(&task.id), provider),
-        );
+            &task.id,
+            &provider,
+            &request.request_id,
+        )?;
         let executable = payload_text(&request.payload, "executable")
             .ok()
             .map(PathBuf::from);
@@ -4359,6 +4357,27 @@ fn payload_attempt_id(value: &Value, fallback: &str) -> String {
     match payload_text(value, "attemptId") {
         Ok(id) if id != UNASSIGNED_ATTEMPT_ID => id,
         _ => fallback.to_owned(),
+    }
+}
+
+fn resolve_admission_attempt_id(
+    store: &store::Store,
+    payload: &Value,
+    task_id: &str,
+    provider: &str,
+    request_id: &str,
+) -> Result<String, String> {
+    let fallback = format!("attempt-{}-{}", stable_suffix(task_id), provider);
+    let requested = payload_attempt_id(payload, &fallback);
+    match store.get_attempt(&requested) {
+        Ok(row) if row.state.is_terminal() => Ok(format!(
+            "attempt-{}-{}-{}",
+            stable_suffix(task_id),
+            provider,
+            stable_suffix(request_id)
+        )),
+        Ok(_) | Err(store::StoreError::NotFound(_)) => Ok(requested),
+        Err(error) => Err(store_message(error)),
     }
 }
 

@@ -565,7 +565,10 @@ impl AgentAdapter for ScenarioAdapter {
         if let Some(reason) = self.fail_next_send.take() {
             return Err(AdapterError::Connection(reason));
         }
-        if isolated_required() && request.text.contains("RC-MARKER-HOLD") {
+        if isolated_required()
+            && request.text.contains("RC-MARKER-HOLD")
+            && !self.sent_prompt_keys.contains(&request.idempotency_key)
+        {
             std::thread::sleep(std::time::Duration::from_millis(8000));
         }
         if self.sent_prompt_keys.contains(&request.idempotency_key) {
@@ -1321,6 +1324,18 @@ mod tests {
             idempotency_key: "ok-1".into(),
         };
         assert!(!adapter.send_prompt(&ok).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
+        let started = std::time::Instant::now();
+        let replay = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-HOLD".into(),
+            idempotency_key: "ok-1".into(),
+        };
+        assert!(adapter.send_prompt(&replay).unwrap().duplicate);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "HOLD must not sleep on a duplicate idempotency key"
+        );
         assert_eq!(adapter.sent_prompts(), &["hello"]);
     }
 

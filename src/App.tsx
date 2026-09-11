@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getCoreClient, persistedAttemptId, type CoreCommand } from "./ipc";
+import { getCoreClient, reusableAttemptId, type CoreCommand } from "./ipc";
 import {
   appendPreviewMessage,
   createPreviewCampaign,
@@ -454,7 +454,7 @@ function App() {
           onHandoff={() => { void handleHandoff(); }}
           onSelectRuntime={(provider) => {
             if (client.selectRuntime && snapshot.activeCampaignId && snapshot.activeTask.id) {
-              const attemptId = persistedAttemptId(snapshot.attempt.id);
+              const attemptId = reusableAttemptId(snapshot.attempt);
               const pending = attemptId
                 ? client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id, attemptId)
                 : client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id);
