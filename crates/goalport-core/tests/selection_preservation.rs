@@ -14,8 +14,8 @@
 //! campaign, task and granted authorization, inserted through the same `Store` the controller shares.
 
 use goalport_core::{
-    Project,
-    domain::{Campaign, Task, WorkStatus},
+    Event, Project,
+    domain::{Attempt, AttemptState, Campaign, Task, WorkStatus},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     store::{CampaignAuthorization, Store},
 };
@@ -311,6 +311,465 @@ fn d1b_omitted_campaign_id_refusal_keeps_selection() {
 // ---------------------------------------------------------------------------------------------
 // Successes: the selection must commit.
 // ---------------------------------------------------------------------------------------------
+
+fn assert_placeholder_not_persisted(server: &CoreServer, context: &str) {
+    assert!(
+        !server
+            .processor()
+            .store()
+            .list_attempts()
+            .unwrap()
+            .iter()
+            .any(|attempt| attempt.id == "attempt-unassigned"),
+        "{context}: the display placeholder must not enter the Attempt table"
+    );
+}
+
+fn add_campaign_without_attempt(server: &CoreServer, campaign_id: &str, task_id: &str) {
+    let store = server.processor().store();
+    let campaign = Campaign {
+        id: campaign_id.into(),
+        goal: format!("campaign {campaign_id}"),
+        root_task_id: task_id.into(),
+        state: WorkStatus::InProgress,
+    };
+    let task = Task {
+        id: task_id.into(),
+        campaign_id: campaign_id.into(),
+        title: format!("task {task_id}"),
+        acceptance: "selectable without a persisted Attempt".into(),
+        state: WorkStatus::InProgress,
+    };
+    store
+        .create_campaign_with_task(SEED_PROJECT, &campaign, &task)
+        .unwrap();
+    store
+        .set_campaign_authorization(campaign_id, &CampaignAuthorization::granted())
+        .unwrap();
+}
+
+fn select_campaign(server: &CoreServer, id: &str, campaign_id: &str) -> Value {
+    let response = call(server, id, "select_campaign", json!({ "campaignId": campaign_id }));
+    assert_eq!(response["ok"], true, "{response}");
+    response["payload"]["snapshot"].clone()
+}
+
+/// The renderer snapshot uses `attempt-unassigned` as a display placeholder before any
+/// Attempt exists. If that string is treated as a real identity, the second Campaign's
+/// first select collides with the first Campaign's registration and is refused.
+#[test]
+fn display_placeholder_is_not_persisted_across_two_campaign_first_selects() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-ph-a", "task-ph-a");
+    add_campaign_without_attempt(&server, "campaign-ph-b", "task-ph-b");
+
+    let before_a = select_campaign(&server, "ph-a-select", "campaign-ph-a");
+    assert_eq!(before_a["activeCampaignId"], "campaign-ph-a");
+    assert_eq!(before_a["attempt"]["id"], "attempt-unassigned");
+
+    let first = call(
+        &server,
+        "ph-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-a",
+            "taskId": "task-ph-a",
+            "attemptId": "attempt-unassigned"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(first_id, "attempt-unassigned");
+    assert_placeholder_not_persisted(&server, "after the first Campaign select");
+
+    let before_b = select_campaign(&server, "ph-b-select", "campaign-ph-b");
+    assert_eq!(before_b["activeCampaignId"], "campaign-ph-b");
+    assert_eq!(before_b["attempt"]["id"], "attempt-unassigned");
+
+    let second = call(
+        &server,
+        "ph-second",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-b",
+            "taskId": "task-ph-b",
+            "attemptId": "attempt-unassigned"
+        }),
+    );
+    assert_eq!(second["ok"], true, "{second}");
+    let second_id = second["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, "attempt-unassigned");
+    assert_ne!(second_id, first_id);
+
+    let reuse = call(
+        &server,
+        "ph-reuse",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-a",
+            "taskId": "task-ph-a",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(reuse["ok"], true, "{reuse}");
+    assert_eq!(
+        reuse["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap(),
+        first_id
+    );
+    assert_placeholder_not_persisted(&server, "after the second Campaign select");
+
+    let created = call(
+        &server,
+        "ph-create",
+        "create_campaign",
+        json!({
+            "projectId": SEED_PROJECT,
+            "goal": "command-surface campaign with no Attempt",
+            "title": "created task",
+            "acceptance": "first Runtime select must not persist the display placeholder"
+        }),
+    );
+    assert_eq!(created["ok"], true, "{created}");
+    let created_view = &created["payload"]["snapshot"];
+    let created_campaign = created_view["activeCampaignId"].as_str().unwrap().to_string();
+    let created_task = created_view["activeTask"]["id"].as_str().unwrap().to_string();
+    let created_attempt = created_view["attempt"]["id"].as_str().unwrap().to_string();
+    let third = call(
+        &server,
+        "ph-third",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": created_campaign,
+            "taskId": created_task,
+            "attemptId": created_attempt
+        }),
+    );
+    assert_eq!(third["ok"], true, "{third}");
+    let third_id = third["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(third_id, "attempt-unassigned");
+    assert_ne!(third_id, first_id);
+    assert_ne!(third_id, second_id);
+    assert_placeholder_not_persisted(&server, "after create_campaign first select");
+}
+
+fn fail_attempt(server: &CoreServer, attempt_id: &str) {
+    let store = server.processor().store();
+    if store.get_attempt(attempt_id).unwrap().state == AttemptState::Queued {
+        let seq = store.get_attempt(attempt_id).unwrap().last_event_seq + 1;
+        store
+            .append_event(&Event {
+                id: format!("event-active-{seq}"),
+                attempt_id: attempt_id.into(),
+                seq,
+                kind: "attempt.active".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+    }
+    let seq = store.get_attempt(attempt_id).unwrap().last_event_seq + 1;
+    store
+        .append_event(&Event {
+            id: format!("event-fail-{seq}"),
+            attempt_id: attempt_id.into(),
+            seq,
+            kind: "attempt.failed".into(),
+            payload_ref: None,
+        })
+        .unwrap();
+    assert!(
+        store.get_attempt(attempt_id).unwrap().state.is_terminal(),
+        "fixture must leave a terminal Attempt"
+    );
+}
+
+/// After a selected Attempt finishes, select_runtime must mint a new identity instead of
+/// reusing the terminal row. That is what the renderer instruction "select a Runtime to
+/// start a new Attempt" requires.
+#[test]
+fn terminal_attempt_id_does_not_block_a_new_runtime_select() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-term", "task-term");
+    let first = call(
+        &server,
+        "term-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term",
+            "taskId": "task-term"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+
+    let again = call(
+        &server,
+        "term-again",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term",
+            "taskId": "task-term",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    let second_id = again["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, first_id);
+    let store = server.processor().store();
+    assert!(store.get_attempt(&first_id).unwrap().state.is_terminal());
+    assert!(!store.get_attempt(&second_id).unwrap().state.is_terminal());
+}
+
+#[test]
+fn terminal_attempt_id_from_another_task_is_refused() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-term-a", "task-term-a");
+    add_campaign_without_attempt(&server, "campaign-term-b", "task-term-b");
+    let first = call(
+        &server,
+        "term-own-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term-a",
+            "taskId": "task-term-a"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+
+    let crossed = call(
+        &server,
+        "term-own-cross",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term-b",
+            "taskId": "task-term-b",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(crossed["ok"], false, "{crossed}");
+    assert!(
+        crossed["error"]
+            .as_str()
+            .unwrap()
+            .contains("registered for another task"),
+        "{crossed}"
+    );
+}
+
+#[test]
+fn queued_withdrawn_attempt_mints_a_new_id_when_the_provider_changes() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-queued", "task-queued");
+    let queued_id = "attempt-queued-codex";
+    server
+        .processor()
+        .store()
+        .insert_attempt(&Attempt::new(
+            queued_id,
+            "task-queued",
+            "codex",
+            "codex-cap-v1",
+        ))
+        .unwrap();
+    let admitted = call(
+        &server,
+        "queued-provider-change",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-queued",
+            "taskId": "task-queued",
+            "attemptId": queued_id
+        }),
+    );
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    let next_id = admitted["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(next_id, queued_id);
+    assert_eq!(
+        server.processor().store().get_attempt(queued_id).unwrap().state,
+        AttemptState::Queued
+    );
+    assert_eq!(
+        server.processor().store().get_attempt(&next_id).unwrap().provider,
+        "scenario"
+    );
+}
+
+#[test]
+fn terminal_second_attempt_does_not_fall_back_to_the_older_live_id() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-multi", "task-multi");
+    let first = call(
+        &server,
+        "multi-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let queued = call(
+        &server,
+        "multi-queue",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi",
+            "attemptId": first_id,
+            "resourcePressure": true
+        }),
+    );
+    assert_eq!(queued["ok"], true, "{queued}");
+    let queue_id = queued["payload"]["snapshot"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.as_str())
+        .find_map(|text| text.strip_prefix("Queued under resource pressure: "))
+        .expect("queued admission id")
+        .to_string();
+    let admitted = call(
+        &server,
+        "multi-admit",
+        "queue_override",
+        json!({ "queueId": queue_id, "reason": "explicit-owner-override" }),
+    );
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    let second_id = admitted["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, first_id);
+    fail_attempt(&server, &second_id);
+
+    let again = call(
+        &server,
+        "multi-again",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi",
+            "attemptId": second_id
+        }),
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    let third_id = again["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(third_id, first_id);
+    assert_ne!(third_id, second_id);
+    assert!(!server
+        .processor()
+        .store()
+        .get_attempt(&first_id)
+        .unwrap()
+        .state
+        .is_terminal());
+}
+
+#[test]
+fn duplicate_terminal_selects_reuse_the_same_replacement() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-dup", "task-dup");
+    let first = call(
+        &server,
+        "dup-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+    let click_a = call(
+        &server,
+        "dup-click-a",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(click_a["ok"], true, "{click_a}");
+    let replacement = click_a["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(replacement, first_id);
+    let click_b = call(
+        &server,
+        "dup-click-b",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-dup",
+            "taskId": "task-dup",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(click_b["ok"], true, "{click_b}");
+    assert_eq!(
+        click_b["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap(),
+        replacement
+    );
+    let live = server
+        .processor()
+        .store()
+        .attempts_for_task("task-dup")
+        .unwrap()
+        .into_iter()
+        .filter(|attempt| !attempt.state.is_terminal())
+        .count();
+    assert_eq!(live, 1, "a second click must not launch another Runtime");
+}
 
 #[test]
 fn s1_first_selection_commits() {

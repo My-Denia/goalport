@@ -143,6 +143,8 @@ AUMID is `GoalPort.Desktop`. No Start Menu shortcut is created.
 
 ## Current verification
 
+PR CI is `.github/workflows/ci.yml` on Windows: `pnpm lint` / `pnpm test:unit`, Core in-memory contract tests, and the Tauri bridge unit tests. It does not run packaged Desktop, live Runtime admission, or isolated `GOALPORT_REQUIRE_ISOLATED` product launches.
+
 ```text
 node --test scripts/connected/v1-isolated-env.test.mjs scripts/connected/v1-resume-chain.test.mjs scripts/connected/v1-core-restart.test.mjs
 cargo test -p goalport-core --test core_restart_epoch --offline -- --test-threads=1

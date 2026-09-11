@@ -557,8 +557,19 @@ impl AgentAdapter for ScenarioAdapter {
                 "prompt attempt does not match the active session".into(),
             ));
         }
+        if isolated_required() && request.text.contains("RC-MARKER-FORCE-FAIL") {
+            return Err(AdapterError::Connection(
+                "RC-MARKER-FORCE-FAIL".into(),
+            ));
+        }
         if let Some(reason) = self.fail_next_send.take() {
             return Err(AdapterError::Connection(reason));
+        }
+        if isolated_required()
+            && request.text.contains("RC-MARKER-HOLD")
+            && !self.sent_prompt_keys.contains(&request.idempotency_key)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(8000));
         }
         if self.sent_prompt_keys.contains(&request.idempotency_key) {
             return Ok(PromptAccepted {
@@ -1167,6 +1178,13 @@ fn capability(name: &str, support: CapabilitySupport, semantics: &str) -> Capabi
     }
 }
 
+fn isolated_required() -> bool {
+    matches!(
+        std::env::var("GOALPORT_REQUIRE_ISOLATED").as_deref(),
+        Ok("1")
+    )
+}
+
 fn now() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1200,6 +1218,142 @@ mod tests {
         assert!(!adapter.send_prompt(&prompt).unwrap().duplicate);
         adapter.resume_session(&session.session_id).unwrap();
         assert!(adapter.send_prompt(&prompt).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
+    }
+
+    const MARKER_CHILD: &str = "GOALPORT_ADAPTER_MARKER_CHILD";
+
+    /// Re-executes this test in a child whose GOALPORT_REQUIRE_ISOLATED is set by
+    /// the test, not inherited from the parent shell. Returns true in the parent
+    /// after the child has already asserted the case.
+    fn reexec_with_isolation(isolated: Option<&str>) -> bool {
+        if std::env::var_os(MARKER_CHILD).is_some() {
+            return false;
+        }
+        let test_name = std::thread::current()
+            .name()
+            .expect("cargo names the test thread")
+            .to_string();
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("test executable"),
+        );
+        command
+            .arg(&test_name)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(MARKER_CHILD, "1")
+            .env_remove("GOALPORT_REQUIRE_ISOLATED");
+        if let Some(value) = isolated {
+            command.env("GOALPORT_REQUIRE_ISOLATED", value);
+        }
+        let output = command
+            .output()
+            .expect("spawn a child with a controlled isolation env");
+        assert!(
+            output.status.success(),
+            "controlled child {test_name} failed (isolated={isolated:?})\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    #[test]
+    fn isolated_markers_are_inert_without_isolated_env() {
+        if reexec_with_isolation(None) {
+            return;
+        }
+        assert!(
+            !isolated_required(),
+            "child must run with GOALPORT_REQUIRE_ISOLATED unset"
+        );
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        let started = std::time::Instant::now();
+        let hold = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-HOLD".into(),
+            idempotency_key: "hold-1".into(),
+        };
+        assert!(!adapter.send_prompt(&hold).unwrap().duplicate);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "HOLD must not sleep unless GOALPORT_REQUIRE_ISOLATED=1"
+        );
+        let fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-FORCE-FAIL".into(),
+            idempotency_key: "fail-1".into(),
+        };
+        assert!(!adapter.send_prompt(&fail).unwrap().duplicate);
+        assert_eq!(
+            adapter.sent_prompts(),
+            &["RC-MARKER-HOLD", "RC-MARKER-FORCE-FAIL"]
+        );
+    }
+
+    #[test]
+    fn isolated_markers_apply_when_isolated_env_is_set() {
+        if reexec_with_isolation(Some("1")) {
+            return;
+        }
+        assert!(
+            isolated_required(),
+            "child must run with GOALPORT_REQUIRE_ISOLATED=1"
+        );
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        let fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-FORCE-FAIL".into(),
+            idempotency_key: "fail-1".into(),
+        };
+        match adapter.send_prompt(&fail) {
+            Err(AdapterError::Connection(reason)) => {
+                assert_eq!(reason, "RC-MARKER-FORCE-FAIL")
+            }
+            other => panic!("expected isolated FORCE-FAIL, got {other:?}"),
+        }
+        assert!(
+            adapter.sent_prompts().is_empty(),
+            "FORCE-FAIL must not be recorded as a sent prompt"
+        );
+        let ok = PromptRequest {
+            attempt_id: "a".into(),
+            text: "hello".into(),
+            idempotency_key: "ok-1".into(),
+        };
+        assert!(!adapter.send_prompt(&ok).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
+        let started = std::time::Instant::now();
+        let replay = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-HOLD".into(),
+            idempotency_key: "ok-1".into(),
+        };
+        assert!(adapter.send_prompt(&replay).unwrap().duplicate);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "HOLD must not sleep on a duplicate idempotency key"
+        );
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
+    }
+
+    #[test]
+    fn fail_next_send_still_fails_once_then_succeeds() {
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        adapter.fail_next_send("boom");
+        let prompt = PromptRequest {
+            attempt_id: "a".into(),
+            text: "hello".into(),
+            idempotency_key: "cmd-fail-once".into(),
+        };
+        match adapter.send_prompt(&prompt) {
+            Err(AdapterError::Connection(reason)) => assert_eq!(reason, "boom"),
+            other => panic!("expected Connection(boom), got {other:?}"),
+        }
+        assert!(!adapter.send_prompt(&prompt).unwrap().duplicate);
         assert_eq!(adapter.sent_prompts(), &["hello"]);
     }
 

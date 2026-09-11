@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
+/// Display-only Attempt identity used when a task has no persisted row.
+/// Admission must never persist or register this string.
+const UNASSIGNED_ATTEMPT_ID: &str = "attempt-unassigned";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiProject {
@@ -344,7 +348,7 @@ impl UiController {
             .or_else(|| attempts.last().cloned())
             .unwrap_or_else(|| {
                 Attempt::new(
-                    "attempt-unassigned",
+                    UNASSIGNED_ATTEMPT_ID,
                     active_task_id.clone().unwrap_or_default(),
                     "scenario",
                     "scenario-cap-v1",
@@ -1274,29 +1278,31 @@ impl UiController {
         );
         let project = self.store.get_project(&project_id).map_err(store_message)?;
         self.ensure_workspace_ingress_allowed(&project.workspace_root, "runtime queue admission")?;
-        let task_id = payload_text_default(&request.payload, "taskId", "");
+        let campaign = self
+            .store
+            .get_campaign(&campaign_id)
+            .map_err(store_message)?;
+        let task_id = payload_text_default(&request.payload, "taskId", &campaign.root_task_id);
+        let task = self.store.get_task(&task_id).map_err(store_message)?;
+        if task.campaign_id != campaign.id {
+            return Err("task does not belong to selected campaign".into());
+        }
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_text_default(
+        let attempt_id = resolve_admission_attempt_id(
+            &self.store,
+            &self.runtime_manager,
             &request.payload,
-            "attemptId",
-            &format!(
-                "attempt-{}-{}",
-                stable_suffix(if task_id.is_empty() {
-                    "queued"
-                } else {
-                    &task_id
-                }),
-                provider
-            ),
-        );
+            &task.id,
+            &provider,
+            &request.request_id,
+            false,
+        )?;
         let mut stored = request.payload.clone();
         if let Some(obj) = stored.as_object_mut() {
             obj.insert("projectId".into(), json!(project_id));
             obj.insert("campaignId".into(), json!(campaign_id));
-            if !task_id.is_empty() {
-                obj.insert("taskId".into(), json!(task_id));
-            }
+            obj.insert("taskId".into(), json!(task.id));
             obj.insert("provider".into(), json!(provider));
             obj.insert("attemptId".into(), json!(attempt_id));
             obj.remove("resourcePressure");
@@ -1361,11 +1367,15 @@ impl UiController {
         }
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_text_default(
+        let attempt_id = resolve_admission_attempt_id(
+            &self.store,
+            &self.runtime_manager,
             &request.payload,
-            "attemptId",
-            &format!("attempt-{}-{}", stable_suffix(&task.id), provider),
-        );
+            &task.id,
+            &provider,
+            &request.request_id,
+            true,
+        )?;
         let executable = payload_text(&request.payload, "executable")
             .ok()
             .map(PathBuf::from);
@@ -1508,12 +1518,17 @@ impl UiController {
             let created_new = self.store.get_attempt(&attempt_id).is_err();
             self.store.insert_attempt(&attempt).map_err(store_message)?;
             if created_new {
-                self.persist_event(
-                    &attempt_id,
-                    "attempt.created",
-                    json!({ "provider": provider }),
-                    None,
-                )?;
+                let mut created = json!({ "provider": provider });
+                if let Ok(source_id) = payload_text(&request.payload, "attemptId") {
+                    if source_id != attempt_id {
+                        if let Ok(source) = self.store.get_attempt(&source_id) {
+                            if source.state.is_terminal() && source.task_id == task.id {
+                                created["rolledFrom"] = json!(source_id);
+                            }
+                        }
+                    }
+                }
+                self.persist_event(&attempt_id, "attempt.created", created, None)?;
             }
         }
         // The registration stage needs no compensation of its own: `attempts` and
@@ -4353,6 +4368,93 @@ fn payload_text_default(value: &Value, key: &str, fallback: &str) -> String {
     payload_text(value, key).unwrap_or_else(|_| fallback.to_owned())
 }
 
+fn payload_attempt_id(value: &Value, fallback: &str) -> String {
+    match payload_text(value, "attemptId") {
+        Ok(id) if id != UNASSIGNED_ATTEMPT_ID => id,
+        _ => fallback.to_owned(),
+    }
+}
+
+fn fresh_attempt_id(task_id: &str, provider: &str, request_id: &str) -> String {
+    format!(
+        "attempt-{}-{}-{}",
+        stable_suffix(task_id),
+        provider,
+        sha256_hex(request_id.as_bytes())
+    )
+}
+
+fn live_rollover_of(
+    store: &store::Store,
+    terminal_id: &str,
+    task_id: &str,
+    provider: &str,
+) -> Result<Option<String>, String> {
+    let attempts = store.attempts_for_task(task_id).map_err(store_message)?;
+    let mut found = None;
+    for attempt in attempts {
+        if attempt.id == terminal_id
+            || attempt.provider != provider
+            || attempt.state.is_terminal()
+        {
+            continue;
+        }
+        let records = store
+            .list_event_records(&attempt.id, 0)
+            .map_err(store_message)?;
+        let rolled_from_here = records.iter().any(|record| {
+            record.event.kind == "attempt.created"
+                && record
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("rolledFrom"))
+                    .and_then(Value::as_str)
+                    == Some(terminal_id)
+        });
+        if rolled_from_here {
+            found = Some(attempt.id);
+        }
+    }
+    Ok(found)
+}
+
+fn resolve_admission_attempt_id(
+    store: &store::Store,
+    runtime_manager: &RuntimeManager,
+    payload: &Value,
+    task_id: &str,
+    provider: &str,
+    request_id: &str,
+    allow_live_reuse: bool,
+) -> Result<String, String> {
+    let fallback = format!("attempt-{}-{}", stable_suffix(task_id), provider);
+    let requested = payload_attempt_id(payload, &fallback);
+    match store.get_attempt(&requested) {
+        Ok(row) if row.task_id != task_id => Err(format!(
+            "attempt {requested} is registered for another task; the request is refused"
+        )),
+        Ok(row) if row.state.is_terminal() => {
+            if allow_live_reuse {
+                if let Some(existing) = live_rollover_of(store, &requested, task_id, provider)? {
+                    return Ok(existing);
+                }
+            }
+            Ok(fresh_attempt_id(task_id, provider, request_id))
+        }
+        Ok(row)
+            if row.provider != provider
+                && row.state == AttemptState::Queued
+                && runtime_manager.registered_binding(&requested).is_none() =>
+        {
+            Ok(fresh_attempt_id(task_id, provider, request_id))
+        }
+        Ok(_) if allow_live_reuse => Ok(requested),
+        Ok(_) => Ok(fresh_attempt_id(task_id, provider, request_id)),
+        Err(store::StoreError::NotFound(_)) => Ok(requested),
+        Err(error) => Err(store_message(error)),
+    }
+}
+
 fn payload_i64(value: &Value, key: &str) -> Option<i64> {
     value.get(key).and_then(Value::as_i64)
 }
@@ -4897,5 +4999,183 @@ mod coalesce_tests {
         ];
         let items = coalesce(&records);
         assert_eq!(message_bodies(&items), ["firstsecond"]);
+    }
+}
+
+#[cfg(test)]
+mod resolve_admission_attempt_id_tests {
+    use super::{fresh_attempt_id, resolve_admission_attempt_id};
+    use crate::{
+        domain::{Attempt, Event},
+        runtime_manager::RuntimeManager,
+        store::Store,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    fn payload(attempt_id: &str) -> serde_json::Value {
+        json!({ "attemptId": attempt_id })
+    }
+
+    #[test]
+    fn queued_without_registration_mints_on_provider_change() {
+        let store = Store::memory().unwrap();
+        let manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-queued",
+                "task-1",
+                "codex",
+                "codex-cap-v1",
+            ))
+            .unwrap();
+        let resolved = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-queued"),
+            "task-1",
+            "scenario",
+            "req-1",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            fresh_attempt_id("task-1", "scenario", "req-1")
+        );
+    }
+
+    #[test]
+    fn queued_with_registration_keeps_id_on_provider_change() {
+        let store = Store::memory().unwrap();
+        let mut manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-queued-kept",
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        manager
+            .select_runtime(
+                "attempt-queued-kept",
+                "scenario",
+                None,
+                "scenario-cap-v1",
+                Path::new("."),
+            )
+            .unwrap();
+        let resolved = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-queued-kept"),
+            "task-1",
+            "claude",
+            "req-2",
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved, "attempt-queued-kept");
+    }
+
+    #[test]
+    fn replacement_ids_do_not_collapse_distinct_request_ids() {
+        assert_ne!(
+            fresh_attempt_id("task-1", "scenario", "rollover/a"),
+            fresh_attempt_id("task-1", "scenario", "rollover_a")
+        );
+        let long_a = format!("{}a", "x".repeat(48));
+        let long_b = format!("{}b", "x".repeat(48));
+        assert_ne!(
+            fresh_attempt_id("task-1", "scenario", &long_a),
+            fresh_attempt_id("task-1", "scenario", &long_b)
+        );
+    }
+
+    #[test]
+    fn terminal_rollover_reuses_a_live_replacement_across_request_ids() {
+        let store = Store::memory().unwrap();
+        let manager = RuntimeManager::new();
+        store
+            .insert_attempt(&Attempt::new(
+                "attempt-old",
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event(&Event {
+                id: "e-active".into(),
+                attempt_id: "attempt-old".into(),
+                seq: 1,
+                kind: "attempt.active".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+        store
+            .append_event(&Event {
+                id: "e-fail".into(),
+                attempt_id: "attempt-old".into(),
+                seq: 2,
+                kind: "attempt.failed".into(),
+                payload_ref: None,
+            })
+            .unwrap();
+        let first = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "click-1",
+            true,
+        )
+        .unwrap();
+        store
+            .insert_attempt(&Attempt::new(
+                &first,
+                "task-1",
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event_json(
+                &Event {
+                    id: "e-created".into(),
+                    attempt_id: first.clone(),
+                    seq: 1,
+                    kind: "attempt.created".into(),
+                    payload_ref: None,
+                },
+                &json!({ "provider": "scenario", "rolledFrom": "attempt-old" }),
+            )
+            .unwrap();
+        let second = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "click-2",
+            true,
+        )
+        .unwrap();
+        assert_eq!(second, first);
+        assert_ne!(first, "attempt-old");
+        let queued = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "queue-1",
+            false,
+        )
+        .unwrap();
+        assert_ne!(queued, first);
+        assert_ne!(queued, "attempt-old");
     }
 }

@@ -1,11 +1,28 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { getCoreClient, resetCoreClientForTests } from "./ipc";
+import { getCoreClient, persistedAttemptId, reusableAttemptId, resetCoreClientForTests } from "./ipc";
 import { resolveCoreSnapshot } from "./types";
 
 afterEach(() => resetCoreClientForTests());
 
 describe("Core client preview transport", () => {
+  it("treats the display placeholder Attempt id as absent", () => {
+    expect(persistedAttemptId("attempt-unassigned")).toBeUndefined();
+    expect(persistedAttemptId("  attempt-unassigned  ")).toBeUndefined();
+    expect(persistedAttemptId("")).toBeUndefined();
+    expect(persistedAttemptId(undefined)).toBeUndefined();
+    expect(persistedAttemptId("attempt-codex-executor-1")).toBe("attempt-codex-executor-1");
+  });
+
+  it("forwards persisted Attempt ids except the display placeholder and uncertain snapshots", () => {
+    expect(reusableAttemptId({ id: "attempt-live", state: "active" })).toBe("attempt-live");
+    expect(reusableAttemptId({ id: "attempt-wait", state: "waiting" })).toBe("attempt-wait");
+    expect(reusableAttemptId({ id: "attempt-done", state: "completed" })).toBe("attempt-done");
+    expect(reusableAttemptId({ id: "attempt-dead", state: "failed" })).toBe("attempt-dead");
+    expect(reusableAttemptId({ id: "attempt-unassigned", state: "active" })).toBeUndefined();
+    expect(reusableAttemptId({ id: "attempt-live", state: "uncertain" })).toBeUndefined();
+  });
+
   it("exposes the versioned projection without pretending browser preview is a Runtime", async () => {
     const client = getCoreClient();
     const snapshot = await client.snapshot();

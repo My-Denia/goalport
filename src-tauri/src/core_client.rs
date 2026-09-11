@@ -169,7 +169,7 @@ impl CoreConnection {
         request.validate()?;
         let wire = serde_json::to_value(request)
             .map_err(|error| format!("unable to encode Core command: {error}"))?;
-        unwrap_ui_snapshot(self.exchange(&wire)?)
+        unwrap_command_result(self.exchange(&wire)?)
     }
 
     fn exchange(&self, value: &Value) -> Result<Value, String> {
@@ -233,14 +233,20 @@ fn normalized_pipe_name(name: &str) -> String {
     }
 }
 
-fn unwrap_ui_snapshot(value: Value) -> Result<Value, String> {
-    if value.get("ok").and_then(Value::as_bool) == Some(false) {
-        return Err(value
+fn tagged_core_rejection(value: &Value) -> Option<Value> {
+    if value.get("ok").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    Some(json!({
+        "goalportRejected": true,
+        "error": value
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("Core rejected the UI request")
-            .to_string());
-    }
+    }))
+}
+
+fn unwrap_ui_snapshot_payload(value: Value) -> Result<Value, String> {
     // v2 responses carry UiCommandResult in payload; retain compatibility with
     // the old direct projection and with a raw UiCommandResponse envelope.
     if let Some(snapshot) = value
@@ -253,6 +259,24 @@ fn unwrap_ui_snapshot(value: Value) -> Result<Value, String> {
         return Ok(value.get("payload").cloned().unwrap_or(Value::Null));
     }
     Ok(value)
+}
+
+fn unwrap_ui_snapshot(value: Value) -> Result<Value, String> {
+    if let Some(rejected) = tagged_core_rejection(&value) {
+        return Err(rejected
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Core rejected the UI request")
+            .to_string());
+    }
+    unwrap_ui_snapshot_payload(value)
+}
+
+fn unwrap_command_result(value: Value) -> Result<Value, String> {
+    if let Some(rejected) = tagged_core_rejection(&value) {
+        return Ok(rejected);
+    }
+    unwrap_ui_snapshot_payload(value)
 }
 
 fn write_frame(writer: &mut File, payload: &[u8]) -> Result<(), String> {
@@ -358,5 +382,40 @@ mod tests {
             normalized_pipe_name(r"\\.\pipe\goalport-connected"),
             r"\\.\pipe\goalport-connected"
         );
+    }
+
+    #[test]
+    fn command_result_tags_a_core_business_rejection() {
+        let tagged = unwrap_command_result(json!({
+            "ok": false,
+            "error": "attempt is already bound to a different Runtime binding"
+        }))
+        .expect("a business rejection is a successful invoke payload");
+        assert_eq!(tagged["goalportRejected"], true);
+        assert_eq!(
+            tagged["error"],
+            "attempt is already bound to a different Runtime binding"
+        );
+    }
+
+    #[test]
+    fn snapshot_result_still_surfaces_a_core_rejection_as_an_error() {
+        let error = unwrap_ui_snapshot(json!({
+            "ok": false,
+            "error": "Core rejected the UI request"
+        }))
+        .expect_err("snapshot keeps ok:false as a transport-level error");
+        assert_eq!(error, "Core rejected the UI request");
+    }
+
+    #[test]
+    fn command_result_extracts_the_snapshot_payload() {
+        let snapshot = unwrap_command_result(json!({
+            "ok": true,
+            "payload": { "snapshot": { "connection": "connected", "attempt": { "id": "a-1" } } }
+        }))
+        .expect("ok:true still unwraps to the snapshot");
+        assert_eq!(snapshot["connection"], "connected");
+        assert_eq!(snapshot["attempt"]["id"], "a-1");
     }
 }
