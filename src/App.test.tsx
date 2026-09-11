@@ -330,4 +330,42 @@ describe("GoalPort preview", () => {
     expect(selectCalls).toHaveLength(1);
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
+
+  it("keeps the footer notice when a reselect fails to reach Core", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false } as const;
+    let selects = 0;
+    const command = vi.fn(async (request: CoreCommand) => {
+      if (request.messageType !== "select_runtime") return base;
+      selects += 1;
+      if (selects === 1) {
+        return { ...base, notices: ["Core refused: already bound"] };
+      }
+      if (selects === 2) {
+        return {
+          ...base,
+          connection: "disconnected" as const,
+          notices: ["Core request failed: ECONNRESET"]
+        };
+      }
+      return { ...base, connection: "connected" as const, notices: [] };
+    });
+    window.goalportCore = {
+      snapshot: async () => base,
+      command,
+      startCore: async () => base,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+    const select = await screen.findByRole("button", { name: /select claude code/i });
+    fireEvent.click(select);
+    expect(await screen.findByText("Core refused: already bound")).toBeTruthy();
+    fireEvent.click(select);
+    expect(await screen.findByText("Core request failed: ECONNRESET")).toBeTruthy();
+    fireEvent.click(select);
+    await waitFor(() => {
+      expect(screen.getByText("Core owns continuity · UI owns presentation")).toBeTruthy();
+    });
+  });
 });

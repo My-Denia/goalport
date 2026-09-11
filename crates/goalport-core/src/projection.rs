@@ -4434,11 +4434,12 @@ fn resolve_admission_attempt_id(
             "attempt {requested} is registered for another task; the request is refused"
         )),
         Ok(row) if row.state.is_terminal() => {
-            if let Some(existing) = live_rollover_of(store, &requested, task_id, provider)? {
-                Ok(existing)
-            } else {
-                Ok(fresh_attempt_id(task_id, provider, request_id))
+            if allow_live_reuse {
+                if let Some(existing) = live_rollover_of(store, &requested, task_id, provider)? {
+                    return Ok(existing);
+                }
             }
+            Ok(fresh_attempt_id(task_id, provider, request_id))
         }
         Ok(row)
             if row.provider != provider
@@ -5164,5 +5165,17 @@ mod resolve_admission_attempt_id_tests {
         .unwrap();
         assert_eq!(second, first);
         assert_ne!(first, "attempt-old");
+        let queued = resolve_admission_attempt_id(
+            &store,
+            &manager,
+            &payload("attempt-old"),
+            "task-1",
+            "scenario",
+            "queue-1",
+            false,
+        )
+        .unwrap();
+        assert_ne!(queued, first);
+        assert_ne!(queued, "attempt-old");
     }
 }

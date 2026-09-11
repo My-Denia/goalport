@@ -38,6 +38,19 @@ const EVIDENCE_LABEL: Record<EvidenceState, string> = {
   unsupported: "Unsupported"
 };
 
+function noticeAfterRuntimeSelect(next: CoreSnapshot, current: string | null): string | null {
+  const notices = next.notices ?? [];
+  const refused = notices.find((notice) => notice.startsWith("Core refused:"));
+  if (refused) return refused;
+  const failed = notices.find(
+    (notice) => notice.startsWith("Core request failed:") || notice.startsWith("Core unavailable")
+  );
+  if (failed || next.connection === "disconnected") {
+    return failed ?? current;
+  }
+  return null;
+}
+
 function connectionLabel(snapshot: CoreSnapshot): string {
   if (snapshot.connection === "connected") return "Core connected";
   if (snapshot.connection === "reconnecting") return "Reconnecting";
@@ -460,8 +473,7 @@ function App() {
                 : client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id);
               void pending.then((next) => {
                 setSnapshot(next);
-                const refusalNotice = next.notices[0]?.startsWith("Core refused:") ? next.notices[0] : null;
-                setActiveNotice(refusalNotice);
+                setActiveNotice((current) => noticeAfterRuntimeSelect(next, current));
                 if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
                   window.__goalportLastSelectResult = next;
                   window.__goalportLastSnapshot = next;
