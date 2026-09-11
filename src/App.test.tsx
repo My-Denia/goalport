@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT } from "./types";
 
 afterEach(() => {
@@ -266,7 +267,7 @@ describe("GoalPort preview", () => {
       preview: false,
       attempt: { ...DEMO_SNAPSHOT.attempt, id: "attempt-unassigned" }
     } as const;
-    const command = vi.fn(async () => snapshot);
+    const command = vi.fn(async (_request: CoreCommand) => snapshot);
     window.goalportCore = {
       snapshot: async () => snapshot,
       command,
@@ -277,9 +278,9 @@ describe("GoalPort preview", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
     await waitFor(() => {
-      expect(command.mock.calls.some(([request]) => request?.messageType === "select_runtime")).toBe(true);
+      expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
-    const selectCalls = command.mock.calls.filter(([request]) => request?.messageType === "select_runtime");
+    const selectCalls = command.mock.calls.filter(([request]) => request.messageType === "select_runtime");
     expect(selectCalls).toHaveLength(1);
     expect(selectCalls[0][0].payload.attemptId).toBeUndefined();
   });
@@ -287,7 +288,7 @@ describe("GoalPort preview", () => {
   it("keeps a persisted Attempt identity when re-selecting a Runtime", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const snapshot = { ...DEMO_SNAPSHOT, preview: false } as const;
-    const command = vi.fn(async () => snapshot);
+    const command = vi.fn(async (_request: CoreCommand) => snapshot);
     window.goalportCore = {
       snapshot: async () => snapshot,
       command,
@@ -298,9 +299,9 @@ describe("GoalPort preview", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
     await waitFor(() => {
-      expect(command.mock.calls.some(([request]) => request?.messageType === "select_runtime")).toBe(true);
+      expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
-    const selectCalls = command.mock.calls.filter(([request]) => request?.messageType === "select_runtime");
+    const selectCalls = command.mock.calls.filter(([request]) => request.messageType === "select_runtime");
     expect(selectCalls).toHaveLength(1);
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });

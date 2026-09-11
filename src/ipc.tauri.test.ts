@@ -5,7 +5,14 @@ import { DEMO_SNAPSHOT } from "./types";
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { getCoreClient, resetCoreClientForTests } from "./ipc";
+import { getCoreClient, resetCoreClientForTests, type CoreCommand } from "./ipc";
+
+function lastCoreCommandRequest(): CoreCommand {
+  const calls = invokeMock.mock.calls.filter(([command]) => command === "core_command");
+  const args = calls.at(-1)?.[1] as { request?: CoreCommand } | undefined;
+  if (!args?.request) throw new Error("expected a core_command invoke");
+  return args.request;
+}
 
 describe("connected Tauri Core command payloads", () => {
   beforeEach(() => {
@@ -92,10 +99,11 @@ describe("connected Tauri Core command payloads", () => {
 
   it("omits the display placeholder Attempt id from select_runtime", async () => {
     const client = getCoreClient();
+    expect(client.selectRuntime).toBeTypeOf("function");
     await client.snapshot();
-    await client.selectRuntime("scenario", "campaign-a", "task-a", "attempt-unassigned");
+    await client.selectRuntime!("scenario", "campaign-a", "task-a", "attempt-unassigned");
 
-    const request = invokeMock.mock.calls.find(([command]) => command === "core_command")?.[1]?.request;
+    const request = lastCoreCommandRequest();
     expect(request).toEqual(expect.objectContaining({
       messageType: "select_runtime",
       payload: { provider: "scenario", campaignId: "campaign-a", taskId: "task-a" }
@@ -105,11 +113,11 @@ describe("connected Tauri Core command payloads", () => {
 
   it("forwards a persisted Attempt id on select_runtime", async () => {
     const client = getCoreClient();
+    expect(client.selectRuntime).toBeTypeOf("function");
     await client.snapshot();
-    await client.selectRuntime("scenario", "campaign-a", "task-a", "attempt-codex-executor-1");
+    await client.selectRuntime!("scenario", "campaign-a", "task-a", "attempt-codex-executor-1");
 
-    const request = invokeMock.mock.calls.find(([command]) => command === "core_command")?.[1]?.request;
-    expect(request.payload).toEqual({
+    expect(lastCoreCommandRequest().payload).toEqual({
       provider: "scenario",
       campaignId: "campaign-a",
       taskId: "task-a",
@@ -119,13 +127,14 @@ describe("connected Tauri Core command payloads", () => {
 
   it("keeps the current snapshot and connection when Core refuses select_runtime", async () => {
     const client = getCoreClient();
+    expect(client.selectRuntime).toBeTypeOf("function");
     const before = await client.snapshot();
 
     invokeMock.mockResolvedValueOnce({
       goalportRejected: true,
       error: "attempt attempt-codex-executor-1 is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused"
     });
-    const after = await client.selectRuntime("claude", before.activeCampaignId, before.activeTask.id, before.attempt.id);
+    const after = await client.selectRuntime!("claude", before.activeCampaignId, before.activeTask.id, before.attempt.id);
 
     expect(after.connection).toBe(before.connection);
     expect(after.attempt.id).toBe(before.attempt.id);

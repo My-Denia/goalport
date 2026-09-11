@@ -1,0 +1,53 @@
+# PR/push gate for the shared UI and Core contracts.
+# Not packaged Desktop, live Runtime admission, or isolated product launch.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test:unit
+      - run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs
+
+  core:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Remove inherited GOALPORT_* variables
+        shell: pwsh
+        run: |
+          Get-ChildItem Env: |
+            Where-Object { $_.Name -like 'GOALPORT_*' } |
+            ForEach-Object { Remove-Item "Env:$($_.Name)" }
+      - run: cargo test -p goalport-core --lib
+      - run: cargo test -p goalport-core --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility
+      - run: cargo test -p goalport-desktop
