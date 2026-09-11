@@ -4375,7 +4375,7 @@ fn fresh_attempt_id(task_id: &str, provider: &str, request_id: &str) -> String {
         "attempt-{}-{}-{}",
         stable_suffix(task_id),
         provider,
-        stable_suffix(request_id)
+        sha256_hex(request_id.as_bytes())
     )
 }
 
@@ -5031,5 +5031,19 @@ mod resolve_admission_attempt_id_tests {
         )
         .unwrap();
         assert_eq!(resolved, "attempt-queued-kept");
+    }
+
+    #[test]
+    fn replacement_ids_do_not_collapse_distinct_request_ids() {
+        assert_ne!(
+            fresh_attempt_id("task-1", "scenario", "rollover/a"),
+            fresh_attempt_id("task-1", "scenario", "rollover_a")
+        );
+        let long_a = format!("{}a", "x".repeat(48));
+        let long_b = format!("{}b", "x".repeat(48));
+        assert_ne!(
+            fresh_attempt_id("task-1", "scenario", &long_a),
+            fresh_attempt_id("task-1", "scenario", &long_b)
+        );
     }
 }
