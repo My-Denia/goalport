@@ -1295,6 +1295,7 @@ impl UiController {
             &task.id,
             &provider,
             &request.request_id,
+            false,
         )?;
         let mut stored = request.payload.clone();
         if let Some(obj) = stored.as_object_mut() {
@@ -1371,6 +1372,7 @@ impl UiController {
             &task.id,
             &provider,
             &request.request_id,
+            true,
         )?;
         let executable = payload_text(&request.payload, "executable")
             .ok()
@@ -4366,23 +4368,33 @@ fn payload_attempt_id(value: &Value, fallback: &str) -> String {
     }
 }
 
+fn fresh_attempt_id(task_id: &str, provider: &str, request_id: &str) -> String {
+    format!(
+        "attempt-{}-{}-{}",
+        stable_suffix(task_id),
+        provider,
+        stable_suffix(request_id)
+    )
+}
+
 fn resolve_admission_attempt_id(
     store: &store::Store,
     payload: &Value,
     task_id: &str,
     provider: &str,
     request_id: &str,
+    allow_live_reuse: bool,
 ) -> Result<String, String> {
     let fallback = format!("attempt-{}-{}", stable_suffix(task_id), provider);
     let requested = payload_attempt_id(payload, &fallback);
     match store.get_attempt(&requested) {
-        Ok(row) if row.state.is_terminal() => Ok(format!(
-            "attempt-{}-{}-{}",
-            stable_suffix(task_id),
-            provider,
-            stable_suffix(request_id)
+        Ok(row) if row.task_id != task_id => Err(format!(
+            "attempt {requested} is registered for another task; the request is refused"
         )),
-        Ok(_) | Err(store::StoreError::NotFound(_)) => Ok(requested),
+        Ok(row) if row.state.is_terminal() => Ok(fresh_attempt_id(task_id, provider, request_id)),
+        Ok(_) if allow_live_reuse => Ok(requested),
+        Ok(_) => Ok(fresh_attempt_id(task_id, provider, request_id)),
+        Err(store::StoreError::NotFound(_)) => Ok(requested),
         Err(error) => Err(store_message(error)),
     }
 }

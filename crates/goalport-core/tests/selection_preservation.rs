@@ -542,6 +542,49 @@ fn terminal_attempt_id_does_not_block_a_new_runtime_select() {
 }
 
 #[test]
+fn terminal_attempt_id_from_another_task_is_refused() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-term-a", "task-term-a");
+    add_campaign_without_attempt(&server, "campaign-term-b", "task-term-b");
+    let first = call(
+        &server,
+        "term-own-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term-a",
+            "taskId": "task-term-a"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    fail_attempt(&server, &first_id);
+
+    let crossed = call(
+        &server,
+        "term-own-cross",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-term-b",
+            "taskId": "task-term-b",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(crossed["ok"], false, "{crossed}");
+    assert!(
+        crossed["error"]
+            .as_str()
+            .unwrap()
+            .contains("registered for another task"),
+        "{crossed}"
+    );
+}
+
+#[test]
 fn s1_first_selection_commits() {
     let server = seed_server();
     let selected = select_seed_campaign(&server, "s1-select", None);

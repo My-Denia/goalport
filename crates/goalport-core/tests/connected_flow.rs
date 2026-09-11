@@ -427,6 +427,62 @@ fn resource_pressure_persists_queued_request_and_override_admits_it() {
     assert_eq!(admitted["attempt"]["id"], "attempt-queued-res01");
 }
 
+#[test]
+fn resource_pressure_does_not_reuse_the_live_attempt_identity() {
+    let server = CoreServer::new(Store::memory().unwrap());
+    let first = select(&server, "res-live-existing");
+    let existing = first["attempt"]["id"].as_str().unwrap().to_string();
+    let queued = view(result(
+        &server,
+        "res-live-queue",
+        "select_runtime",
+        json!({
+            "campaignId": "campaign-synthetic-preview",
+            "taskId": "task-synthetic-preview",
+            "provider": "scenario",
+            "attemptId": existing,
+            "resourcePressure": true
+        }),
+    ));
+    assert_eq!(queued["attempt"]["id"], existing);
+    let queue_id = queue_notice_id(&queued);
+    let payload: Value = serde_json::from_str(
+        server
+            .processor()
+            .store()
+            .get_admission(&queue_id)
+            .unwrap()
+            .request_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    let queued_id = payload["attemptId"].as_str().unwrap().to_string();
+    assert_ne!(queued_id, existing);
+
+    let admitted = result(
+        &server,
+        "res-live-override",
+        "queue_override",
+        json!({ "queueId": queue_id, "reason": "explicit-owner-override" }),
+    );
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    assert_eq!(
+        admitted["payload"]["snapshot"]["attempt"]["id"],
+        queued_id
+    );
+    assert_ne!(queued_id, existing);
+    assert!(
+        !server
+            .processor()
+            .store()
+            .get_attempt(&existing)
+            .unwrap()
+            .state
+            .is_terminal()
+    );
+}
+
 fn queue_notice_id(snapshot: &Value) -> String {
     snapshot["notices"]
         .as_array()
