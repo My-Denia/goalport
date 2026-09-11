@@ -50,4 +50,14 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
       - run: cargo test -p goalport-core --lib
       - run: cargo test -p goalport-core --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility
+      - name: Placeholder Core binaries for Tauri resource check
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          if (-not (Test-Path target/release/goalport-core.exe)) {
+            Set-Content -Path target/release/goalport-core.exe -Value ''
+          }
+          if (-not (Test-Path target/release/goalport-core-launcher.exe)) {
+            Set-Content -Path target/release/goalport-core-launcher.exe -Value ''
+          }
       - run: cargo test -p goalport-desktop
