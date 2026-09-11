@@ -15,7 +15,7 @@
 
 use goalport_core::{
     Event, Project,
-    domain::{AttemptState, Campaign, Task, WorkStatus},
+    domain::{Attempt, AttemptState, Campaign, Task, WorkStatus},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     store::{CampaignAuthorization, Store},
 };
@@ -582,6 +582,129 @@ fn terminal_attempt_id_from_another_task_is_refused() {
             .contains("registered for another task"),
         "{crossed}"
     );
+}
+
+#[test]
+fn queued_withdrawn_attempt_mints_a_new_id_when_the_provider_changes() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-queued", "task-queued");
+    let queued_id = "attempt-queued-codex";
+    server
+        .processor()
+        .store()
+        .insert_attempt(&Attempt::new(
+            queued_id,
+            "task-queued",
+            "codex",
+            "codex-cap-v1",
+        ))
+        .unwrap();
+    let admitted = call(
+        &server,
+        "queued-provider-change",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-queued",
+            "taskId": "task-queued",
+            "attemptId": queued_id
+        }),
+    );
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    let next_id = admitted["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(next_id, queued_id);
+    assert_eq!(
+        server.processor().store().get_attempt(queued_id).unwrap().state,
+        AttemptState::Queued
+    );
+    assert_eq!(
+        server.processor().store().get_attempt(&next_id).unwrap().provider,
+        "scenario"
+    );
+}
+
+#[test]
+fn terminal_second_attempt_does_not_fall_back_to_the_older_live_id() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-multi", "task-multi");
+    let first = call(
+        &server,
+        "multi-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let queued = call(
+        &server,
+        "multi-queue",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi",
+            "attemptId": first_id,
+            "resourcePressure": true
+        }),
+    );
+    assert_eq!(queued["ok"], true, "{queued}");
+    let queue_id = queued["payload"]["snapshot"]["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.as_str())
+        .find_map(|text| text.strip_prefix("Queued under resource pressure: "))
+        .expect("queued admission id")
+        .to_string();
+    let admitted = call(
+        &server,
+        "multi-admit",
+        "queue_override",
+        json!({ "queueId": queue_id, "reason": "explicit-owner-override" }),
+    );
+    assert_eq!(admitted["ok"], true, "{admitted}");
+    let second_id = admitted["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, first_id);
+    fail_attempt(&server, &second_id);
+
+    let again = call(
+        &server,
+        "multi-again",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-multi",
+            "taskId": "task-multi",
+            "attemptId": second_id
+        }),
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    let third_id = again["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(third_id, first_id);
+    assert_ne!(third_id, second_id);
+    assert!(!server
+        .processor()
+        .store()
+        .get_attempt(&first_id)
+        .unwrap()
+        .state
+        .is_terminal());
 }
 
 #[test]

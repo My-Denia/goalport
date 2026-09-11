@@ -306,7 +306,7 @@ describe("GoalPort preview", () => {
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
 
-  it("omits a terminal Attempt identity when selecting the next Runtime", async () => {
+  it("forwards a terminal Attempt identity so Core can mint a replacement", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const snapshot = {
       ...DEMO_SNAPSHOT,
@@ -328,6 +328,6 @@ describe("GoalPort preview", () => {
     });
     const selectCalls = command.mock.calls.filter(([request]) => request.messageType === "select_runtime");
     expect(selectCalls).toHaveLength(1);
-    expect(selectCalls[0][0].payload.attemptId).toBeUndefined();
+    expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
 });

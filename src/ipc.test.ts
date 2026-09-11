@@ -14,11 +14,11 @@ describe("Core client preview transport", () => {
     expect(persistedAttemptId("attempt-codex-executor-1")).toBe("attempt-codex-executor-1");
   });
 
-  it("reuses only a non-terminal persisted Attempt id", () => {
+  it("forwards persisted Attempt ids except the display placeholder and uncertain snapshots", () => {
     expect(reusableAttemptId({ id: "attempt-live", state: "active" })).toBe("attempt-live");
     expect(reusableAttemptId({ id: "attempt-wait", state: "waiting" })).toBe("attempt-wait");
-    expect(reusableAttemptId({ id: "attempt-done", state: "completed" })).toBeUndefined();
-    expect(reusableAttemptId({ id: "attempt-dead", state: "failed" })).toBeUndefined();
+    expect(reusableAttemptId({ id: "attempt-done", state: "completed" })).toBe("attempt-done");
+    expect(reusableAttemptId({ id: "attempt-dead", state: "failed" })).toBe("attempt-dead");
     expect(reusableAttemptId({ id: "attempt-unassigned", state: "active" })).toBeUndefined();
     expect(reusableAttemptId({ id: "attempt-live", state: "uncertain" })).toBeUndefined();
   });

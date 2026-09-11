@@ -4392,6 +4392,11 @@ fn resolve_admission_attempt_id(
             "attempt {requested} is registered for another task; the request is refused"
         )),
         Ok(row) if row.state.is_terminal() => Ok(fresh_attempt_id(task_id, provider, request_id)),
+        Ok(row)
+            if row.provider != provider && row.state == AttemptState::Queued =>
+        {
+            Ok(fresh_attempt_id(task_id, provider, request_id))
+        }
         Ok(_) if allow_live_reuse => Ok(requested),
         Ok(_) => Ok(fresh_attempt_id(task_id, provider, request_id)),
         Err(store::StoreError::NotFound(_)) => Ok(requested),
