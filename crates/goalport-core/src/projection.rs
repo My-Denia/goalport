@@ -1278,13 +1278,21 @@ impl UiController {
         );
         let project = self.store.get_project(&project_id).map_err(store_message)?;
         self.ensure_workspace_ingress_allowed(&project.workspace_root, "runtime queue admission")?;
-        let task_id = payload_text_default(&request.payload, "taskId", "");
+        let campaign = self
+            .store
+            .get_campaign(&campaign_id)
+            .map_err(store_message)?;
+        let task_id = payload_text_default(&request.payload, "taskId", &campaign.root_task_id);
+        let task = self.store.get_task(&task_id).map_err(store_message)?;
+        if task.campaign_id != campaign.id {
+            return Err("task does not belong to selected campaign".into());
+        }
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
         let attempt_id = resolve_admission_attempt_id(
             &self.store,
             &request.payload,
-            if task_id.is_empty() { "queued" } else { &task_id },
+            &task.id,
             &provider,
             &request.request_id,
         )?;
@@ -1292,9 +1300,7 @@ impl UiController {
         if let Some(obj) = stored.as_object_mut() {
             obj.insert("projectId".into(), json!(project_id));
             obj.insert("campaignId".into(), json!(campaign_id));
-            if !task_id.is_empty() {
-                obj.insert("taskId".into(), json!(task_id));
-            }
+            obj.insert("taskId".into(), json!(task.id));
             obj.insert("provider".into(), json!(provider));
             obj.insert("attemptId".into(), json!(attempt_id));
             obj.remove("resourcePressure");

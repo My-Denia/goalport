@@ -426,3 +426,120 @@ fn resource_pressure_persists_queued_request_and_override_admits_it() {
     ));
     assert_eq!(admitted["attempt"]["id"], "attempt-queued-res01");
 }
+
+fn queue_notice_id(snapshot: &Value) -> String {
+    snapshot["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item.as_str())
+        .find_map(|text| text.strip_prefix("Queued under resource pressure: "))
+        .expect("queued admission id")
+        .to_string()
+}
+
+#[test]
+fn queued_select_without_task_id_scopes_attempt_to_the_campaign_root_task() {
+    let server = CoreServer::new(Store::memory().unwrap());
+    let _ = select(&server, "qscope-existing");
+    let first = result(
+        &server,
+        "qscope-create-a",
+        "create_campaign",
+        json!({ "goal": "queued campaign a", "title": "task a" }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_view = view(first);
+    let campaign_a = first_view["activeCampaignId"].as_str().unwrap().to_string();
+    let task_a = first_view["activeTask"]["id"].as_str().unwrap().to_string();
+    let queued_a = view(result(
+        &server,
+        "qscope-queue-a",
+        "select_runtime",
+        json!({
+            "campaignId": campaign_a,
+            "provider": "scenario",
+            "resourcePressure": true
+        }),
+    ));
+    let queue_a = queue_notice_id(&queued_a);
+    let payload_a: Value = serde_json::from_str(
+        server
+            .processor()
+            .store()
+            .get_admission(&queue_a)
+            .unwrap()
+            .request_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload_a["taskId"], task_a);
+    assert_ne!(payload_a["attemptId"], "attempt-queued-scenario");
+
+    let second = result(
+        &server,
+        "qscope-create-b",
+        "create_campaign",
+        json!({ "goal": "queued campaign b", "title": "task b" }),
+    );
+    assert_eq!(second["ok"], true, "{second}");
+    let second_view = view(second);
+    let campaign_b = second_view["activeCampaignId"].as_str().unwrap().to_string();
+    let _queued_b = view(result(
+        &server,
+        "qscope-queue-b",
+        "select_runtime",
+        json!({
+            "campaignId": campaign_b,
+            "provider": "scenario",
+            "resourcePressure": true
+        }),
+    ));
+    let queue_b = server
+        .processor()
+        .store()
+        .pending_admissions()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .find(|id| id != &queue_a)
+        .expect("second queued admission");
+    assert_ne!(queue_a, queue_b);
+    let payload_b: Value = serde_json::from_str(
+        server
+            .processor()
+            .store()
+            .get_admission(&queue_b)
+            .unwrap()
+            .request_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(payload_a["attemptId"], payload_b["attemptId"]);
+
+    let admitted_a = result(
+        &server,
+        "qscope-admit-a",
+        "queue_override",
+        json!({ "queueId": queue_a, "reason": "explicit-owner-override" }),
+    );
+    assert_eq!(admitted_a["ok"], true, "{admitted_a}");
+    assert_eq!(
+        admitted_a["payload"]["snapshot"]["attempt"]["id"],
+        payload_a["attemptId"]
+    );
+
+    let admitted_b = result(
+        &server,
+        "qscope-admit-b",
+        "queue_override",
+        json!({ "queueId": queue_b, "reason": "explicit-owner-override" }),
+    );
+    assert_eq!(admitted_b["ok"], true, "{admitted_b}");
+    assert_eq!(
+        admitted_b["payload"]["snapshot"]["attempt"]["id"],
+        payload_b["attemptId"]
+    );
+}
