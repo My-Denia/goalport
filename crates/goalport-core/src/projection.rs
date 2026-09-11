@@ -26,6 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
+/// Display-only Attempt identity used when a task has no persisted row.
+/// Admission must never persist or register this string.
+const UNASSIGNED_ATTEMPT_ID: &str = "attempt-unassigned";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiProject {
@@ -344,7 +348,7 @@ impl UiController {
             .or_else(|| attempts.last().cloned())
             .unwrap_or_else(|| {
                 Attempt::new(
-                    "attempt-unassigned",
+                    UNASSIGNED_ATTEMPT_ID,
                     active_task_id.clone().unwrap_or_default(),
                     "scenario",
                     "scenario-cap-v1",
@@ -1277,9 +1281,8 @@ impl UiController {
         let task_id = payload_text_default(&request.payload, "taskId", "");
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_text_default(
+        let attempt_id = payload_attempt_id(
             &request.payload,
-            "attemptId",
             &format!(
                 "attempt-{}-{}",
                 stable_suffix(if task_id.is_empty() {
@@ -1361,9 +1364,8 @@ impl UiController {
         }
         let provider =
             payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
-        let attempt_id = payload_text_default(
+        let attempt_id = payload_attempt_id(
             &request.payload,
-            "attemptId",
             &format!("attempt-{}-{}", stable_suffix(&task.id), provider),
         );
         let executable = payload_text(&request.payload, "executable")
@@ -4351,6 +4353,13 @@ fn payload_text(value: &Value, key: &str) -> Result<String, String> {
 
 fn payload_text_default(value: &Value, key: &str, fallback: &str) -> String {
     payload_text(value, key).unwrap_or_else(|_| fallback.to_owned())
+}
+
+fn payload_attempt_id(value: &Value, fallback: &str) -> String {
+    match payload_text(value, "attemptId") {
+        Ok(id) if id != UNASSIGNED_ATTEMPT_ID => id,
+        _ => fallback.to_owned(),
+    }
 }
 
 fn payload_i64(value: &Value, key: &str) -> Option<i64> {

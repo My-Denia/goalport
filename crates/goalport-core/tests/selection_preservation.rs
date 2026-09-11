@@ -312,6 +312,159 @@ fn d1b_omitted_campaign_id_refusal_keeps_selection() {
 // Successes: the selection must commit.
 // ---------------------------------------------------------------------------------------------
 
+fn assert_placeholder_not_persisted(server: &CoreServer, context: &str) {
+    assert!(
+        !server
+            .processor()
+            .store()
+            .list_attempts()
+            .unwrap()
+            .iter()
+            .any(|attempt| attempt.id == "attempt-unassigned"),
+        "{context}: the display placeholder must not enter the Attempt table"
+    );
+}
+
+fn add_campaign_without_attempt(server: &CoreServer, campaign_id: &str, task_id: &str) {
+    let store = server.processor().store();
+    let campaign = Campaign {
+        id: campaign_id.into(),
+        goal: format!("campaign {campaign_id}"),
+        root_task_id: task_id.into(),
+        state: WorkStatus::InProgress,
+    };
+    let task = Task {
+        id: task_id.into(),
+        campaign_id: campaign_id.into(),
+        title: format!("task {task_id}"),
+        acceptance: "selectable without a persisted Attempt".into(),
+        state: WorkStatus::InProgress,
+    };
+    store
+        .create_campaign_with_task(SEED_PROJECT, &campaign, &task)
+        .unwrap();
+    store
+        .set_campaign_authorization(campaign_id, &CampaignAuthorization::granted())
+        .unwrap();
+}
+
+fn select_campaign(server: &CoreServer, id: &str, campaign_id: &str) -> Value {
+    let response = call(server, id, "select_campaign", json!({ "campaignId": campaign_id }));
+    assert_eq!(response["ok"], true, "{response}");
+    response["payload"]["snapshot"].clone()
+}
+
+/// The renderer snapshot uses `attempt-unassigned` as a display placeholder before any
+/// Attempt exists. If that string is treated as a real identity, the second Campaign's
+/// first select collides with the first Campaign's registration and is refused.
+#[test]
+fn display_placeholder_is_not_persisted_across_two_campaign_first_selects() {
+    let server = seed_server();
+    add_campaign_without_attempt(&server, "campaign-ph-a", "task-ph-a");
+    add_campaign_without_attempt(&server, "campaign-ph-b", "task-ph-b");
+
+    let before_a = select_campaign(&server, "ph-a-select", "campaign-ph-a");
+    assert_eq!(before_a["activeCampaignId"], "campaign-ph-a");
+    assert_eq!(before_a["attempt"]["id"], "attempt-unassigned");
+
+    let first = call(
+        &server,
+        "ph-first",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-a",
+            "taskId": "task-ph-a",
+            "attemptId": "attempt-unassigned"
+        }),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let first_id = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(first_id, "attempt-unassigned");
+    assert_placeholder_not_persisted(&server, "after the first Campaign select");
+
+    let before_b = select_campaign(&server, "ph-b-select", "campaign-ph-b");
+    assert_eq!(before_b["activeCampaignId"], "campaign-ph-b");
+    assert_eq!(before_b["attempt"]["id"], "attempt-unassigned");
+
+    let second = call(
+        &server,
+        "ph-second",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-b",
+            "taskId": "task-ph-b",
+            "attemptId": "attempt-unassigned"
+        }),
+    );
+    assert_eq!(second["ok"], true, "{second}");
+    let second_id = second["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(second_id, "attempt-unassigned");
+    assert_ne!(second_id, first_id);
+
+    let reuse = call(
+        &server,
+        "ph-reuse",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": "campaign-ph-a",
+            "taskId": "task-ph-a",
+            "attemptId": first_id
+        }),
+    );
+    assert_eq!(reuse["ok"], true, "{reuse}");
+    assert_eq!(
+        reuse["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap(),
+        first_id
+    );
+    assert_placeholder_not_persisted(&server, "after the second Campaign select");
+
+    let created = call(
+        &server,
+        "ph-create",
+        "create_campaign",
+        json!({
+            "projectId": SEED_PROJECT,
+            "goal": "command-surface campaign with no Attempt",
+            "title": "created task",
+            "acceptance": "first Runtime select must not persist the display placeholder"
+        }),
+    );
+    assert_eq!(created["ok"], true, "{created}");
+    let created_view = &created["payload"]["snapshot"];
+    let created_campaign = created_view["activeCampaignId"].as_str().unwrap().to_string();
+    let created_task = created_view["activeTask"]["id"].as_str().unwrap().to_string();
+    let created_attempt = created_view["attempt"]["id"].as_str().unwrap().to_string();
+    let third = call(
+        &server,
+        "ph-third",
+        "select_runtime",
+        json!({
+            "provider": "scenario",
+            "campaignId": created_campaign,
+            "taskId": created_task,
+            "attemptId": created_attempt
+        }),
+    );
+    assert_eq!(third["ok"], true, "{third}");
+    let third_id = third["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(third_id, "attempt-unassigned");
+    assert_ne!(third_id, first_id);
+    assert_ne!(third_id, second_id);
+    assert_placeholder_not_persisted(&server, "after create_campaign first select");
+}
+
 #[test]
 fn s1_first_selection_commits() {
     let server = seed_server();

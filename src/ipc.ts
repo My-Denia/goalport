@@ -13,6 +13,15 @@ import {
 
 export const IPC_PROTOCOL_VERSION = "goalport.ipc.v1";
 
+/** Display-only identity Core uses when a task has no persisted Attempt. */
+export const UNASSIGNED_ATTEMPT_ID = "attempt-unassigned";
+
+export function persistedAttemptId(attemptId: string | undefined | null): string | undefined {
+  const trimmed = attemptId?.trim();
+  if (!trimmed || trimmed === UNASSIGNED_ATTEMPT_ID) return undefined;
+  return trimmed;
+}
+
 export interface CloseChoicePayload {
   requestId: string;
   choice: "continue" | "stop";
@@ -328,7 +337,8 @@ class TauriCoreClient implements CoreClient {
 
   async selectRuntime(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot> {
     const payload: Record<string, string | number | boolean> = { provider, campaignId, taskId };
-    if (attemptId) payload.attemptId = attemptId;
+    const persisted = persistedAttemptId(attemptId);
+    if (persisted) payload.attemptId = persisted;
     return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_runtime", payload });
   }
 

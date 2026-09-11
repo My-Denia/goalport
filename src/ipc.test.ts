@@ -1,11 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { getCoreClient, resetCoreClientForTests } from "./ipc";
+import { getCoreClient, persistedAttemptId, resetCoreClientForTests } from "./ipc";
 import { resolveCoreSnapshot } from "./types";
 
 afterEach(() => resetCoreClientForTests());
 
 describe("Core client preview transport", () => {
+  it("treats the display placeholder Attempt id as absent", () => {
+    expect(persistedAttemptId("attempt-unassigned")).toBeUndefined();
+    expect(persistedAttemptId("  attempt-unassigned  ")).toBeUndefined();
+    expect(persistedAttemptId("")).toBeUndefined();
+    expect(persistedAttemptId(undefined)).toBeUndefined();
+    expect(persistedAttemptId("attempt-codex-executor-1")).toBe("attempt-codex-executor-1");
+  });
+
   it("exposes the versioned projection without pretending browser preview is a Runtime", async () => {
     const client = getCoreClient();
     const snapshot = await client.snapshot();

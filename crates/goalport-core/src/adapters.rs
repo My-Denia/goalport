@@ -1218,9 +1218,52 @@ mod tests {
         assert_eq!(adapter.sent_prompts(), &["hello"]);
     }
 
+    const MARKER_CHILD: &str = "GOALPORT_ADAPTER_MARKER_CHILD";
+
+    /// Re-executes this test in a child whose GOALPORT_REQUIRE_ISOLATED is set by
+    /// the test, not inherited from the parent shell. Returns true in the parent
+    /// after the child has already asserted the case.
+    fn reexec_with_isolation(isolated: Option<&str>) -> bool {
+        if std::env::var_os(MARKER_CHILD).is_some() {
+            return false;
+        }
+        let test_name = std::thread::current()
+            .name()
+            .expect("cargo names the test thread")
+            .to_string();
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("test executable"),
+        );
+        command
+            .arg(&test_name)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(MARKER_CHILD, "1")
+            .env_remove("GOALPORT_REQUIRE_ISOLATED");
+        if let Some(value) = isolated {
+            command.env("GOALPORT_REQUIRE_ISOLATED", value);
+        }
+        let output = command
+            .output()
+            .expect("spawn a child with a controlled isolation env");
+        assert!(
+            output.status.success(),
+            "controlled child {test_name} failed (isolated={isolated:?})\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     #[test]
     fn isolated_markers_are_inert_without_isolated_env() {
-        assert!(!isolated_required());
+        if reexec_with_isolation(None) {
+            return;
+        }
+        assert!(
+            !isolated_required(),
+            "child must run with GOALPORT_REQUIRE_ISOLATED unset"
+        );
         let mut adapter = ScenarioAdapter::new("scenario");
         adapter.create_session(&request()).unwrap();
         let started = std::time::Instant::now();
@@ -1240,7 +1283,45 @@ mod tests {
             idempotency_key: "fail-1".into(),
         };
         assert!(!adapter.send_prompt(&fail).unwrap().duplicate);
-        assert_eq!(adapter.sent_prompts(), &["RC-MARKER-HOLD", "RC-MARKER-FORCE-FAIL"]);
+        assert_eq!(
+            adapter.sent_prompts(),
+            &["RC-MARKER-HOLD", "RC-MARKER-FORCE-FAIL"]
+        );
+    }
+
+    #[test]
+    fn isolated_markers_apply_when_isolated_env_is_set() {
+        if reexec_with_isolation(Some("1")) {
+            return;
+        }
+        assert!(
+            isolated_required(),
+            "child must run with GOALPORT_REQUIRE_ISOLATED=1"
+        );
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        let fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-FORCE-FAIL".into(),
+            idempotency_key: "fail-1".into(),
+        };
+        match adapter.send_prompt(&fail) {
+            Err(AdapterError::Connection(reason)) => {
+                assert_eq!(reason, "RC-MARKER-FORCE-FAIL")
+            }
+            other => panic!("expected isolated FORCE-FAIL, got {other:?}"),
+        }
+        assert!(
+            adapter.sent_prompts().is_empty(),
+            "FORCE-FAIL must not be recorded as a sent prompt"
+        );
+        let ok = PromptRequest {
+            attempt_id: "a".into(),
+            text: "hello".into(),
+            idempotency_key: "ok-1".into(),
+        };
+        assert!(!adapter.send_prompt(&ok).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
     }
 
     #[test]

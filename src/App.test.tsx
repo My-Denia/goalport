@@ -258,4 +258,50 @@ describe("GoalPort preview", () => {
     expect(within(dialog).getByRole("button", { name: "Stop Claude turn and quit" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Stop background work and quit" })).toBeNull();
   });
+
+  it("omits the display placeholder when first selecting a Runtime", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const snapshot = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      attempt: { ...DEMO_SNAPSHOT.attempt, id: "attempt-unassigned" }
+    } as const;
+    const command = vi.fn(async () => snapshot);
+    window.goalportCore = {
+      snapshot: async () => snapshot,
+      command,
+      startCore: async () => snapshot,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
+    await waitFor(() => {
+      expect(command.mock.calls.some(([request]) => request?.messageType === "select_runtime")).toBe(true);
+    });
+    const selectCalls = command.mock.calls.filter(([request]) => request?.messageType === "select_runtime");
+    expect(selectCalls).toHaveLength(1);
+    expect(selectCalls[0][0].payload.attemptId).toBeUndefined();
+  });
+
+  it("keeps a persisted Attempt identity when re-selecting a Runtime", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const snapshot = { ...DEMO_SNAPSHOT, preview: false } as const;
+    const command = vi.fn(async () => snapshot);
+    window.goalportCore = {
+      snapshot: async () => snapshot,
+      command,
+      startCore: async () => snapshot,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
+    await waitFor(() => {
+      expect(command.mock.calls.some(([request]) => request?.messageType === "select_runtime")).toBe(true);
+    });
+    const selectCalls = command.mock.calls.filter(([request]) => request?.messageType === "select_runtime");
+    expect(selectCalls).toHaveLength(1);
+    expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
+  });
 });

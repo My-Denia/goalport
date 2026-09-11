@@ -89,4 +89,46 @@ describe("connected Tauri Core command payloads", () => {
     expect(afterRejection.notices[0]).toMatch(/^Core refused:/);
     expect(afterRejection.connection).toBe(connectionBeforeRejection);
   });
+
+  it("omits the display placeholder Attempt id from select_runtime", async () => {
+    const client = getCoreClient();
+    await client.snapshot();
+    await client.selectRuntime("scenario", "campaign-a", "task-a", "attempt-unassigned");
+
+    const request = invokeMock.mock.calls.find(([command]) => command === "core_command")?.[1]?.request;
+    expect(request).toEqual(expect.objectContaining({
+      messageType: "select_runtime",
+      payload: { provider: "scenario", campaignId: "campaign-a", taskId: "task-a" }
+    }));
+    expect(request.payload.attemptId).toBeUndefined();
+  });
+
+  it("forwards a persisted Attempt id on select_runtime", async () => {
+    const client = getCoreClient();
+    await client.snapshot();
+    await client.selectRuntime("scenario", "campaign-a", "task-a", "attempt-codex-executor-1");
+
+    const request = invokeMock.mock.calls.find(([command]) => command === "core_command")?.[1]?.request;
+    expect(request.payload).toEqual({
+      provider: "scenario",
+      campaignId: "campaign-a",
+      taskId: "task-a",
+      attemptId: "attempt-codex-executor-1"
+    });
+  });
+
+  it("keeps the current snapshot and connection when Core refuses select_runtime", async () => {
+    const client = getCoreClient();
+    const before = await client.snapshot();
+
+    invokeMock.mockResolvedValueOnce({
+      goalportRejected: true,
+      error: "attempt attempt-codex-executor-1 is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused"
+    });
+    const after = await client.selectRuntime("claude", before.activeCampaignId, before.activeTask.id, before.attempt.id);
+
+    expect(after.connection).toBe(before.connection);
+    expect(after.attempt.id).toBe(before.attempt.id);
+    expect(after.notices[0]).toMatch(/^Core refused:/);
+  });
 });
