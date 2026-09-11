@@ -66,19 +66,26 @@ export interface CoreClient {
   openInVsCode(workspaceRoot: string): Promise<void>;
   selectProject?(projectId: string): Promise<CoreSnapshot>;
   selectCampaign?(campaignId: string): Promise<CoreSnapshot>;
-  selectRuntime?(provider: string, campaignId: string, taskId: string): Promise<CoreSnapshot>;
+  selectRuntime?(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot>;
   interrupt?(attemptId: string): Promise<CoreSnapshot>;
   recheckStopResponsibility?(attemptId: string): Promise<CoreSnapshot>;
   continueInIsolatedWorkspace?(attemptId: string, targetWorkspace: string): Promise<CoreSnapshot>;
   revokeAuthorization?(campaignId: string, scope?: string): Promise<CoreSnapshot>;
   requestOwnerAction?(action: string, planApproved?: boolean, auditPassed?: boolean): Promise<CoreSnapshot>;
   notify?(title: string, body: string): Promise<boolean>;
+  dispatch?(request: CoreCommand): Promise<CoreSnapshot>;
 }
 
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
     __GOALPORT_ELECTRON__?: boolean;
+    __GOALPORT_ISOLATED?: number;
+    __goalportDispatch?: (request: CoreCommand) => Promise<CoreSnapshot>;
+    __goalportAppSnapshot?: () => Promise<CoreSnapshot>;
+    __goalportLastEnvelope?: CoreCommand;
+    __goalportLastSnapshot?: CoreSnapshot;
+    __goalportLastSelectResult?: CoreSnapshot;
     __goalportCloseRequestId?: string;
     goalportCore?: {
       snapshot: () => Promise<unknown>;
@@ -278,7 +285,10 @@ class TauriCoreClient implements CoreClient {
     await this.invoke("open_in_vscode", { workspaceRoot });
   }
 
-  private async dispatch(command: CoreCommand): Promise<CoreSnapshot> {
+  async dispatch(command: CoreCommand): Promise<CoreSnapshot> {
+    if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
+      window.__goalportLastEnvelope = command;
+    }
     try {
       const raw = await this.invoke<unknown>("core_command", { request: command });
       const rawRecord = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
@@ -288,12 +298,14 @@ class TauriCoreClient implements CoreClient {
           ...this.lastSnapshot,
           notices: [`Core refused: ${message}`, ...this.lastSnapshot.notices]
         };
+        this.rememberIsolatedSnapshot();
         return this.lastSnapshot;
       }
       const snapshot = resolveCoreSnapshot(raw);
       if (!snapshot) throw new Error("Core returned an invalid command projection");
       this.entityVersion += 1;
       this.lastSnapshot = snapshot;
+      this.rememberIsolatedSnapshot();
       return snapshot;
     } catch (error) {
       this.lastSnapshot = {
@@ -301,6 +313,7 @@ class TauriCoreClient implements CoreClient {
         connection: "disconnected",
         notices: [`Core request failed: ${errorMessage(error)}`, ...this.lastSnapshot.notices]
       };
+      this.rememberIsolatedSnapshot();
       return this.lastSnapshot;
     }
   }
@@ -313,8 +326,16 @@ class TauriCoreClient implements CoreClient {
     return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_campaign", payload: { campaignId } });
   }
 
-  async selectRuntime(provider: string, campaignId: string, taskId: string): Promise<CoreSnapshot> {
-    return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_runtime", payload: { provider, campaignId, taskId } });
+  async selectRuntime(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string | number | boolean> = { provider, campaignId, taskId };
+    if (attemptId) payload.attemptId = attemptId;
+    return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_runtime", payload });
+  }
+
+  private rememberIsolatedSnapshot(): void {
+    if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
+      window.__goalportLastSnapshot = this.lastSnapshot;
+    }
   }
 
   async interrupt(attemptId: string): Promise<CoreSnapshot> {

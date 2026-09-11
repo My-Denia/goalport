@@ -557,8 +557,16 @@ impl AgentAdapter for ScenarioAdapter {
                 "prompt attempt does not match the active session".into(),
             ));
         }
+        if isolated_required() && request.text.contains("RC-MARKER-FORCE-FAIL") {
+            return Err(AdapterError::Connection(
+                "RC-MARKER-FORCE-FAIL".into(),
+            ));
+        }
         if let Some(reason) = self.fail_next_send.take() {
             return Err(AdapterError::Connection(reason));
+        }
+        if isolated_required() && request.text.contains("RC-MARKER-HOLD") {
+            std::thread::sleep(std::time::Duration::from_millis(8000));
         }
         if self.sent_prompt_keys.contains(&request.idempotency_key) {
             return Ok(PromptAccepted {
@@ -1167,6 +1175,13 @@ fn capability(name: &str, support: CapabilitySupport, semantics: &str) -> Capabi
     }
 }
 
+fn isolated_required() -> bool {
+    matches!(
+        std::env::var("GOALPORT_REQUIRE_ISOLATED").as_deref(),
+        Ok("1")
+    )
+}
+
 fn now() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1200,6 +1215,49 @@ mod tests {
         assert!(!adapter.send_prompt(&prompt).unwrap().duplicate);
         adapter.resume_session(&session.session_id).unwrap();
         assert!(adapter.send_prompt(&prompt).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello"]);
+    }
+
+    #[test]
+    fn isolated_markers_are_inert_without_isolated_env() {
+        assert!(!isolated_required());
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        let started = std::time::Instant::now();
+        let hold = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-HOLD".into(),
+            idempotency_key: "hold-1".into(),
+        };
+        assert!(!adapter.send_prompt(&hold).unwrap().duplicate);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "HOLD must not sleep unless GOALPORT_REQUIRE_ISOLATED=1"
+        );
+        let fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-FORCE-FAIL".into(),
+            idempotency_key: "fail-1".into(),
+        };
+        assert!(!adapter.send_prompt(&fail).unwrap().duplicate);
+        assert_eq!(adapter.sent_prompts(), &["RC-MARKER-HOLD", "RC-MARKER-FORCE-FAIL"]);
+    }
+
+    #[test]
+    fn fail_next_send_still_fails_once_then_succeeds() {
+        let mut adapter = ScenarioAdapter::new("scenario");
+        adapter.create_session(&request()).unwrap();
+        adapter.fail_next_send("boom");
+        let prompt = PromptRequest {
+            attempt_id: "a".into(),
+            text: "hello".into(),
+            idempotency_key: "cmd-fail-once".into(),
+        };
+        match adapter.send_prompt(&prompt) {
+            Err(AdapterError::Connection(reason)) => assert_eq!(reason, "boom"),
+            other => panic!("expected Connection(boom), got {other:?}"),
+        }
+        assert!(!adapter.send_prompt(&prompt).unwrap().duplicate);
         assert_eq!(adapter.sent_prompts(), &["hello"]);
     }
 

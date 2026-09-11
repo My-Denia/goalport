@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getCoreClient } from "./ipc";
+import { getCoreClient, type CoreCommand } from "./ipc";
 import {
   appendPreviewMessage,
   createPreviewCampaign,
@@ -90,6 +90,35 @@ function App() {
       window.clearInterval(timer);
     };
   }, [client, snapshot.connection, autoStartAttempted, reconnectAnnounced]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const bindIsolatedDispatch = (): boolean => {
+      if (window.__GOALPORT_ISOLATED !== 1) return false;
+      if (typeof client.dispatch !== "function") return false;
+      window.__goalportDispatch = (request: CoreCommand) => client.dispatch!(request);
+      window.__goalportAppSnapshot = () => client.snapshot();
+      return true;
+    };
+    if (bindIsolatedDispatch()) {
+      return () => {
+        delete window.__goalportDispatch;
+        delete window.__goalportAppSnapshot;
+      };
+    }
+    const interval = window.setInterval(() => {
+      if (bindIsolatedDispatch()) window.clearInterval(interval);
+    }, 50);
+    const timeout = window.setTimeout(() => window.clearInterval(interval), 8000);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+      if (window.__GOALPORT_ISOLATED === 1) {
+        delete window.__goalportDispatch;
+        delete window.__goalportAppSnapshot;
+      }
+    };
+  }, [client]);
 
   useEffect(() => {
     const api = window.goalportCore;
@@ -425,7 +454,19 @@ function App() {
           onHandoff={() => { void handleHandoff(); }}
           onSelectRuntime={(provider) => {
             if (client.selectRuntime && snapshot.activeCampaignId && snapshot.activeTask.id) {
-              void client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id).then(setSnapshot);
+              const attemptId = snapshot.attempt.id;
+              const pending = attemptId
+                ? client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id, attemptId)
+                : client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id);
+              void pending.then((next) => {
+                setSnapshot(next);
+                const refusalNotice = next.notices[0]?.startsWith("Core refused:") ? next.notices[0] : null;
+                setActiveNotice(refusalNotice);
+                if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
+                  window.__goalportLastSelectResult = next;
+                  window.__goalportLastSnapshot = next;
+                }
+              });
             }
           }}
           onRecheck={(attemptId) => { void handleRecheck(attemptId); }}

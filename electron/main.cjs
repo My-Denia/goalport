@@ -460,6 +460,9 @@ async function createWindow() {
     }
   });
   await mainWindow.loadFile(path.join(appRoot, "dist", "index.html"));
+  if (isolatedRequired() && mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.webContents.executeJavaScript("window.__GOALPORT_ISOLATED=1");
+  }
   mainWindow.on("close", (event) => {
     if (allowQuitAfterCloseChoice) return;
     if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
