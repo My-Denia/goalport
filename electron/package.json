@@ -1,0 +1,6 @@
+{
+  "name": "goalport-electron-host",
+  "private": true,
+  "version": "0.1.0-preview.1",
+  "main": "main.cjs"
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "fixture": "synthetic-goalport-desktop-parity",
+  "operationSequence": [
+    { "id": "cold-start", "action": "launch packaged host", "expected": "connected Core snapshot" },
+    { "id": "project-select", "action": "select seeded synthetic project", "expected": "Core project id displayed" },
+    { "id": "campaign-create", "action": "create Campaign and root Task", "expected": "atomic ids returned" },
+    { "id": "runtime-select", "action": "select Runtime and Attempt", "expected": "Core Attempt id displayed" },
+    { "id": "ime-input", "action": "compose Chinese text with Windows IME", "expected": "composition and committed input preserved" },
+    { "id": "long-paste", "action": "paste bounded long synthetic text", "expected": "clipboard source and byte hash recorded" },
+    { "id": "send-turn", "action": "send one synthetic/native prompt", "expected": "reply/tool/waiting/terminal events" },
+    { "id": "tool-flood", "action": "render many persisted tool output rows", "expected": "bounded UI remains responsive" },
+    { "id": "history-scroll", "action": "scroll long persisted history", "expected": "same cursor and identities" },
+    { "id": "session-switch", "action": "switch Campaign/Task", "expected": "Core projection changes" },
+    { "id": "close-reopen", "action": "close host and reopen", "expected": "same Core and no prompt replay" },
+    { "id": "notification", "action": "trigger visible installed host notification", "expected": "OS delivered notification" },
+    { "id": "process-sample", "action": "sample full process tree", "expected": "host/Core/native CLI separated" }
+  ],
+  "dataPolicy": "synthetic only; no credentials, private project content or native config is copied",
+  "requiredEvidence": ["step operation id", "input hash", "screenshot or recording hash", "Core cursor", "process sample", "IME composition proof", "clipboard provenance"]
+}

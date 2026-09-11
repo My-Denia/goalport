@@ -1,0 +1,261 @@
+{
+  "schemaVersion": 1,
+  "name": "goalport-v1-product-scenarios",
+  "description": "Synthetic, local-only Scenario Runtime contracts. S is executable by the Core scenario CLI; R and D are separate evidence obligations.",
+  "syntheticOnly": true,
+  "scenarios": [
+    {
+      "id": "DUR-01",
+      "title": "UI loss does not replay a committed prompt",
+      "initialState": { "attempt": "ACTIVE", "ui": "CONNECTED", "lastCommittedEvent": 3, "promptCommand": "cmd-1" },
+      "inputs": ["commit event 4", "lose UI client", "reconnect UI client"],
+      "faults": ["ui_process_exit"],
+      "expectedEvents": ["event_committed:4", "ui_disconnected", "runtime_event_accepted:5", "ui_reconnected", "projection_replayed"],
+      "expectedFinalState": { "attempt": "ACTIVE", "lastCommittedEvent": 5, "promptSendCount": 1, "promptReplay": false },
+      "forbiddenEffects": ["prompt_replayed", "second_active_writer", "event_loss"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "DUR-02",
+      "title": "Uncertain write lease blocks takeover",
+      "initialState": { "attempt": "ACTIVE", "lease": "ACTIVE", "workspace": "synthetic://dur-02" },
+      "inputs": ["observe synthetic file mutation", "Runtime exits unexpectedly", "request new mutating Attempt"],
+      "faults": ["runtime_exit_after_file_write", "write_receipt_missing"],
+      "expectedEvents": ["workspace_changed", "runtime_exited", "lease_marked_uncertain", "takeover_blocked"],
+      "expectedFinalState": { "lease": "UNCERTAIN", "newMutatingLease": "BLOCKED", "reconciliation": "REQUIRED" },
+      "forbiddenEffects": ["lease_auto_released", "second_active_writer", "workspace_reset"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "DUR-03",
+      "title": "Core crash keeps process result bounded",
+      "initialState": { "core": "CONNECTED", "supervision": "DECLARED", "attempt": "ACTIVE" },
+      "inputs": ["start supervised synthetic child", "terminate Core", "restart Core", "reconcile process epoch"],
+      "faults": ["core_exit"],
+      "expectedEvents": ["core_exited", "process_status_unknown_or_exited", "core_restarted", "reconciliation_recorded"],
+      "expectedFinalState": { "residualProcess": "UNKNOWN_OR_CONFIRMED_EXITED", "committedEventsPreserved": true, "automaticReplay": false },
+      "forbiddenEffects": ["unverified_process_kill_claim", "prompt_replay", "lost_committed_event"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "DUR-04",
+      "title": "Transport failure is not unconditional attachment",
+      "initialState": { "transport": "CONNECTED", "session": "SYNTHETIC-SESSION", "attempt": "ACTIVE" },
+      "inputs": ["sever adapter transport", "request recovery", "record supported recovery level"],
+      "faults": ["transport_disconnect"],
+      "expectedEvents": ["transport_lost", "recovery_preflight", "recovery_classified"],
+      "expectedFinalState": { "recovery": "R1_OR_R2_OR_R3_OR_BLOCKED", "promptReplay": false, "capabilityGapVisible": true },
+      "forbiddenEffects": ["unconditional_stdio_attach", "hidden_new_attempt", "prompt_replayed"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "QUA-01",
+      "title": "External edit makes verification stale",
+      "initialState": { "snapshot": "S1", "evidence": "VERIFIED", "workspace": "synthetic://qua-01" },
+      "inputs": ["verify target against S1", "external editor changes target", "read current verdict"],
+      "faults": ["external_workspace_edit"],
+      "expectedEvents": ["evidence_verified:S1", "workspace_drift_detected", "evidence_marked_stale"],
+      "expectedFinalState": { "currentVerdict": "STALE", "historicalEvidence": "RETAINED", "newSnapshotRequired": true },
+      "forbiddenEffects": ["stale_verified_display", "history_rewrite", "automatic_workspace_revert"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "QUA-02",
+      "title": "Independent frozen review requires revalidation after repair",
+      "initialState": { "bundle": "FROZEN", "audit": "PENDING", "evidence": "CURRENT" },
+      "inputs": ["independent context reviews bundle", "review requests repair", "repair completes", "reverify target"],
+      "faults": ["audit_finding_requires_fix"],
+      "expectedEvents": ["bundle_frozen", "audit_finding_recorded", "repair_continued", "evidence_invalidated", "target_reverified"],
+      "expectedFinalState": { "audit": "RECORDED", "repair": "COUNTED", "finalEvidence": "CURRENT_OR_UNMET", "unverifiedRangeRecorded": true },
+      "forbiddenEffects": ["audit_self_approval", "old_bundle_reused_as_current", "repair_budget_bypass"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "QUA-03",
+      "title": "Exit zero without meaningful tests cannot verify",
+      "initialState": { "verification": "PENDING", "target": "synthetic://qua-03" },
+      "inputs": ["run exit-zero zero-test command", "run all-skipped command", "run mock-only command", "evaluate verdict"],
+      "faults": ["zero_execution_range", "all_assertions_skipped", "mock_only_runner"],
+      "expectedEvents": ["command_completed", "range_checked", "verification_rejected"],
+      "expectedFinalState": { "verdict": "UNVERIFIED", "reason": "NON_ZERO_SCOPE_REQUIRED" },
+      "forbiddenEffects": ["verified_from_exit_zero", "mock_promoted_to_real", "skipped_promoted"],
+      "requiredLevels": ["S"]
+    },
+    {
+      "id": "QUA-04",
+      "title": "Changed target is not bound to a frozen report",
+      "initialState": { "target": "synthetic://qua-04@S1", "bundle": "FROZEN:S1", "verification": "RUNNING" },
+      "inputs": ["change target during verification", "complete report", "compare report target and latest target"],
+      "faults": ["target_revision_changes_during_test", "source_unknown"],
+      "expectedEvents": ["bundle_bound:S1", "target_drifted", "report_marked_unbound"],
+      "expectedFinalState": { "reportRevision": "S1", "latestRevision": "S2", "verdict": "UNMET_OR_STALE" },
+      "forbiddenEffects": ["report_rebound_to_latest", "unknown_source_promoted", "target_rewritten"],
+      "requiredLevels": ["S"]
+    },
+    {
+      "id": "ROU-01",
+      "title": "Recommendation explains scope and alternatives",
+      "initialState": { "policy": "RECOMMEND", "candidates": ["codex", "grok"], "task": "synthetic://rou-01" },
+      "inputs": ["calculate eligible candidates", "show recommendation", "apply Task-scoped override"],
+      "faults": ["none"],
+      "expectedEvents": ["hard_eligibility_checked", "recommendation_explained", "scoped_override_recorded"],
+      "expectedFinalState": { "reasonVisible": true, "riskVisible": true, "alternativeVisible": true, "overrideScope": "TASK" },
+      "forbiddenEffects": ["global_preference_mutation", "silent_provider_switch", "quota_fabrication"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "ROU-02",
+      "title": "Reassignment waits for old responsibility and lease",
+      "initialState": { "oldAttempt": "ACTIVE", "oldLease": "ACTIVE", "newAttempt": "ABSENT", "dataPolicy": "ALLOW" },
+      "inputs": ["request provider change", "stop old responsibility", "reconcile old lease", "freeze handoff", "start new Attempt"],
+      "faults": ["old_runtime_disconnects_during_stop"],
+      "expectedEvents": ["handoff_requested", "old_attempt_reconciled", "old_lease_released_or_uncertain", "handoff_frozen", "new_attempt_created"],
+      "expectedFinalState": { "newAttempt": "CREATED_AFTER_RECONCILIATION", "oldHistory": "RETAINED", "manualCopy": false },
+      "forbiddenEffects": ["overlapping_mutating_leases", "old_history_overwrite", "handoff_before_reconciliation"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "ROU-03",
+      "title": "Unknown capacity remains explicit and routable",
+      "initialState": { "capacity": "UNKNOWN", "history": "INSUFFICIENT", "policy": "USER_PREFERENCE_FIRST" },
+      "inputs": ["request route", "show capacity source", "select capable Runtime"],
+      "faults": ["provider_quota_unobservable", "no_local_history"],
+      "expectedEvents": ["capacity_unknown_recorded", "history_insufficient_recorded", "capability_route_selected"],
+      "expectedFinalState": { "route": "ELIGIBLE", "remainingQuota": "UNKNOWN", "modelName": "UNSPECIFIED" },
+      "forbiddenEffects": ["invented_quota", "hardcoded_personal_model", "forced_api_fallback"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "EFF-01",
+      "title": "Authorized ordinary work continues after UI close",
+      "initialState": { "policy": "AUTO_WITHIN_BOUNDS", "decisionInbox": [], "attempt": "ACTIVE" },
+      "inputs": ["authorize ordinary step", "close UI", "complete safe step", "reopen UI"],
+      "faults": ["ui_process_exit"],
+      "expectedEvents": ["ordinary_step_authorized", "ui_disconnected", "step_completed", "ui_reconnected", "decision_inbox_unchanged"],
+      "expectedFinalState": { "step": "COMPLETED", "decisionInbox": [], "promptReplay": false },
+      "forbiddenEffects": ["unapproved_external_effect", "decision_inbox_flood", "prompt_replayed"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "EFF-02",
+      "title": "Ordinary question does not require a full chain",
+      "initialState": { "requestKind": "QUESTION", "policy": "RECORD_ONLY", "plan": "ABSENT" },
+      "inputs": ["ask ordinary question", "answer through Runtime", "enable advanced policy", "ask governed question"],
+      "faults": ["none"],
+      "expectedEvents": ["question_classified", "direct_answer_path", "advanced_policy_enabled", "governed_path_selected"],
+      "expectedFinalState": { "ordinaryPath": "NO_FULL_PLAN", "advancedPath": "CONFIGURABLE", "policyHistory": "RETAINED" },
+      "forbiddenEffects": ["mandatory_plan_for_question", "hidden_policy_change", "runtime_replacement"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "EFF-03",
+      "title": "Same-scope repair continues Attempt and counts budget",
+      "initialState": { "attempt": "AWAITING_REVIEW", "repairCount": 1, "nativeGeneration": "N1", "scope": "TASK-A" },
+      "inputs": ["review requests same-scope fix", "continue Attempt", "record repair", "check native generation"],
+      "faults": ["verification_failure"],
+      "expectedEvents": ["needs_fix", "repair_count_incremented", "attempt_reactivated", "native_generation_observed"],
+      "expectedFinalState": { "attemptIdentity": "UNCHANGED", "repairCount": 2, "nativeGeneration": "N1", "scope": "TASK-A" },
+      "forbiddenEffects": ["new_attempt_for_same_scope", "repair_budget_reset", "native_generation_mutation"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "SEC-01",
+      "title": "Excluded Provider receives no transferred data",
+      "initialState": { "providerAllowlist": ["codex"], "selectedProvider": "excluded-provider", "content": "synthetic://sec-01" },
+      "inputs": ["evaluate excluded-provider candidate", "apply provider exclusion", "show future Workspace read disclosure"],
+      "faults": ["candidate_ranked_higher_but_excluded"],
+      "expectedEvents": ["policy_exclusion_applied", "transfer_blocked", "workspace_disclosure_shown"],
+      "expectedFinalState": { "selectedProvider": "NONE_OR_ALLOWED", "transferredBytes": 0, "futureReadDisclosure": true },
+      "forbiddenEffects": ["excluded_provider_bytes", "silent_allowlist_bypass", "sandbox_claim"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "SEC-02",
+      "title": "Current revocation outranks a historical policy snapshot",
+      "initialState": { "campaign": "CREATED", "policySnapshot": "ALLOW", "currentAuthorization": "ALLOW" },
+      "inputs": ["revoke data/action authorization", "request next action", "inspect current decision"],
+      "faults": ["authorization_revoked_after_campaign_creation"],
+      "expectedEvents": ["revocation_recorded", "current_policy_reloaded", "next_action_blocked"],
+      "expectedFinalState": { "nextAction": "BLOCKED", "historicalSnapshot": "RETAINED", "revocation": "EFFECTIVE" },
+      "forbiddenEffects": ["old_snapshot_authorizes_action", "revocation_ignored", "credential_capture"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "SAF-01",
+      "title": "Unknown external effect is not replayed",
+      "initialState": { "outbox": "DISPATCHING", "effectTarget": "synthetic://effect", "sendCount": 0 },
+      "inputs": ["send synthetic effect", "drop receipt", "restart reconciliation", "inspect send count"],
+      "faults": ["receipt_lost_after_send"],
+      "expectedEvents": ["effect_started", "receipt_missing", "effect_unknown", "reconciliation_required"],
+      "expectedFinalState": { "effect": "UNKNOWN", "sendCount": 1, "automaticReplay": false },
+      "forbiddenEffects": ["blind_effect_replay", "exactly_once_claim", "public_target_write"],
+      "requiredLevels": ["S"]
+    },
+    {
+      "id": "SAF-02",
+      "title": "Plan and audit approval do not authorize external actions",
+      "initialState": { "plan": "APPROVED", "audit": "PASS", "externalActions": "UNAUTHORIZED" },
+      "inputs": ["request commit", "request push", "request release", "request delete"],
+      "faults": ["none"],
+      "expectedEvents": ["action_authority_checked", "each_action_blocked_or_decisioned"],
+      "expectedFinalState": { "commit": "UNAUTHORIZED", "push": "UNAUTHORIZED", "release": "UNAUTHORIZED", "delete": "UNAUTHORIZED" },
+      "forbiddenEffects": ["implicit_commit", "implicit_push", "implicit_release", "implicit_delete", "native_rule_change"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "COM-01",
+      "title": "Version changes force current preflight",
+      "initialState": { "historicalCapability": "V1", "runtimeVersion": "1.0", "adapterVersion": "A1", "preflight": "READY" },
+      "inputs": ["change Runtime fingerprint", "request resume", "run current preflight", "compare historical capability"],
+      "faults": ["runtime_or_adapter_version_change"],
+      "expectedEvents": ["fingerprint_changed", "preflight_required", "current_capability_recorded"],
+      "expectedFinalState": { "historicalCapability": "RETAINED", "currentPreflight": "REQUIRED_OR_COMPLETE", "historyRewritten": false },
+      "forbiddenEffects": ["old_capability_reused_silently", "history_rewrite", "prompt_replay"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "COM-02",
+      "title": "Native instructions and permissions are observed or disclosed as gaps",
+      "initialState": { "syntheticNativeConfig": ["instruction", "skill", "hook", "permission"], "adapter": "SELECTED" },
+      "inputs": ["run synthetic native marker task", "observe structured result", "record unsupported marker if absent"],
+      "faults": ["native_marker_not_observable"],
+      "expectedEvents": ["native_config_probed", "marker_observed_or_gap_recorded", "permission_result_recorded"],
+      "expectedFinalState": { "nativeBehavior": "OBSERVED_OR_EXPLICIT_GAP", "rulesClosedToHideGap": true },
+      "forbiddenEffects": ["native_config_copied", "gap_promoted_to_pass", "permission_bypass"],
+      "requiredLevels": ["S", "R"]
+    },
+    {
+      "id": "RES-01",
+      "title": "Resource pressure queues work without killing existing owners",
+      "initialState": { "resourcePressure": "ABOVE_THRESHOLD", "existingRuntime": "ACTIVE", "existingVSCode": "OPEN", "newAttempt": "REQUESTED" },
+      "inputs": ["request new mutating Attempt", "evaluate admission", "release pressure", "admit queued Attempt"],
+      "faults": ["resource_budget_exceeded"],
+      "expectedEvents": ["admission_denied_or_queued", "existing_runtime_preserved", "existing_vscode_preserved", "queued_attempt_admitted"],
+      "expectedFinalState": { "newAttempt": "QUEUED_OR_ADMITTED", "existingRuntime": "ACTIVE", "existingVSCode": "OPEN" },
+      "forbiddenEffects": ["existing_runtime_killed", "vscode_killed", "silent_budget_override"],
+      "requiredLevels": ["S", "D"]
+    },
+    {
+      "id": "RES-02",
+      "title": "Large output and bounded storage expose degradation",
+      "initialState": { "historyRows": 1000, "streamBytes": 16777216, "buffer": "BOUNDED", "ui": "OPEN" },
+      "inputs": ["stream large synthetic output", "render long history", "inject buffer or disk failure", "inspect limitation"],
+      "faults": ["buffer_limit_or_disk_full"],
+      "expectedEvents": ["output_chunk_persisted", "history_virtualized", "backpressure_or_storage_failure", "limitation_visible"],
+      "expectedFinalState": { "history": "RETAINED_OR_EXPLICITLY_TRUNCATED", "ui": "RESPONSIVE_OR_DEGRADED", "infiniteFidelityClaim": false },
+      "forbiddenEffects": ["unbounded_memory_claim", "silent_data_loss", "process_tree_kill_without_evidence"],
+      "requiredLevels": ["S", "R", "D"]
+    },
+    {
+      "id": "DAT-01",
+      "title": "Diagnostics exclude synthetic secrets and deletion stays App-scoped",
+      "initialState": { "appData": "SYNTHETIC", "workspace": "SYNTHETIC", "runtimeSession": "RUNTIME_OWNED", "diagnostics": "DISABLED" },
+      "inputs": ["place synthetic secret in fixture", "generate diagnostic preview", "generate App-data deletion manifest"],
+      "faults": ["none"],
+      "expectedEvents": ["secret_redaction_checked", "diagnostic_manifest_shown", "app_data_scope_checked"],
+      "expectedFinalState": { "secretInExport": false, "workspaceDeleted": false, "runtimeSessionDeleted": false, "nativeConfigDeleted": false },
+      "forbiddenEffects": ["secret_export", "workspace_delete", "runtime_session_delete", "native_config_delete", "telemetry_upload"],
+      "requiredLevels": ["S", "D"]
+    }
+  ]
+}

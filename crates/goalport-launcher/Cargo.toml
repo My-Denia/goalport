@@ -1,0 +1,15 @@
+[package]
+name = "goalport-core-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lifecycle-independent GoalPort Core launcher"
+
+[[bin]]
+name = "goalport-core-launcher"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+serde_json = "1"

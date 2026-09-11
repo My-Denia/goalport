@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Minimum permissions for the GoalPort desktop shell.","local":true,"windows":["main"],"permissions":["core:default"]}}

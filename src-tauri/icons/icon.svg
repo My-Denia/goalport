@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title>GoalPort</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a68aff"/>
+      <stop offset="1" stop-color="#45346f"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="#111114"/>
+  <rect x="15" y="15" width="98" height="98" rx="25" fill="url(#bg)"/>
+  <path d="M39 45h36M39 64h50M39 83h27" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+</svg>

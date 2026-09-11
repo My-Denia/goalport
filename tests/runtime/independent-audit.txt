@@ -1,0 +1,14 @@
+Act as an independent auditor with no reliance on the previous Runtime conclusion.
+Read only the machine-generated GoalPort handoff packet in this prompt.
+Check all of the following:
+1. goal is present and non-empty;
+2. workspaceHash is a 64-character hexadecimal hash;
+3. authorization contains request, manifest and requestHash provenance;
+4. oldAttempt responsibility is reconciled and leaseStates/outboxStates show no unknown effect;
+5. manualCopy is false and the new Attempt/session is distinct.
+
+Do not use tools, modify files, access the network, or perform external actions.
+If every check passes, reply with exactly these two lines:
+GOALPORT_AUDIT_VERDICT_PASS
+checks=goal,workspace,provenance,responsibility,session
+Otherwise reply GOALPORT_AUDIT_VERDICT_FAIL and name the failed checks.
