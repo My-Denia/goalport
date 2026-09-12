@@ -37,7 +37,7 @@
     "electron:package": "node scripts/connected/package-electron.mjs",
     "electron:start": "node scripts/desktop/start.mjs",
     "electron:verify": "node scripts/desktop/verify-package.mjs",
-    "test:desktop": "node --test scripts/desktop/package.test.mjs scripts/desktop/launch.test.mjs scripts/desktop/docs-ci.test.mjs scripts/desktop/diagnostics.test.mjs",
+    "test:desktop": "node --test scripts/desktop/package.test.mjs scripts/desktop/launch.test.mjs scripts/desktop/docs-ci.test.mjs scripts/desktop/diagnostics.test.mjs scripts/desktop/click-target.test.mjs scripts/connected/v1-cdp.test.mjs",
     "tauri:build:release": "cargo build --release -p goalport-core -p goalport-core-launcher && tauri build --ci"
   },
   "dependencies": {

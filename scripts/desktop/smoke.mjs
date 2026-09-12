@@ -11,6 +11,7 @@ import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
 import { collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
+import { clickPointFor } from "./click-target.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const normalize = launchConfig.normalizedPath;
@@ -79,16 +80,18 @@ async function smoke() {
   const command = (messageType, payload, requestId = randomUUID()) => read(`window.goalportCore.command(${JSON.stringify({ protocolVersion: "goalport.ipc.v2", requestId, entityVersion: 0, messageType, payload })})`);
   const body = () => read("document.body.innerText");
   const uiAttempt = () => read("document.querySelector('[data-attempt-id]')?.dataset.attemptId");
+  const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false };
+  const viewport = () => read("(() => { const rail = document.querySelector('.context-rail'); const rect = document.querySelector('.runtime-row summary')?.getBoundingClientRect(); return { width: innerWidth, height: innerHeight, devicePixelRatio, railDisplay: rail ? getComputedStyle(rail).display : null, runtimeSummary: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null }; })()");
   const screen = async (name) => {
     const image = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     writeFileSync(resolve(out, `${name}.png`), Buffer.from(image.data, "base64"));
     writeFileSync(resolve(out, `${name}.txt`), await body());
   };
   const click = async (selector, exactText) => {
-    const expression = `(() => { const el = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}); if (!el) throw Error('control missing'); if (el.disabled) throw Error('control disabled'); el.scrollIntoView({block:'center'}); return true; })()`;
+    const expression = `(() => { const el = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}); if (!el) throw Error('control missing'); if (el.disabled) throw Error('control disabled'); el.scrollIntoView({block:'center',inline:'center'}); return true; })()`;
     await read(expression);
     await sleep(50);
-    const point = await read(`(() => { const el = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}); const r=el.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()`);
+    const point = await read(`(${clickPointFor.toString()})(Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}))`);
     await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
     await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   };
@@ -181,6 +184,15 @@ async function smoke() {
     stage = "attach-cdp";
     page = await attachGoalPort(port);
     await until("connected packaged UI", async () => (await body()).includes("Core connected"));
+    const initialViewport = await viewport();
+    await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
+    await until("desktop Runtime controls visible", async () => {
+      const current = await viewport();
+      return current.width === desktopViewport.width && current.railDisplay !== "none" && current.runtimeSummary?.width > 0;
+    });
+    const actualViewport = await viewport();
+    (report.viewportStarts ??= []).push({ initial: initialViewport, actual: actualViewport });
+    console.log(`PASS desktop viewport ${JSON.stringify({ initial: initialViewport, actual: actualViewport })}`);
     const info = await read("window.goalportCore.appInfo()");
     assert.equal(info.version, identity.version);
     assert.equal(info.testMode, !normal);
@@ -398,6 +410,10 @@ async function smoke() {
     marker("close/reopen keeps current Core, task and history without resend", { corePid: oldCorePid, countsBefore: beforeClose, countsAfterManualSend: counts() });
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1000, height: 800, deviceScaleFactor: 1, mobile: false });
     await screen("09-narrow-window");
+    report.narrowLayout = { ...(await viewport()), coverage: "layout only; Runtime controls are unavailable at this existing breakpoint" };
+    await assert.rejects(() => read(`(${clickPointFor.toString()})(document.querySelector('.runtime-row summary'))`), /no visible area/);
+    await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
+    await until("desktop viewport restored", async () => (await viewport()).width === desktopViewport.width);
     assertNoNativeChildren();
     report.finalCounts = counts();
     report.attempts = dbRows("SELECT id,task_id,provider,state FROM attempts ORDER BY rowid");
@@ -405,7 +421,8 @@ async function smoke() {
     report.events = dbRows("SELECT attempt_id,seq,kind,payload_json FROM events ORDER BY rowid");
     report.status = "PASS";
   } catch (error) {
-    report.status = "FAIL"; report.error = error.stack || error.message;
+    report.status = "FAIL";
+    report.error = sanitizeDiagnostic(error.stack || error.message, [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]);
     report.diagnostics = collectFailureDiagnostics({
       stage, child,
       files: { electron: resolve(out, "electron.log"), launcher: resolve(profile, "goalport.sqlite.launcher.log"), core: resolve(profile, "goalport.sqlite.core.log") },

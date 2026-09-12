@@ -37,6 +37,8 @@ Closing the window while a task is active offers the existing background/stop ch
 
 Windows terminals and CI runners can place processes in a supervised job. If that job refuses a breakaway request, the launcher can start Core under the existing job constraints. Core survives the GoalPort window and launcher closing, but the external supervisor can still terminate it when its job ends. The launcher records its creation mode beside the database. See [Windows job lifetimes](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
 
+Runtime selection currently requires a content viewport wider than 1020 CSS pixels: the existing narrow layout hides the Runtime sidebar. Widen the window to use those controls. Packaged workflow checks use a fixed 1440×900 viewport; the separate 1000-pixel screenshot checks layout only.
+
 ## Synthetic checks and limits
 
 **Scenario Runtime is an in-process synthetic test runtime**, not a real Agent or subscription admission. An explicit test profile allows Scenario only and rejects native Codex, Claude and Grok process starts:
