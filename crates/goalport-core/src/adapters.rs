@@ -565,7 +565,10 @@ impl AgentAdapter for ScenarioAdapter {
         if let Some(reason) = self.fail_next_send.take() {
             return Err(AdapterError::Connection(reason));
         }
-        if isolated_required()
+        let isolated_turn_failure =
+            isolated_required() && request.text.contains("RC-MARKER-TURN-FAIL");
+        if !isolated_turn_failure
+            && isolated_required()
             && request.text.contains("RC-MARKER-HOLD")
             && !self.sent_prompt_keys.contains(&request.idempotency_key)
         {
@@ -581,6 +584,21 @@ impl AgentAdapter for ScenarioAdapter {
         self.sent_prompt_keys
             .insert(request.idempotency_key.clone());
         self.sent_prompts.push(request.text.clone());
+        if isolated_turn_failure {
+            let failed_event = self.next_event(
+                AgentEventType::TurnFailed,
+                json!({
+                    "status": "failed",
+                    "reason": "isolated Scenario turn-failure fixture"
+                }),
+            );
+            self.events.push_back(failed_event);
+            return Ok(PromptAccepted {
+                idempotency_key: request.idempotency_key.clone(),
+                accepted: true,
+                duplicate: false,
+            });
+        }
         let event = self.next_event(
             AgentEventType::MessageDelta,
             json!({ "text": request.text }),
@@ -1286,9 +1304,37 @@ mod tests {
             idempotency_key: "fail-1".into(),
         };
         assert!(!adapter.send_prompt(&fail).unwrap().duplicate);
+        let _ = adapter.stream_events().unwrap();
+        let turn_fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-TURN-FAIL".into(),
+            idempotency_key: "turn-fail-1".into(),
+        };
+        assert!(!adapter.send_prompt(&turn_fail).unwrap().duplicate);
+        let events = adapter.stream_events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentEventType::ToolActivity)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentEventType::TurnCompleted)
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event_type != AgentEventType::TurnFailed),
+            "TURN-FAIL must remain ordinary text outside isolation"
+        );
         assert_eq!(
             adapter.sent_prompts(),
-            &["RC-MARKER-HOLD", "RC-MARKER-FORCE-FAIL"]
+            &[
+                "RC-MARKER-HOLD",
+                "RC-MARKER-FORCE-FAIL",
+                "RC-MARKER-TURN-FAIL"
+            ]
         );
     }
 
@@ -1337,6 +1383,60 @@ mod tests {
             "HOLD must not sleep on a duplicate idempotency key"
         );
         assert_eq!(adapter.sent_prompts(), &["hello"]);
+        let _ = adapter.stream_events().unwrap();
+        let turn_fail = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-TURN-FAIL".into(),
+            idempotency_key: "turn-fail-1".into(),
+        };
+        let accepted = adapter.send_prompt(&turn_fail).unwrap();
+        assert!(accepted.accepted);
+        assert!(!accepted.duplicate);
+        assert_eq!(adapter.sent_prompts(), &["hello", "RC-MARKER-TURN-FAIL"]);
+        let events = adapter.stream_events().unwrap();
+        assert_eq!(events.len(), 1, "turn failure must emit no tool or waiting work");
+        assert_eq!(events[0].event_type, AgentEventType::TurnFailed);
+        assert_eq!(events[0].payload["status"], "failed");
+        assert!(adapter.send_prompt(&turn_fail).unwrap().duplicate);
+        assert!(adapter.stream_events().unwrap().is_empty());
+        assert_eq!(adapter.sent_prompts(), &["hello", "RC-MARKER-TURN-FAIL"]);
+    }
+
+    fn assert_structured_marker_is_plain_input(mut adapter: impl AgentAdapter) {
+        adapter.create_session(&request()).unwrap();
+        let _ = adapter.stream_events().unwrap();
+        let prompt = PromptRequest {
+            attempt_id: "a".into(),
+            text: "RC-MARKER-TURN-FAIL".into(),
+            idempotency_key: "structured-turn-fail".into(),
+        };
+        let accepted = adapter.send_prompt(&prompt).unwrap();
+        assert!(accepted.accepted);
+        assert!(!accepted.duplicate);
+        assert!(adapter.stream_events().unwrap().is_empty());
+        assert!(adapter.send_prompt(&prompt).unwrap().duplicate);
+    }
+
+    #[test]
+    fn isolated_turn_failure_marker_is_scenario_only() {
+        if reexec_with_isolation(Some("1")) {
+            return;
+        }
+        assert_structured_marker_is_plain_input(CodexAppServerAdapter::new(
+            "codex",
+            "test",
+            "C:\\work",
+        ));
+        assert_structured_marker_is_plain_input(GrokAcpAdapter::new(
+            "grok",
+            "test",
+            "C:\\work",
+        ));
+        assert_structured_marker_is_plain_input(ClaudeCliAdapter::new(
+            "claude",
+            "test",
+            "C:\\work",
+        ));
     }
 
     #[test]

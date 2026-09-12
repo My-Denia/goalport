@@ -120,7 +120,11 @@ fn isolated_serve_without_nonce_is_rejected() {
 #[test]
 fn record_close_choice_persists_receipt_and_event() {
     let store = Store::open_in_memory().unwrap();
-    let mut controller = UiController::new(store.clone()).unwrap();
+    let mut controller = UiController::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    )
+    .unwrap();
     let snapshot = controller
         .handle(ui("snapshot", json!({})))
         .unwrap()

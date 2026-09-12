@@ -8,7 +8,9 @@ import {
   resolvePermission,
   withConnection,
   type ConnectionState,
-  type CoreSnapshot
+  type CoreCommandOutcome,
+  type CoreSnapshot,
+  type TimelineItem
 } from "./types";
 
 export const IPC_PROTOCOL_VERSION = "goalport.ipc.v1";
@@ -76,7 +78,7 @@ export interface CoreClient {
   readonly mode: "tauri" | "electron" | "browser-preview";
   snapshot(): Promise<CoreSnapshot>;
   createCampaign(workspaceRoot: string, goal: string): Promise<CoreSnapshot>;
-  sendMessage(message: string, campaignId: string, attemptId: string): Promise<CoreSnapshot>;
+  sendMessage(message: string, campaignId: string, attemptId: string, taskId?: string): Promise<CoreSnapshot>;
   resolveDecision(decisionId: string, allow?: boolean): Promise<CoreSnapshot>;
   reconnect(): Promise<CoreSnapshot>;
   handoff?(provider: string, oldAttemptId: string, instruction: string): Promise<CoreSnapshot>;
@@ -92,7 +94,27 @@ export interface CoreClient {
   revokeAuthorization?(campaignId: string, scope?: string): Promise<CoreSnapshot>;
   requestOwnerAction?(action: string, planApproved?: boolean, auditPassed?: boolean): Promise<CoreSnapshot>;
   notify?(title: string, body: string): Promise<boolean>;
+  chooseWorkspace?(): Promise<string | null>;
+  appInfo?(): Promise<AppInfo>;
   dispatch?(request: CoreCommand): Promise<CoreSnapshot>;
+}
+
+export interface AppInfo {
+  version: string;
+  channel: string;
+  testMode: boolean;
+  dataPath: string;
+}
+
+export interface CommandTraceEntry {
+  phase: "issued" | "settled";
+  requestId: string;
+  messageType: string;
+  provider?: string;
+  campaignId?: string;
+  taskId?: string;
+  attemptId?: string;
+  kind?: CoreCommandOutcome["kind"];
 }
 
 declare global {
@@ -105,6 +127,7 @@ declare global {
     __goalportLastEnvelope?: CoreCommand;
     __goalportLastSnapshot?: CoreSnapshot;
     __goalportLastSelectResult?: CoreSnapshot;
+    __goalportCommandTrace?: CommandTraceEntry[];
     __goalportCloseRequestId?: string;
     goalportCore?: {
       snapshot: () => Promise<unknown>;
@@ -112,6 +135,8 @@ declare global {
       startCore: () => Promise<unknown>;
       openInVsCode: (workspaceRoot: string) => Promise<void>;
       notify?: (title: string, body: string) => Promise<boolean>;
+      chooseWorkspace?: () => Promise<string | null>;
+      appInfo?: () => Promise<AppInfo>;
       requestClose?: () => Promise<unknown>;
       confirmCloseChoice?: (payload: CloseChoicePayload | "continue" | "stop") => Promise<unknown>;
       dismissCloseChoice?: () => Promise<unknown>;
@@ -192,21 +217,44 @@ class TauriCoreClient implements CoreClient {
   readonly mode: "tauri" | "electron";
   private lastSnapshot: CoreSnapshot = EMPTY_SNAPSHOT;
   private entityVersion = 0;
+  private mutationGeneration = 0;
+  private pendingMutations = 0;
+  private commandTail: Promise<void> = Promise.resolve();
+  private snapshotInFlight: Promise<CoreSnapshot> | null = null;
 
   constructor(mode: "tauri" | "electron" = "tauri") {
     this.mode = mode;
   }
 
   async snapshot(): Promise<CoreSnapshot> {
+    // A poll must never race a command and later replace its result. Calls that
+    // arrive while a mutation is queued use the last accepted projection; the
+    // next interval obtains a fresh full snapshot after the queue drains.
+    if (this.snapshotInFlight) return this.snapshotInFlight;
+    const pending = this.pendingMutations > 0
+      ? this.waitForMutationQueue()
+      : this.readSnapshot(this.mutationGeneration);
+    this.snapshotInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.snapshotInFlight === pending) this.snapshotInFlight = null;
+    }
+  }
+
+  private async readSnapshot(generation: number): Promise<CoreSnapshot> {
     try {
       const raw = await this.invoke<unknown>("core_snapshot");
+      if (generation !== this.mutationGeneration || this.pendingMutations > 0) return this.waitForMutationQueue();
       const snapshot = resolveCoreSnapshot(raw);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       this.lastSnapshot = snapshot;
       return snapshot;
     } catch (error) {
+      if (generation !== this.mutationGeneration || this.pendingMutations > 0) return this.waitForMutationQueue();
       this.lastSnapshot = {
         ...this.lastSnapshot,
+        commandOutcome: undefined,
         connection: "disconnected",
         notices: [`Core unavailable: ${errorMessage(error)}`, ...this.lastSnapshot.notices]
       };
@@ -214,13 +262,22 @@ class TauriCoreClient implements CoreClient {
     }
   }
 
-  async sendMessage(message: string, campaignId: string, attemptId: string): Promise<CoreSnapshot> {
+  private async waitForMutationQueue(): Promise<CoreSnapshot> {
+    while (this.pendingMutations > 0) {
+      const tail = this.commandTail;
+      await tail;
+      if (tail === this.commandTail && this.pendingMutations === 0) break;
+    }
+    return this.lastSnapshot;
+  }
+
+  async sendMessage(message: string, campaignId: string, attemptId: string, taskId?: string): Promise<CoreSnapshot> {
     const command: CoreCommand = {
       protocolVersion: IPC_PROTOCOL_VERSION,
       requestId: requestId(),
       entityVersion: this.entityVersion,
       messageType: "send_message",
-      payload: { message, campaignId, attemptId, taskId: this.lastSnapshot.activeTask.id }
+      payload: { message, campaignId, attemptId, taskId: taskId ?? this.lastSnapshot.activeTask.id }
     };
     return this.dispatch(command);
   }
@@ -231,7 +288,7 @@ class TauriCoreClient implements CoreClient {
       requestId: requestId(),
       entityVersion: this.entityVersion,
       messageType: "create_campaign",
-      payload: { workspaceRoot, goal, projectId: this.lastSnapshot.selectedProjectId, title: goal, acceptance: "Persist ordered Runtime events and recover without replay." }
+      payload: { workspaceRoot, goal, title: goal, acceptance: "Persist ordered Runtime events and recover without replay." }
     };
     return this.dispatch(command);
   }
@@ -296,7 +353,7 @@ class TauriCoreClient implements CoreClient {
 
   async setConnection(connection: ConnectionState): Promise<CoreSnapshot> {
     if (connection === "connected") return this.reconnect();
-    this.lastSnapshot = withConnection(this.lastSnapshot, connection);
+    this.lastSnapshot = { ...withConnection(this.lastSnapshot, connection), commandOutcome: undefined };
     return this.lastSnapshot;
   }
 
@@ -305,6 +362,23 @@ class TauriCoreClient implements CoreClient {
   }
 
   async dispatch(command: CoreCommand): Promise<CoreSnapshot> {
+    traceCommand("issued", command);
+    this.pendingMutations += 1;
+    this.mutationGeneration += 1;
+    const previous = this.commandTail;
+    const run = previous.then(() => this.performDispatch(command));
+    const traced = run.then((snapshot) => {
+      traceCommand("settled", command, snapshot.commandOutcome?.kind ?? "transport-error");
+      return snapshot;
+    });
+    const settled = traced.finally(() => {
+      this.pendingMutations -= 1;
+    });
+    this.commandTail = settled.then(() => undefined, () => undefined);
+    return settled;
+  }
+
+  private async performDispatch(command: CoreCommand): Promise<CoreSnapshot> {
     if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
       window.__goalportLastEnvelope = command;
     }
@@ -312,25 +386,42 @@ class TauriCoreClient implements CoreClient {
       const raw = await this.invoke<unknown>("core_command", { request: command });
       const rawRecord = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
       if (rawRecord && rawRecord.goalportRejected) {
+        const rejectedRequestId = rawRecord.requestId ?? rawRecord.request_id;
+        if (typeof rejectedRequestId === "string" && rejectedRequestId !== command.requestId) {
+          throw new Error("Core rejection identity did not match the request");
+        }
         const message = errorMessage(rawRecord.error);
         this.lastSnapshot = {
           ...this.lastSnapshot,
+          commandOutcome: commandOutcome(command, "refused", message),
           notices: [`Core refused: ${message}`, ...this.lastSnapshot.notices]
         };
         this.rememberIsolatedSnapshot();
         return this.lastSnapshot;
       }
-      const snapshot = resolveCoreSnapshot(raw);
+      const envelope = commandEnvelope(raw, command);
+      const snapshot = resolveCoreSnapshot(envelope.snapshot);
       if (!snapshot) throw new Error("Core returned an invalid command projection");
       this.entityVersion += 1;
-      this.lastSnapshot = snapshot;
+      const projected = command.messageType === "reconnect"
+        ? mergeReconnectProjection(this.lastSnapshot, snapshot)
+        : snapshot;
+      this.lastSnapshot = {
+        ...projected,
+        commandOutcome: {
+          ...commandOutcome(command, "accepted"),
+          duplicate: envelope.duplicate
+        }
+      };
       this.rememberIsolatedSnapshot();
-      return snapshot;
+      return this.lastSnapshot;
     } catch (error) {
+      const message = errorMessage(error);
       this.lastSnapshot = {
         ...this.lastSnapshot,
+        commandOutcome: commandOutcome(command, "transport-error", message),
         connection: "disconnected",
-        notices: [`Core request failed: ${errorMessage(error)}`, ...this.lastSnapshot.notices]
+        notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices]
       };
       this.rememberIsolatedSnapshot();
       return this.lastSnapshot;
@@ -385,6 +476,18 @@ class TauriCoreClient implements CoreClient {
     return api.notify(title, body);
   }
 
+  async chooseWorkspace(): Promise<string | null> {
+    if (this.mode !== "electron") return null;
+    return window.goalportCore?.chooseWorkspace?.() ?? null;
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    if (this.mode !== "electron" || !window.goalportCore?.appInfo) {
+      return { version: "", channel: this.mode === "tauri" ? "desktop" : "preview", testMode: false, dataPath: "" };
+    }
+    return window.goalportCore.appInfo();
+  }
+
   private async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     if (this.mode === "electron") {
       const api = window.goalportCore;
@@ -396,6 +499,74 @@ class TauriCoreClient implements CoreClient {
     }
     return invokeCore<T>(command, args);
   }
+}
+
+function commandOutcome(
+  command: CoreCommand,
+  kind: CoreCommandOutcome["kind"],
+  error?: string
+): CoreCommandOutcome {
+  return {
+    kind,
+    requestId: command.requestId,
+    messageType: command.messageType,
+    ...(error ? { error } : {})
+  };
+}
+
+function commandEnvelope(raw: unknown, command: CoreCommand): { snapshot: unknown; duplicate?: boolean } {
+  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+  if (!record || !("snapshot" in record)) return { snapshot: raw };
+  if (record.accepted !== true) throw new Error("Core did not acknowledge the command");
+  if (record.requestId !== command.requestId && record.request_id !== command.requestId) {
+    throw new Error("Core command response identity did not match the request");
+  }
+  return {
+    snapshot: record.snapshot,
+    duplicate: typeof record.duplicate === "boolean" ? record.duplicate : undefined
+  };
+}
+
+function mergeReconnectProjection(previous: CoreSnapshot, next: CoreSnapshot): CoreSnapshot {
+  const sameView = previous.selectedProjectId === next.selectedProjectId
+    && previous.activeCampaignId === next.activeCampaignId
+    && previous.activeTask.id === next.activeTask.id
+    && previous.attempt.id === next.attempt.id;
+  if (!sameView) return next;
+  const timeline = dedupeTimeline([...previous.timeline, ...next.timeline]);
+  return { ...next, timeline, cursor: Math.max(previous.cursor, next.cursor) };
+}
+
+function dedupeTimeline(items: TimelineItem[]): TimelineItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function traceCommand(
+  phase: CommandTraceEntry["phase"],
+  command: CoreCommand,
+  kind?: CoreCommandOutcome["kind"]
+): void {
+  if (typeof window === "undefined" || window.__GOALPORT_ISOLATED !== 1) return;
+  const textField = (key: string): string | undefined => {
+    const value = command.payload[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  };
+  const entry: CommandTraceEntry = {
+    phase,
+    requestId: command.requestId,
+    messageType: command.messageType,
+    provider: textField("provider"),
+    campaignId: textField("campaignId"),
+    taskId: textField("taskId"),
+    attemptId: textField("attemptId"),
+    ...(kind ? { kind } : {})
+  };
+  window.__goalportCommandTrace = [...(window.__goalportCommandTrace ?? []), entry].slice(-64);
 }
 
 let sharedClient: CoreClient | undefined;

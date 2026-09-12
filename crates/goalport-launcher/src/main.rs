@@ -2,6 +2,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -9,12 +10,27 @@ use std::{
 };
 
 fn main() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        if env::var("GOALPORT_LAUNCHER_REEXEC").ok().as_deref() != Some("1") {
-            return reexec_breakaway();
+    let result = run();
+    if let Err(error) = &result {
+        // The detached launcher can have null stdio. Keep
+        // startup failures beside this launch's DB instead of losing the cause.
+        let args: Vec<String> = env::args().skip(1).collect();
+        if let Some(db) = arg_option(&args, "--db") {
+            append_launcher_log(Path::new(&db), error);
         }
     }
+    result
+}
+
+fn run() -> Result<(), String> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("goalport-core-launcher {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // Prefer to break Core away from Electron's process group and any permissive
+    // desktop job. A denied breakaway can fall back to the external job's
+    // lifetime while remaining independent of the GoalPort window and launcher.
+    // Core's full READY identity gate remains unchanged.
     let mut args = env::args().skip(1);
     let core = args
         .next()
@@ -32,74 +48,78 @@ fn main() -> Result<(), String> {
     let identity = current_identity();
     let parent_pid = identity.parent_pid;
 
-    let mut command = Command::new(&core);
-    command.args(&core_args).stdin(Stdio::null());
-    if let Some(db) = db.as_ref() {
-        let log_path = launch_log_path(db);
-        match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(file) => match file.try_clone() {
-                Ok(clone) => {
-                    command.stdout(Stdio::from(file));
-                    command.stderr(Stdio::from(clone));
-                }
-                Err(_) => {
-                    command.stdout(Stdio::from(file));
-                    command.stderr(Stdio::null());
-                }
-            },
-            Err(_) => {
-                command.stdout(Stdio::null());
-                command.stderr(Stdio::null());
-            }
-        }
-    } else {
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
-    }
-    command.env("GOALPORT_LAUNCHER_PID", identity.pid.to_string());
-    command.env(
-        "GOALPORT_LAUNCHER_CREATED_MS",
-        identity.created_ms.to_string(),
-    );
-    command.env("GOALPORT_LAUNCHER_EXE", &identity.executable_path);
-    command.env("GOALPORT_LAUNCHER_SHA256", &identity.executable_sha256);
     let observed_parent = env::var("GOALPORT_ELECTRON_PID")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|pid| *pid > 0)
         .unwrap_or(parent_pid);
-    command.env("GOALPORT_LAUNCHER_PARENT_PID", observed_parent.to_string());
-    command.env("GOALPORT_LAUNCHER_STARTED_AT", &started_at);
-    command.env("GOALPORT_CORE_SPAWNED_AT", utc_now_iso());
-    if !nonce.trim().is_empty() {
-        command.env("GOALPORT_LAUNCH_NONCE", nonce.trim());
-    }
+    let spawn_core = |creation_flags: u32| -> io::Result<std::process::Child> {
+        let mut command = Command::new(&core);
+        command.args(&core_args).stdin(Stdio::null());
+        if let Some(db) = db.as_ref() {
+            let log_path = launch_log_path(db);
+            match fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                Ok(file) => match file.try_clone() {
+                    Ok(clone) => {
+                        command.stdout(Stdio::from(file));
+                        command.stderr(Stdio::from(clone));
+                    }
+                    Err(_) => {
+                        command.stdout(Stdio::from(file));
+                        command.stderr(Stdio::null());
+                    }
+                },
+                Err(_) => {
+                    command.stdout(Stdio::null());
+                    command.stderr(Stdio::null());
+                }
+            }
+        } else {
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
+        }
+        command.env("GOALPORT_LAUNCHER_PID", identity.pid.to_string());
+        command.env(
+            "GOALPORT_LAUNCHER_CREATED_MS",
+            identity.created_ms.to_string(),
+        );
+        command.env("GOALPORT_LAUNCHER_EXE", &identity.executable_path);
+        command.env("GOALPORT_LAUNCHER_SHA256", &identity.executable_sha256);
+        command.env("GOALPORT_LAUNCHER_PARENT_PID", observed_parent.to_string());
+        command.env("GOALPORT_LAUNCHER_STARTED_AT", &started_at);
+        command.env("GOALPORT_CORE_SPAWNED_AT", utc_now_iso());
+        if !nonce.trim().is_empty() {
+            command.env("GOALPORT_LAUNCH_NONCE", nonce.trim());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(creation_flags);
+        }
+        #[cfg(not(windows))]
+        let _ = creation_flags;
+        command.spawn()
+    };
 
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Break the Core out of a desktop job/process group. The Core owns the
-        // SQLite/event/runtime lifetime after the launcher exits.
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(
-            CREATE_BREAKAWAY_FROM_JOB
-                | CREATE_NEW_PROCESS_GROUP
-                | CREATE_NO_WINDOW
-                | DETACHED_PROCESS,
-        );
-    }
-    let child = command
-        .spawn()
-        .map_err(|error| format!("unable to launch lifecycle-independent Core: {error}"))?;
+    let (child, launch_mode) = spawn_windows_core(spawn_core, current_process_in_any_job)?;
+    #[cfg(not(windows))]
+    let (child, launch_mode) = (
+        spawn_core(0).map_err(|error| format!("unable to launch Core: {error}"))?,
+        CoreLaunchMode::PlatformDefault,
+    );
     let core_pid = child.id();
     drop(child);
+    if let Some(db) = db.as_ref() {
+        append_launcher_log(
+            db,
+            &format!("Core launch mode: {}; pid={core_pid}", launch_mode.as_str()),
+        );
+    }
 
     if let Some(db) = db {
         if !nonce.trim().is_empty() {
@@ -122,46 +142,6 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn reexec_breakaway() -> Result<(), String> {
-    let self_exe = env::current_exe().map_err(|error| error.to_string())?;
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut command = Command::new(&self_exe);
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env("GOALPORT_LAUNCHER_REEXEC", "1");
-    if env::var("GOALPORT_LAUNCHER_PARENT_PID")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        command.env(
-            "GOALPORT_LAUNCHER_PARENT_PID",
-            observed_parent_pid().to_string(),
-        );
-    }
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(
-            CREATE_BREAKAWAY_FROM_JOB
-                | CREATE_NEW_PROCESS_GROUP
-                | CREATE_NO_WINDOW
-                | DETACHED_PROCESS,
-        );
-    }
-    command
-        .spawn()
-        .map_err(|error| format!("unable to reexec launcher outside the UI job: {error}"))?;
-    Ok(())
-}
-
 fn arg_option(args: &[String], name: &str) -> Option<String> {
     args.windows(2)
         .find(|pair| pair[0] == name)
@@ -178,6 +158,102 @@ fn launch_log_path(db: &Path) -> PathBuf {
     let mut path = db.as_os_str().to_os_string();
     path.push(".core.log");
     PathBuf::from(path)
+}
+
+fn launcher_log_path(db: &Path) -> PathBuf {
+    let mut path = db.as_os_str().to_os_string();
+    path.push(".launcher.log");
+    PathBuf::from(path)
+}
+
+fn append_launcher_log(db: &Path, message: &str) {
+    if let Ok(mut log) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(launcher_log_path(db))
+    {
+        let _ = writeln!(log, "{} {message}", utc_now_iso());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreLaunchMode {
+    #[cfg(windows)]
+    BreakawayRequested,
+    #[cfg(windows)]
+    InheritedJobFallback,
+    #[cfg(not(windows))]
+    PlatformDefault,
+}
+
+impl CoreLaunchMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            #[cfg(windows)]
+            Self::BreakawayRequested => "breakaway-requested",
+            #[cfg(windows)]
+            Self::InheritedJobFallback => "inherited-job-fallback",
+            #[cfg(not(windows))]
+            Self::PlatformDefault => "platform-default",
+        }
+    }
+}
+
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+#[cfg(windows)]
+const INHERITED_JOB_FLAGS: u32 = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | DETACHED_PROCESS;
+#[cfg(windows)]
+const BREAKAWAY_FLAGS: u32 = CREATE_BREAKAWAY_FROM_JOB | INHERITED_JOB_FLAGS;
+
+#[cfg(windows)]
+fn spawn_windows_core<T>(
+    mut spawn: impl FnMut(u32) -> io::Result<T>,
+    current_process_in_job: impl FnOnce() -> io::Result<bool>,
+) -> Result<(T, CoreLaunchMode), String> {
+    let initial_error = match spawn(BREAKAWAY_FLAGS) {
+        Ok(child) => return Ok((child, CoreLaunchMode::BreakawayRequested)),
+        Err(error) => error,
+    };
+    if initial_error.raw_os_error() != Some(5) {
+        return Err(format!(
+            "unable to launch Core with breakaway-requested flags: {initial_error}"
+        ));
+    }
+    match current_process_in_job() {
+        Ok(true) => match spawn(INHERITED_JOB_FLAGS) {
+            Ok(child) => Ok((child, CoreLaunchMode::InheritedJobFallback)),
+            Err(fallback_error) => Err(format!(
+                "unable to launch Core: breakaway-requested flags were denied ({initial_error}); inherited-job fallback also failed ({fallback_error})"
+            )),
+        },
+        Ok(false) => Err(format!(
+            "unable to launch Core with breakaway-requested flags: {initial_error}; inherited-job fallback was not attempted because the launcher is not in a job"
+        )),
+        Err(observation_error) => Err(format!(
+            "unable to launch Core with breakaway-requested flags: {initial_error}; inherited-job fallback was not attempted because job membership could not be confirmed ({observation_error})"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn current_process_in_any_job() -> io::Result<bool> {
+    use winapi::{um::jobapi::IsProcessInJob, um::processthreadsapi::GetCurrentProcess};
+
+    let mut in_job = 0;
+    let succeeded =
+        unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) };
+    if succeeded == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(in_job != 0)
+    }
 }
 
 fn absolute_path(path: &Path) -> PathBuf {
@@ -621,6 +697,11 @@ unsafe extern "system" {
 mod tests {
     use super::{LaunchReadyExpectation, current_identity, launch_ready_matches, utc_now_iso};
     use serde_json::json;
+    #[cfg(windows)]
+    use std::io;
+
+    #[cfg(windows)]
+    use super::{BREAKAWAY_FLAGS, CoreLaunchMode, INHERITED_JOB_FLAGS, spawn_windows_core};
 
     #[test]
     fn launch_ready_is_bound_to_fresh_full_process_identity() {
@@ -692,5 +773,97 @@ mod tests {
             &serde_json::to_string(&invalid_time).unwrap(),
             &expected
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn successful_breakaway_is_not_retried_or_probed() {
+        let mut attempts = Vec::new();
+        let (child, mode) = spawn_windows_core(
+            |flags| {
+                attempts.push(flags);
+                Ok(11)
+            },
+            || panic!("job membership must not be probed after a successful spawn"),
+        )
+        .unwrap();
+        assert_eq!(child, 11);
+        assert_eq!(mode, CoreLaunchMode::BreakawayRequested);
+        assert_eq!(attempts, [BREAKAWAY_FLAGS]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn access_denied_in_confirmed_job_retries_once_without_breakaway() {
+        let mut attempts = Vec::new();
+        let (child, mode) = spawn_windows_core(
+            |flags| {
+                attempts.push(flags);
+                if attempts.len() == 1 {
+                    Err(io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(22)
+                }
+            },
+            || Ok(true),
+        )
+        .unwrap();
+        assert_eq!(child, 22);
+        assert_eq!(mode, CoreLaunchMode::InheritedJobFallback);
+        assert_eq!(attempts, [BREAKAWAY_FLAGS, INHERITED_JOB_FLAGS]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn access_denied_without_confirmed_job_is_not_retried() {
+        for membership in [Ok(false), Err(io::Error::from_raw_os_error(6))] {
+            let mut attempts = Vec::new();
+            let error = spawn_windows_core::<u32>(
+                |flags| {
+                    attempts.push(flags);
+                    Err(io::Error::from_raw_os_error(5))
+                },
+                || membership,
+            )
+            .unwrap_err();
+            assert_eq!(attempts, [BREAKAWAY_FLAGS]);
+            assert!(error.contains("fallback was not attempted"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_access_denied_error_is_not_retried_or_probed() {
+        let mut attempts = Vec::new();
+        let error = spawn_windows_core::<u32>(
+            |flags| {
+                attempts.push(flags);
+                Err(io::Error::from_raw_os_error(2))
+            },
+            || panic!("job membership must not be probed for another OS error"),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, [BREAKAWAY_FLAGS]);
+        assert!(error.contains("breakaway-requested flags"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_fallback_is_not_retried_again() {
+        let mut attempts = Vec::new();
+        let error = spawn_windows_core::<u32>(
+            |flags| {
+                attempts.push(flags);
+                Err(io::Error::from_raw_os_error(if attempts.len() == 1 {
+                    5
+                } else {
+                    32
+                }))
+            },
+            || Ok(true),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, [BREAKAWAY_FLAGS, INHERITED_JOB_FLAGS]);
+        assert!(error.contains("inherited-job fallback also failed"));
     }
 }

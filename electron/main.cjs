@@ -1,12 +1,43 @@
-const { app, BrowserWindow, ipcMain, Notification, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, Notification, shell, dialog } = require("electron");
 const { spawn } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
+const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment } = require("./launch-config.cjs");
+const { invokeCoreRequest, acknowledgedStopSnapshot } = require("./core-client.cjs");
 
-const RUN_SLUG = process.env.GOALPORT_RUN_SLUG || "goalport-electron-rc-resume-chain";
+const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
+function reportStartupFailure(error) {
+  console.error("GoalPort startup refused:", error);
+  dialog.showErrorBox("GoalPort could not start", String(error.message || error));
+  app.exit(1);
+}
+
+let appVersion, profile;
+try {
+  const launchArgs = launchArguments(process.argv);
+  const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
+  profile = legacyIsolated ? null : prepareProfile({
+    args: launchArgs, appData: app.getPath("appData"), version: appVersion, isPackaged: app.isPackaged,
+    coreSha256: fileSha256(coreBinary() || "")
+  });
+  if (profile) {
+    app.setPath("userData", profile.directory);
+    const env = childEnvironment(process.env, profile);
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("GOALPORT_") && !(key in env)) delete process.env[key];
+    }
+    Object.assign(process.env, env);
+  }
+} catch (error) {
+  reportStartupFailure(error);
+  return;
+}
+
+const RUN_SLUG = profile?.slug || process.env.GOALPORT_RUN_SLUG || "goalport-electron-rc-resume-chain";
 const PRESERVE_SLUGS = [
   "goalport-connected-dual-desktop",
   "goalport-electron-stable-v1",
@@ -60,6 +91,7 @@ function thisRunRoot(resolvedPath) {
 }
 
 function assertIsolatedLaunch() {
+  if (profile) return; // Profile ownership, mode and component identity were checked above.
   if (!isolatedRequired()) return;
   const db = process.env.GOALPORT_CORE_DB;
   const pipe = process.env.GOALPORT_CORE_PIPE;
@@ -102,9 +134,9 @@ if (process.env.GOALPORT_CDP_PORT) {
 }
 app.setAppUserModelId("GoalPort.Desktop");
 
-const configuredPipeName = isolatedRequired()
+const configuredPipeName = profile?.pipe || (isolatedRequired()
   ? (process.env.GOALPORT_CORE_PIPE || `${RUN_SLUG}-missing-pipe`)
-  : (process.env.GOALPORT_CORE_PIPE || "goalport-core-v1");
+  : (process.env.GOALPORT_CORE_PIPE || "goalport-core-v1"));
 const PIPE_NAME = configuredPipeName.startsWith("\\\\.\\pipe\\")
   ? configuredPipeName
   : `\\\\.\\pipe\\${configuredPipeName}`;
@@ -134,7 +166,6 @@ let lastStopResponsibilityHeld = false;
 let lastHeldAttemptId = "";
 let lastCampaignId = "";
 let lastLaunchNonce = "";
-const appRoot = require("node:fs").existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 
 function fileSha256(target) {
   try {
@@ -180,6 +211,10 @@ function normalizeClosePayload(payload) {
 }
 
 function coreBinary() {
+  if (app.isPackaged) {
+    const bundled = path.join(process.resourcesPath, "goalport-core.exe");
+    return fs.existsSync(bundled) ? bundled : undefined;
+  }
   const configured = process.env.GOALPORT_CORE_BIN;
   if (configured) return configured;
   const candidates = [
@@ -191,6 +226,10 @@ function coreBinary() {
 }
 
 function launcherBinary() {
+  if (app.isPackaged) {
+    const bundled = path.join(process.resourcesPath, "goalport-core-launcher.exe");
+    return fs.existsSync(bundled) ? bundled : undefined;
+  }
   const configured = process.env.GOALPORT_CORE_LAUNCHER_BIN;
   if (configured) return configured;
   const candidates = [
@@ -202,6 +241,7 @@ function launcherBinary() {
 }
 
 function dbPath() {
+  if (profile) return profile.database;
   if (isolatedRequired()) {
     if (!process.env.GOALPORT_CORE_DB) {
       throw new Error("isolated Electron refused app.getPath(userData) SQLite");
@@ -228,14 +268,14 @@ function pipeAvailable() {
 }
 
 async function ensureCore() {
-  if (isolatedRequired() && !isThisRunIsolatedPipe(process.env.GOALPORT_CORE_PIPE || configuredPipeName)) {
+  if (!profile && isolatedRequired() && !isThisRunIsolatedPipe(process.env.GOALPORT_CORE_PIPE || configuredPipeName)) {
     throw new Error(`isolated Electron refused to attach to non this-run pipe: ${process.env.GOALPORT_CORE_PIPE || configuredPipeName}`);
   }
-  if (await pipeAvailable()) return;
+  if (await pipeAvailable()) return verifyCoreConnection();
   if (coreLaunchPromise) return coreLaunchPromise;
   if (lastLaunchNonce) {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (await pipeAvailable()) return;
+      if (await pipeAvailable()) return verifyCoreConnection();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error("Lifecycle-independent Core pipe disappeared; refusing to spawn a second Core");
@@ -244,6 +284,7 @@ async function ensureCore() {
   if (!binary) throw new Error("GoalPort Core binary is missing; build goalport-core before launching Electron");
   coreLaunchPromise = (async () => {
     const launcher = launcherBinary();
+    if (app.isPackaged && !launcher) throw new Error("The packaged Core launcher is missing; verify or rebuild the complete RC package");
     const command = launcher || binary;
     const commandArgs = launcher
       ? [binary, "serve", "--pipe", PIPE_NAME, "--db", dbPath()]
@@ -253,7 +294,7 @@ async function ensureCore() {
     const identity = electronIdentity();
     const launchRequestedAt = isoNow();
     const childEnv = {
-      ...process.env,
+      ...childEnvironment(process.env, profile),
       GOALPORT_CORE_BIN: binary,
       GOALPORT_LAUNCH_NONCE: launchNonce,
       GOALPORT_RUN_SLUG: RUN_SLUG,
@@ -269,17 +310,35 @@ async function ensureCore() {
       windowsHide: true,
       env: childEnv
     });
+    let spawnError;
+    coreChild.once("error", (error) => { spawnError = error; });
     coreChild.unref();
     // A cold Windows launch can spend several seconds in SQLite migration and
     // process setup. Keep the host alive long enough for the detached Core to
     // expose the pipe instead of turning a slow first run into a false crash.
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (await pipeAvailable()) return;
+      if (spawnError) throw new Error(`Core launcher could not start: ${spawnError.message}`);
+      if (await pipeAvailable()) return verifyCoreConnection();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error("Lifecycle-independent Core did not expose its Named Pipe within 10 seconds");
+    let detail = "";
+    for (const suffix of [".launcher.log", ".core.log"]) {
+      try { detail += fs.readFileSync(`${dbPath()}${suffix}`, "utf8").slice(-1500); } catch {}
+    }
+    throw new Error(`Core did not expose its Named Pipe within 10 seconds.${detail ? `\n${detail.trim()}` : ""}`);
   })().finally(() => { coreLaunchPromise = undefined; });
   return coreLaunchPromise;
+}
+
+async function verifyCoreConnection() {
+  if (!profile) return;
+  const requestId = `identity-${randomUUID()}`;
+  const response = await exchange({
+    protocolVersion: "goalport.ipc.v2", requestId,
+    entityVersion: 0, messageType: "get_startup_receipt", payload: {}
+  });
+  if (!response || response.requestId !== requestId || response.ok === false) throw new Error("Core startup identity is unavailable; attachment refused");
+  assertCoreIdentity(response.payload?.receipt, profile);
 }
 
 function exchange(request) {
@@ -291,6 +350,8 @@ function exchange(request) {
     const timeout = setTimeout(() => fail(new Error("Core IPC response timed out after 120 seconds")), 120000);
     const fail = (error) => { if (!settled) { settled = true; clearTimeout(timeout); socket.destroy(); reject(error); } };
     socket.on("error", fail);
+    socket.on("end", () => { if (!settled) fail(new Error("Core closed the connection before acknowledging the request")); });
+    socket.on("close", () => { if (!settled) fail(new Error("Core connection closed before acknowledgement")); });
     socket.on("data", (chunk) => {
       chunks.push(chunk);
       const bytes = Buffer.concat(chunks);
@@ -314,17 +375,6 @@ function exchange(request) {
     // Do not half-close a Windows Named Pipe before a slow native response.
     socket.on("connect", () => socket.write(frame));
   });
-}
-
-function unwrap(value) {
-  if (value && value.ok === false) {
-    const error = new Error(value.error || "Core rejected the request");
-    error.coreRejected = true;
-    throw error;
-  }
-  if (value && value.payload && value.payload.snapshot) return value.payload.snapshot;
-  if (value && value.payload) return value.payload;
-  return value;
 }
 
 function closeAttemptTarget(active, selectedId, held, heldId) {
@@ -397,37 +447,11 @@ async function quitAfterCloseChoice() {
   app.quit();
 }
 
-// Runs one exchange attempt and converts a tagged Core rejection into the
-// { goalportRejected, error } shape. Genuine transport errors (anything
-// without coreRejected === true) are rethrown so the caller can retry.
-async function attemptExchange(request) {
-  try {
-    return { rejected: null, result: unwrap(await exchange(request)) };
-  } catch (error) {
-    if (error && error.coreRejected === true) {
-      return { rejected: { goalportRejected: true, error: String(error.message || error) }, result: null };
-    }
-    throw error;
-  }
-}
-
 async function invokeCore(request) {
-  try {
-    const outcome = await attemptExchange(request);
-    if (outcome.rejected) return outcome.rejected;
-    cacheAttempt(outcome.result);
-    maybeNotify(request, outcome.result);
-    return outcome.result;
-  }
-  catch {
-    await ensureCore();
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    const outcome = await attemptExchange(request);
-    if (outcome.rejected) return outcome.rejected;
-    cacheAttempt(outcome.result);
-    maybeNotify(request, outcome.result);
-    return outcome.result;
-  }
+  return invokeCoreRequest(request, {
+    exchange, ensureCore, delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    onResult: (snapshot) => { cacheAttempt(snapshot); maybeNotify(request, snapshot); }
+  });
 }
 
 function maybeNotify(request, result) {
@@ -451,7 +475,7 @@ async function createWindow() {
     height: 920,
     minWidth: 720,
     minHeight: 640,
-    title: "GoalPort · Preview",
+    title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : "RC"}`,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -473,6 +497,13 @@ async function createWindow() {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle("goalport:app-info", () => ({
+    version: appVersion, channel: "Stable V1 RC", testMode: isolatedRequired(), dataPath: app.getPath("userData")
+  }));
+  ipcMain.handle("goalport:choose-workspace", async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, { title: "Choose a project workspace", properties: ["openDirectory"] });
+    return choice.canceled ? null : choice.filePaths[0] || null;
+  });
   ipcMain.handle("goalport:core-snapshot", (_, request) => invokeCore(request));
   ipcMain.handle("goalport:core-command", (_, request) => invokeCore(request));
   ipcMain.handle("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
@@ -548,6 +579,7 @@ app.whenReady().then(() => {
       if (!closeAttemptId) {
         throw new Error("no-core-owned-attempt");
       }
+      const requiresHold = lastStopResponsibilityHeld || lastAttemptProvider === "claude";
       const stopped = await invokeCore({
         protocolVersion: "goalport.ipc.v2",
         requestId,
@@ -555,14 +587,7 @@ app.whenReady().then(() => {
         messageType: "safe_stop",
         payload: { attemptId: closeAttemptId }
       });
-      if (stopped?.goalportRejected === true) {
-        throw new Error(stopped.error || "Core rejected durable Stop");
-      }
-      const responsibility = stopped?.stopResponsibility || stopped?.stop_responsibility;
-      const durableHoldReturned = String(responsibility?.writeResponsibility || responsibility?.write_responsibility || "").toLowerCase() === "held";
-      if ((lastStopResponsibilityHeld || lastAttemptProvider === "claude") && !durableHoldReturned) {
-        throw new Error("durable-stop-hold-missing");
-      }
+      acknowledgedStopSnapshot(stopped, requestId, requiresHold);
       const receipt = await persistCloseChoice({
         requestId,
         choice: "stop",
@@ -591,7 +616,7 @@ app.whenReady().then(() => {
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };
   });
   return createWindow();
-}).catch((error) => { console.error(error); app.quit(); });
+}).catch(reportStartupFailure);
 
 app.on("before-quit", (event) => {
   if (allowQuitAfterCloseChoice) return;

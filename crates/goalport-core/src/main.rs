@@ -31,6 +31,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     };
     match command {
+        "--version" | "-V" => {
+            println!("goalport-core {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "serve" => serve(&args[1..]),
         "preflight" => preflight(&args[1..]),
         "scenario" => scenario(&args[1..]),

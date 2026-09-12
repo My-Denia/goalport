@@ -240,6 +240,26 @@ impl CoreServer {
     pub fn new(store: Store) -> Self {
         let ui = UiController::new(store.clone())
             .unwrap_or_else(|error| panic!("unable to initialize Core UI projection: {error}"));
+        Self::with_ui(store, ui)
+    }
+
+    /// Explicit constructor for tests that still exercise the legacy seeded
+    /// projection. Production startup uses `new` and leaves a fresh Store empty.
+    pub fn new_seeded_fixture(store: Store, workspace_root: impl Into<String>) -> Self {
+        let ui = UiController::new_seeded_fixture(store.clone(), workspace_root)
+            .unwrap_or_else(|error| panic!("unable to initialize seeded Core fixture: {error}"));
+        Self::with_ui(store, ui)
+    }
+
+    /// Empty-store constructor with the native Runtime firewall forced on,
+    /// intended for parallel-safe synthetic acceptance tests.
+    pub fn new_synthetic_only(store: Store) -> Self {
+        let ui = UiController::new_synthetic_only(store.clone())
+            .unwrap_or_else(|error| panic!("unable to initialize synthetic-only Core: {error}"));
+        Self::with_ui(store, ui)
+    }
+
+    fn with_ui(store: Store, ui: UiController) -> Self {
         Self {
             processor: CommandProcessor::new(store),
             ledger: Arc::new(Mutex::new(RequestLedger::default())),

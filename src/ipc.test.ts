@@ -76,6 +76,67 @@ describe("Core client preview transport", () => {
     expect(snapshot?.timeline[0].kind).toBe("message");
   });
 
+  it("keeps a normal empty projection empty instead of inheriting demo identities", () => {
+    const snapshot = resolveCoreSnapshot({
+      protocolVersion: "goalport.ipc.v2",
+      buildId: "core-empty",
+      connection: "connected",
+      projects: [],
+      selectedProjectId: "",
+      project: { id: "", name: "No workspace selected", workspaceRoot: "", color: "slate" },
+      campaigns: [],
+      activeCampaignId: "",
+      activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" },
+      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No Runtime selected", eventCount: 0 },
+      timeline: [],
+      cursor: 0,
+      runtimes: [],
+      decisions: [],
+      evidence: [],
+      stopResponsibility: null,
+      relatedHolds: [],
+      preview: false,
+      notices: []
+    });
+
+    expect(snapshot).toEqual(expect.objectContaining({
+      projects: [], campaigns: [], activeCampaignId: "", timeline: [], decisions: [], evidence: [], preview: false
+    }));
+    expect(snapshot?.activeTask.id).toBe("");
+    expect(snapshot?.activeTask.state).toBe("waiting");
+    expect(snapshot?.attempt).toEqual(expect.objectContaining({ id: "attempt-unassigned", provider: "unassigned", state: "waiting" }));
+    expect(snapshot?.attempt.id).not.toBe("attempt-codex-executor-1");
+  });
+
+  it("drops records with missing identities and preserves an unknown Runtime id", () => {
+    const snapshot = resolveCoreSnapshot({
+      protocolVersion: "goalport.ipc.v2",
+      buildId: "core-identity",
+      connection: "connected",
+      projects: [{ name: "missing id" }],
+      selectedProjectId: "",
+      project: { id: "", name: "No workspace selected", workspaceRoot: "", color: "slate" },
+      campaigns: [{ title: "missing id" }],
+      activeCampaignId: "",
+      activeTask: {},
+      attempt: {},
+      timeline: [{ body: "missing id" }],
+      runtimes: [{ id: "future-runtime", name: "Future Runtime", support: "unknown", capabilities: {} }],
+      decisions: [{ title: "missing id" }],
+      evidence: [{ claim: "missing id" }],
+      preview: false,
+      notices: []
+    });
+
+    expect(snapshot?.projects).toEqual([]);
+    expect(snapshot?.campaigns).toEqual([]);
+    expect(snapshot?.timeline).toEqual([]);
+    expect(snapshot?.decisions).toEqual([]);
+    expect(snapshot?.evidence).toEqual([]);
+    expect(snapshot?.runtimes[0].id).toBe("future-runtime");
+    expect(snapshot?.attempt).toEqual(expect.objectContaining({ id: "attempt-unassigned", provider: "unassigned", state: "uncertain" }));
+  });
+
   it("normalizes only explicit durable Stop state and never infers it from historical text", () => {
     const base = {
       protocol_version: "goalport.ipc.v2",

@@ -18,7 +18,11 @@ fn ui(message_type: &str, payload: serde_json::Value) -> UiCommandRequest {
 #[test]
 fn core_crash_does_not_replay_prompt() {
     let store = Store::open_in_memory().unwrap();
-    let mut first = UiController::new(store.clone()).unwrap();
+    let mut first = UiController::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    )
+    .unwrap();
     let snapshot = first.handle(ui("snapshot", json!({}))).unwrap().snapshot;
     let campaign_id = snapshot.active_campaign_id.clone();
     let task_id = snapshot.active_task.id.clone();
@@ -128,7 +132,11 @@ fn uncertain_effect_not_replayed() {
 #[test]
 fn recovery_class_is_explicit() {
     let store = Store::open_in_memory().unwrap();
-    let mut controller = UiController::new(store.clone()).unwrap();
+    let mut controller = UiController::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    )
+    .unwrap();
     let snapshot = controller
         .handle(ui("snapshot", json!({})))
         .unwrap()

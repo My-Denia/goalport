@@ -4,6 +4,10 @@ use goalport_core::{
 };
 use serde_json::{Value, json};
 
+fn seeded_server() -> CoreServer {
+    CoreServer::new_seeded_fixture(Store::memory().unwrap(), "synthetic://goalport-fixture")
+}
+
 fn request(id: &str, message_type: &str, payload: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "protocolVersion": CONNECTED_UI_PROTOCOL_VERSION,
@@ -21,7 +25,7 @@ fn snapshot(response: Value) -> Value {
 
 #[test]
 fn full_projection_snapshot_wire_contains_core_owned_identity() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let value = server
         .handle_json(&request("snapshot-1", "snapshot", json!({})))
         .unwrap();
@@ -58,7 +62,7 @@ fn full_projection_snapshot_wire_contains_core_owned_identity() {
 
 #[test]
 fn create_select_send_and_duplicate_preserve_campaign_task_attempt_ids() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let created = server
         .handle_json(&request(
             "create-1",
@@ -140,7 +144,7 @@ fn create_select_send_and_duplicate_preserve_campaign_task_attempt_ids() {
 
 #[test]
 fn invalid_project_and_cross_campaign_task_fail_closed() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let missing = server
         .handle_json(&request(
             "project-missing",
@@ -177,7 +181,7 @@ fn invalid_project_and_cross_campaign_task_fail_closed() {
 
 #[test]
 fn ui_command_round_trip_returns_versioned_envelope_and_request_id() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let response = server
         .handle_json(&request("round-trip", "snapshot", json!({})))
         .unwrap();
@@ -189,7 +193,7 @@ fn ui_command_round_trip_returns_versioned_envelope_and_request_id() {
 
 #[test]
 fn atomic_campaign_task_creation_returns_related_ids() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let view = snapshot(
         server
             .handle_json(&request(
@@ -218,7 +222,10 @@ fn atomic_campaign_task_creation_returns_related_ids() {
 fn core_reopen_preserves_selected_projection_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("connected.sqlite");
-    let first = CoreServer::new(Store::open(&path).unwrap());
+    let first = CoreServer::new_seeded_fixture(
+        Store::open(&path).unwrap(),
+        "synthetic://goalport-fixture",
+    );
     let view = snapshot(
         first
             .handle_json(&request(
@@ -246,7 +253,7 @@ fn core_reopen_preserves_selected_projection_identity() {
 
 #[test]
 fn event_payload_commit_and_cursor_are_visible_in_projection() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = snapshot(server.handle_json(&request("event-runtime", "select_runtime", json!({
         "provider": "scenario", "campaignId": "campaign-synthetic-preview", "taskId": "task-synthetic-preview"
     }))).unwrap());
@@ -268,7 +275,7 @@ fn event_payload_commit_and_cursor_are_visible_in_projection() {
 
 #[test]
 fn duplicate_send_request_does_not_add_a_second_user_event() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = snapshot(server.handle_json(&request("dup-runtime", "select_runtime", json!({
         "provider": "scenario", "campaignId": "campaign-synthetic-preview", "taskId": "task-synthetic-preview"
     }))).unwrap());
@@ -296,7 +303,7 @@ fn duplicate_send_request_does_not_add_a_second_user_event() {
 
 #[test]
 fn reused_send_request_id_with_changed_prompt_is_rejected() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = snapshot(
         server
             .handle_json(&request(
@@ -354,7 +361,7 @@ fn select_project_switches_core_owned_project_without_host_fallback() {
 
 #[test]
 fn runtime_selection_creates_attempt_and_session_under_core_identity() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let value = server.handle_json(&request("runtime-select", "select_runtime", json!({
         "provider": "scenario", "campaignId": "campaign-synthetic-preview", "taskId": "task-synthetic-preview"
     }))).unwrap();

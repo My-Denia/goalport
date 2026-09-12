@@ -160,7 +160,36 @@ fn select_seed_campaign(server: &CoreServer, id: &str, attempt_id: Option<&str>)
 
 fn seed_server() -> CoreServer {
     assert_env_pinned();
-    CoreServer::new(Store::memory().unwrap())
+    let store = Store::memory().unwrap();
+    store
+        .insert_project(&Project {
+            id: SEED_PROJECT.into(),
+            workspace_root: "synthetic://goalport-fixture".into(),
+        })
+        .unwrap();
+    let campaign = Campaign {
+        id: SEED_CAMPAIGN.into(),
+        goal: "selection preservation fixture".into(),
+        root_task_id: SEED_TASK.into(),
+        state: WorkStatus::InProgress,
+    };
+    store
+        .create_campaign_with_task(
+            SEED_PROJECT,
+            &campaign,
+            &Task {
+                id: SEED_TASK.into(),
+                campaign_id: SEED_CAMPAIGN.into(),
+                title: "selection preservation".into(),
+                acceptance: "first select creates the Attempt".into(),
+                state: WorkStatus::InProgress,
+            },
+        )
+        .unwrap();
+    store
+        .set_campaign_authorization(SEED_CAMPAIGN, &CampaignAuthorization::granted())
+        .unwrap();
+    CoreServer::new(store)
 }
 
 // ---------------------------------------------------------------------------------------------

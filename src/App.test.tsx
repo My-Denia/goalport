@@ -9,7 +9,14 @@ afterEach(() => {
   cleanup();
   delete window.goalportCore;
   delete window.__GOALPORT_ELECTRON__;
+  window.history.replaceState(null, "", "/");
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 describe("GoalPort preview", () => {
   it("renders the three-column conversation workspace with campaign continuity", () => {
@@ -306,6 +313,40 @@ describe("GoalPort preview", () => {
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
 
+  it("passes an opaque Core Runtime id through selection unchanged", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const opaqueId = "Provider_V2 Beta";
+    const snapshot = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      runtimes: [{
+        ...DEMO_SNAPSHOT.runtimes[0],
+        id: opaqueId,
+        name: "Opaque Runtime",
+        support: "unknown" as const
+      }]
+    };
+    const command = vi.fn(async (request: CoreCommand) => ({
+      requestId: request.requestId,
+      accepted: true,
+      duplicate: false,
+      snapshot
+    }));
+    window.goalportCore = {
+      snapshot: async () => snapshot,
+      command,
+      startCore: async () => snapshot,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /select opaque runtime/i }));
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true));
+
+    const request = command.mock.calls.find(([candidate]) => candidate.messageType === "select_runtime")![0];
+    expect(request.payload.provider).toBe(opaqueId);
+  });
+
   it("forwards a terminal Attempt identity so Core can mint a replacement", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const snapshot = {
@@ -339,16 +380,12 @@ describe("GoalPort preview", () => {
       if (request.messageType !== "select_runtime") return base;
       selects += 1;
       if (selects === 1) {
-        return { ...base, notices: ["Core refused: already bound"] };
+        return { goalportRejected: true, requestId: request.requestId, error: "already bound" };
       }
       if (selects === 2) {
-        return {
-          ...base,
-          connection: "disconnected" as const,
-          notices: ["Core request failed: ECONNRESET"]
-        };
+        throw new Error("ECONNRESET");
       }
-      return { ...base, connection: "connected" as const, notices: [] };
+      return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: { ...base, connection: "connected" as const, notices: [] } };
     });
     window.goalportCore = {
       snapshot: async () => base,
@@ -363,9 +400,321 @@ describe("GoalPort preview", () => {
     expect(await screen.findByText("Core refused: already bound")).toBeTruthy();
     fireEvent.click(select);
     expect(await screen.findByText("Core request failed: ECONNRESET")).toBeTruthy();
-    fireEvent.click(select);
+    fireEvent.click(screen.getByRole("button", { name: /reconnect core/i }));
+    const reconnectedSelect = await screen.findByRole("button", { name: /select claude code/i });
+    await waitFor(() => expect((reconnectedSelect as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(reconnectedSelect);
     await waitFor(() => {
       expect(screen.getByText("Core owns continuity · UI owns presentation")).toBeTruthy();
     });
+  });
+
+  it("opens a normal empty RC without demo data, a prompt, or a routable Attempt", async () => {
+    window.history.replaceState(null, "", "/?firstRun=1");
+    window.__GOALPORT_ELECTRON__ = true;
+    const empty = {
+      ...DEMO_SNAPSHOT,
+      connection: "connected" as const,
+      preview: false,
+      projects: [],
+      selectedProjectId: "",
+      project: { id: "", name: "No workspace selected", workspaceRoot: "", color: "slate" },
+      campaigns: [],
+      activeCampaignId: "",
+      activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" as const },
+      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor" as const, state: "waiting" as const, sessionLabel: "No Runtime selected", eventCount: 0 },
+      timeline: [],
+      decisions: [],
+      evidence: [],
+      notices: []
+    };
+    const command = vi.fn(async () => empty);
+    window.goalportCore = {
+      snapshot: async () => empty,
+      command,
+      startCore: async () => empty,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({ version: "1.0.0-rc.1", channel: "Stable V1 RC", testMode: false, dataPath: "C:\\GoalPortRC" })
+    };
+
+    render(<App />);
+
+    expect((await screen.findAllByText("No Runtime selected")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("dialog", { name: /start your first campaign/i })).toBeNull();
+    expect(screen.queryByText("Build a durable preview")).toBeNull();
+    expect(screen.queryByText("Workspace write permission")).toBeNull();
+    const composer = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(true);
+    expect(composer.placeholder).toBe("Create or select a Campaign before drafting a message…");
+    fireEvent.change(composer, { target: { value: "must not be discarded" } });
+    expect(composer.value).toBe("");
+    expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /select claude code/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect(command).not.toHaveBeenCalled();
+    expect((await screen.findAllByText(/STABLE V1 RC 1\.0\.0-rc\.1/)).length).toBeGreaterThan(0);
+  });
+
+  it("keeps uncertain Runtime identity visible and blocks sending", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const uncertain = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      attempt: { ...DEMO_SNAPSHOT.attempt, state: "uncertain" as const, sessionLabel: "projection mismatch" }
+    };
+    window.goalportCore = {
+      snapshot: async () => uncertain,
+      command: async () => uncertain,
+      startCore: async () => uncertain,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+
+    expect((await screen.findAllByText("Runtime identity uncertain")).length).toBeGreaterThan(0);
+    expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("uses the native workspace picker and preserves the form on create refusal", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false };
+    const command = vi.fn(async (request: CoreCommand) => ({
+      goalportRejected: true,
+      requestId: request.requestId,
+      error: "workspace is already held"
+    }));
+    window.goalportCore = {
+      snapshot: async () => base,
+      command,
+      startCore: async () => base,
+      openInVsCode: async () => undefined,
+      chooseWorkspace: async () => "C:\\work\\chosen"
+    };
+    render(<App />);
+    fireEvent.click((await screen.findAllByRole("button", { name: /new campaign/i }))[0]);
+    fireEvent.click(screen.getByRole("button", { name: /browse/i }));
+    const workspace = screen.getByRole("textbox", { name: /project folder/i }) as HTMLInputElement;
+    await waitFor(() => expect(workspace.value).toBe("C:\\work\\chosen"));
+    const goal = screen.getByRole("textbox", { name: /campaign goal/i }) as HTMLTextAreaElement;
+    fireEvent.change(goal, { target: { value: "Keep this exact goal" } });
+    fireEvent.click(screen.getByRole("button", { name: /create campaign/i }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Core refused: workspace is already held");
+    expect(workspace.value).toBe("C:\\work\\chosen");
+    expect(goal.value).toBe("Keep this exact goal");
+    const request = command.mock.calls.at(-1)?.[0];
+    expect(request).toBeDefined();
+    expect(request!.payload).toEqual(expect.objectContaining({ workspaceRoot: "C:\\work\\chosen", goal: "Keep this exact goal" }));
+    expect(request!.payload.projectId).toBeUndefined();
+  });
+
+  it("creates a normal campaign without sending its goal and leaves Runtime unassigned", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false };
+    const created = {
+      ...base,
+      campaigns: [{ ...base.campaigns[0], id: "campaign-new", title: "Fresh campaign", goal: "Fresh campaign" }],
+      activeCampaignId: "campaign-new",
+      activeTask: { id: "task-new", title: "Fresh campaign", acceptance: "", state: "in-progress" as const },
+      attempt: { id: "attempt-unassigned", taskId: "task-new", provider: "unassigned", role: "executor" as const, state: "waiting" as const, sessionLabel: "No Runtime selected", eventCount: 0 },
+      timeline: [], decisions: [], evidence: [], notices: []
+    };
+    const command = vi.fn(async (request: CoreCommand) => ({
+      requestId: request.requestId,
+      accepted: true,
+      duplicate: false,
+      snapshot: created
+    }));
+    window.goalportCore = { snapshot: async () => base, command, startCore: async () => base, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Unsent draft from the previous campaign" } });
+    fireEvent.click((await screen.findAllByRole("button", { name: /new campaign/i }))[0]);
+    fireEvent.change(screen.getByRole("textbox", { name: /project folder/i }), { target: { value: "C:\\work\\fresh" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /campaign goal/i }), { target: { value: "Fresh campaign" } });
+    fireEvent.click(screen.getByRole("button", { name: /create campaign/i }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /start your first campaign/i })).toBeNull());
+    expect(composer.value).toBe("");
+    expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Campaign created. Select a Runtime before sending work.")).toBeTruthy();
+    expect(command).toHaveBeenCalledTimes(1);
+    expect(command.mock.calls[0][0].messageType).toBe("create_campaign");
+  });
+
+  it("preserves a failed send and reports the exact refusal", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false };
+    const command = vi.fn(async (request: CoreCommand) => ({ goalportRejected: true, requestId: request.requestId, error: "delivery unknown; it was not sent again" }));
+    window.goalportCore = { snapshot: async () => base, command, startCore: async () => base, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Do not lose this input" } });
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+
+    expect(await screen.findByText("Core refused: delivery unknown; it was not sent again")).toBeTruthy();
+    expect(composer.value).toBe("Do not lose this input");
+  });
+
+  it("binds a send to captured ids and does not clear a later draft", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false };
+    const pending = deferred<unknown>();
+    const command = vi.fn((_request: CoreCommand) => pending.promise);
+    window.goalportCore = { snapshot: async () => base, command, startCore: async () => base, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "First input" } });
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+    await waitFor(() => expect(command).toHaveBeenCalledOnce());
+    const request = command.mock.calls[0][0];
+    fireEvent.change(composer, { target: { value: "Second input drafted while waiting" } });
+    pending.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: base });
+
+    await waitFor(() => expect(composer.value).toBe("Second input drafted while waiting"));
+    expect(request.payload).toEqual(expect.objectContaining({
+      campaignId: base.activeCampaignId,
+      taskId: base.activeTask.id,
+      attemptId: base.attempt.id,
+      message: "First input"
+    }));
+    expect(await screen.findByText(new RegExp(`Message recorded for task ${base.activeTask.id}`))).toBeTruthy();
+  });
+
+  it("keeps a delayed refused send and its draft with the original campaign", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const campaignA = { ...DEMO_SNAPSHOT, preview: false };
+    const campaignB = {
+      ...campaignA,
+      activeCampaignId: "campaign-evidence-loop",
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
+      timeline: [], notices: []
+    };
+    const pendingSend = deferred<unknown>();
+    const command = vi.fn((request: CoreCommand) => {
+      if (request.messageType === "send_message") return pendingSend.promise;
+      const selected = request.payload.campaignId === campaignB.activeCampaignId ? campaignB : campaignA;
+      return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: selected });
+    });
+    window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    await screen.findByText("Task B");
+    fireEvent.change(composer, { target: { value: "Campaign B draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
+    fireEvent.change(composer, { target: { value: "Campaign A input" } });
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "send_message")).toBe(true));
+    const sendRequest = command.mock.calls.find(([request]) => request.messageType === "send_message")![0];
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    pendingSend.resolve({ goalportRejected: true, requestId: sendRequest.requestId, error: "A delivery remains unknown" });
+
+    await screen.findByText("Task B");
+    expect(composer.value).toBe("Campaign B draft");
+    expect(screen.queryByText("Core refused: A delivery remains unknown")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    expect(await screen.findByText("Core refused: A delivery remains unknown")).toBeTruthy();
+    expect(composer.value).toBe("Campaign A input");
+  });
+
+  it("clears only the accepted campaign draft when another campaign has identical text", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const campaignA = { ...DEMO_SNAPSHOT, preview: false };
+    const campaignB = {
+      ...campaignA,
+      activeCampaignId: "campaign-evidence-loop",
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
+      timeline: [], notices: []
+    };
+    const pendingSend = deferred<unknown>();
+    const command = vi.fn((request: CoreCommand) => {
+      if (request.messageType === "send_message") return pendingSend.promise;
+      const selected = request.payload.campaignId === campaignB.activeCampaignId ? campaignB : campaignA;
+      return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: selected });
+    });
+    window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    await screen.findByText("Task B");
+    fireEvent.change(composer, { target: { value: "Identical draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
+    fireEvent.change(composer, { target: { value: "Identical draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "send_message")).toBe(true));
+    const sendRequest = command.mock.calls.find(([request]) => request.messageType === "send_message")![0];
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    pendingSend.resolve({ requestId: sendRequest.requestId, accepted: true, duplicate: false, snapshot: campaignA });
+
+    await screen.findByText("Task B");
+    expect(composer.value).toBe("Identical draft");
+    expect(sendRequest.payload).toEqual(expect.objectContaining({
+      campaignId: campaignA.activeCampaignId,
+      taskId: campaignA.activeTask.id,
+      attemptId: campaignA.attempt.id,
+      message: "Identical draft"
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
+    expect(composer.value).toBe("");
+  });
+
+  it("binds typing during a pending selection to the campaign still shown", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const campaignA = { ...DEMO_SNAPSHOT, preview: false };
+    const campaignB = {
+      ...campaignA,
+      activeCampaignId: "campaign-evidence-loop",
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
+      timeline: [], notices: []
+    };
+    const pendingSelect = deferred<unknown>();
+    const command = vi.fn((request: CoreCommand) => request.payload.campaignId === campaignB.activeCampaignId
+      ? pendingSelect.promise
+      : Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: campaignA }));
+    window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "A before selection" } });
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    await waitFor(() => expect(command).toHaveBeenCalledOnce());
+    const selectRequest = command.mock.calls[0][0];
+    fireEvent.change(composer, { target: { value: "Typed while Campaign A remains visible" } });
+    expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId);
+    pendingSelect.resolve({ requestId: selectRequest.requestId, accepted: true, duplicate: false, snapshot: campaignB });
+
+    await screen.findByText("Task B");
+    expect(composer.value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
+    expect(composer.value).toBe("Typed while Campaign A remains visible");
+  });
+
+  it("presents Scenario Runtime activity and Stop as explicitly synthetic", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const nativeActor = "Native Runtime · session";
+    const nativeSession = "native session · adapter-local";
+    const scenario = {
+      ...DEMO_SNAPSHOT,
+      preview: true,
+      attempt: { ...DEMO_SNAPSHOT.attempt, provider: "scenario", state: "active" as const, sessionLabel: nativeSession },
+      timeline: [{ ...DEMO_SNAPSHOT.timeline[0], id: "scenario-event", actor: nativeActor }]
+    };
+    window.goalportCore = { snapshot: async () => scenario, command: async () => scenario, startCore: async () => scenario, openInVsCode: async () => undefined };
+    render(<App />);
+
+    expect(await screen.findByText("Synthetic Scenario Runtime · session")).toBeTruthy();
+    expect(screen.queryByText(nativeActor)).toBeNull();
+    expect(screen.getByText("Synthetic Scenario · synthetic session · adapter-local")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /stop synthetic scenario turn/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    expect(screen.getByRole("button", { name: /stop synthetic scenario and quit/i })).toBeTruthy();
+    expect(scenario.timeline[0].actor).toBe(nativeActor);
+    expect(scenario.attempt.sessionLabel).toBe(nativeSession);
   });
 });

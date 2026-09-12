@@ -6,6 +6,9 @@ vi.mock("./ipc", async () => {
   const { DEMO_SNAPSHOT } = await import("./types");
   const disconnected = { ...DEMO_SNAPSHOT, connection: "disconnected" as const };
   return {
+    persistedAttemptId: (value: string | undefined | null) => value && value !== "attempt-unassigned" ? value : undefined,
+    reusableAttemptId: (attempt: { id?: string; state?: string } | null | undefined) =>
+      attempt?.state === "uncertain" || attempt?.id === "attempt-unassigned" ? undefined : attempt?.id,
     getCoreClient: () => ({
       mode: "tauri" as const,
       snapshot: async () => disconnected,

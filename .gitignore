@@ -1,5 +1,6 @@
 node_modules/
 dist/
+artifacts/electron-rc/
 target/
 target-connected-controller/
 target-connected-controller2/

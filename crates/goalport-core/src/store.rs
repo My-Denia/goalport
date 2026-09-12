@@ -1254,6 +1254,88 @@ impl Store {
         Ok(())
     }
 
+    /// Insert a new rollover Attempt together with the event that establishes
+    /// its source lineage. Existing rows are refused rather than repaired: this
+    /// operation is only for a newly-created successor, never for historical
+    /// backfill. The Attempt cannot become visible without its lineage event.
+    pub fn insert_rollover_attempt(
+        &self,
+        attempt: &Attempt,
+        rolled_from: &str,
+    ) -> Result<(), StoreError> {
+        attempt.validate()?;
+        if attempt.state != AttemptState::Queued
+            || attempt.last_event_seq != 0
+            || attempt.provider_session.is_some()
+        {
+            return Err(StoreError::InvalidState(
+                "a rollover Attempt must be a new queued row with no events or provider session"
+                    .into(),
+            ));
+        }
+        let rolled_from = rolled_from.trim();
+        if rolled_from.is_empty() || rolled_from == attempt.id {
+            return Err(StoreError::InvalidState(
+                "rollover source must name a distinct Attempt".into(),
+            ));
+        }
+        let payload_json = serde_json::to_string(&serde_json::json!({
+            "provider": attempt.provider,
+            "rolledFrom": rolled_from,
+        }))?;
+        let event_id = format!("core-event-{}-1", attempt.id);
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let source_task_id: String = tx
+            .query_row(
+                "SELECT task_id FROM attempts WHERE id=?1",
+                params![rolled_from],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("attempt {rolled_from}")))?;
+        if source_task_id != attempt.task_id {
+            return Err(StoreError::InvalidState(format!(
+                "rollover source {rolled_from} must belong to task {}",
+                attempt.task_id
+            )));
+        }
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts WHERE id=?1",
+                params![attempt.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(StoreError::IdempotencyConflict(attempt.id.clone()));
+        }
+
+        tx.execute(
+            "INSERT INTO attempts(id, task_id, provider, provider_session, state, last_event_seq, capability_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                attempt.id,
+                attempt.task_id,
+                attempt.provider,
+                attempt.provider_session,
+                attempt_state_string(attempt.state),
+                attempt.last_event_seq,
+                attempt.capability_version
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at) VALUES (?1, ?2, 1, 'attempt.created', NULL, NULL, ?3, ?4)",
+            params![event_id, attempt.id, payload_json, now()],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET last_event_seq=1, version=version+1 WHERE id=?1",
+            params![attempt.id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_attempt(&self, id: &str) -> Result<Attempt, StoreError> {
         let connection = self.inner.lock().expect("store mutex poisoned");
         connection
@@ -1432,6 +1514,181 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Create or reuse the Project identified by a canonical workspace and
+    /// commit the Campaign, root Task, policy snapshot, and current
+    /// authorization in one transaction. Existing authorization is never
+    /// widened by a replay: it must already equal the requested value.
+    pub fn create_workspace_campaign(
+        &self,
+        proposed_project: &Project,
+        campaign: &Campaign,
+        task: &Task,
+        policy_id: &str,
+        policy_payload_json: &str,
+        authorization: &CampaignAuthorization,
+    ) -> Result<Project, StoreError> {
+        if proposed_project.id.trim().is_empty()
+            || proposed_project.workspace_root.trim().is_empty()
+            || policy_id.trim().is_empty()
+        {
+            return Err(StoreError::InvalidState(
+                "project id, workspace root, and policy id are required".into(),
+            ));
+        }
+        if campaign.root_task_id != task.id || task.campaign_id != campaign.id {
+            return Err(StoreError::InvalidState(
+                "campaign root_task_id and task campaign_id must agree".into(),
+            ));
+        }
+
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let projects = {
+            let mut statement =
+                tx.prepare("SELECT id, workspace_root FROM projects ORDER BY rowid, id")?;
+            let rows = statement.query_map([], |row| {
+                Ok(Project {
+                    id: row.get(0)?,
+                    workspace_root: row.get(1)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let matching = match_workspace_project(&projects, proposed_project, |workspace_root| {
+            std::fs::canonicalize(Path::new(workspace_root)).ok()
+        })?;
+        let project = if let Some(existing) = matching {
+            existing
+        } else {
+            if let Some(existing) = projects
+                .iter()
+                .find(|project| project.id == proposed_project.id)
+            {
+                return Err(StoreError::IdempotencyConflict(existing.id.clone()));
+            }
+            tx.execute(
+                "INSERT INTO projects(id, workspace_root) VALUES (?1, ?2)",
+                params![proposed_project.id, proposed_project.workspace_root],
+            )?;
+            proposed_project.clone()
+        };
+
+        let campaign_existing: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT goal, root_task_id, state FROM campaigns WHERE id=?1",
+                params![campaign.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((goal, root_task_id, state)) = campaign_existing {
+            if goal != campaign.goal
+                || root_task_id != campaign.root_task_id
+                || state != work_status_string(campaign.state)
+            {
+                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO campaigns(id, goal, root_task_id, state) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    campaign.id,
+                    campaign.goal,
+                    campaign.root_task_id,
+                    work_status_string(campaign.state)
+                ],
+            )?;
+        }
+
+        let task_existing: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT campaign_id, title, acceptance, state FROM tasks WHERE id=?1",
+                params![task.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((campaign_id, title, acceptance, state)) = task_existing {
+            if campaign_id != task.campaign_id
+                || title != task.title
+                || acceptance != task.acceptance
+                || state != work_status_string(task.state)
+            {
+                return Err(StoreError::IdempotencyConflict(task.id.clone()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO tasks(id, campaign_id, title, acceptance, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    task.id,
+                    task.campaign_id,
+                    task.title,
+                    task.acceptance,
+                    work_status_string(task.state)
+                ],
+            )?;
+        }
+
+        let mapping: Option<String> = tx
+            .query_row(
+                "SELECT project_id FROM campaign_projects WHERE campaign_id=?1",
+                params![campaign.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing_project) = mapping {
+            if existing_project != project.id {
+                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO campaign_projects(campaign_id, project_id) VALUES (?1, ?2)",
+                params![campaign.id, project.id],
+            )?;
+        }
+
+        let existing_policy: Option<(String, String)> = tx
+            .query_row(
+                "SELECT campaign_id, payload_json FROM policy_snapshots WHERE id=?1",
+                params![policy_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((campaign_id, payload)) = existing_policy {
+            if campaign_id != campaign.id || payload != policy_payload_json {
+                return Err(StoreError::IdempotencyConflict(policy_id.into()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO policy_snapshots(id, campaign_id, payload_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![policy_id, campaign.id, policy_payload_json, now()],
+            )?;
+        }
+
+        let existing_authorization: Option<(i64, i64, i64)> = tx
+            .query_row(
+                "SELECT provider_authorized, transfer_authorized, action_authorized FROM campaign_authorizations WHERE campaign_id=?1",
+                params![campaign.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let expected = (
+            i64::from(authorization.provider_authorized),
+            i64::from(authorization.transfer_authorized),
+            i64::from(authorization.action_authorized),
+        );
+        if let Some(existing) = existing_authorization {
+            if existing != expected {
+                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO campaign_authorizations(campaign_id, provider_authorized, transfer_authorized, action_authorized, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![campaign.id, expected.0, expected.1, expected.2, now()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(project)
     }
 
     pub fn record_command(&self, command: &Command) -> Result<Command, StoreError> {
@@ -3023,6 +3280,68 @@ impl Store {
     }
 }
 
+fn match_workspace_project<F>(
+    projects: &[Project],
+    proposed: &Project,
+    canonicalize: F,
+) -> Result<Option<Project>, StoreError>
+where
+    F: Fn(&str) -> Option<std::path::PathBuf>,
+{
+    let requested_key =
+        crate::domain::normalize_workspace_key(Path::new(&proposed.workspace_root));
+    let requested_identity = canonicalize(&proposed.workspace_root);
+    let candidates = projects
+        .iter()
+        .map(|project| {
+            let conservative_key =
+                crate::domain::normalize_workspace_key(Path::new(&project.workspace_root));
+            let canonical_identity = canonicalize(&project.workspace_root);
+            (project, conservative_key, canonical_identity)
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(requested_identity) = requested_identity.as_ref() {
+        let actual = candidates
+            .iter()
+            .filter(|(_, _, identity)| identity.as_ref() == Some(requested_identity))
+            .collect::<Vec<_>>();
+        let conservative_conflicts = candidates
+            .iter()
+            .filter(|(_, key, identity)| {
+                key == &requested_key && identity.as_ref() != Some(requested_identity)
+            })
+            .count();
+        if actual.len() > 1 || conservative_conflicts > 0 {
+            return Err(StoreError::InvalidState(format!(
+                "workspace identity is ambiguous across {} projects; creation refused",
+                actual.len() + conservative_conflicts
+            )));
+        }
+        return Ok(actual.first().map(|(project, _, _)| (*project).clone()));
+    }
+
+    let conservative = candidates
+        .iter()
+        .filter(|(_, key, _)| key == &requested_key)
+        .collect::<Vec<_>>();
+    let exact = conservative.iter().filter(|(project, _, _)| {
+        project.id == proposed.id && project.workspace_root == proposed.workspace_root
+    });
+    if conservative.len() == 1 {
+        if let Some((project, _, _)) = exact.into_iter().next() {
+            return Ok(Some((*project).clone()));
+        }
+    }
+    if !conservative.is_empty() {
+        return Err(StoreError::InvalidState(format!(
+            "workspace identity is ambiguous across {} projects; creation refused",
+            conservative.len()
+        )));
+    }
+    Ok(None)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionRow {
     pub id: String,
@@ -3685,6 +4004,73 @@ fn ensure_command_result_json(tx: &Transaction<'_>) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_matcher_refuses_distinct_canonical_identities_with_one_conservative_key() {
+        let stored = Project {
+            id: "project-upper".into(),
+            workspace_root: r"Z:\identity-probe\Foo".into(),
+        };
+        let proposed = Project {
+            id: "project-lower".into(),
+            workspace_root: r"Z:\identity-probe\foo".into(),
+        };
+        let result = match_workspace_project(
+            std::slice::from_ref(&stored),
+            &proposed,
+            |workspace_root| match workspace_root {
+                r"Z:\identity-probe\Foo" => {
+                    Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\Foo"))
+                }
+                r"Z:\identity-probe\foo" => {
+                    Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\foo"))
+                }
+                _ => None,
+            },
+        );
+        assert!(matches!(result, Err(StoreError::InvalidState(_))));
+    }
+
+    #[test]
+    fn workspace_matcher_reuses_one_verified_actual_alias() {
+        let stored = Project {
+            id: "project-short".into(),
+            workspace_root: r"Z:\PROGRA~1\workspace".into(),
+        };
+        let proposed = Project {
+            id: "project-long".into(),
+            workspace_root: r"Z:\Program Files\workspace".into(),
+        };
+        let identity = std::path::PathBuf::from(r"\\?\Z:\Program Files\workspace");
+        let matched = match_workspace_project(
+            std::slice::from_ref(&stored),
+            &proposed,
+            |_| Some(identity.clone()),
+        )
+        .unwrap();
+        assert_eq!(matched, Some(stored));
+    }
+
+    #[test]
+    fn workspace_matcher_refuses_multiple_projects_for_one_actual_identity() {
+        let first = Project {
+            id: "project-first".into(),
+            workspace_root: r"Z:\alias-one\workspace".into(),
+        };
+        let second = Project {
+            id: "project-second".into(),
+            workspace_root: r"Z:\alias-two\workspace".into(),
+        };
+        let proposed = Project {
+            id: "project-proposed".into(),
+            workspace_root: r"Z:\actual\workspace".into(),
+        };
+        let identity = std::path::PathBuf::from(r"\\?\Z:\actual\workspace");
+        let result = match_workspace_project(&[first, second], &proposed, |_| {
+            Some(identity.clone())
+        });
+        assert!(matches!(result, Err(StoreError::InvalidState(_))));
+    }
 
     fn attempt() -> Attempt {
         Attempt::new("a1", "t1", "scenario", "cap-v1")

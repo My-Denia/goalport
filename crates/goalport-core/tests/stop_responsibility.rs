@@ -456,7 +456,11 @@ fn ui(message_type: &str, request_id: &str, payload: serde_json::Value) -> UiCom
 #[test]
 fn held_workspace_rejects_new_attempt_send_and_allow_before_side_effects() {
     let store = Store::memory().unwrap();
-    let mut controller = UiController::new(store.clone()).unwrap();
+    let mut controller = UiController::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    )
+    .unwrap();
     let snapshot = controller.snapshot(None).unwrap();
     let workspace = snapshot.project.workspace_root;
     let campaign_id = snapshot.active_campaign_id;
@@ -525,7 +529,11 @@ fn held_workspace_rejects_new_attempt_send_and_allow_before_side_effects() {
 #[test]
 fn inert_campaign_is_allowed_but_downstream_admission_is_blocked() {
     let store = Store::memory().unwrap();
-    let mut controller = UiController::new(store.clone()).unwrap();
+    let mut controller = UiController::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    )
+    .unwrap();
     let snapshot = controller.snapshot(None).unwrap();
     store
         .begin_stop_responsibility(

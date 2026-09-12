@@ -3,6 +3,8 @@ const requestId = () => `desktop-snapshot-${Date.now()}-${Math.random().toString
 
 contextBridge.exposeInMainWorld("__GOALPORT_ELECTRON__", true);
 contextBridge.exposeInMainWorld("goalportCore", {
+  appInfo: () => ipcRenderer.invoke("goalport:app-info"),
+  chooseWorkspace: () => ipcRenderer.invoke("goalport:choose-workspace"),
   snapshot: () => ipcRenderer.invoke("goalport:core-snapshot", {
     protocolVersion: "goalport.ipc.v2",
     requestId: requestId(),

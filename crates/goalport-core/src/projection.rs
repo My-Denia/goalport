@@ -24,7 +24,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Display-only Attempt identity used when a task has no persisted row.
 /// Admission must never persist or register this string.
@@ -228,9 +231,35 @@ pub struct UiController {
 
 impl UiController {
     pub fn new(store: Store) -> Result<Self, String> {
+        Self::initialize(store, None, false)
+    }
+
+    pub fn new_synthetic_only(store: Store) -> Result<Self, String> {
+        Self::initialize(store, None, true)
+    }
+
+    /// Explicit legacy fixture bootstrap. Normal Core construction never
+    /// creates synthetic rows, and callers that need the historical fixture
+    /// must name its workspace without changing process-global environment.
+    pub fn new_seeded_fixture(
+        store: Store,
+        workspace_root: impl Into<String>,
+    ) -> Result<Self, String> {
+        Self::initialize(store, Some(workspace_root.into()), false)
+    }
+
+    fn initialize(
+        store: Store,
+        seed_workspace: Option<String>,
+        force_synthetic_only: bool,
+    ) -> Result<Self, String> {
         let mut controller = Self {
             store,
-            runtime_manager: RuntimeManager::new(),
+            runtime_manager: if force_synthetic_only {
+                RuntimeManager::new_synthetic_only()
+            } else {
+                RuntimeManager::new()
+            },
             selected_project_id: String::new(),
             selected_campaign_id: None,
             selected_task_id: None,
@@ -238,8 +267,21 @@ impl UiController {
             notices: Vec::new(),
             build_id: current_executable_build_id(),
         };
-        controller.ensure_seed()?;
+        if let Some(workspace_root) = seed_workspace {
+            controller.ensure_seed(&workspace_root)?;
+        }
         controller.reconstruct_from_store()?;
+        if controller.selected_project_id.is_empty() {
+            if let Some(project) = controller
+                .store
+                .list_projects()
+                .map_err(store_message)?
+                .into_iter()
+                .next()
+            {
+                controller.selected_project_id = project.id;
+            }
+        }
         Ok(controller)
     }
 
@@ -293,7 +335,42 @@ impl UiController {
     pub fn snapshot(&mut self, after_cursor: Option<i64>) -> Result<CoreSnapshot, String> {
         let projects = self.store.list_projects().map_err(store_message)?;
         if projects.is_empty() {
-            return Err("Core has no project projection".into());
+            self.selected_project_id.clear();
+            self.selected_campaign_id = None;
+            self.selected_task_id = None;
+            self.selected_attempt_id = None;
+            self.flush_runtime_events()?;
+            return Ok(CoreSnapshot {
+                protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+                build_id: self.build_id.clone(),
+                connection: "connected".into(),
+                projects: Vec::new(),
+                selected_project_id: String::new(),
+                project: UiProject {
+                    id: String::new(),
+                    name: String::new(),
+                    workspace_root: String::new(),
+                    color: String::new(),
+                },
+                campaigns: Vec::new(),
+                active_campaign_id: String::new(),
+                active_task: UiTask {
+                    id: String::new(),
+                    title: String::new(),
+                    acceptance: String::new(),
+                    state: "waiting".into(),
+                },
+                attempt: unassigned_attempt_ui(String::new()),
+                timeline: Vec::new(),
+                cursor: 0,
+                runtimes: runtime_profiles(),
+                decisions: Vec::new(),
+                evidence: Vec::new(),
+                stop_responsibility: None,
+                related_holds: Vec::new(),
+                preview: false,
+                notices: self.notices.clone(),
+            });
         }
         if !projects
             .iter()
@@ -346,14 +423,7 @@ impl UiController {
             .and_then(|id| attempts.iter().find(|attempt| attempt.id == id))
             .cloned()
             .or_else(|| attempts.last().cloned())
-            .unwrap_or_else(|| {
-                Attempt::new(
-                    UNASSIGNED_ATTEMPT_ID,
-                    active_task_id.clone().unwrap_or_default(),
-                    "scenario",
-                    "scenario-cap-v1",
-                )
-            });
+            .unwrap_or_else(|| unassigned_attempt(active_task_id.clone().unwrap_or_default()));
         self.selected_campaign_id = active_campaign.as_ref().map(|item| item.id.clone());
         self.selected_task_id = active_task_id;
         self.selected_attempt_id = Some(active_attempt.id.clone());
@@ -465,7 +535,8 @@ impl UiController {
             decisions,
             evidence,
             stop_responsibility,
-            preview: active_attempt.provider.eq_ignore_ascii_case("scenario"),
+            preview: active_attempt.id != UNASSIGNED_ATTEMPT_ID
+                && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
                 let mut notices = self.notices.clone();
                 self.merge_permission_denied_notices(&mut notices)?;
@@ -586,26 +657,13 @@ impl UiController {
         })
     }
 
-    fn ensure_seed(&mut self) -> Result<(), String> {
+    fn ensure_seed(&mut self, workspace_root: &str) -> Result<(), String> {
         let projects = self.store.list_projects().map_err(store_message)?;
         if projects.is_empty() {
-            let workspace = std::env::var("GOALPORT_SYNTHETIC_ROOT").unwrap_or_else(|_| {
-                std::env::current_dir()
-                    .map(|root| {
-                        root.join(
-                            "goal-runs/goalport-electron-stable-v1/fixtures/synthetic-workspace",
-                        )
-                        .to_string_lossy()
-                        .into_owned()
-                    })
-                    .unwrap_or_else(|_| {
-                        "goal-runs/goalport-electron-stable-v1/fixtures/synthetic-workspace".into()
-                    })
-            });
             self.store
                 .insert_project(&Project {
                     id: "project-synthetic".into(),
-                    workspace_root: workspace,
+                    workspace_root: workspace_root.into(),
                 })
                 .map_err(store_message)?;
         }
@@ -659,6 +717,43 @@ impl UiController {
                 .set_campaign_authorization(&campaign.id, &CampaignAuthorization::granted())
                 .map_err(store_message)?;
         }
+        // The explicit seeded constructor models the historical connected
+        // Scenario preview, including its in-process session. Production never
+        // calls this path. Registering the fixture here keeps the persisted
+        // Active row from looking like unknown work after the new fail-closed
+        // restart boundary was added.
+        if self.store.get_attempt("attempt-scenario-preview").is_ok()
+            && self
+                .runtime_manager
+                .registered_binding("attempt-scenario-preview")
+                .is_none()
+        {
+            self.runtime_manager
+                .select_runtime(
+                    "attempt-scenario-preview",
+                    "scenario",
+                    None,
+                    "scenario-1",
+                    &PathBuf::from(project.workspace_root.clone()),
+                )
+                .map_err(|error| error.to_string())?;
+            let session = self
+                .runtime_manager
+                .create_session(
+                    "attempt-scenario-preview",
+                    &SessionRequest {
+                        campaign_id: Some("campaign-synthetic-preview".into()),
+                        task_id: "task-synthetic-preview".into(),
+                        attempt_id: "attempt-scenario-preview".into(),
+                        workspace_root: PathBuf::from(project.workspace_root.clone()),
+                        resume_session: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            for event in session.events {
+                self.persist_agent_event(&event)?;
+            }
+        }
         Ok(())
     }
 
@@ -672,9 +767,21 @@ impl UiController {
     }
 
     fn create_campaign(&mut self, request: &UiCommandRequest) -> Result<(), String> {
-        let project_id =
-            payload_text_default(&request.payload, "projectId", &self.selected_project_id);
-        let project = self.store.get_project(&project_id).map_err(store_message)?;
+        let explicit_workspace = payload_text(&request.payload, "workspaceRoot").ok();
+        let project = if let Some(workspace_root) = explicit_workspace {
+            let canonical = canonical_existing_workspace(&workspace_root)?;
+            Project {
+                id: format!("project-{}", sha256_hex(canonical.as_bytes())),
+                workspace_root: canonical,
+            }
+        } else {
+            let project_id =
+                payload_text_default(&request.payload, "projectId", &self.selected_project_id);
+            if project_id.is_empty() {
+                return Err("payload.workspaceRoot is required before the first Campaign".into());
+            }
+            self.store.get_project(&project_id).map_err(store_message)?
+        };
         let goal = payload_text_default(&request.payload, "goal", "Explore a GoalPort campaign");
         let title = payload_text_default(&request.payload, "title", &goal);
         let acceptance = payload_text_default(
@@ -682,8 +789,9 @@ impl UiController {
             "acceptance",
             "Persist ordered Runtime events and recover without replay.",
         );
-        let campaign_id = format!("campaign-{}", stable_suffix(&request.request_id));
-        let task_id = format!("task-{}", stable_suffix(&request.request_id));
+        let request_hash = sha256_hex(request.request_id.as_bytes());
+        let campaign_id = format!("campaign-{request_hash}");
+        let task_id = format!("task-{request_hash}");
         let campaign = Campaign {
             id: campaign_id.clone(),
             goal,
@@ -697,9 +805,6 @@ impl UiController {
             acceptance,
             state: crate::domain::WorkStatus::InProgress,
         };
-        self.store
-            .create_campaign_with_task(&project.id, &campaign, &task)
-            .map_err(store_message)?;
         let snapshot_payload = json!({
             "campaignId": campaign_id,
             "goal": campaign.goal,
@@ -707,15 +812,16 @@ impl UiController {
             "transferAuthorized": true,
             "actionAuthorized": true
         });
-        self.store
-            .insert_policy_snapshot(
-                &format!("policy-{}", stable_suffix(&request.request_id)),
-                &campaign_id,
+        let project = self
+            .store
+            .create_workspace_campaign(
+                &project,
+                &campaign,
+                &task,
+                &format!("policy-{request_hash}"),
                 &snapshot_payload.to_string(),
+                &CampaignAuthorization::granted(),
             )
-            .map_err(store_message)?;
-        self.store
-            .set_campaign_authorization(&campaign_id, &CampaignAuthorization::granted())
             .map_err(store_message)?;
         self.selected_project_id = project.id;
         self.selected_campaign_id = Some(campaign_id);
@@ -1265,7 +1371,7 @@ impl UiController {
         {
             return self.enqueue_runtime_request(request);
         }
-        self.admit_runtime(request)
+        self.admit_runtime(request, false)
     }
 
     fn enqueue_runtime_request(&mut self, request: &UiCommandRequest) -> Result<(), String> {
@@ -1297,6 +1403,7 @@ impl UiController {
             &provider,
             &request.request_id,
             false,
+            false,
         )?;
         let mut stored = request.payload.clone();
         if let Some(obj) = stored.as_object_mut() {
@@ -1325,7 +1432,11 @@ impl UiController {
         Ok(())
     }
 
-    fn admit_runtime(&mut self, request: &UiCommandRequest) -> Result<(), String> {
+    fn admit_runtime(
+        &mut self,
+        request: &UiCommandRequest,
+        from_explicit_queue: bool,
+    ) -> Result<(), String> {
         let project_id =
             payload_text_default(&request.payload, "projectId", &self.selected_project_id);
         let project = self.store.get_project(&project_id).map_err(store_message)?;
@@ -1375,6 +1486,7 @@ impl UiController {
             &provider,
             &request.request_id,
             true,
+            from_explicit_queue,
         )?;
         let executable = payload_text(&request.payload, "executable")
             .ok()
@@ -1488,6 +1600,30 @@ impl UiController {
             self.selected_task_id = Some(task.id);
             self.selected_attempt_id = Some(attempt_id);
             return Ok(());
+        }
+        // The synthetic test profile is a Core firewall. It is deliberately
+        // checked after the occupied-binding comparison above, so a stale
+        // cross-provider race still proves the binding conflict it reached,
+        // while every genuinely new native admission is refused before the
+        // Attempt row or any other durable state is written.
+        self.runtime_manager
+            .ensure_provider_allowed(&provider)
+            .map_err(|error| error.to_string())?;
+        if let Ok(existing_row) = self.store.get_attempt(&attempt_id) {
+            if matches!(
+                existing_row.state,
+                AttemptState::Active | AttemptState::AwaitingReview
+            ) {
+                if existing_row.provider != provider {
+                    return Err(format!(
+                        "attempt {attempt_id} already belongs to Runtime provider {}; the conflicting {provider} request is refused",
+                        existing_row.provider
+                    ));
+                }
+                return Err(format!(
+                    "attempt {attempt_id} has current persisted work but no registered Runtime; explicit recovery is required and automatic replacement is refused"
+                ));
+            }
         }
         // Retry gate (increment 4). A row may already exist for this attempt id without any
         // registration. The one case admitted again here is a previous admission whose
@@ -2590,6 +2726,22 @@ impl UiController {
         if !auth.transfer_authorized || !auth.provider_authorized {
             return Err("current campaign authorization denies handoff; historical PolicySnapshot is explanatory only".into());
         }
+        let provider = payload_text(&request.payload, "provider")?;
+        let project = self
+            .store
+            .get_project(&self.selected_project_id)
+            .map_err(store_message)?;
+        let destination_workspace = PathBuf::from(project.workspace_root.clone());
+        RuntimeManager::intended_binding(
+            &provider,
+            None,
+            runtime_version(&provider),
+            &destination_workspace,
+        )
+        .map_err(|error| error.to_string())?;
+        self.runtime_manager
+            .ensure_provider_allowed(&provider)
+            .map_err(|error| error.to_string())?;
         if old.state == AttemptState::Active && old.provider.eq_ignore_ascii_case("claude") {
             self.stop_claude_with_operation(
                 &old_attempt_id,
@@ -2645,11 +2797,6 @@ impl UiController {
                 Some(AttemptState::Cancelled),
             )?;
         }
-        let provider = payload_text(&request.payload, "provider")?;
-        let project = self
-            .store
-            .get_project(&self.selected_project_id)
-            .map_err(store_message)?;
         let evidence = self
             .store
             .list_evidence()
@@ -2668,13 +2815,14 @@ impl UiController {
             "goal-runs/goalport-electron-stable-v1/evidence/locks/shared-interface-freeze.json",
         );
         let new_id = format!("attempt-handoff-{}", stable_suffix(&request.request_id));
+        let new_attempt = Attempt::new(
+            &new_id,
+            &task.id,
+            &provider,
+            format!("{provider}-cap-v1"),
+        );
         self.store
-            .insert_attempt(&Attempt::new(
-                &new_id,
-                &task.id,
-                &provider,
-                format!("{provider}-cap-v1"),
-            ))
+            .insert_rollover_attempt(&new_attempt, &old_attempt_id)
             .map_err(store_message)?;
         self.runtime_manager
             .select_runtime(
@@ -3365,7 +3513,7 @@ impl UiController {
                 message_type: "select_runtime".into(),
                 payload,
             };
-            self.admit_runtime(&admit_request)?;
+            self.admit_runtime(&admit_request, true)?;
             self.notices
                 .insert(0, "Queued Attempt admitted after owner override".into());
         }
@@ -3816,15 +3964,44 @@ fn runtime_binding_payload(
 }
 
 fn project_to_ui(project: &Project) -> UiProject {
+    let workspace_name = project
+        .workspace_root
+        .rsplit(|character| character == '\\' || character == '/')
+        .find(|part| !part.is_empty())
+        .map(str::to_owned);
     UiProject {
         id: project.id.clone(),
-        name: project
-            .id
-            .strip_prefix("project-")
-            .unwrap_or(&project.id)
-            .replace('-', " "),
+        name: workspace_name.unwrap_or_else(|| {
+            project
+                .id
+                .strip_prefix("project-")
+                .unwrap_or(&project.id)
+                .replace('-', " ")
+        }),
         workspace_root: project.workspace_root.clone(),
         color: "violet".into(),
+    }
+}
+
+fn unassigned_attempt(task_id: String) -> Attempt {
+    Attempt::new(
+        UNASSIGNED_ATTEMPT_ID,
+        task_id,
+        "unassigned",
+        "unassigned",
+    )
+}
+
+fn unassigned_attempt_ui(task_id: String) -> UiAttempt {
+    UiAttempt {
+        id: UNASSIGNED_ATTEMPT_ID.into(),
+        task_id,
+        provider: "unassigned".into(),
+        role: "executor".into(),
+        state: "waiting".into(),
+        session_label: "No Runtime selected".into(),
+        session_hash: None,
+        event_count: 0,
     }
 }
 
@@ -3870,6 +4047,9 @@ fn task_to_ui(task: &Task) -> UiTask {
 }
 
 fn attempt_to_ui(attempt: &Attempt, store: &Store) -> UiAttempt {
+    if attempt.id == UNASSIGNED_ATTEMPT_ID {
+        return unassigned_attempt_ui(attempt.task_id.clone());
+    }
     let event_count = store
         .list_events(&attempt.id)
         .map(|events| events.len())
@@ -4207,7 +4387,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         UiRuntime {
             id: "codex".into(),
             name: "Codex".into(),
-            version: runtime_version("codex"),
+            version: "not observed in this Attempt".into(),
             support: "partial".into(),
             mode: "Executor".into(),
             subtitle: "Native app-server · subscription path".into(),
@@ -4244,7 +4424,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         UiRuntime {
             id: "grok".into(),
             name: "Grok".into(),
-            version: runtime_version("grok"),
+            version: "not observed in this Attempt".into(),
             support: "partial".into(),
             mode: "Auditor".into(),
             subtitle: "ACP stdio · subscription path".into(),
@@ -4368,6 +4548,29 @@ fn payload_text_default(value: &Value, key: &str, fallback: &str) -> String {
     payload_text(value, key).unwrap_or_else(|_| fallback.to_owned())
 }
 
+fn canonical_existing_workspace(value: &str) -> Result<String, String> {
+    let path = PathBuf::from(value);
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("workspaceRoot must name an existing directory: {error}"))?;
+    if !metadata.is_dir() {
+        return Err("workspaceRoot must name an existing directory".into());
+    }
+    let canonical = fs::canonicalize(&path)
+        .map_err(|error| format!("workspaceRoot could not be canonicalized: {error}"))?;
+    Ok(operational_workspace_path(&canonical))
+}
+
+fn operational_workspace_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.into_owned()
+    }
+}
+
 fn payload_attempt_id(value: &Value, fallback: &str) -> String {
     match payload_text(value, "attemptId") {
         Ok(id) if id != UNASSIGNED_ATTEMPT_ID => id,
@@ -4388,34 +4591,56 @@ fn live_rollover_of(
     store: &store::Store,
     terminal_id: &str,
     task_id: &str,
-    provider: &str,
 ) -> Result<Option<String>, String> {
     let attempts = store.attempts_for_task(task_id).map_err(store_message)?;
-    let mut found = None;
-    for attempt in attempts {
-        if attempt.id == terminal_id
-            || attempt.provider != provider
-            || attempt.state.is_terminal()
-        {
-            continue;
-        }
+    let mut edges = Vec::new();
+    for attempt in &attempts {
         let records = store
             .list_event_records(&attempt.id, 0)
             .map_err(store_message)?;
-        let rolled_from_here = records.iter().any(|record| {
-            record.event.kind == "attempt.created"
-                && record
-                    .payload
-                    .as_ref()
-                    .and_then(|payload| payload.get("rolledFrom"))
-                    .and_then(Value::as_str)
-                    == Some(terminal_id)
-        });
-        if rolled_from_here {
-            found = Some(attempt.id);
+        for parent in records.iter().filter_map(|record| {
+            (record.event.kind == "attempt.created")
+                .then(|| {
+                    record
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("rolledFrom"))
+                        .and_then(Value::as_str)
+                })
+                .flatten()
+        }) {
+            edges.push((parent.to_owned(), attempt.id.clone()));
         }
     }
-    Ok(found)
+    let mut reachable = vec![terminal_id.to_owned()];
+    let mut cursor = 0;
+    while cursor < reachable.len() {
+        let parent = reachable[cursor].clone();
+        cursor += 1;
+        for (_, child) in edges.iter().filter(|(edge_parent, _)| edge_parent == &parent) {
+            if !reachable.iter().any(|seen| seen == child) {
+                reachable.push(child.clone());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for attempt in attempts {
+        if attempt.id != terminal_id
+            && !attempt.state.is_terminal()
+            && reachable.iter().any(|id| id == &attempt.id)
+        {
+            found.push(attempt.id);
+        }
+    }
+    found.sort();
+    found.dedup();
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(found.pop()),
+        count => Err(format!(
+            "terminal attempt {terminal_id} has ambiguous live rollover lineage ({count} successors); request refused"
+        )),
+    }
 }
 
 fn resolve_admission_attempt_id(
@@ -4426,8 +4651,34 @@ fn resolve_admission_attempt_id(
     provider: &str,
     request_id: &str,
     allow_live_reuse: bool,
+    from_explicit_queue: bool,
 ) -> Result<String, String> {
     let fallback = format!("attempt-{}-{}", stable_suffix(task_id), provider);
+    let explicit = payload_text(payload, "attemptId")
+        .ok()
+        .filter(|id| id != UNASSIGNED_ATTEMPT_ID);
+    if allow_live_reuse && explicit.is_none() {
+        let mut current = store
+            .attempts_for_task(task_id)
+            .map_err(store_message)?
+            .into_iter()
+            .filter(|attempt| {
+                matches!(attempt.state, AttemptState::Active | AttemptState::AwaitingReview)
+            })
+            .map(|attempt| attempt.id)
+            .collect::<Vec<_>>();
+        current.sort();
+        current.dedup();
+        match current.len() {
+            0 => {}
+            1 => return Ok(current.pop().expect("one current attempt")),
+            count => {
+                return Err(format!(
+                    "task {task_id} has ambiguous current Attempt identity ({count} live rows); request refused"
+                ));
+            }
+        }
+    }
     let requested = payload_attempt_id(payload, &fallback);
     match store.get_attempt(&requested) {
         Ok(row) if row.task_id != task_id => Err(format!(
@@ -4435,7 +4686,7 @@ fn resolve_admission_attempt_id(
         )),
         Ok(row) if row.state.is_terminal() => {
             if allow_live_reuse {
-                if let Some(existing) = live_rollover_of(store, &requested, task_id, provider)? {
+                if let Some(existing) = live_rollover_of(store, &requested, task_id)? {
                     return Ok(existing);
                 }
             }
@@ -4450,7 +4701,27 @@ fn resolve_admission_attempt_id(
         }
         Ok(_) if allow_live_reuse => Ok(requested),
         Ok(_) => Ok(fresh_attempt_id(task_id, provider, request_id)),
-        Err(store::StoreError::NotFound(_)) => Ok(requested),
+        Err(store::StoreError::NotFound(_)) => {
+            if allow_live_reuse && explicit.is_some() && !from_explicit_queue {
+                let current = store
+                    .attempts_for_task(task_id)
+                    .map_err(store_message)?
+                    .into_iter()
+                    .filter(|attempt| {
+                        matches!(
+                            attempt.state,
+                            AttemptState::Active | AttemptState::AwaitingReview
+                        )
+                    })
+                    .count();
+                if current > 0 {
+                    return Err(format!(
+                        "attempt {requested} is unknown while task {task_id} already has current work; request refused"
+                    ));
+                }
+            }
+            Ok(requested)
+        }
         Err(error) => Err(store_message(error)),
     }
 }
@@ -4857,7 +5128,11 @@ mod coalesce_tests {
     #[test]
     fn mismatched_claude_cancel_is_journaled_without_cancelling_attempt() {
         let store = Store::memory().unwrap();
-        let mut controller = UiController::new(store.clone()).unwrap();
+        let mut controller = UiController::new_seeded_fixture(
+            store.clone(),
+            "synthetic://goalport-fixture",
+        )
+        .unwrap();
         let snapshot = controller.snapshot(None).unwrap();
         let attempt_id = "attempt-claude-mismatch";
         store
@@ -5037,6 +5312,7 @@ mod resolve_admission_attempt_id_tests {
             "scenario",
             "req-1",
             true,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -5074,6 +5350,7 @@ mod resolve_admission_attempt_id_tests {
             "claude",
             "req-2",
             true,
+            false,
         )
         .unwrap();
         assert_eq!(resolved, "attempt-queued-kept");
@@ -5131,6 +5408,7 @@ mod resolve_admission_attempt_id_tests {
             "scenario",
             "click-1",
             true,
+            false,
         )
         .unwrap();
         store
@@ -5161,6 +5439,7 @@ mod resolve_admission_attempt_id_tests {
             "scenario",
             "click-2",
             true,
+            false,
         )
         .unwrap();
         assert_eq!(second, first);
@@ -5172,6 +5451,7 @@ mod resolve_admission_attempt_id_tests {
             "task-1",
             "scenario",
             "queue-1",
+            false,
             false,
         )
         .unwrap();
