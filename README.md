@@ -35,6 +35,8 @@ A profile is bound to its mode, RC version and Core binary identity. An unrelate
 
 Closing the window while a task is active offers the existing background/stop choices. Reopening the same package/profile reconnects to its matching Core. A lost command acknowledgement is reported without automatic resend. After a terminal Attempt, choosing a Runtime starts the next Attempt; repeated or stale conflicting choices cannot create competing replacements. Independent Campaigns retain separate identities. Held or unknown workspace responsibility remains enforced.
 
+Windows terminals and CI runners can place processes in a supervised job. If that job refuses a breakaway request, the launcher can start Core under the existing job constraints. Core survives the GoalPort window and launcher closing, but the external supervisor can still terminate it when its job ends. The launcher records its creation mode beside the database. See [Windows job lifetimes](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+
 ## Synthetic checks and limits
 
 **Scenario Runtime is an in-process synthetic test runtime**, not a real Agent or subscription admission. An explicit test profile allows Scenario only and rejects native Codex, Claude and Grok process starts:
@@ -53,6 +55,7 @@ pnpm test:unit
 pnpm test:desktop
 cargo test --locked -p goalport-core --lib
 cargo test --locked -p goalport-core --test electron_rc_core --test selection_preservation --test registration_boundary
+cargo test --locked -p goalport-core-launcher
 ```
 
 The packaged smoke driver copies the verified application into a fresh directory outside the source tree and exercises its real renderer, IPC and Core. It creates its own profiles and synthetic workspaces, writes screenshots/results to the new `--out` directory, and stops only its own processes. It never calls real subscriptions:

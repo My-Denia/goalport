@@ -1191,6 +1191,8 @@ version = "1.0.0-rc.1"
 dependencies = [
  "serde_json",
  "sha2",
+ "tempfile",
+ "winapi",
 ]
 
 [[package]]

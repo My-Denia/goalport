@@ -191,6 +191,13 @@ async function smoke() {
     assert.equal(coreIdentity.executableSha256, identity.artifacts.find((entry) => entry.path === "resources/goalport-core.exe").sha256);
     assert.equal(normalize(coreIdentity.executablePath), normalize(resolve(packageRoot, "resources/goalport-core.exe")));
     assert.equal(normalize(receipt.receipt.databaseIdentity), normalize(resolve(profile, "goalport.sqlite")));
+    const launchMode = await until("launcher creation mode", () => {
+      const launchModes = [...readFileSync(resolve(profile, "goalport.sqlite.launcher.log"), "utf8").matchAll(/Core launch mode: (breakaway-requested|inherited-job-fallback); pid=(\d+)/g)];
+      return launchModes.findLast((match) => Number(match[2]) === coreIdentity.pid)?.[1];
+    });
+    assert.ok(launchMode, "launcher creation mode is bound to this ready Core PID");
+    report.launcherCreationMode = launchMode;
+    console.log(`PASS launcher creation mode ${launchMode} is bound to current Core`);
     assertNoNativeChildren();
     report.appInfo = info; report.coreIdentity = coreIdentity; report.startupReceipt = receipt.receipt; save();
   };

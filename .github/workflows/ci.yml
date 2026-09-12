@@ -60,6 +60,8 @@ jobs:
             cargo test --locked -p goalport-core --test registration_generation $case -- --exact
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          cargo test --locked -p goalport-core-launcher -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Placeholder Core binaries for Tauri resource check
         shell: pwsh
         run: |
