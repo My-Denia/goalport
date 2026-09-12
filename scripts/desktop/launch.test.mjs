@@ -68,12 +68,13 @@ test("normal RC starts in product data and test profile has a different pipe", (
   const root = fixture(t);
   const normal = prepareProfile(settings(root));
   const synthetic = prepareProfile(settings(root, { "--test-profile": resolve(root, "isolated") }));
-  assert.equal(normal.directory, resolve(root, "GoalPort/rc"));
+  assert.equal(normal.directory, realpathSync.native(resolve(root, "GoalPort/rc")));
   assert.equal(normal.testMode, false);
   assert.equal(synthetic.testMode, true);
   assert.notEqual(normal.pipe, synthetic.pipe);
   assert.notEqual(normal.pipe, "\\\\.\\pipe\\goalport-core-v1");
   assert.deepEqual(prepareProfile(settings(root)), normal);
+  assert.deepEqual(prepareProfile(settings(realpathSync.native(root))), normal);
 });
 
 test("legacy DB, mode change and changed build refuse without touching preimages", (t) => {
