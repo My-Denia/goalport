@@ -9,20 +9,32 @@ const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment } 
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("./core-client.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
-const launchArgs = launchArguments(process.argv);
-const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
-const appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
-const profile = legacyIsolated ? null : prepareProfile({
-  args: launchArgs, appData: app.getPath("appData"), version: appVersion,
-  coreSha256: fileSha256(coreBinary() || "")
-});
-if (profile) {
-  app.setPath("userData", profile.directory);
-  const env = childEnvironment(process.env, profile);
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith("GOALPORT_") && !(key in env)) delete process.env[key];
+function reportStartupFailure(error) {
+  console.error("GoalPort startup refused:", error);
+  dialog.showErrorBox("GoalPort could not start", String(error.message || error));
+  app.exit(1);
+}
+
+let appVersion, profile;
+try {
+  const launchArgs = launchArguments(process.argv);
+  const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
+  profile = legacyIsolated ? null : prepareProfile({
+    args: launchArgs, appData: app.getPath("appData"), version: appVersion,
+    coreSha256: fileSha256(coreBinary() || "")
+  });
+  if (profile) {
+    app.setPath("userData", profile.directory);
+    const env = childEnvironment(process.env, profile);
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("GOALPORT_") && !(key in env)) delete process.env[key];
+    }
+    Object.assign(process.env, env);
   }
-  Object.assign(process.env, env);
+} catch (error) {
+  reportStartupFailure(error);
+  return;
 }
 
 const RUN_SLUG = profile?.slug || process.env.GOALPORT_RUN_SLUG || "goalport-electron-rc-resume-chain";
@@ -604,7 +616,7 @@ app.whenReady().then(() => {
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };
   });
   return createWindow();
-}).catch((error) => { console.error(error); dialog.showErrorBox("GoalPort could not start", String(error.message || error)); app.exit(1); });
+}).catch(reportStartupFailure);
 
 app.on("before-quit", (event) => {
   if (allowQuitAfterCloseChoice) return;

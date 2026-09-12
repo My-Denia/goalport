@@ -3,7 +3,22 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
-const normalizedPath = (value) => path.resolve(value).replace(/^\\\\\?\\/, "").replaceAll("/", "\\").toLowerCase();
+function canonicalPath(value) {
+  const absolute = path.resolve(value);
+  let ancestor = absolute;
+  while (true) {
+    try {
+      // The native Windows API expands 8.3 aliases; the JS realpath fallback
+      // can leave them intact. The database itself may not exist yet.
+      return path.join(fs.realpathSync.native(ancestor), path.relative(ancestor, absolute));
+    } catch {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return absolute;
+      ancestor = parent;
+    }
+  }
+}
+const normalizedPath = (value) => canonicalPath(value).replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("/", "\\").toLowerCase();
 
 function launchArguments(argv) {
   const result = {};
@@ -35,7 +50,7 @@ function prepareProfile({ args, appData, version, coreSha256 }) {
     }
   }
   fs.mkdirSync(directory, { recursive: true });
-  const canonical = fs.realpathSync(directory);
+  const canonical = fs.realpathSync.native(directory);
   if (!fs.existsSync(marker)) {
     fs.writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, product: "GoalPort", version, coreSha256, mode }, null, 2)}\n`, { flag: "wx" });
   }

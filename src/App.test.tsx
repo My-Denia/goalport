@@ -313,6 +313,40 @@ describe("GoalPort preview", () => {
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
 
+  it("passes an opaque Core Runtime id through selection unchanged", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const opaqueId = "Provider_V2 Beta";
+    const snapshot = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      runtimes: [{
+        ...DEMO_SNAPSHOT.runtimes[0],
+        id: opaqueId,
+        name: "Opaque Runtime",
+        support: "unknown" as const
+      }]
+    };
+    const command = vi.fn(async (request: CoreCommand) => ({
+      requestId: request.requestId,
+      accepted: true,
+      duplicate: false,
+      snapshot
+    }));
+    window.goalportCore = {
+      snapshot: async () => snapshot,
+      command,
+      startCore: async () => snapshot,
+      openInVsCode: async () => undefined
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /select opaque runtime/i }));
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true));
+
+    const request = command.mock.calls.find(([candidate]) => candidate.messageType === "select_runtime")![0];
+    expect(request.payload.provider).toBe(opaqueId);
+  });
+
   it("forwards a terminal Attempt identity so Core can mint a replacement", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const snapshot = {
@@ -409,6 +443,11 @@ describe("GoalPort preview", () => {
     expect(screen.queryByRole("dialog", { name: /start your first campaign/i })).toBeNull();
     expect(screen.queryByText("Build a durable preview")).toBeNull();
     expect(screen.queryByText("Workspace write permission")).toBeNull();
+    const composer = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    expect(composer.disabled).toBe(true);
+    expect(composer.placeholder).toBe("Create or select a Campaign before drafting a message…");
+    fireEvent.change(composer, { target: { value: "must not be discarded" } });
+    expect(composer.value).toBe("");
     expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /select claude code/i }) as HTMLButtonElement).disabled).toBe(true);
     expect(command).not.toHaveBeenCalled();

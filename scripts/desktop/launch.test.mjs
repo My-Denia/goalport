@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
+import vm from "node:vm";
 const require = createRequire(import.meta.url);
-const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment } = require("../../electron/launch-config.cjs");
+const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
@@ -15,6 +16,53 @@ function fixture(t) {
   return root;
 }
 const settings = (root, args = {}) => ({ appData: root, version: "1.0.0-rc.1", coreSha256: hash, args });
+
+test("real Electron entrypoint presents startup refusals before readiness or profile adoption", (t) => {
+  const root = fixture(t);
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  for (const kind of ["missing-core", "invalid-argument", "wrong-profile"]) {
+    const resources = resolve(root, kind, "resources");
+    const data = resolve(root, kind, "profile");
+    mkdirSync(resources, { recursive: true });
+    mkdirSync(data, { recursive: true });
+    if (kind === "wrong-profile") {
+      writeFileSync(resolve(resources, "goalport-core.exe"), "test-only Core identity; never executed");
+      writeFileSync(resolve(data, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, product: "GoalPort", mode: "normal", version: "1.0.0-rc.1", coreSha256: "b".repeat(64) }));
+    }
+    const preimage = readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]);
+    const dialogs = [], exits = [], logs = [];
+    const electron = {
+      app: { isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => data, exit: (code) => exits.push(code), whenReady: () => assert.fail("refusal cannot start the ready path") },
+      dialog: { showErrorBox: (title, message) => dialogs.push({ title, message }) }
+    };
+    main((name) => name === "electron" ? electron : mainRequire(name), { exports: {} }, {}, resolve("electron"), {
+      argv: ["GoalPort.exe", "--data-dir", kind === "invalid-argument" ? "relative" : data], resourcesPath: resources, env: {}
+    }, { error: (...args) => logs.push(args.map(String).join(" ")) });
+    assert.deepEqual(exits, [1]);
+    assert.equal(dialogs.length, 1);
+    assert.equal(dialogs[0].title, "GoalPort could not start");
+    assert.match(dialogs[0].message, kind === "missing-core" ? /Core identity is unavailable/ : kind === "invalid-argument" ? /absolute path/ : /another RC build/);
+    assert.match(logs.join("\n"), /GoalPort startup refused/);
+    assert.deepEqual(readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]), preimage);
+  }
+});
+
+test("Windows aliases share identity even for an absent database descendant", { skip: process.platform !== "win32" }, () => {
+  const alias = "C:/PROGRA~1";
+  assert.ok(existsSync(alias), "Windows short-name fixture must exist; never create files there");
+  const canonical = realpathSync.native(alias);
+  const child = `goalport-no-write-${process.pid}-${Date.now()}/goalport.sqlite`;
+  const database = resolve(alias, child);
+  assert.equal(existsSync(database), false);
+  assert.equal(normalizedPath(alias), normalizedPath(canonical));
+  assert.equal(normalizedPath(database), normalizedPath(resolve(canonical, child)));
+  const profile = { database, coreSha256: hash, pipe: "test-pipe" };
+  assert.doesNotThrow(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child), pipeIdentity: profile.pipe }, profile));
+  assert.throws(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child + "-other"), pipeIdentity: profile.pipe }, profile), /attachment refused/);
+  assert.equal(existsSync(database), false);
+});
 
 test("normal RC starts in product data and test profile has a different pipe", (t) => {
   const root = fixture(t);
@@ -101,13 +149,28 @@ test("Core rejection stays a refusal and an accepted command retains request/dup
 
 test("snapshot retry rechecks attachment once and never retries a tagged refusal", async () => {
   let calls = 0, checks = 0;
-  const result = await invokeCoreRequest({ messageType: "snapshot", requestId: "read-1" }, {
+  await assert.rejects(invokeCoreRequest({ messageType: "snapshot", requestId: "read-1" }, {
     exchange: async () => { if (++calls === 1) throw new Error("closed"); return { ok: false, requestId: "read-1", error: "wrong state" }; },
     ensureCore: async () => { checks += 1; }, delay: async () => {}
-  });
+  }), /wrong state/);
   assert.equal(calls, 2);
   assert.equal(checks, 1);
-  assert.equal(result.goalportRejected, true);
+});
+
+test("a refused snapshot keeps the active held cache and never retries or notifies", async () => {
+  const previous = { attempt: { id: "held-attempt", state: "active" }, stopResponsibility: { writeResponsibility: "held", attemptId: "held-attempt" } };
+  let cache = previous, calls = 0;
+  await assert.rejects((async () => {
+    const snapshot = await invokeCoreRequest({ messageType: "snapshot", requestId: "read-refused" }, {
+      exchange: async () => { calls += 1; return { ok: false, requestId: "read-refused", error: "snapshot refused" }; },
+      ensureCore: () => assert.fail("a definite refusal must not retry attachment"),
+      delay: () => assert.fail("a definite refusal must not retry"),
+      onResult: () => assert.fail("refused data must not update the cache or notifications")
+    });
+    cache = snapshot;
+  })(), /snapshot refused/);
+  assert.equal(calls, 1);
+  assert.equal(cache, previous);
 });
 
 test("close Stop consumes the acknowledged snapshot and requires the existing durable hold", async () => {

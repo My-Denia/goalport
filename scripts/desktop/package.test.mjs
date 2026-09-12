@@ -4,8 +4,55 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256 } from "./package.mjs";
+import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
+
+function fixtureGitEnv(root) {
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: resolve(root, "missing-global-config"),
+    GIT_TERMINAL_PROMPT: "0"
+  };
+}
+
+function fixtureGit(root, args) {
+  const result = spawnSync("git", args, { cwd: root, env: fixtureGitEnv(root), encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) throw new Error(`Fixture Git command failed: git ${args.join(" ")}\n${result.stderr || result.error || ""}`);
+  return result.stdout;
+}
+
+function isolatedSourceIdentity(root) {
+  const previous = {
+    GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+    GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+    GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT
+  };
+  Object.assign(process.env, fixtureGitEnv(root));
+  try {
+    return sourceIdentity(root);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+function sourceIdentityFixture(t) {
+  const temp = mkdtempSync(resolve(tmpdir(), "goalport-source-identity-test-"));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const root = resolve(temp, "source");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(resolve(root, ".gitignore"), ".cargo/config.toml\n");
+  writeFileSync(resolve(root, "Cargo.lock"), "# fixture lock\n");
+  writeFileSync(resolve(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "source-identity-fixture", private: true }));
+  fixtureGit(root, ["init", "--initial-branch", "main"]);
+  fixtureGit(root, ["add", "--all"]);
+  fixtureGit(root, ["-c", "user.name=GoalPort Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "fixture"]);
+  return root;
+}
 
 async function fixture(t) {
   const temp = mkdtempSync(resolve(tmpdir(), "goalport-package-test-"));
@@ -74,4 +121,55 @@ test("manifest cannot read outside the package and unlisted files are detected",
   manifest.artifacts.push({ path: "../outside", bytes: 1, sha256: "d".repeat(64) });
   save();
   assert.throws(() => verifyPackage(root), /Unsafe artifact path/);
+});
+
+test("new root build inputs change the declared source identity and dirty state", (t) => {
+  const root = sourceIdentityFixture(t);
+  const baseline = isolatedSourceIdentity(root);
+  const added = {
+    "index.html": "<!doctype html>\n",
+    "rust-toolchain.toml": "channel = 'fixture'\n",
+    "tsconfig.app.json": "{\"extends\":\"./tsconfig.json\"}\n",
+    "tsconfig.extra.json": "{\"extends\":\"./tsconfig.json\"}\n",
+    "tsconfig.json": "{\"files\":[] }\n",
+    "tsconfig.node.json": "{\"include\":[\"vite.config.ts\"]}\n",
+    "vite.config.mjs": "export default {};\n",
+    "vite.config.ts": "export default {};\n"
+  };
+  for (const [name, contents] of Object.entries(added)) writeFileSync(resolve(root, name), contents);
+
+  const withRootInputs = isolatedSourceIdentity(root);
+  const paths = new Set(withRootInputs.files.map(({ path }) => path));
+  for (const name of Object.keys(added)) assert.ok(paths.has(name), `${name} must be declared source`);
+  assert.equal(withRootInputs.dirty, true);
+  assert.notEqual(withRootInputs.treeSha256, baseline.treeSha256);
+
+  writeFileSync(resolve(root, "vite.config.ts"), "export default { base: './' };\n");
+  const changedRootInput = isolatedSourceIdentity(root);
+  assert.notEqual(changedRootInput.treeSha256, withRootInputs.treeSha256);
+  assert.equal(changedRootInput.files.find(({ path }) => path === "vite.config.ts").sha256, fileHash(resolve(root, "vite.config.ts")));
+});
+
+test("untracked or ignored Cargo config is refused while tracked safe config is declared and private config stays excluded", (t) => {
+  const root = sourceIdentityFixture(t);
+  mkdirSync(resolve(root, ".cargo"));
+  writeFileSync(resolve(root, ".cargo/config"), "[net]\noffline = true\n");
+  assert.throws(() => isolatedSourceIdentity(root), /Untracked or ignored Cargo configuration.*\.cargo[\\/]config/);
+  rmSync(resolve(root, ".cargo/config"));
+
+  writeFileSync(resolve(root, ".cargo/config.toml"), "[net]\noffline = true\n");
+  assert.throws(() => isolatedSourceIdentity(root), /Untracked or ignored Cargo configuration.*\.cargo[\\/]config\.toml/);
+  fixtureGit(root, ["add", "-f", ".cargo/config.toml"]);
+  fixtureGit(root, ["-c", "user.name=GoalPort Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", "track safe Cargo config"]);
+
+  const trackedConfig = isolatedSourceIdentity(root);
+  assert.equal(trackedConfig.dirty, false);
+  assert.ok(trackedConfig.files.some(({ path }) => path === ".cargo/config.toml"));
+
+  writeFileSync(resolve(root, ".npmrc"), "registry=https://registry.example.invalid\n");
+  writeFileSync(resolve(root, ".env.local"), "VITE_FIXTURE=value\n");
+  const privateConfig = isolatedSourceIdentity(root);
+  assert.equal(privateConfig.treeSha256, trackedConfig.treeSha256);
+  assert.equal(privateConfig.dirty, false);
+  assert.ok(!privateConfig.files.some(({ path }) => path === ".npmrc" || path === ".env.local"));
 });

@@ -1,12 +1,22 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = resolve(import.meta.dirname, "../..");
 export const COMPONENTS = ["goalport-core.exe", "goalport-core-launcher.exe", "goalport-claude-stop-broker.exe"];
+export const ROOT_BUILD_INPUTS = Object.freeze([
+  "Cargo.lock", "Cargo.toml", "index.html", "package.json", "pnpm-lock.yaml", "rust-toolchain.toml",
+  "tsconfig.app.json", "tsconfig.json", "tsconfig.node.json", "vite.config.ts"
+]);
+const ROOT_BUILD_INPUT_SET = new Set(ROOT_BUILD_INPUTS);
+const ROOT_BUILD_INPUT_PATTERNS = [
+  /^tsconfig(?:\.[A-Za-z0-9_-]+)?\.json$/,
+  /^vite\.config\.(?:cjs|cts|js|mjs|mts|ts)$/
+];
+const CARGO_CONFIG_PATHS = [".cargo/config", ".cargo/config.toml"];
 export const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 export const fileHash = (file) => sha256(readFileSync(file));
 
@@ -38,17 +48,43 @@ function git(root, args) {
   return result.stdout;
 }
 
+function pathExists(root, name) {
+  try {
+    lstatSync(resolve(root, name));
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+    throw error;
+  }
+}
+
+function rejectUntrackedCargoConfig(root, tracked) {
+  for (const name of CARGO_CONFIG_PATHS) {
+    if (pathExists(root, name) && !tracked.has(name)) {
+      throw new Error(`Untracked or ignored Cargo configuration is not allowed in source identity: ${name}`);
+    }
+  }
+}
+
+function isAllowedNewSource(name) {
+  return ROOT_BUILD_INPUT_SET.has(name)
+    || ROOT_BUILD_INPUT_PATTERNS.some((pattern) => pattern.test(name))
+    || /^(src|crates|electron|scripts|tests|docs|\.github)\//.test(name);
+}
+
 // Include tracked files and deliberate new source files, never private run data,
 // user config or build output. The list is recorded so an export is reviewable.
 export function sourceIdentity(root = ROOT) {
   const revision = git(root, ["rev-parse", "HEAD"]).trim();
   const tracked = git(root, ["ls-files", "-z"]).split("\0").filter(Boolean);
+  const trackedSet = new Set(tracked);
+  rejectUntrackedCargoConfig(root, trackedSet);
   const newFiles = git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-    .split("\0").filter((name) => /^(src|crates|electron|scripts|tests|docs|\.github)\//.test(name));
+    .split("\0").filter((name) => isAllowedNewSource(name));
   const files = [...new Set([...tracked, ...newFiles])].sort()
     .filter((name) => !/(^|\/)(goal-runs|\.goal-runs|node_modules|target|dist|artifacts|\.git)(\/|$)/.test(name))
     .filter((name) => !/(\.tsbuildinfo|\.db(?:-shm|-wal)?|\.sqlite(?:-shm|-wal)?|\.log|\.exe|\.dll)$/.test(name))
-    .filter((name) => !/(^|\/)(\.env(?:\..*)?|\.outbound-manifest.*)$/.test(name))
+    .filter((name) => !/(^|\/)(\.env(?:\..*)?|\.npmrc|\.outbound-manifest.*)$/.test(name))
     .filter((name) => existsSync(resolve(root, name)))
     .map((name) => ({ path: name, sha256: fileHash(resolve(root, name)) }));
   if (!files.some((file) => file.path === "Cargo.lock") || !files.some((file) => file.path === "pnpm-lock.yaml")) {

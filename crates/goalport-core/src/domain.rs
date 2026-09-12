@@ -1,7 +1,10 @@
 //! Core domain values and invariants.
 
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::Path};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 pub type EntityId = String;
@@ -297,15 +300,15 @@ impl WorkspaceLease {
 }
 
 /// Normalizes the lexical form of a Windows workspace path without requiring it to exist.
-/// Existing paths are canonicalized first, but failure to canonicalize is intentionally not an
-/// error: a lease must also protect a workspace that is about to be created.
+/// The nearest existing ancestor is canonicalized so aliases remain equivalent when the workspace
+/// or one of its descendants has not been created yet.
 pub fn normalize_workspace_key(path: &Path) -> String {
     let raw = path.to_string_lossy();
     // On Unix test hosts a Windows-looking path is not a filesystem-relative path;
     // canonicalizing it would prepend the test checkout and break alias checks.
     let windows_form = raw.starts_with("\\\\") || raw.as_bytes().get(1) == Some(&b':');
     let candidate = if cfg!(windows) || !windows_form {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        canonicalize_nearest_existing_ancestor(path)
     } else {
         path.to_path_buf()
     };
@@ -325,6 +328,19 @@ pub fn normalize_workspace_key(path: &Path) -> String {
         value = value.to_ascii_lowercase();
     }
     value
+}
+
+fn canonicalize_nearest_existing_ancestor(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        let Ok(canonical) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let Ok(unresolved) = path.strip_prefix(ancestor) else {
+            continue;
+        };
+        return canonical.join(unresolved);
+    }
+    path.to_path_buf()
 }
 
 fn lexical_windows_path(value: &str) -> String {

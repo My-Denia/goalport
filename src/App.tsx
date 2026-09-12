@@ -147,7 +147,8 @@ function App() {
   const selectionIntent = useRef(0);
   const sendInFlight = useRef(false);
 
-  const draftCampaignId = snapshot.activeCampaignId;
+  const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);
+  const draftCampaignId = activeCampaign?.id ?? "";
   const draft = draftCampaignId ? campaignDrafts[draftCampaignId] ?? "" : "";
 
   function updateVisibleCampaignDraft(value: string) {
@@ -302,7 +303,6 @@ function App() {
     if (window.goalportCore?.dismissCloseChoice) void window.goalportCore.dismissCloseChoice();
   }
 
-  const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);
   const activeTargetKey = snapshotTargetKey(snapshot);
   const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
   const syntheticScenario = scenarioIsActive(snapshot);
@@ -694,6 +694,7 @@ function App() {
             draft={draft}
             connection={snapshot.connection}
             held={snapshot.stopResponsibility?.writeResponsibility === "held"}
+            hasDraftTarget={Boolean(draftCampaignId)}
             ready={attemptIsRoutable(snapshot)}
             busy={sendBusy}
             onChange={updateVisibleCampaignDraft}
@@ -990,14 +991,15 @@ interface ComposerProps {
   draft: string;
   connection: CoreSnapshot["connection"];
   held: boolean;
+  hasDraftTarget: boolean;
   ready: boolean;
   busy: boolean;
   onChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }
 
-function Composer({ draft, connection, held, ready, busy, onChange, onSubmit }: ComposerProps) {
-  const canSubmit = draft.trim().length > 0 && connection === "connected" && !held && ready && !busy;
+function Composer({ draft, connection, held, hasDraftTarget, ready, busy, onChange, onSubmit }: ComposerProps) {
+  const canSubmit = draft.trim().length > 0 && connection === "connected" && !held && hasDraftTarget && ready && !busy;
   return (
     <form className="composer" aria-label="Message composer" onSubmit={onSubmit}>
       <div className="composer-inner">
@@ -1009,11 +1011,13 @@ function Composer({ draft, connection, held, ready, busy, onChange, onSubmit }: 
             ? "Core holds write responsibility while residual execution is unknown…"
             : connection !== "connected"
               ? "Reconnect Core before sending a new message…"
+              : !hasDraftTarget
+                ? "Create or select a Campaign before drafting a message…"
               : ready
                 ? "Ask the active Runtime to continue…"
                 : "Select a Runtime before sending work…"}
           rows={2}
-          disabled={connection !== "connected" || held}
+          disabled={connection !== "connected" || held || !hasDraftTarget}
         />
         <div className="composer-actions">
           <div className="composer-tools">

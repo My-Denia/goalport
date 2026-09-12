@@ -9,9 +9,11 @@ import { DatabaseSync } from "node:sqlite";
 import { argsFor, fileHash } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
+import launchConfig from "../../electron/launch-config.cjs";
+import { collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const normalize = (name) => resolve(name).replace(/^\\\\\?\\/, "").toLowerCase();
+const normalize = launchConfig.normalizedPath;
 const argv = process.argv.slice(2);
 const normal = argv.includes("--normal");
 const args = argsFor(argv.filter((arg) => arg !== "--normal"), ["--package", "--out", "--test-profile"]);
@@ -19,7 +21,7 @@ const args = argsFor(argv.filter((arg) => arg !== "--normal"), ["--package", "--
 if (args.help) {
   console.log("Usage: node scripts/desktop/smoke.mjs --package <package-directory> --out <new-evidence-directory> [--normal | --test-profile <new-absolute-profile>]\nCopies the complete RC outside source; verifies real GUI, IPC and Core with Scenario only. Node >=22.19 required.\nNormal mode uses ordinary data handling and inert markers, with empty native configuration/PATH. Default mode is explicitly synthetic-only.");
 } else {
-  await smoke().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });
+  await smoke().catch((error) => { console.error(sanitizeDiagnostic(error.stack || error, [process.env.USERPROFILE, process.env.HOME, tmpdir()])); process.exitCode = 1; });
 }
 
 async function smoke() {
@@ -51,11 +53,13 @@ async function smoke() {
   assert.equal(verifyPackage(packageRoot).sourceTreeSha256, identity.sourceTreeSha256);
   for (const dir of [workspaceA, workspaceB, nativeHome]) mkdirSync(dir, { recursive: true });
   let child, page, coreIdentity, logFd;
+  let stage = "prepare-launch";
   const marker = (name, evidence = {}) => {
     report.steps.push({ name, at: new Date().toISOString(), ...evidence }); save();
     console.log(`PASS ${name}`);
   };
   const until = async (description, predicate, timeout = 20000) => {
+    stage = description;
     const deadline = Date.now() + timeout;
     let last;
     while (Date.now() < deadline) {
@@ -171,8 +175,10 @@ async function smoke() {
       for (const provider of ["codex", "claude", "grok"]) for (const ext of [".exe", ".cmd", ".bat"]) assert.equal(existsSync(resolve(folder, provider + ext)), false, "native executable absent from smoke search path");
     }
     logFd = openSync(resolve(out, "electron.log"), "a");
+    stage = "spawn-electron";
     child = spawn(resolve(packageRoot, "GoalPort.exe"), [normal ? "--data-dir" : "--test-profile", profile, `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], { cwd: packageRoot, env, stdio: ["ignore", logFd, logFd], windowsHide: true });
     child.once("error", (error) => { report.launchError = error.message; save(); });
+    stage = "attach-cdp";
     page = await attachGoalPort(port);
     await until("connected packaged UI", async () => (await body()).includes("Core connected"));
     const info = await read("window.goalportCore.appInfo()");
@@ -206,6 +212,9 @@ async function smoke() {
     assert.equal(empty.preview, false);
     assert.deepEqual(counts(), { projects: 0, campaigns: 0, tasks: 0, attempts: 0, commands: 0, outbox: 0 });
     assert.equal(empty.attempt.id, "attempt-unassigned");
+    const emptyComposer = await read("({disabled:document.querySelector('textarea[aria-label=\"Message composer\"]').disabled,placeholder:document.querySelector('textarea[aria-label=\"Message composer\"]').placeholder})");
+    assert.equal(emptyComposer.disabled, true, "no Campaign means there is no draft target");
+    assert.match(emptyComposer.placeholder, /Create or select a Campaign/);
     await screen("01-first-run");
     marker("empty ordinary product projection and no automatic input", { counts: counts() });
 
@@ -390,6 +399,12 @@ async function smoke() {
     report.status = "PASS";
   } catch (error) {
     report.status = "FAIL"; report.error = error.stack || error.message;
+    report.diagnostics = collectFailureDiagnostics({
+      stage, child,
+      files: { electron: resolve(out, "electron.log"), launcher: resolve(profile, "goalport.sqlite.launcher.log"), core: resolve(profile, "goalport.sqlite.core.log") },
+      privatePaths: [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]
+    });
+    console.error(JSON.stringify({ diagnostics: report.diagnostics }, null, 2));
     if (page) { try { await screen("failure"); } catch {} }
     throw error;
   } finally {
@@ -412,6 +427,7 @@ async function smoke() {
     report.completedAt = new Date().toISOString();
     report.cleanup.push({ path: scratch, action: "retained for local inspection; contains only this smoke's package/profile/workspaces" });
     save();
-    console.log(JSON.stringify({ status: report.status, mode: report.mode, report: resolve(out, "report.json"), scratch }, null, 2));
+    const publicPath = (value) => sanitizeDiagnostic(value, [process.env.USERPROFILE, process.env.HOME, tmpdir()]);
+    console.log(JSON.stringify({ status: report.status, mode: report.mode, report: publicPath(resolve(out, "report.json")), scratch: publicPath(scratch) }, null, 2));
   }
 }

@@ -717,11 +717,10 @@ function normalizeRuntime(value: unknown): RuntimeProfile | null {
   const explicitId = optionalText(raw.id);
   if (!explicitId) return null;
   const name = asText(raw.name, "Runtime");
-  const id = normalized(explicitId, "runtime-unknown");
   const support = normalized(raw.support, "unknown");
   const capabilities = asRecord(raw.capabilities) ?? {};
   return {
-    id,
+    id: explicitId,
     name,
     version: asText(raw.version, "unknown"),
     support: support === "supported" || support === "partial" || support === "unsupported" ? support : "unknown",

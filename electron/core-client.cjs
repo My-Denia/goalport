@@ -6,7 +6,15 @@ async function invokeCoreRequest(request, { exchange, ensureCore, delay, onResul
     if (response?.requestId !== request.requestId) {
       throw new Error("Core response identity does not match the request; result remains unknown");
     }
-    if (response?.ok === false) return { goalportRejected: true, requestId: request.requestId, error: String(response.error || "Core rejected the request") };
+    if (response?.ok === false) {
+      const error = String(response.error || "Core rejected the request");
+      // A refused read contains no projection. It must not replace a cached
+      // active/held Attempt or be retried as if its result were unknown.
+      if (request.messageType === "snapshot") {
+        throw Object.assign(new Error(error), { goalportRejected: true });
+      }
+      return { goalportRejected: true, requestId: request.requestId, error };
+    }
     const body = response?.payload || response;
     if (request.messageType === "snapshot") return body?.snapshot || body;
     if (!body || body.requestId !== request.requestId || body.accepted !== true || !body.snapshot) {
@@ -17,7 +25,7 @@ async function invokeCoreRequest(request, { exchange, ensureCore, delay, onResul
   let result;
   try { result = await attempt(); }
   catch (error) {
-    if (request.messageType !== "snapshot") throw error;
+    if (request.messageType !== "snapshot" || error?.goalportRejected) throw error;
     await ensureCore();
     await delay(120);
     result = await attempt();

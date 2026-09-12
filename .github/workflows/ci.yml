@@ -54,7 +54,7 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           cargo test -p goalport-core --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p goalport-core --test electron_rc_core --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation
+          cargo test --locked -p goalport-core --test workspace_aliases --test electron_rc_core --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($case in @('r1_succeeded_send_replays_as_duplicate_success_without_delivery', 'r1b_succeeded_send_still_replays_as_success_after_the_attempt_became_terminal', 'r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing', 'n1_reuse_for_another_task_is_refused_and_the_selection_is_kept')) {
             cargo test --locked -p goalport-core --test registration_generation $case -- --exact
