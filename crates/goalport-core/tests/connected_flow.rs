@@ -5,6 +5,10 @@ use goalport_core::{
 };
 use serde_json::{Value, json};
 
+fn seeded_server() -> CoreServer {
+    CoreServer::new_seeded_fixture(Store::memory().unwrap(), "synthetic://goalport-fixture")
+}
+
 fn wire(id: &str, kind: &str, payload: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "protocolVersion": CONNECTED_UI_PROTOCOL_VERSION,
@@ -21,11 +25,12 @@ fn result(server: &CoreServer, id: &str, kind: &str, payload: Value) -> Value {
 }
 
 fn view(response: Value) -> Value {
+    assert_eq!(response["ok"], true, "{response}");
     response["payload"]["snapshot"].clone()
 }
 
 fn select(server: &CoreServer, id: &str) -> Value {
-    view(result(
+    let response = result(
         server,
         id,
         "select_runtime",
@@ -34,12 +39,14 @@ fn select(server: &CoreServer, id: &str) -> Value {
             "taskId": "task-synthetic-preview",
             "provider": "scenario"
         }),
-    ))
+    );
+    assert_eq!(response["ok"], true, "{response}");
+    view(response)
 }
 
 #[test]
 fn connected_send_persists_reply_tool_waiting_before_terminal_state() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "flow-runtime");
     let attempt = selected["attempt"]["id"].as_str().unwrap();
     let response = result(
@@ -71,7 +78,7 @@ fn connected_send_persists_reply_tool_waiting_before_terminal_state() {
 
 #[test]
 fn permission_request_is_projected_and_gui_decision_is_durable() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "permission-runtime");
     let attempt = selected["attempt"]["id"].as_str().unwrap();
     let pending = view(result(
@@ -111,10 +118,45 @@ fn permission_decision_stays_pending_when_native_callback_is_unavailable() {
 
     let store = Store::memory().unwrap();
     let server = CoreServer::new(store.clone());
+    let workspace = tempfile::tempdir().unwrap();
+    let created = result(
+        &server,
+        "permission-no-runtime-create",
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.path(),
+            "goal": "permission callback boundary",
+            "title": "persist pending decision"
+        }),
+    );
+    assert_eq!(created["ok"], true, "{created}");
+    let campaign_id = created["payload"]["snapshot"]["activeCampaignId"]
+        .as_str()
+        .unwrap();
+    let task_id = created["payload"]["snapshot"]["activeTask"]["id"]
+        .as_str()
+        .unwrap();
+    store
+        .insert_attempt(&Attempt::new(
+            "attempt-no-runtime",
+            task_id,
+            "scenario",
+            "scenario-cap-v1",
+        ))
+        .unwrap();
+    store
+        .append_event(&Event {
+            id: "attempt-no-runtime-active".into(),
+            attempt_id: "attempt-no-runtime".into(),
+            seq: 1,
+            kind: "attempt.active".into(),
+            payload_ref: None,
+        })
+        .unwrap();
     store
         .insert_decision(&Decision {
             id: "native-callback-missing".into(),
-            attempt_id: "attempt-scenario-preview".into(),
+            attempt_id: "attempt-no-runtime".into(),
             kind: "permission".into(),
             state: DecisionState::Pending,
         })
@@ -123,7 +165,13 @@ fn permission_decision_stays_pending_when_native_callback_is_unavailable() {
         &server,
         "permission-callback-missing",
         "permission_response",
-        json!({ "decisionId": "native-callback-missing", "allow": true }),
+        json!({
+            "decisionId": "native-callback-missing",
+            "campaignId": campaign_id,
+            "taskId": task_id,
+            "attemptId": "attempt-no-runtime",
+            "allow": true
+        }),
     );
     assert_eq!(response["ok"], false);
     assert!(
@@ -140,7 +188,7 @@ fn permission_decision_stays_pending_when_native_callback_is_unavailable() {
 
 #[test]
 fn safe_stop_records_cancelled_attempt_without_host_state_invention() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "stop-runtime");
     let attempt = selected["attempt"]["id"].as_str().unwrap();
     let stopped = view(result(
@@ -162,7 +210,7 @@ fn safe_stop_records_cancelled_attempt_without_host_state_invention() {
 
 #[test]
 fn reconnect_cursor_backfills_only_committed_events_and_does_not_resend_prompt() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "reconnect-runtime");
     let attempt = selected["attempt"]["id"].as_str().unwrap();
     let cursor = selected["cursor"].as_i64().unwrap();
@@ -215,7 +263,7 @@ fn reconnect_cursor_backfills_only_committed_events_and_does_not_resend_prompt()
 
 #[test]
 fn invalid_attempt_and_campaign_references_are_rejected_by_core() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let response = result(
         &server,
         "bad-send",
@@ -238,7 +286,7 @@ fn invalid_attempt_and_campaign_references_are_rejected_by_core() {
 
 #[test]
 fn handoff_creates_distinct_attempt_and_retains_old_history() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "handoff-runtime");
     let old_attempt = selected["attempt"]["id"].as_str().unwrap().to_string();
     let sent = view(result(
@@ -268,7 +316,7 @@ fn handoff_creates_distinct_attempt_and_retains_old_history() {
 
 #[test]
 fn handoff_instruction_is_submitted_from_core_packet_without_manual_copy() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let selected = select(&server, "handoff-packet-runtime");
     let old_attempt = selected["attempt"]["id"].as_str().unwrap().to_string();
     let source = view(result(
@@ -311,7 +359,10 @@ fn handoff_instruction_is_submitted_from_core_packet_without_manual_copy() {
 #[test]
 fn handoff_does_not_create_attempt_when_native_stop_is_unconfirmed() {
     let store = Store::memory().unwrap();
-    let server = CoreServer::new(store.clone());
+    let server = CoreServer::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    );
     store
         .insert_attempt(&Attempt::new(
             "active-native",
@@ -349,7 +400,10 @@ fn handoff_does_not_create_attempt_when_native_stop_is_unconfirmed() {
 #[test]
 fn handoff_does_not_create_attempt_with_unknown_external_effect() {
     let store = Store::memory().unwrap();
-    let server = CoreServer::new(store.clone());
+    let server = CoreServer::new_seeded_fixture(
+        store.clone(),
+        "synthetic://goalport-fixture",
+    );
     let selected = select(&server, "handoff-outbox-runtime");
     let old_attempt = selected["attempt"]["id"].as_str().unwrap();
     store
@@ -396,7 +450,7 @@ fn handoff_does_not_create_attempt_with_unknown_external_effect() {
 
 #[test]
 fn resource_pressure_persists_queued_request_and_override_admits_it() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let first = select(&server, "res-existing");
     let existing = first["attempt"]["id"].as_str().unwrap().to_string();
     let queued = view(result(
@@ -429,7 +483,7 @@ fn resource_pressure_persists_queued_request_and_override_admits_it() {
 
 #[test]
 fn resource_pressure_does_not_reuse_the_live_attempt_identity() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let first = select(&server, "res-live-existing");
     let existing = first["attempt"]["id"].as_str().unwrap().to_string();
     let queued = view(result(
@@ -496,7 +550,7 @@ fn queue_notice_id(snapshot: &Value) -> String {
 
 #[test]
 fn queued_select_without_task_id_scopes_attempt_to_the_campaign_root_task() {
-    let server = CoreServer::new(Store::memory().unwrap());
+    let server = seeded_server();
     let _ = select(&server, "qscope-existing");
     let first = result(
         &server,

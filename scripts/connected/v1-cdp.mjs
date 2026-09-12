@@ -3,7 +3,7 @@ export async function attachGoalPort(port) {
   let page;
   while (Date.now() < deadline) {
     try {
-      const raw = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+      const raw = await (await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1000) })).json();
       page = (Array.isArray(raw) ? raw : [raw]).find((item) => item.type === "page" && String(item.title || "").includes("GoalPort"));
       if (page?.webSocketDebuggerUrl) break;
     } catch {

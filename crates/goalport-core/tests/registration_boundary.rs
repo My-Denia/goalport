@@ -9,10 +9,11 @@
 //! selection on campaign 1). Manager cases (M*) drive `RuntimeManager` directly, also without a process.
 
 use goalport_core::{
-    PromptRequest, RuntimeManager, SessionRequest,
+    Project, PromptRequest, RuntimeManager, SessionRequest,
     adapters::AdapterError,
+    domain::{Campaign, Task, WorkStatus},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
-    store::Store,
+    store::{CampaignAuthorization, Store},
 };
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Mutex};
@@ -111,6 +112,7 @@ fn add_second_campaign(server: &CoreServer) -> (String, String) {
 
 fn seed_payload() -> Value {
     json!({
+        "projectId": SEED_PROJECT,
         "provider": "scenario",
         "campaignId": SEED_CAMPAIGN,
         "taskId": SEED_TASK,
@@ -120,7 +122,36 @@ fn seed_payload() -> Value {
 
 fn seed_server() -> CoreServer {
     assert_env_pinned();
-    CoreServer::new(Store::memory().unwrap())
+    let store = Store::memory().unwrap();
+    store
+        .insert_project(&Project {
+            id: SEED_PROJECT.into(),
+            workspace_root: "synthetic://goalport-fixture".into(),
+        })
+        .unwrap();
+    let campaign = Campaign {
+        id: SEED_CAMPAIGN.into(),
+        goal: "explicit registration fixture".into(),
+        root_task_id: SEED_TASK.into(),
+        state: WorkStatus::InProgress,
+    };
+    store
+        .create_campaign_with_task(
+            SEED_PROJECT,
+            &campaign,
+            &Task {
+                id: SEED_TASK.into(),
+                campaign_id: SEED_CAMPAIGN.into(),
+                title: "explicit registration".into(),
+                acceptance: "first select creates the Attempt".into(),
+                state: WorkStatus::InProgress,
+            },
+        )
+        .unwrap();
+    store
+        .set_campaign_authorization(SEED_CAMPAIGN, &CampaignAuthorization::granted())
+        .unwrap();
+    CoreServer::new(store)
 }
 
 /// Store T with a successful selection on campaign 1 under the explicit attempt id.

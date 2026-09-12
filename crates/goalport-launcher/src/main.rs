@@ -2,6 +2,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -9,12 +10,29 @@ use std::{
 };
 
 fn main() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        if env::var("GOALPORT_LAUNCHER_REEXEC").ok().as_deref() != Some("1") {
-            return reexec_breakaway();
+    let result = run();
+    if let Err(error) = &result {
+        // The detached launcher can have null stdio. Keep
+        // startup failures beside this launch's DB instead of losing the cause.
+        let args: Vec<String> = env::args().skip(1).collect();
+        if let Some(db) = arg_option(&args, "--db") {
+            let file = format!("{db}.launcher.log");
+            if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(file) {
+                let _ = writeln!(log, "{} {error}", utc_now_iso());
+            }
         }
     }
+    result
+}
+
+fn run() -> Result<(), String> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("goalport-core-launcher {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // Electron already starts this launcher detached. Create Core directly:
+    // repeating a breakaway in a second launcher can be denied by nested jobs.
+    // Core's own creation flags and full READY identity gate remain unchanged.
     let mut args = env::args().skip(1);
     let core = args
         .next()
@@ -119,46 +137,6 @@ fn main() -> Result<(), String> {
             wait_launch_ready(&launch_ready_path(&db), &expectation)?;
         }
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn reexec_breakaway() -> Result<(), String> {
-    let self_exe = env::current_exe().map_err(|error| error.to_string())?;
-    let args: Vec<String> = env::args().skip(1).collect();
-    let mut command = Command::new(&self_exe);
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env("GOALPORT_LAUNCHER_REEXEC", "1");
-    if env::var("GOALPORT_LAUNCHER_PARENT_PID")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        command.env(
-            "GOALPORT_LAUNCHER_PARENT_PID",
-            observed_parent_pid().to_string(),
-        );
-    }
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(
-            CREATE_BREAKAWAY_FROM_JOB
-                | CREATE_NEW_PROCESS_GROUP
-                | CREATE_NO_WINDOW
-                | DETACHED_PROCESS,
-        );
-    }
-    command
-        .spawn()
-        .map_err(|error| format!("unable to reexec launcher outside the UI job: {error}"))?;
     Ok(())
 }
 

@@ -290,6 +290,9 @@ pub struct RuntimeManager {
     /// Minted once per manager (a Core restart yields a new one) and joined with `seq` into
     /// `registration_identity`, the persisted name of one registration.
     instance: String,
+    /// Captured once when Core starts. An isolated synthetic profile may never
+    /// cross the in-process Scenario boundary into a native provider process.
+    synthetic_only: bool,
 }
 
 /// In-process manager counter: two managers built in the same nanosecond still get distinct
@@ -320,6 +323,12 @@ impl Default for RuntimeManager {
 
 impl RuntimeManager {
     pub fn new() -> Self {
+        Self::with_synthetic_only(
+            std::env::var("GOALPORT_TEST_SYNTHETIC_ONLY").as_deref() == Ok("1"),
+        )
+    }
+
+    fn with_synthetic_only(synthetic_only: bool) -> Self {
         Self {
             attempts: HashMap::new(),
             selected_provider: HashMap::new(),
@@ -332,7 +341,32 @@ impl RuntimeManager {
                 MANAGER_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
                 os_random_u128()
             ),
+            synthetic_only,
         }
+    }
+
+    /// Explicit constructor for in-process firewall tests. It avoids mutating
+    /// process-global environment variables in a parallel Rust test runner.
+    pub fn new_synthetic_only() -> Self {
+        Self::with_synthetic_only(true)
+    }
+
+    pub fn ensure_provider_allowed(&self, provider: &str) -> Result<(), AdapterError> {
+        if self.synthetic_only && !provider.trim().eq_ignore_ascii_case("scenario") {
+            return Err(AdapterError::Unsupported(format!(
+                "test profile permits only the in-process Scenario Runtime; native provider {} is refused",
+                provider.trim()
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_attempt_allowed(&self, attempt_id: &str) -> Result<(), AdapterError> {
+        let provider = self
+            .selected_provider
+            .get(attempt_id)
+            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+        self.ensure_provider_allowed(provider)
     }
 
     /// The binding a `select_runtime` call with these arguments would adopt,
@@ -723,6 +757,7 @@ impl RuntimeManager {
                 "attempt {attempt_id} already has a registered Runtime; it is kept, not replaced"
             )));
         }
+        self.ensure_provider_allowed(&provider)?;
         let version = version.into();
         let binding = Self::intended_binding(&provider, executable, version.clone(), workspace_root)?;
         let executable = binding.executable.clone();
@@ -788,6 +823,7 @@ impl RuntimeManager {
         attempt_id: &str,
         request: &SessionRequest,
     ) -> Result<RuntimeSessionResult, AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
         let runtime = self
             .attempts
             .get_mut(attempt_id)
@@ -810,6 +846,7 @@ impl RuntimeManager {
         attempt_id: &str,
         request: &PromptRequest,
     ) -> Result<RuntimeSendResult, AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
         let runtime = self
             .attempts
             .get_mut(attempt_id)
@@ -839,6 +876,7 @@ impl RuntimeManager {
         attempt_id: &str,
         response: PermissionResponse,
     ) -> Result<(), AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
         let runtime = self
             .attempts
             .get_mut(attempt_id)
@@ -904,6 +942,7 @@ impl RuntimeManager {
         attempt_id: &str,
         session_id: &str,
     ) -> Result<RuntimeSessionResult, AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
         let runtime = self
             .attempts
             .get_mut(attempt_id)
@@ -939,6 +978,7 @@ impl RuntimeManager {
         attempt_id: &str,
         request: &SessionRequest,
     ) -> Result<RuntimeSessionResult, AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
         request.validate()?;
         if request.attempt_id != attempt_id {
             return Err(AdapterError::InvalidRequest(
@@ -5775,6 +5815,59 @@ fn native_approval_policy() -> Result<String, AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_firewall_blocks_native_session_resume_and_send_before_spawn() {
+        let workspace = PathBuf::from("Z:\\goalport-does-not-exist");
+        let mut manager = RuntimeManager::with_synthetic_only(false);
+        manager
+            .select_runtime(
+                "attempt-firewall",
+                "codex",
+                Some(workspace.join("codex.exe")),
+                "test",
+                &workspace,
+            )
+            .unwrap();
+        assert_eq!(manager.process_started("attempt-firewall"), Some(false));
+        manager.synthetic_only = true;
+        let session = SessionRequest {
+            campaign_id: Some("campaign-firewall".into()),
+            task_id: "task-firewall".into(),
+            attempt_id: "attempt-firewall".into(),
+            workspace_root: workspace,
+            resume_session: None,
+        };
+        for error in [
+            manager.create_session("attempt-firewall", &session).unwrap_err(),
+            manager
+                .resume_session("attempt-firewall", "native-session")
+                .unwrap_err(),
+            manager
+                .permission_response(
+                    "attempt-firewall",
+                    PermissionResponse {
+                        request_id: "permission-firewall".into(),
+                        allow: true,
+                    },
+                )
+                .unwrap_err(),
+            manager
+                .send_prompt(
+                    "attempt-firewall",
+                    &PromptRequest {
+                        attempt_id: "attempt-firewall".into(),
+                        text: "must not dispatch".into(),
+                        idempotency_key: "firewall-send".into(),
+                    },
+                )
+                .unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("test profile permits only"));
+        }
+        assert_eq!(manager.process_started("attempt-firewall"), Some(false));
+        assert_eq!(manager.native_pid("attempt-firewall"), None);
+    }
 
     #[test]
     fn codex_agent_delta_is_normalized_to_visible_text() {

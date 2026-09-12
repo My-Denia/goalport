@@ -17,6 +17,15 @@ export type EvidenceState = "verified" | "needs-review" | "stale" | "unavailable
 export type ProviderSupport = "supported" | "partial" | "unsupported" | "unknown";
 export type AttemptState = "active" | "waiting" | "completed" | "failed" | "uncertain";
 
+/** Transport-local result metadata. CoreSnapshot itself remains the durable projection. */
+export interface CoreCommandOutcome {
+  kind: "accepted" | "refused" | "transport-error";
+  requestId: string;
+  messageType: string;
+  duplicate?: boolean;
+  error?: string;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;
@@ -61,7 +70,8 @@ export interface TimelineItem {
 }
 
 export interface RuntimeProfile {
-  id: "claude" | "codex" | "grok" | "scenario";
+  /** Core-owned Runtime identity. Unknown ids stay unknown instead of becoming Codex. */
+  id: string;
   name: string;
   version: string;
   support: ProviderSupport;
@@ -147,7 +157,7 @@ export interface CoreSnapshot {
     id: string;
     title: string;
     acceptance: string;
-    state: "in-progress" | "blocked" | "complete";
+    state: "waiting" | "in-progress" | "blocked" | "complete";
   };
   attempt: AttemptSummary;
   timeline: TimelineItem[];
@@ -159,6 +169,8 @@ export interface CoreSnapshot {
   relatedHolds: StopResponsibilitySummary[];
   preview: boolean;
   notices: string[];
+  /** Added by the desktop client only for the Promise that completed a command. */
+  commandOutcome?: CoreCommandOutcome;
 }
 
 const initialTimeline: TimelineItem[] = [
@@ -394,11 +406,11 @@ export const EMPTY_SNAPSHOT: CoreSnapshot = {
   project: { id: "", name: "No project", workspaceRoot: "", color: "slate" },
   campaigns: [],
   activeCampaignId: "",
-  activeTask: { id: "", title: "No task selected", acceptance: "", state: "in-progress" },
-  attempt: { id: "", taskId: "", provider: "", role: "executor", state: "uncertain", sessionLabel: "Core is not connected", sessionHash: undefined, eventCount: 0 },
+  activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" },
+  attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No Runtime selected", sessionHash: undefined, eventCount: 0 },
   timeline: [],
   cursor: 0,
-  runtimes: DEMO_SNAPSHOT.runtimes,
+  runtimes: [],
   decisions: [],
   evidence: [],
   stopResponsibility: null,
@@ -535,34 +547,34 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
   const raw = asRecord(input);
   if (!raw || !asRecord(raw.project) || !Array.isArray(raw.campaigns) || !Array.isArray(raw.timeline)) return null;
   const rawProject = asRecord(raw.project) ?? {};
-  const rawCampaigns = raw.campaigns.map(normalizeCampaign);
-  const rawTimeline = raw.timeline.map(normalizeTimelineItem);
+  const rawCampaigns = raw.campaigns.map(normalizeCampaign).filter(isPresent);
+  const rawTimeline = raw.timeline.map(normalizeTimelineItem).filter(isPresent);
   const rawAttempt = normalizeAttempt(raw.attempt);
   const rawActiveTask = normalizeActiveTask(raw.activeTask ?? raw.active_task);
   return {
-    ...DEMO_SNAPSHOT,
-    protocolVersion: asText(raw.protocolVersion ?? raw.protocol_version, DEMO_SNAPSHOT.protocolVersion),
-    buildId: asText(raw.buildId ?? raw.build_id, DEMO_SNAPSHOT.buildId),
+    ...EMPTY_SNAPSHOT,
+    protocolVersion: asText(raw.protocolVersion ?? raw.protocol_version, EMPTY_SNAPSHOT.protocolVersion),
+    buildId: asText(raw.buildId ?? raw.build_id, EMPTY_SNAPSHOT.buildId),
     connection: normalizeConnection(raw.connection),
     projects: Array.isArray(raw.projects)
-      ? raw.projects.map(normalizeProject)
-      : [normalizeProject(raw.project)],
+      ? raw.projects.map(normalizeProject).filter(isPresent)
+      : [],
     selectedProjectId: asText(raw.selectedProjectId ?? raw.selected_project_id, asText(rawProject.id, "")),
     project: {
-      id: asText(rawProject.id, DEMO_SNAPSHOT.project.id),
-      name: asText(rawProject.name, DEMO_SNAPSHOT.project.name),
-      workspaceRoot: asText(rawProject.workspaceRoot ?? rawProject.workspace_root, DEMO_SNAPSHOT.project.workspaceRoot),
-      color: asText(rawProject.color, DEMO_SNAPSHOT.project.color)
+      id: asText(rawProject.id, ""),
+      name: asText(rawProject.name, "No workspace selected"),
+      workspaceRoot: asText(rawProject.workspaceRoot ?? rawProject.workspace_root, ""),
+      color: asText(rawProject.color, "slate")
     },
     campaigns: rawCampaigns,
-    activeCampaignId: asText(raw.activeCampaignId ?? raw.active_campaign_id, rawCampaigns[0]?.id ?? ""),
+    activeCampaignId: asText(raw.activeCampaignId ?? raw.active_campaign_id, ""),
     activeTask: rawActiveTask,
     attempt: rawAttempt,
     timeline: rawTimeline,
     cursor: asNumber(raw.cursor, rawTimeline.length),
-    runtimes: Array.isArray(raw.runtimes) ? raw.runtimes.map(normalizeRuntime) : DEMO_SNAPSHOT.runtimes,
-    decisions: Array.isArray(raw.decisions) ? raw.decisions.map(normalizeDecision) : DEMO_SNAPSHOT.decisions,
-    evidence: Array.isArray(raw.evidence) ? raw.evidence.map(normalizeEvidence) : DEMO_SNAPSHOT.evidence,
+    runtimes: Array.isArray(raw.runtimes) ? raw.runtimes.map(normalizeRuntime).filter(isPresent) : [],
+    decisions: Array.isArray(raw.decisions) ? raw.decisions.map(normalizeDecision).filter(isPresent) : [],
+    evidence: Array.isArray(raw.evidence) ? raw.evidence.map(normalizeEvidence).filter(isPresent) : [],
     stopResponsibility: normalizeStopResponsibility(raw.stopResponsibility ?? raw.stop_responsibility),
     relatedHolds: Array.isArray(raw.relatedHolds ?? raw.related_holds)
       ? ((raw.relatedHolds ?? raw.related_holds) as unknown[])
@@ -570,7 +582,8 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
           .filter((hold): hold is StopResponsibilitySummary => hold !== null)
       : [],
     preview: raw.preview === true,
-    notices: Array.isArray(raw.notices) ? raw.notices.map((notice) => asText(notice, "")).filter(Boolean) : DEMO_SNAPSHOT.notices
+    notices: Array.isArray(raw.notices) ? raw.notices.map((notice) => asText(notice, "")).filter(Boolean) : [],
+    commandOutcome: undefined
   };
 }
 
@@ -588,10 +601,16 @@ function normalized(value: unknown, fallback: string): string {
   return asText(value, fallback).trim().toLowerCase().replace(/_/g, "-").replace(/\s+/g, "-");
 }
 
-function normalizeProject(value: unknown): ProjectSummary {
+function isPresent<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+function normalizeProject(value: unknown): ProjectSummary | null {
   const raw = asRecord(value) ?? {};
+  const id = optionalText(raw.id);
+  if (!id) return null;
   return {
-    id: asText(raw.id, "project-unknown"),
+    id,
     name: asText(raw.name, "Project"),
     workspaceRoot: asText(raw.workspaceRoot ?? raw.workspace_root, ""),
     color: asText(raw.color, "violet")
@@ -599,18 +618,20 @@ function normalizeProject(value: unknown): ProjectSummary {
 }
 
 function normalizeConnection(value: unknown): ConnectionState {
-  const state = normalized(value, "connected");
+  const state = normalized(value, "disconnected");
   if (state === "disconnected" || state === "reconnecting" || state === "degraded") return state;
-  return "connected";
+  return state === "connected" ? "connected" : "disconnected";
 }
 
-function normalizeCampaign(value: unknown): CampaignSummary {
+function normalizeCampaign(value: unknown): CampaignSummary | null {
   const raw = asRecord(value) ?? {};
+  const id = optionalText(raw.id);
+  if (!id) return null;
   const title = asText(raw.title ?? raw.name, "Untitled campaign");
   const state = normalized(raw.state, "active");
   return {
-    id: asText(raw.id, `campaign-${Math.random().toString(16).slice(2)}`),
-    projectId: asText(raw.projectId ?? raw.project_id, DEMO_SNAPSHOT.project.id),
+    id,
+    projectId: asText(raw.projectId ?? raw.project_id, ""),
     title,
     goal: asText(raw.goal, title),
     state: state === "paused" || state === "complete" || state === "blocked" ? state : "active",
@@ -620,13 +641,15 @@ function normalizeCampaign(value: unknown): CampaignSummary {
   };
 }
 
-function normalizeTimelineItem(value: unknown): TimelineItem {
+function normalizeTimelineItem(value: unknown): TimelineItem | null {
   const raw = asRecord(value) ?? {};
+  const id = optionalText(raw.id);
+  if (!id) return null;
   const kindValue = normalized(raw.kind, "message");
   const kind: TimelineKind = isTimelineKind(kindValue) ? kindValue : "message";
   const details = Array.isArray(raw.details) ? raw.details.map((detail) => asText(detail, "")).filter(Boolean) : undefined;
   return {
-    id: asText(raw.id, `timeline-${Math.random().toString(16).slice(2)}`),
+    id,
     kind,
     actor: asText(raw.actor ?? raw.author, "Core"),
     title: asText(raw.title, KIND_META_TITLE[kind]),
@@ -666,37 +689,39 @@ function normalizeActiveTask(value: unknown): CoreSnapshot["activeTask"] {
   const raw = asRecord(value) ?? {};
   const state = normalized(raw.state, "in-progress");
   return {
-    id: asText(raw.id, DEMO_SNAPSHOT.activeTask.id),
-    title: asText(raw.title, DEMO_SNAPSHOT.activeTask.title),
-    acceptance: asText(raw.acceptance, DEMO_SNAPSHOT.activeTask.acceptance),
-    state: state === "blocked" || state === "complete" ? state : "in-progress"
+    id: asText(raw.id, ""),
+    title: asText(raw.title, "No task selected"),
+    acceptance: asText(raw.acceptance, ""),
+    state: state === "waiting" || state === "blocked" || state === "complete" ? state : "in-progress"
   };
 }
 
 function normalizeAttempt(value: unknown): AttemptSummary {
   const raw = asRecord(value) ?? {};
-  const state = normalized(raw.state, "active");
+  const state = normalized(raw.state, "uncertain");
   const role = normalized(raw.role, "executor");
   return {
-    id: asText(raw.id, DEMO_SNAPSHOT.attempt.id),
-    taskId: asText(raw.taskId ?? raw.task_id, DEMO_SNAPSHOT.attempt.taskId),
-    provider: asText(raw.provider, DEMO_SNAPSHOT.attempt.provider),
+    id: asText(raw.id, "attempt-unassigned"),
+    taskId: asText(raw.taskId ?? raw.task_id, ""),
+    provider: asText(raw.provider, "unassigned"),
     role: role === "planner" || role === "auditor" ? role : "executor",
     state: state === "waiting" || state === "completed" || state === "failed" || state === "uncertain" ? state : "active",
-    sessionLabel: asText(raw.sessionLabel ?? raw.session_label, DEMO_SNAPSHOT.attempt.sessionLabel),
+    sessionLabel: asText(raw.sessionLabel ?? raw.session_label, "Runtime identity unavailable"),
     sessionHash: typeof raw.sessionHash === "string" ? raw.sessionHash : typeof raw.session_hash === "string" ? raw.session_hash : undefined,
-    eventCount: asNumber(raw.eventCount ?? raw.event_count, DEMO_SNAPSHOT.attempt.eventCount)
+    eventCount: asNumber(raw.eventCount ?? raw.event_count, 0)
   };
 }
 
-function normalizeRuntime(value: unknown): RuntimeProfile {
+function normalizeRuntime(value: unknown): RuntimeProfile | null {
   const raw = asRecord(value) ?? {};
+  const explicitId = optionalText(raw.id);
+  if (!explicitId) return null;
   const name = asText(raw.name, "Runtime");
-  const id = normalized(raw.id ?? name, "codex");
+  const id = normalized(explicitId, "runtime-unknown");
   const support = normalized(raw.support, "unknown");
   const capabilities = asRecord(raw.capabilities) ?? {};
   return {
-    id: id === "claude" || id === "grok" || id === "scenario" ? id : "codex",
+    id,
     name,
     version: asText(raw.version, "unknown"),
     support: support === "supported" || support === "partial" || support === "unsupported" ? support : "unknown",
@@ -712,11 +737,13 @@ function normalizeRuntime(value: unknown): RuntimeProfile {
   };
 }
 
-function normalizeDecision(value: unknown): DecisionRequest {
+function normalizeDecision(value: unknown): DecisionRequest | null {
   const raw = asRecord(value) ?? {};
+  const id = optionalText(raw.id);
+  if (!id) return null;
   const kind = normalized(raw.kind, "permission");
   return {
-    id: asText(raw.id, `decision-${Math.random().toString(16).slice(2)}`),
+    id,
     title: asText(raw.title, "Core decision"),
     kind: kind === "policy" || kind === "handoff" || kind === "lease" ? kind : "permission",
     facts: Array.isArray(raw.facts) ? raw.facts.map((fact) => asText(fact, "")).filter(Boolean) : [],
@@ -726,10 +753,12 @@ function normalizeDecision(value: unknown): DecisionRequest {
   };
 }
 
-function normalizeEvidence(value: unknown): EvidenceSummary {
+function normalizeEvidence(value: unknown): EvidenceSummary | null {
   const raw = asRecord(value) ?? {};
+  const id = optionalText(raw.id);
+  if (!id) return null;
   return {
-    id: asText(raw.id, `evidence-${Math.random().toString(16).slice(2)}`),
+    id,
     claim: asText(raw.claim, "Evidence claim"),
     state: normalizeEvidenceState(raw.state) ?? "needs-review",
     source: asText(raw.source, "Core projection"),

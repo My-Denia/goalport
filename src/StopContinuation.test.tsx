@@ -12,6 +12,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import App from "./App";
+import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, resolveCoreSnapshot } from "./types";
 
 afterEach(() => {
@@ -232,17 +233,11 @@ describe("a refused continuation is never announced as a success", () => {
 
   it("shows Core's reason instead of a success line", async () => {
     const base = { ...DEMO_SNAPSHOT, preview: false, stopResponsibility: HELD, relatedHolds: [] };
-    const refused = {
-      ...base,
-      notices: [
-        "Core refused: attempt attempt-legacy already has a continuation, in C:\\work\\alpha-continued-abc. A repeat click, a reopened window or a replayed request never mints a second one; continue working there, or take a new decision explicitly.",
-        ...DEMO_SNAPSHOT.notices
-      ]
-    };
+    const refusal = "attempt attempt-legacy already has a continuation, in C:\\work\\alpha-continued-abc. A repeat click, a reopened window or a replayed request never mints a second one; continue working there, or take a new decision explicitly.";
     window.__GOALPORT_ELECTRON__ = true;
     window.goalportCore = {
       snapshot: async () => base,
-      command: async () => refused,
+      command: async (request: CoreCommand) => ({ goalportRejected: true, requestId: request.requestId, error: refusal }),
       startCore: async () => ({}),
       openInVsCode: async () => undefined
     } as never;
@@ -266,7 +261,7 @@ describe("a refused continuation is never announced as a success", () => {
     window.__GOALPORT_ELECTRON__ = true;
     window.goalportCore = {
       snapshot: async () => base,
-      command: async () => ({ ...base, notices: [] }),
+      command: async (request: CoreCommand) => ({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: { ...base, notices: [] } }),
       startCore: async () => ({}),
       openInVsCode: async () => undefined
     } as never;

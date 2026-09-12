@@ -1,6 +1,6 @@
 {
   "name": "goalport",
-  "version": "0.1.0-preview.1",
+  "version": "1.0.0-rc.1",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -8,8 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "tsc -b --pretty false",
-    "test": "vitest run src/App.test.tsx src/App.reconnect.test.tsx src/ipc.test.ts src/ipc.tauri.test.ts src/StopContinuation.test.tsx && node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/v1-isolated-env.test.mjs scripts/connected/v1-resume-chain.test.mjs scripts/connected/v1-core-restart.test.mjs",
-    "test:unit": "vitest run src/App.test.tsx src/App.reconnect.test.tsx src/ipc.test.ts src/ipc.tauri.test.ts src/StopContinuation.test.tsx",
+    "test": "vitest run --dir src App.test.tsx App.reconnect.test.tsx ipc.test.ts ipc.tauri.test.ts StopContinuation.test.tsx && node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/v1-isolated-env.test.mjs scripts/connected/v1-resume-chain.test.mjs scripts/connected/v1-core-restart.test.mjs",
+    "test:unit": "vitest run --dir src App.test.tsx App.reconnect.test.tsx ipc.test.ts ipc.tauri.test.ts StopContinuation.test.tsx",
     "test:runtime-preflight": "node --test scripts/verify-runtime-preflight.test.mjs scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs",
     "test:connected-ipc": "node --test scripts/connected/ipc-client.test.mjs scripts/connected/strict-predicates.test.mjs",
     "tauri": "tauri",
@@ -35,6 +35,9 @@
     "verify:handoff": "node scripts/connected/verify-handoff.mjs",
     "electron:dev": "electron .",
     "electron:package": "node scripts/connected/package-electron.mjs",
+    "electron:start": "node scripts/desktop/start.mjs",
+    "electron:verify": "node scripts/desktop/verify-package.mjs",
+    "test:desktop": "node --test scripts/desktop/package.test.mjs scripts/desktop/launch.test.mjs scripts/desktop/docs-ci.test.mjs",
     "tauri:build:release": "cargo build --release -p goalport-core -p goalport-core-launcher && tauri build --ci"
   },
   "dependencies": {
@@ -56,5 +59,8 @@
     "vite": "8.2.2",
     "vitest": "4.1.11"
   },
-  "packageManager": "pnpm@11.22.0"
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
 }

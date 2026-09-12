@@ -1,5 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getCoreClient, reusableAttemptId, type CoreCommand } from "./ipc";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { getCoreClient, persistedAttemptId, reusableAttemptId, type AppInfo, type CoreCommand } from "./ipc";
 import {
   appendPreviewMessage,
   createPreviewCampaign,
@@ -39,16 +39,80 @@ const EVIDENCE_LABEL: Record<EvidenceState, string> = {
 };
 
 function noticeAfterRuntimeSelect(next: CoreSnapshot, current: string | null): string | null {
-  const notices = next.notices ?? [];
-  const refused = notices.find((notice) => notice.startsWith("Core refused:"));
-  if (refused) return refused;
-  const failed = notices.find(
-    (notice) => notice.startsWith("Core request failed:") || notice.startsWith("Core unavailable")
-  );
-  if (failed || next.connection === "disconnected") {
-    return failed ?? current;
+  return commandFailure(next, "select_runtime") ?? (next.connection === "disconnected" ? current : null);
+}
+
+function commandFailure(next: CoreSnapshot, messageType: string): string | null {
+  const outcome = next.commandOutcome;
+  if (outcome?.messageType === messageType) {
+    if (outcome.kind === "accepted") return null;
+    return outcome.kind === "refused"
+      ? `Core refused: ${outcome.error ?? "request not accepted"}`
+      : `Core request failed: ${outcome.error ?? "transport unavailable"}`;
   }
-  return null;
+  const notices = next.notices ?? [];
+  const explicit = notices.find((notice) =>
+    notice.startsWith("Core refused:")
+    || notice.startsWith("Core request failed:")
+    || notice.startsWith("Core unavailable")
+  );
+  if (explicit) return explicit;
+  return `Core did not confirm ${messageType.replace(/_/g, " ")}.`;
+}
+
+function attemptIsRoutable(snapshot: CoreSnapshot): boolean {
+  const attemptId = persistedAttemptId(snapshot.attempt.id);
+  const provider = snapshot.attempt.provider.trim().toLowerCase();
+  return Boolean(
+    attemptId
+    && snapshot.activeCampaignId
+    && snapshot.activeTask.id
+    && snapshot.attempt.taskId === snapshot.activeTask.id
+    && provider
+    && provider !== "unassigned"
+    && snapshot.attempt.state !== "uncertain"
+    && snapshot.attempt.state !== "completed"
+    && snapshot.attempt.state !== "failed"
+  );
+}
+
+function attemptDisplay(snapshot: CoreSnapshot): { label: string; detail: string; glyph: string; uncertain: boolean } {
+  const provider = snapshot.attempt.provider.trim();
+  const unassigned = !persistedAttemptId(snapshot.attempt.id) || provider.toLowerCase() === "unassigned";
+  const mismatched = Boolean(snapshot.activeTask.id && snapshot.attempt.taskId !== snapshot.activeTask.id);
+  const uncertain = !unassigned && (snapshot.attempt.state === "uncertain" || mismatched);
+  if (unassigned) return { label: "No Runtime selected", detail: "unassigned", glyph: "–", uncertain: false };
+  if (uncertain) return { label: "Runtime identity uncertain", detail: "send blocked", glyph: "?", uncertain: true };
+  if (provider.toLowerCase() === "scenario") {
+    return { label: "Synthetic Scenario Runtime", detail: `synthetic · ${snapshot.attempt.state}`, glyph: "S", uncertain: false };
+  }
+  return { label: provider, detail: `${snapshot.attempt.role} · ${snapshot.attempt.state}`, glyph: provider[0]?.toUpperCase() ?? "?", uncertain: false };
+}
+
+function scenarioIsActive(snapshot: CoreSnapshot): boolean {
+  return snapshot.attempt.provider.trim().toLowerCase() === "scenario";
+}
+
+function presentedTimelineItem(item: TimelineItem, syntheticScenario: boolean): TimelineItem {
+  if (!syntheticScenario || !/native runtime/i.test(item.actor)) return item;
+  return { ...item, actor: item.actor.replace(/native runtime/gi, "Synthetic Scenario Runtime") };
+}
+
+function presentedSessionLabel(snapshot: CoreSnapshot): string {
+  const label = snapshot.attempt.sessionLabel.trim();
+  if (!scenarioIsActive(snapshot)) return label;
+  const synthetic = label
+    .replace(/native runtime/gi, "Synthetic Scenario Runtime")
+    .replace(/native session/gi, "synthetic session");
+  return `Synthetic Scenario · ${synthetic || "synthetic session"}`;
+}
+
+function commandTargetKey(campaignId: string, taskId: string, attemptId: string): string {
+  return `${campaignId}\u001f${taskId}\u001f${attemptId}`;
+}
+
+function snapshotTargetKey(snapshot: CoreSnapshot): string {
+  return commandTargetKey(snapshot.activeCampaignId, snapshot.activeTask.id, snapshot.attempt.id);
 }
 
 function connectionLabel(snapshot: CoreSnapshot): string {
@@ -58,51 +122,75 @@ function connectionLabel(snapshot: CoreSnapshot): string {
   return "Core disconnected";
 }
 
+function channelLabel(appInfo: AppInfo | null, preview: boolean): string {
+  const channel = appInfo?.channel.trim() || (preview ? "preview" : "rc");
+  const version = appInfo?.version.trim();
+  return `${channel.toUpperCase()}${version ? ` ${version}` : ""}${appInfo?.testMode ? " · TEST" : ""}`;
+}
+
 function App() {
   const client = useMemo(() => getCoreClient(), []);
   const [snapshot, setSnapshot] = useState<CoreSnapshot>(() => client.mode === "browser-preview" ? DEMO_SNAPSHOT : EMPTY_SNAPSHOT);
-  const [draft, setDraft] = useState("");
+  const [campaignDrafts, setCampaignDrafts] = useState<Record<string, string>>({});
   const [workspaceDraft, setWorkspaceDraft] = useState("");
   const [goalDraft, setGoalDraft] = useState("");
-  const [firstRunOpen, setFirstRunOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("firstRun") === "1";
-  });
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   const [activeNotice, setActiveNotice] = useState<string | null>(null);
+  const [targetNotices, setTargetNotices] = useState<Record<string, string>>({});
   const [recoveryBusy, setRecoveryBusy] = useState(false);
-  const [autoStartAttempted, setAutoStartAttempted] = useState(false);
+  const [sendBusy, setSendBusy] = useState(false);
+  const [campaignBusy, setCampaignBusy] = useState(false);
+  const [campaignError, setCampaignError] = useState<string | null>(null);
+  const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
-  const [reconnectAnnounced, setReconnectAnnounced] = useState(false);
+  const selectionIntent = useRef(0);
+  const sendInFlight = useRef(false);
+
+  const draftCampaignId = snapshot.activeCampaignId;
+  const draft = draftCampaignId ? campaignDrafts[draftCampaignId] ?? "" : "";
+
+  function updateVisibleCampaignDraft(value: string) {
+    // Selection is authoritative only after Core returns its projection. While a
+    // selection is pending, the visible composer remains bound to the campaign
+    // still on screen, so keystrokes cannot silently move to the requested one.
+    if (!draftCampaignId) return;
+    setCampaignDrafts((current) => ({ ...current, [draftCampaignId]: value }));
+  }
 
   useEffect(() => {
     let mounted = true;
-    void client.snapshot().then((next) => {
+    let autoStartAttempted = false;
+    const refresh = async (allowStart: boolean) => {
+      const next = await client.snapshot();
       if (!mounted) return;
       setSnapshot(next);
-      if (!autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview") {
-        setAutoStartAttempted(true);
-        void client.startCore().then((started) => {
-          if (mounted) setSnapshot(started);
-        });
-      } else if (!reconnectAnnounced && next.connection === "connected" && client.reconnect) {
-        setReconnectAnnounced(true);
-        void client.reconnect().then((reconnected) => {
-          if (mounted) setSnapshot(reconnected);
-        });
+      if (allowStart && !autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview") {
+        autoStartAttempted = true;
+        const started = await client.startCore();
+        if (mounted) setSnapshot(started);
       }
-    });
+    };
+    void refresh(true);
     const timer = window.setInterval(() => {
       if (!mounted) return;
-      void client.snapshot().then((next) => {
-        if (mounted) setSnapshot(next);
-      });
+      void refresh(false);
     }, 750);
     return () => {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, [client, snapshot.connection, autoStartAttempted, reconnectAnnounced]);
+  }, [client]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (client.appInfo) {
+      void client.appInfo().then((info) => {
+        if (mounted) setAppInfo(info);
+      }).catch(() => undefined);
+    }
+    return () => { mounted = false; };
+  }, [client]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -214,7 +302,10 @@ function App() {
     if (window.goalportCore?.dismissCloseChoice) void window.goalportCore.dismissCloseChoice();
   }
 
-  const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId) ?? snapshot.campaigns[0];
+  const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);
+  const activeTargetKey = snapshotTargetKey(snapshot);
+  const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
+  const syntheticScenario = scenarioIsActive(snapshot);
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -222,20 +313,48 @@ function App() {
       setActiveNotice("Core refused new work while residual execution is unknown and write responsibility is held.");
       return;
     }
-    const message = draft.trim();
-    if (!message) return;
-    const next =
-      client.mode === "browser-preview"
-        ? appendPreviewMessage(snapshot, message)
-        : await client.sendMessage(message, snapshot.activeCampaignId, snapshot.attempt.id);
-    setSnapshot(next);
-    const refusalNotice = next.notices[0]?.startsWith("Core refused:") ? next.notices[0] : null;
-    if (refusalNotice) {
-      setActiveNotice(refusalNotice);
+    if (!attemptIsRoutable(snapshot)) {
+      setActiveNotice(snapshot.attempt.state === "uncertain"
+        ? "Runtime identity is uncertain. Select a Runtime before sending new input."
+        : "Select a Runtime for the active task before sending a message.");
       return;
     }
-    setDraft("");
-    setActiveNotice("Message recorded with a stable command identity. Reconnect will not replay it.");
+    if (sendInFlight.current) return;
+    const submittedDraft = draft;
+    const message = submittedDraft.trim();
+    if (!message) return;
+    const target = {
+      campaignId: snapshot.activeCampaignId,
+      taskId: snapshot.activeTask.id,
+      attemptId: snapshot.attempt.id,
+      selection: selectionIntent.current
+    };
+    const targetKey = commandTargetKey(target.campaignId, target.taskId, target.attemptId);
+    sendInFlight.current = true;
+    setSendBusy(true);
+    try {
+      const next = client.mode === "browser-preview"
+        ? appendPreviewMessage(snapshot, message)
+        : await client.sendMessage(message, target.campaignId, target.attemptId, target.taskId);
+      if (target.selection === selectionIntent.current) setSnapshot(next);
+      const failure = client.mode === "browser-preview" ? null : commandFailure(next, "send_message");
+      const notice = failure
+        ?? `Message recorded for task ${target.taskId} with a stable command identity. Reconnect will not replay it.`;
+      setTargetNotices((current) => ({ ...current, [targetKey]: notice }));
+      if (failure) {
+        if (target.selection === selectionIntent.current) setActiveNotice(failure);
+        return;
+      }
+      setCampaignDrafts((current) => current[target.campaignId] === submittedDraft
+        ? { ...current, [target.campaignId]: "" }
+        : current);
+      if (target.selection === selectionIntent.current) {
+        setActiveNotice(notice);
+      }
+    } finally {
+      sendInFlight.current = false;
+      setSendBusy(false);
+    }
   }
 
   async function handlePermissionDecision(decisionId: string, allow: boolean) {
@@ -243,8 +362,16 @@ function App() {
       setActiveNotice("Permission Allow is blocked while Core holds Stop responsibility. Decline remains available.");
       return;
     }
+    const viewIntent = selectionIntent.current;
     const next = client.mode === "browser-preview" ? resolvePermission(snapshot, allow) : await client.resolveDecision(decisionId, allow);
-    setSnapshot(next);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    if (client.mode !== "browser-preview") {
+      const failure = commandFailure(next, "resolve_decision");
+      if (failure) {
+        setActiveNotice(failure);
+        return;
+      }
+    }
     setActiveNotice(allow ? "Permission allowed once. Session-wide approval remains disabled." : "Permission denied. No write action was sent and automatic retry is disabled.");
     if (client.notify) {
       void client.notify(allow ? "GoalPort decision" : "GoalPort decision", allow ? "Permission allowed once." : "Permission denied.");
@@ -256,8 +383,14 @@ function App() {
       setActiveNotice("Revocation is unavailable until a Core campaign is selected.");
       return;
     }
+    const viewIntent = selectionIntent.current;
     const next = await client.revokeAuthorization(snapshot.activeCampaignId, scope);
-    setSnapshot(next);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    const failure = commandFailure(next, "revoke_authorization");
+    if (failure) {
+      setActiveNotice(failure);
+      return;
+    }
     setActiveNotice(`Current ${scope} authorization revoked. The next related action will re-check current auth.`);
     if (client.notify) void client.notify("GoalPort decision", `Authorization revoked: ${scope}`);
   }
@@ -267,9 +400,10 @@ function App() {
       setActiveNotice("Owner-only requests require a connected Core.");
       return;
     }
+    const viewIntent = selectionIntent.current;
     const next = await client.requestOwnerAction(action, true, true);
-    setSnapshot(next);
-    setActiveNotice(`Owner-only ${action} was blocked. Plan/audit flags do not grant authority.`);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    setActiveNotice(commandFailure(next, "request_owner_action") ?? `Owner-only ${action} was blocked. Plan/audit flags do not grant authority.`);
   }
 
   // A re-check reads current reality and appends one observation. It cannot release
@@ -281,11 +415,12 @@ function App() {
       return;
     }
     setRecoveryBusy(true);
+    const viewIntent = selectionIntent.current;
     try {
       const next = await client.recheckStopResponsibility(attemptId);
-      setSnapshot(next);
-      const refusal = (next.notices || []).find((notice) => notice.startsWith("Core refused:"));
-      if (refusal) setActiveNotice(refusal.replace(/^Core refused:\s*/, "Re-check refused: "));
+      if (viewIntent === selectionIntent.current) setSnapshot(next);
+      const failure = commandFailure(next, "recheck_stop_responsibility");
+      if (failure) setActiveNotice(failure.replace(/^Core (?:refused|request failed):\s*/, "Re-check failed: "));
     } catch (error) {
       setActiveNotice(`Re-check failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -314,17 +449,18 @@ function App() {
     // would refuse. Proposing one anyway would train the user to expect a refusal.
     const suggestion = `${source.replace(/[\/]+$/, "")}-continued-${Date.now().toString(36)}`;
     setRecoveryBusy(true);
+    const viewIntent = selectionIntent.current;
     try {
       const next = await client.continueInIsolatedWorkspace(attemptId, suggestion);
-      setSnapshot(next);
+      if (viewIntent === selectionIntent.current) setSnapshot(next);
       // A Core refusal does NOT reject: `dispatch` returns the previous snapshot with
       // a "Core refused: …" notice prepended. Announcing success on that path would
       // tell the user their work had been carried somewhere it had not -- the exact
       // class of false safety claim this whole feature exists to avoid. So the
       // refusal is detected and shown as a refusal.
-      const refusal = (next.notices || []).find((notice) => notice.startsWith("Core refused:"));
-      if (refusal) {
-        setActiveNotice(refusal.replace(/^Core refused:\s*/, "Continuation refused: "));
+      const failure = commandFailure(next, "continue_in_isolated_workspace");
+      if (failure) {
+        setActiveNotice(failure.replace(/^Core (?:refused|request failed):\s*/, "Continuation refused: "));
         return;
       }
       setActiveNotice(`Continued in ${suggestion}. The original workspace stays held.`);
@@ -349,12 +485,18 @@ function App() {
       setActiveNotice("No second Runtime has a verified capability path for handoff.");
       return;
     }
+    const viewIntent = selectionIntent.current;
     const next = await client.handoff(
       candidate.id,
       snapshot.attempt.id,
       "Continue from the Core generated handoff packet and report the next safe step."
     );
-    setSnapshot(next);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    const failure = commandFailure(next, "handoff");
+    if (failure) {
+      setActiveNotice(failure);
+      return;
+    }
     setActiveNotice(`Core assigned a new ${candidate.name} Attempt from the persisted handoff packet.`);
   }
 
@@ -364,11 +506,29 @@ function App() {
     setActiveNotice("UI is offline. Core keeps committed task state; uncommitted input remains in this window.");
   }
 
+  async function handleInterrupt() {
+    const attemptId = persistedAttemptId(snapshot.attempt.id);
+    if (!client.interrupt || !attemptId || snapshot.attempt.state !== "active") {
+      setActiveNotice("Core has no active Runtime turn to stop.");
+      return;
+    }
+    const viewIntent = selectionIntent.current;
+    const next = await client.interrupt(attemptId);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    const failure = commandFailure(next, "interrupt");
+    if (failure) setActiveNotice(failure);
+  }
+
   async function handleReconnect() {
     const next = client.mode === "browser-preview" ? withConnection(snapshot, "connected") : await client.startCore();
     setSnapshot(next);
+    const failure = client.mode === "browser-preview" || next.commandOutcome?.messageType !== "reconnect"
+      ? null
+      : commandFailure(next, "reconnect");
     setActiveNotice(
-      next.connection === "connected"
+      failure
+        ? failure
+        : next.connection === "connected"
         ? "Reconnected from the Core projection. No prompt was replayed."
         : "Core connection remains unavailable. No prompt was replayed."
     );
@@ -380,22 +540,47 @@ function App() {
 
   async function handleCreateCampaign(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const next =
-      client.mode === "browser-preview"
-        ? createPreviewCampaign(snapshot, workspaceDraft, goalDraft)
-        : await client.createCampaign(workspaceDraft, goalDraft);
-    setSnapshot(next);
-    setWorkspaceDraft("");
-    setGoalDraft("");
-    setFirstRunOpen(false);
-    setActiveNotice("Preview campaign created. Connect Core before assigning work to a Runtime.");
+    if (campaignBusy) return;
+    const workspace = workspaceDraft.trim();
+    const goal = goalDraft.trim();
+    if (!workspace || !goal) return;
+    const intent = ++selectionIntent.current;
+    setCampaignBusy(true);
+    setCampaignError(null);
+    try {
+      const next = client.mode === "browser-preview"
+        ? createPreviewCampaign(snapshot, workspace, goal)
+        : await client.createCampaign(workspace, goal);
+      if (intent !== selectionIntent.current) return;
+      const failure = client.mode === "browser-preview" ? null : commandFailure(next, "create_campaign");
+      if (failure) {
+        setSnapshot(next);
+        setCampaignError(failure);
+        setActiveNotice(failure);
+        return;
+      }
+      setSnapshot(next);
+      setWorkspaceDraft("");
+      setGoalDraft("");
+      setFirstRunOpen(false);
+      setActiveNotice(client.mode === "browser-preview"
+        ? "Synthetic preview campaign created. Connect Core before assigning work to a Runtime."
+        : "Campaign created. Select a Runtime before sending work.");
+    } finally {
+      setCampaignBusy(false);
+    }
   }
 
-  function selectCampaign(campaignId: string) {
+  async function selectCampaign(campaignId: string) {
     const selected = snapshot.campaigns.find((campaign) => campaign.id === campaignId);
     if (!selected || selected.id === snapshot.activeCampaignId) return;
     if (client.selectCampaign) {
-      void client.selectCampaign(campaignId).then(setSnapshot);
+      const intent = ++selectionIntent.current;
+      const next = await client.selectCampaign(campaignId);
+      if (intent !== selectionIntent.current) return;
+      setSnapshot(next);
+      const failure = commandFailure(next, "select_campaign");
+      setActiveNotice(failure);
       return;
     }
     setSnapshot({
@@ -404,6 +589,57 @@ function App() {
       activeTask: { ...snapshot.activeTask, title: selected.activeTaskTitle },
       notices: [`Viewing ${selected.title}. Attempt continuity is read from Core.`, ...snapshot.notices]
     });
+  }
+
+  async function selectProject(projectId: string) {
+    if (!client.selectProject || projectId === snapshot.selectedProjectId) return;
+    const intent = ++selectionIntent.current;
+    const next = await client.selectProject(projectId);
+    if (intent !== selectionIntent.current) return;
+    setSnapshot(next);
+    const failure = commandFailure(next, "select_project");
+    setActiveNotice(failure);
+  }
+
+  async function selectRuntime(provider: string) {
+    if (!client.selectRuntime || !snapshot.activeCampaignId || !snapshot.activeTask.id) {
+      setActiveNotice("Create or select a campaign task before choosing a Runtime.");
+      return;
+    }
+    const intent = ++selectionIntent.current;
+    const campaignId = snapshot.activeCampaignId;
+    const taskId = snapshot.activeTask.id;
+    const attemptId = reusableAttemptId(snapshot.attempt);
+    const next = attemptId
+      ? await client.selectRuntime(provider, campaignId, taskId, attemptId)
+      : await client.selectRuntime(provider, campaignId, taskId);
+    if (intent !== selectionIntent.current) return;
+    setSnapshot(next);
+    setActiveNotice((current) => noticeAfterRuntimeSelect(next, current));
+    if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
+      window.__goalportLastSelectResult = next;
+      window.__goalportLastSnapshot = next;
+    }
+  }
+
+  async function chooseWorkspace() {
+    if (client.mode !== "electron" || !client.chooseWorkspace) return;
+    try {
+      const selected = await client.chooseWorkspace();
+      if (selected) {
+        setWorkspaceDraft(selected);
+        setCampaignError(null);
+      }
+    } catch (error) {
+      const message = `Workspace selection failed: ${error instanceof Error ? error.message : String(error)}`;
+      setCampaignError(message);
+      setActiveNotice(message);
+    }
+  }
+
+  function openCampaignDialog() {
+    setCampaignError(null);
+    setFirstRunOpen(true);
   }
 
   function toggleTimelineItem(id: string) {
@@ -416,20 +652,21 @@ function App() {
       <TopBar
         snapshot={snapshot}
         activeCampaign={activeCampaign}
+        appInfo={appInfo}
         onReconnect={handleReconnect}
         onOffline={handleOffline}
-        onOpenFirstRun={() => setFirstRunOpen(true)}
+        onOpenFirstRun={openCampaignDialog}
         onCloseWindow={handleCloseWindow}
       />
 
       <div className="workspace-grid">
         <ProjectSidebar
           snapshot={snapshot}
-          onSelectCampaign={selectCampaign}
+          onSelectCampaign={(campaignId) => { void selectCampaign(campaignId); }}
           onSelectProject={(projectId) => {
-            if (client.selectProject) void client.selectProject(projectId).then(setSnapshot);
+            void selectProject(projectId);
           }}
-          onNewCampaign={() => setFirstRunOpen(true)}
+          onNewCampaign={openCampaignDialog}
         />
 
         <main className="conversation-column" aria-label="Campaign conversation">
@@ -449,11 +686,19 @@ function App() {
 
             <div className="timeline-list">
               {snapshot.timeline.map((item) => (
-                <TimelineCard key={item.id} item={item} expanded={Boolean(expandedItems[item.id])} onToggle={toggleTimelineItem} />
+                <TimelineCard key={item.id} item={presentedTimelineItem(item, syntheticScenario)} expanded={Boolean(expandedItems[item.id])} onToggle={toggleTimelineItem} />
               ))}
             </div>
           </div>
-          <Composer draft={draft} connection={snapshot.connection} held={snapshot.stopResponsibility?.writeResponsibility === "held"} onChange={setDraft} onSubmit={handleSend} />
+          <Composer
+            draft={draft}
+            connection={snapshot.connection}
+            held={snapshot.stopResponsibility?.writeResponsibility === "held"}
+            ready={attemptIsRoutable(snapshot)}
+            busy={sendBusy}
+            onChange={updateVisibleCampaignDraft}
+            onSubmit={handleSend}
+          />
         </main>
 
         <ContextRail
@@ -465,47 +710,49 @@ function App() {
           onReconnect={handleReconnect}
           onOffline={handleOffline}
           onHandoff={() => { void handleHandoff(); }}
-          onSelectRuntime={(provider) => {
-            if (client.selectRuntime && snapshot.activeCampaignId && snapshot.activeTask.id) {
-              const attemptId = reusableAttemptId(snapshot.attempt);
-              const pending = attemptId
-                ? client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id, attemptId)
-                : client.selectRuntime(provider, snapshot.activeCampaignId, snapshot.activeTask.id);
-              void pending.then((next) => {
-                setSnapshot(next);
-                setActiveNotice((current) => noticeAfterRuntimeSelect(next, current));
-                if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
-                  window.__goalportLastSelectResult = next;
-                  window.__goalportLastSnapshot = next;
-                }
-              });
-            }
-          }}
+          onSelectRuntime={(provider) => { void selectRuntime(provider); }}
           onRecheck={(attemptId) => { void handleRecheck(attemptId); }}
           onContinue={(attemptId) => { void handleContinue(attemptId); }}
           recoveryBusy={recoveryBusy}
-          onInterrupt={() => {
-            if (client.interrupt && snapshot.attempt.id) void client.interrupt(snapshot.attempt.id).then(setSnapshot);
-          }}
+          onInterrupt={() => { void handleInterrupt(); }}
           onRevoke={(scope) => { void handleRevoke(scope); }}
           onOwnerAction={(action) => { void handleOwnerAction(action); }}
           onOpenInVsCode={() => {
             void client.openInVsCode(snapshot.project.workspaceRoot).catch(() => {
-              setActiveNotice("VS Code launcher is unavailable in this preview environment.");
+              setActiveNotice("VS Code launcher is unavailable for the selected workspace.");
             });
           }}
         />
       </div>
 
-      <FooterBar snapshot={snapshot} activeNotice={activeNotice} onDismissNotice={() => setActiveNotice(null)} />
+      <FooterBar
+        snapshot={snapshot}
+        appInfo={appInfo}
+        activeNotice={displayedNotice}
+        onDismissNotice={() => {
+          setActiveNotice(null);
+          setTargetNotices((current) => {
+            const next = { ...current };
+            delete next[activeTargetKey];
+            return next;
+          });
+        }}
+      />
 
       {firstRunOpen ? (
         <FirstRunDialog
           workspace={workspaceDraft}
           goal={goalDraft}
+          preview={client.mode === "browser-preview"}
+          busy={campaignBusy}
+          error={campaignError}
+          canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
           onWorkspaceChange={setWorkspaceDraft}
           onGoalChange={setGoalDraft}
-          onCancel={() => setFirstRunOpen(false)}
+          onBrowse={() => { void chooseWorkspace(); }}
+          onCancel={() => {
+            if (!campaignBusy) setFirstRunOpen(false);
+          }}
           onSubmit={handleCreateCampaign}
         />
       ) : null}
@@ -527,14 +774,16 @@ function App() {
 interface TopBarProps {
   snapshot: CoreSnapshot;
   activeCampaign: CoreSnapshot["campaigns"][number] | undefined;
+  appInfo: AppInfo | null;
   onReconnect: () => void;
   onOffline: () => void;
   onOpenFirstRun: () => void;
   onCloseWindow: () => void;
 }
 
-function TopBar({ snapshot, activeCampaign, onReconnect, onOffline, onOpenFirstRun, onCloseWindow }: TopBarProps) {
+function TopBar({ snapshot, activeCampaign, appInfo, onReconnect, onOffline, onOpenFirstRun, onCloseWindow }: TopBarProps) {
   const connected = snapshot.connection === "connected";
+  const channel = (appInfo?.channel || (snapshot.preview ? "preview" : "rc")).toUpperCase();
   return (
     <header className="topbar" role="banner">
       <div className="brand-lockup">
@@ -544,7 +793,7 @@ function TopBar({ snapshot, activeCampaign, onReconnect, onOffline, onOpenFirstR
           <span />
         </div>
         <span className="brand-name">GoalPort</span>
-        <span className="brand-version">PREVIEW</span>
+        <span className="brand-version">{channelLabel(appInfo, snapshot.preview)}</span>
       </div>
 
       <div className="breadcrumb" aria-label="Current campaign">
@@ -560,7 +809,7 @@ function TopBar({ snapshot, activeCampaign, onReconnect, onOffline, onOpenFirstR
         </span>
         <span className="mode-pill">
           <span className="mode-dot" aria-hidden="true" />
-          Assisted · Preview
+          {snapshot.preview ? "Synthetic Scenario" : `Assisted · ${channel}`}
         </span>
         {connected ? (
           <button className="icon-button" type="button" aria-label="Simulate offline" onClick={onOffline} title="Simulate offline">
@@ -600,7 +849,7 @@ function ProjectSidebar({ snapshot, onSelectCampaign, onSelectProject, onNewCamp
           <p className="eyebrow">WORKSPACE</p>
           <h2>Projects</h2>
         </div>
-        <button className="icon-button subtle" type="button" aria-label="Add project" title="Add project">
+        <button className="icon-button subtle" type="button" aria-label="Add project" title="Add project" onClick={onNewCampaign}>
           ＋
         </button>
       </div>
@@ -666,6 +915,7 @@ function ProjectSidebar({ snapshot, onSelectCampaign, onSelectProject, onNewCamp
 }
 
 function ConversationHeading({ snapshot, activeCampaign }: { snapshot: CoreSnapshot; activeCampaign: CoreSnapshot["campaigns"][number] | undefined }) {
+  const attempt = attemptDisplay(snapshot);
   return (
     <div className="conversation-heading">
       <div className="conversation-heading-main">
@@ -679,10 +929,10 @@ function ConversationHeading({ snapshot, activeCampaign }: { snapshot: CoreSnaps
       </div>
       <div className="conversation-heading-side">
         <span className={`task-state task-state-${snapshot.activeTask.state}`}>{snapshot.activeTask.state.replace("-", " ")}</span>
-        <span className="attempt-chip">
-          <span className="provider-avatar provider-codex">C</span>
-          <span>{snapshot.attempt.provider}</span>
-          <span className="attempt-role">{snapshot.attempt.role}</span>
+        <span className="attempt-chip" data-identity-uncertain={attempt.uncertain ? "true" : "false"}>
+          <span className={`provider-avatar provider-${snapshot.attempt.provider.toLowerCase()}`}>{attempt.glyph}</span>
+          <span>{attempt.label}</span>
+          <span className="attempt-role">{attempt.detail}</span>
         </span>
       </div>
     </div>
@@ -740,12 +990,14 @@ interface ComposerProps {
   draft: string;
   connection: CoreSnapshot["connection"];
   held: boolean;
+  ready: boolean;
+  busy: boolean;
   onChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }
 
-function Composer({ draft, connection, held, onChange, onSubmit }: ComposerProps) {
-  const canSubmit = draft.trim().length > 0 && connection === "connected" && !held;
+function Composer({ draft, connection, held, ready, busy, onChange, onSubmit }: ComposerProps) {
+  const canSubmit = draft.trim().length > 0 && connection === "connected" && !held && ready && !busy;
   return (
     <form className="composer" aria-label="Message composer" onSubmit={onSubmit}>
       <div className="composer-inner">
@@ -753,7 +1005,13 @@ function Composer({ draft, connection, held, onChange, onSubmit }: ComposerProps
           aria-label="Message composer"
           value={draft}
           onChange={(event) => onChange(event.target.value)}
-          placeholder={held ? "Core holds write responsibility while residual execution is unknown…" : connection === "connected" ? "Ask the active Runtime to continue…" : "Reconnect Core before sending a new message…"}
+          placeholder={held
+            ? "Core holds write responsibility while residual execution is unknown…"
+            : connection !== "connected"
+              ? "Reconnect Core before sending a new message…"
+              : ready
+                ? "Ask the active Runtime to continue…"
+                : "Select a Runtime before sending work…"}
           rows={2}
           disabled={connection !== "connected" || held}
         />
@@ -762,16 +1020,16 @@ function Composer({ draft, connection, held, onChange, onSubmit }: ComposerProps
             <button className="composer-tool" type="button" aria-label="Attach context" title="Attach context">
               ⊕ <span>Context</span>
             </button>
-            <span className="composer-hint">Sent to the active Attempt · no hidden planner</span>
+            <span className="composer-hint">Draft stays with the campaign shown · sent to its active Attempt</span>
           </div>
           <button className="send-button" type="submit" aria-label="Send message" disabled={!canSubmit}>
-            <span>Send</span>
+            <span>{busy ? "Sending…" : "Send"}</span>
             <span className="send-arrow" aria-hidden="true">↗</span>
           </button>
         </div>
       </div>
       <div className="composer-footnote">
-        <span><span className="lock-glyph" aria-hidden="true">⌑</span> Local-only preview</span>
+        <span><span className="lock-glyph" aria-hidden="true">⌑</span> Local Core projection</span>
         <span>Enter to send · Shift + Enter for a new line</span>
       </div>
     </form>
@@ -939,6 +1197,10 @@ function ContextRail({ snapshot, onPermissionDecision, onKeepWaiting, onReconnec
   const responsibilityHeld = snapshot.stopResponsibility?.writeResponsibility === "held";
   const ownStopRequested = responsibilityHeld && snapshot.stopResponsibility?.attemptId === snapshot.attempt.id;
   const stopDisabled = ownStopRequested || snapshot.attempt.state !== "active";
+  const hasTask = Boolean(snapshot.activeCampaignId && snapshot.activeTask.id);
+  const routable = attemptIsRoutable(snapshot);
+  const attempt = attemptDisplay(snapshot);
+  const syntheticScenario = scenarioIsActive(snapshot);
   return (
     <aside className="context-rail" aria-label="Runtime context">
       <div className="rail-scroll">
@@ -1006,7 +1268,7 @@ function ContextRail({ snapshot, onPermissionDecision, onKeepWaiting, onReconnec
             <span className="routing-mode-disabled">Automatic · gated</span>
           </div>
           <div className="runtime-list">
-            {snapshot.runtimes.map((runtime) => <RuntimeRow key={runtime.id} runtime={runtime} onSelect={onSelectRuntime} blocked={responsibilityHeld} />)}
+            {snapshot.runtimes.map((runtime) => <RuntimeRow key={runtime.id} runtime={runtime} onSelect={onSelectRuntime} blocked={responsibilityHeld || !hasTask || snapshot.connection !== "connected"} />)}
           </div>
           <div className="routing-phrases" aria-label="Routing actions">
             <span>Assign next step to…</span>
@@ -1032,27 +1294,32 @@ function ContextRail({ snapshot, onPermissionDecision, onKeepWaiting, onReconnec
               <span className="rail-icon rail-icon-violet" aria-hidden="true">◌</span>
               <div>
                 <p className="eyebrow">CURRENT RESPONSIBILITY</p>
-                <h2 id="attempt-context-title">Active Attempt</h2>
+                <h2 id="attempt-context-title">{routable ? "Active Attempt" : "Runtime Attempt"}</h2>
               </div>
             </div>
-            <span className="active-state-dot" aria-label="Active" />
+            <span className="active-state-dot" style={{ opacity: routable ? 1 : 0.35 }} aria-label={routable ? "Active" : attempt.detail} />
           </div>
           <div className="attempt-detail-card">
             <div className="attempt-detail-header">
-              <span className="provider-avatar provider-codex">C</span>
+              <span className={`provider-avatar provider-${snapshot.attempt.provider.toLowerCase()}`}>{attempt.glyph}</span>
               <div>
-                <strong>{snapshot.attempt.provider}</strong>
-                <span>{snapshot.attempt.role} · {snapshot.attempt.state}</span>
+                <strong>{attempt.label}</strong>
+                <span>{attempt.detail}</span>
+                {syntheticScenario ? <span>{presentedSessionLabel(snapshot)}</span> : null}
               </div>
               <span className="attempt-event-count">{snapshot.attempt.eventCount} events</span>
             </div>
-            <div className="attempt-meter"><span style={{ width: `${Math.min(92, 24 + snapshot.attempt.eventCount * 2)}%` }} /></div>
-            <p>Long-running work remains Core-owned while this window is closed. Session identity stays in diagnostic detail.</p>
+            {routable ? <div className="attempt-meter"><span style={{ width: `${Math.min(92, 24 + snapshot.attempt.eventCount * 2)}%` }} /></div> : null}
+            <p>{routable
+              ? "Long-running work remains Core-owned while this window is closed. Session identity stays in diagnostic detail."
+              : attempt.uncertain
+                ? "Core could not bind this view to a trustworthy Runtime identity. Sending stays blocked until you select a Runtime."
+                : "Select a Runtime explicitly. Creating a campaign does not send its goal as a prompt."}</p>
           </div>
           <div className="rail-actions">
-            <button className="rail-action" type="button" onClick={onOpenInVsCode}><span aria-hidden="true">↗</span> Open in VS Code</button>
-            <button className="rail-action" type="button" onClick={onHandoff} disabled={responsibilityHeld}><span aria-hidden="true">⇄</span> Assign next step</button>
-            <button className="rail-action rail-action-danger" type="button" onClick={onInterrupt} disabled={stopDisabled}><span aria-hidden="true">■</span> {ownStopRequested ? "Stop already requested" : stopDisabled ? "No active turn" : "Stop native turn"}</button>
+            <button className="rail-action" type="button" onClick={onOpenInVsCode} disabled={!snapshot.project.workspaceRoot}><span aria-hidden="true">↗</span> Open in VS Code</button>
+            <button className="rail-action" type="button" onClick={onHandoff} disabled={responsibilityHeld || !routable}><span aria-hidden="true">⇄</span> Assign next step</button>
+            <button className="rail-action rail-action-danger" type="button" onClick={onInterrupt} disabled={stopDisabled}><span aria-hidden="true">■</span> {ownStopRequested ? "Stop already requested" : stopDisabled ? "No active turn" : syntheticScenario ? "Stop synthetic Scenario turn" : "Stop native turn"}</button>
           </div>
         </section>
 
@@ -1105,7 +1372,7 @@ function ContextRail({ snapshot, onPermissionDecision, onKeepWaiting, onReconnec
         </section>
 
         <section className="rail-panel boundary-panel" aria-labelledby="boundary-title">
-          <div className="boundary-topline"><span className="preview-ribbon">PREVIEW</span><span>V1 boundary</span></div>
+          <div className="boundary-topline"><span className="preview-ribbon">{snapshot.preview ? "SYNTHETIC" : "RC"}</span><span>V1 boundary</span></div>
           <h2 id="boundary-title">You stay in control of the edges.</h2>
           <ul>
             <li>Core reconnect is available; session attachment remains capability-gated.</li>
@@ -1126,7 +1393,7 @@ function RuntimeRow({ runtime, onSelect, blocked }: { runtime: RuntimeProfile; o
       <summary>
         <span className={`provider-avatar provider-${runtime.id}`}>{runtime.name[0]}</span>
         <span className="runtime-copy"><strong>{runtime.name}</strong><small>{runtime.subtitle}</small></span>
-        <span className={`support-chip support-${runtime.support}`}>{runtime.support === "partial" ? "Preview" : runtime.support}</span>
+        <span className={`support-chip support-${runtime.support}`}>{runtime.id === "scenario" ? "Synthetic" : runtime.support === "partial" ? "Preview" : runtime.support}</span>
         <span className="runtime-chevron" aria-hidden="true">⌄</span>
       </summary>
       <div className="runtime-reasons">
@@ -1146,7 +1413,7 @@ function RuntimeRow({ runtime, onSelect, blocked }: { runtime: RuntimeProfile; o
   );
 }
 
-function FooterBar({ snapshot, activeNotice, onDismissNotice }: { snapshot: CoreSnapshot; activeNotice: string | null; onDismissNotice: () => void }) {
+function FooterBar({ snapshot, appInfo, activeNotice, onDismissNotice }: { snapshot: CoreSnapshot; appInfo: AppInfo | null; activeNotice: string | null; onDismissNotice: () => void }) {
   return (
     <footer className="footerbar">
       <div className="footer-status">
@@ -1160,7 +1427,9 @@ function FooterBar({ snapshot, activeNotice, onDismissNotice }: { snapshot: Core
       <div className="footer-message">
         {activeNotice ? <><span>{activeNotice}</span><button type="button" aria-label="Dismiss notification" onClick={onDismissNotice}>×</button></> : <span>Core owns continuity · UI owns presentation</span>}
       </div>
-      <div className="footer-build">{snapshot.protocolVersion} · {snapshot.buildId}</div>
+      <div className="footer-build" title={appInfo?.dataPath ? `Data: ${appInfo.dataPath}` : undefined}>
+        {channelLabel(appInfo, snapshot.preview)} · {snapshot.protocolVersion} · {snapshot.buildId}
+      </div>
     </footer>
   );
 }
@@ -1168,8 +1437,13 @@ function FooterBar({ snapshot, activeNotice, onDismissNotice }: { snapshot: Core
 interface FirstRunDialogProps {
   workspace: string;
   goal: string;
+  preview: boolean;
+  busy: boolean;
+  error: string | null;
+  canBrowse: boolean;
   onWorkspaceChange: (value: string) => void;
   onGoalChange: (value: string) => void;
+  onBrowse: () => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }
@@ -1186,6 +1460,7 @@ interface CloseChoiceDialogProps {
 function CloseChoiceDialog({ provider, active, stopResponsibility, onContinue, onStop, onKeepOpen }: CloseChoiceDialogProps) {
   const targetProvider = active ? provider : stopResponsibility?.provider || provider;
   const isClaude = targetProvider.toLowerCase() === "claude";
+  const isScenario = targetProvider.toLowerCase() === "scenario";
   return (
     <div className="dialog-backdrop" role="presentation">
       <section className="first-run-dialog close-choice-dialog" role="dialog" aria-modal="true" aria-label="Continue running in the background?">
@@ -1196,11 +1471,13 @@ function CloseChoiceDialog({ provider, active, stopResponsibility, onContinue, o
             ? "Residual execution remains unknown. Core keeps write responsibility held. Continue closes only this window and starts no new work; Stop waits for the durable Core response before quit acknowledgement."
             : isClaude
               ? "Stop requests interruption of the current native Claude turn. Started tools may keep running; Core records residual responsibility before closing. Continue closes this window and starts no new work."
+              : isScenario
+                ? "This is a synthetic Scenario turn. Stop records the synthetic Attempt transition; no native provider process is implied. Continue closes only this window and starts no new work."
               : "Long-running work remains Core-owned while this window is closed. Continue leaves Core and the authorized Runtime running. Stop asks Core to end the active Attempt, then quits this window."}
         </p>
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onKeepOpen}>Keep window open</button>
-          <button className="button button-danger" type="button" onClick={onStop}>{isClaude ? "Stop Claude turn and quit" : "Stop background work and quit"}</button>
+          <button className="button button-danger" type="button" onClick={onStop}>{isClaude ? "Stop Claude turn and quit" : isScenario ? "Stop synthetic Scenario and quit" : "Stop background work and quit"}</button>
           <button className="button button-primary" type="button" onClick={onContinue}>Continue in background</button>
         </div>
       </section>
@@ -1208,24 +1485,32 @@ function CloseChoiceDialog({ provider, active, stopResponsibility, onContinue, o
   );
 }
 
-function FirstRunDialog({ workspace, goal, onWorkspaceChange, onGoalChange, onCancel, onSubmit }: FirstRunDialogProps) {
+function FirstRunDialog({ workspace, goal, preview, busy, error, canBrowse, onWorkspaceChange, onGoalChange, onBrowse, onCancel, onSubmit }: FirstRunDialogProps) {
   return (
     <div className="dialog-backdrop" role="presentation">
       <section className="first-run-dialog" role="dialog" aria-modal="true" aria-label="Start your first campaign">
-        <button className="dialog-close" type="button" aria-label="Close first-run setup" onClick={onCancel}>×</button>
+        <button className="dialog-close" type="button" aria-label="Close first-run setup" onClick={onCancel} disabled={busy}>×</button>
         <div className="dialog-mark" aria-hidden="true"><span>GP</span></div>
-        <p className="eyebrow">FIRST-RUN SETUP · PREVIEW</p>
-        <h2>Start your first campaign</h2>
+        <p className="eyebrow">{preview ? "SYNTHETIC BROWSER PREVIEW" : "LOCAL RC SETUP"}</p>
+        <h2>Create a campaign</h2>
         <p className="dialog-lead">Give GoalPort a workspace and a durable goal. You can customize routing and working style before a Runtime receives work.</p>
         <form onSubmit={onSubmit}>
           <label className="field-label" htmlFor="project-folder">Project folder</label>
-          <div className="field-with-icon"><span aria-hidden="true">⌂</span><input id="project-folder" aria-label="Project folder" value={workspace} onChange={(event) => onWorkspaceChange(event.target.value)} placeholder="C:\\workspace\\your-project" required /></div>
+          <div className="field-with-icon">
+            <span aria-hidden="true">⌂</span>
+            <input id="project-folder" aria-label="Project folder" value={workspace} onChange={(event) => onWorkspaceChange(event.target.value)} placeholder="C:\\workspace\\your-project" required disabled={busy} />
+            {canBrowse ? <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy}>Browse…</button> : null}
+          </div>
           <label className="field-label" htmlFor="campaign-goal">Campaign goal</label>
-          <textarea id="campaign-goal" aria-label="Campaign goal" value={goal} onChange={(event) => onGoalChange(event.target.value)} placeholder="What should this campaign accomplish?" rows={3} required />
-          <div className="dialog-note"><span aria-hidden="true">ⓘ</span><span>Preview mode stores a synthetic projection in this window. A connected Core is required for native Runtime work.</span></div>
+          <textarea id="campaign-goal" aria-label="Campaign goal" value={goal} onChange={(event) => onGoalChange(event.target.value)} placeholder="What should this campaign accomplish?" rows={3} required disabled={busy} />
+          {error ? <div className="dialog-note" role="alert"><span aria-hidden="true">!</span><span>{error}</span></div> : (
+            <div className="dialog-note"><span aria-hidden="true">ⓘ</span><span>{preview
+              ? "This browser-only Scenario is synthetic. No native Runtime receives work."
+              : "Core saves the campaign locally. No Runtime receives work until you select one and send a message."}</span></div>
+          )}
           <div className="dialog-actions">
-            <button className="button button-quiet" type="button" onClick={onCancel}>Cancel</button>
-            <button className="button button-primary" type="submit">Begin preview <span aria-hidden="true">↗</span></button>
+            <button className="button button-quiet" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+            <button className="button button-primary" type="submit" disabled={busy}>{busy ? "Creating…" : preview ? "Begin preview" : "Create campaign"} <span aria-hidden="true">↗</span></button>
           </div>
         </form>
       </section>

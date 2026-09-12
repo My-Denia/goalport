@@ -1,5 +1,5 @@
-# PR/push gate for the shared UI and Core contracts.
-# Not packaged Desktop, live Runtime admission, or isolated product launch.
+# Windows code contracts and repository-built Electron RC smoke.
+# Synthetic Desktop checks do not establish native subscription admission.
 name: CI
 
 on:
@@ -30,7 +30,7 @@ jobs:
           version: 11.22.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.19.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
@@ -54,7 +54,12 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           cargo test -p goalport-core --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p goalport-core --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility
+          cargo test --locked -p goalport-core --test electron_rc_core --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($case in @('r1_succeeded_send_replays_as_duplicate_success_without_delivery', 'r1b_succeeded_send_still_replays_as_success_after_the_attempt_became_terminal', 'r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing', 'n1_reuse_for_another_task_is_refused_and_the_selection_is_kept')) {
+            cargo test --locked -p goalport-core --test registration_generation $case -- --exact
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Placeholder Core binaries for Tauri resource check
         shell: pwsh
         run: |
@@ -66,3 +71,27 @@ jobs:
             Set-Content -Path target/release/goalport-core-launcher.exe -Value ''
           }
       - run: cargo test -p goalport-desktop
+
+  desktop:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@1.96.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:desktop
+      - run: pnpm electron:package --out artifacts/electron-rc/ci
+      - run: pnpm electron:verify --package artifacts/electron-rc/ci/GoalPort-win32-x64
+      - name: Packaged normal first use
+        run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --normal --out artifacts/electron-rc/ci-normal-smoke
+      - name: Packaged synthetic consecutive tasks
+        run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-synthetic-smoke
