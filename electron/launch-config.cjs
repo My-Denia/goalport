@@ -18,7 +18,26 @@ function canonicalPath(value) {
     }
   }
 }
-const normalizedPath = (value) => canonicalPath(value).replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("/", "\\").toLowerCase();
+const normalizedPath = (value) => canonicalPath(value).replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("/", "\\");
+
+function validateProfileMarker(marker, { mode, coreSha256, version, profileKey }) {
+  const deadline = Date.now() + 1000;
+  let existing;
+  while (true) {
+    try {
+      existing = JSON.parse(fs.readFileSync(marker, "utf8"));
+      break;
+    } catch (error) {
+      // An exclusive creator may have opened the file but not finished its
+      // first write. Never overwrite it; wait briefly for a complete marker.
+      if (!(error instanceof SyntaxError || error.code === "ENOENT") || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  if (existing?.product !== "GoalPort" || existing.schemaVersion !== 1 || existing.mode !== mode) throw new Error("This data directory belongs to a different profile; choose a new directory");
+  if (existing.coreSha256 !== coreSha256 || existing.version !== version) throw new Error("This data profile belongs to another RC build. Choose a new --data-dir; automatic migration is not supported");
+  if (existing.identityVersion !== 2 || existing.profileKey !== profileKey) throw new Error("This data profile uses an older or different path identity. Choose a new --data-dir; automatic migration is not supported");
+}
 
 function launchArguments(argv) {
   const result = {};
@@ -35,26 +54,23 @@ function launchArguments(argv) {
 
 // Normal RC state has a new product-owned location. Existing arbitrary/legacy
 // SQLite files are never adopted or migrated just because they are nearby.
-function prepareProfile({ args, appData, version, coreSha256 }) {
+function prepareProfile({ args, appData, version, coreSha256, isPackaged = true }) {
   if (!/^[a-f0-9]{64}$/.test(coreSha256)) throw new Error("Packaged Core identity is unavailable");
   const mode = args["--test-profile"] ? "synthetic-test" : "normal";
-  const directory = path.resolve(args["--test-profile"] || args["--data-dir"] || path.join(appData, "GoalPort", "rc"));
+  const directory = path.resolve(args["--test-profile"] || args["--data-dir"] || path.join(appData, "GoalPort", isPackaged ? "rc" : "dev"));
   const marker = path.join(directory, "goalport-profile.json");
-  if (fs.existsSync(directory)) {
-    if (fs.existsSync(marker)) {
-      const existing = JSON.parse(fs.readFileSync(marker, "utf8"));
-      if (existing.product !== "GoalPort" || existing.schemaVersion !== 1 || existing.mode !== mode) throw new Error("This data directory belongs to a different profile; choose a new directory");
-      if (existing.coreSha256 !== coreSha256 || existing.version !== version) throw new Error("This data profile belongs to another RC build. Choose a new --data-dir; automatic migration is not supported");
-    } else if (fs.readdirSync(directory).length) {
-      throw new Error("Data directory is not an empty or existing GoalPort RC profile; legacy databases are not imported");
-    }
+  if (fs.existsSync(directory) && !fs.existsSync(marker) && fs.readdirSync(directory).length && !fs.existsSync(marker)) {
+    throw new Error("Data directory is not an empty or existing GoalPort RC profile; legacy databases are not imported");
   }
   fs.mkdirSync(directory, { recursive: true });
   const canonical = fs.realpathSync.native(directory);
-  if (!fs.existsSync(marker)) {
-    fs.writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, product: "GoalPort", version, coreSha256, mode }, null, 2)}\n`, { flag: "wx" });
-  }
   const key = hash(normalizedPath(canonical)).slice(0, 20);
+  try {
+    fs.writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", version, coreSha256, mode }, null, 2)}\n`, { flag: "wx" });
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    validateProfileMarker(marker, { mode, coreSha256, version, profileKey: key });
+  }
   const slug = `goalport-rc-${key}`;
   return {
     mode, directory: canonical, database: path.join(canonical, "goalport.sqlite"),

@@ -21,7 +21,7 @@ try {
   const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
   appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
   profile = legacyIsolated ? null : prepareProfile({
-    args: launchArgs, appData: app.getPath("appData"), version: appVersion,
+    args: launchArgs, appData: app.getPath("appData"), version: appVersion, isPackaged: app.isPackaged,
     coreSha256: fileSha256(coreBinary() || "")
   });
   if (profile) {

@@ -1,6 +1,5 @@
 use goalport_core::{
     AttemptState, Event, Store,
-    domain::normalize_workspace_key,
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
 };
 use serde_json::{Value, json};
@@ -42,6 +41,18 @@ fn create_campaign(server: &CoreServer, id: &str, workspace: &Path, goal: &str) 
             "acceptance": "bounded Core regression passes"
         }),
     )
+}
+
+fn operational_canonical(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap();
+    let value = canonical.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.into_owned()
+    }
 }
 
 fn active_ids(response: &Value) -> (String, String) {
@@ -110,7 +121,7 @@ fn workspace_campaign_creation_is_canonical_atomic_and_reuses_alias_identity() {
     let first_view = &first["payload"]["snapshot"];
     assert_eq!(
         first_view["project"]["workspaceRoot"],
-        normalize_workspace_key(workspace.path())
+        operational_canonical(workspace.path())
     );
     assert_eq!(first_view["attempt"]["id"], "attempt-unassigned");
     assert_eq!(first_view["attempt"]["provider"], "unassigned");

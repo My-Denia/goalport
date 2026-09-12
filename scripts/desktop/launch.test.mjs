@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
+import { spawn } from "node:child_process";
 const require = createRequire(import.meta.url);
 const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
@@ -75,6 +76,150 @@ test("normal RC starts in product data and test profile has a different pipe", (
   assert.notEqual(normal.pipe, "\\\\.\\pipe\\goalport-core-v1");
   assert.deepEqual(prepareProfile(settings(root)), normal);
   assert.deepEqual(prepareProfile(settings(realpathSync.native(root))), normal);
+});
+
+test("development and packaged defaults coexist with different Core identities", (t) => {
+  for (const order of [[true, false], [false, true]]) {
+    const root = fixture(t);
+    const profiles = new Map();
+    for (const isPackaged of order) {
+      profiles.set(isPackaged, prepareProfile({ ...settings(root), isPackaged, coreSha256: (isPackaged ? "a" : "b").repeat(64) }));
+    }
+    const rc = profiles.get(true), dev = profiles.get(false);
+    assert.equal(rc.directory, realpathSync.native(resolve(root, "GoalPort/rc")));
+    assert.equal(dev.directory, realpathSync.native(resolve(root, "GoalPort/dev")));
+    assert.notEqual(rc.pipe, dev.pipe);
+    assert.equal(dev.testMode, false, "development is not synthetic mode");
+    writeFileSync(rc.database, "preserve packaged RC database bytes");
+    const before = readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]);
+    assert.deepEqual(prepareProfile({ ...settings(root), isPackaged: false, coreSha256: "b".repeat(64) }), dev);
+    assert.deepEqual(prepareProfile({ ...settings(root), isPackaged: true }), rc);
+    assert.deepEqual(readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]), before);
+    assert.throws(() => prepareProfile({ ...settings(root, { "--data-dir": rc.directory }), isPackaged: false, coreSha256: "b".repeat(64) }), /another RC build/);
+    assert.deepEqual(readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]), before);
+  }
+});
+
+test("explicit normal and synthetic profile paths keep precedence in development", (t) => {
+  const root = fixture(t);
+  const args = { "--data-dir": resolve(root, "explicit") };
+  assert.deepEqual(prepareProfile({ ...settings(root, args), isPackaged: false }), prepareProfile({ ...settings(root, args), isPackaged: true }));
+  const syntheticArgs = { "--test-profile": resolve(root, "synthetic") };
+  const devTest = prepareProfile({ ...settings(root, syntheticArgs), isPackaged: false });
+  assert.equal(devTest.testMode, true);
+  assert.deepEqual(devTest, prepareProfile({ ...settings(root, syntheticArgs), isPackaged: true }));
+});
+
+test("the actual Electron entrypoint passes its packaged state to profile selection", (t) => {
+  const root = fixture(t);
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  writeFileSync(resolve(root, "goalport-core.exe"), "inert identity fixture, never executed");
+  for (const isPackaged of [false, true]) {
+    let seen;
+    const electron = { app: { isPackaged, getVersion: () => "1.0.0-rc.1", getPath: () => root, exit: () => {}, whenReady: () => assert.fail("fixture stops before readiness") }, dialog: { showErrorBox: () => {} } };
+    main((name) => name === "electron" ? electron : name === "./launch-config.cjs" ? {
+      ...mainRequire(name), prepareProfile: (options) => { seen = options; throw new Error("fixture stops after profile option capture"); }
+    } : mainRequire(name), { exports: {} }, {}, resolve("electron"), { argv: ["Electron.exe"], resourcesPath: root, env: { GOALPORT_CORE_BIN: resolve(root, "goalport-core.exe") } }, { error: () => {} });
+    assert.equal(seen?.isPackaged, isPackaged);
+  }
+});
+
+function virtualProfiles(onWrite, onRead) {
+  const directories = new Set(), files = new Map();
+  const missing = () => Object.assign(new Error("missing fixture path"), { code: "ENOENT" });
+  const fs = {
+    existsSync: (name) => directories.has(name) || files.has(name),
+    mkdirSync: (name) => directories.add(name),
+    realpathSync: { native: (name) => { if (!fs.existsSync(name)) throw missing(); return name; } },
+    readdirSync: (name) => [...files.keys()].filter((file) => resolve(file, "..") === name).map((file) => file.slice(name.length + 1)),
+    readFileSync: (name) => { if (!files.has(name)) throw missing(); return onRead ? onRead(name, files) : files.get(name); },
+    writeFileSync: (name, text, options) => {
+      onWrite?.(name, text, files);
+      if (options?.flag === "wx" && files.has(name)) throw Object.assign(new Error("fixture marker race"), { code: "EEXIST" });
+      files.set(name, String(text));
+    }
+  };
+  const module = { exports: {} };
+  vm.runInNewContext(readFileSync(resolve("electron/launch-config.cjs"), "utf8"), { module, exports: module.exports, require: (name) => name === "node:fs" ? fs : require(name) });
+  return { ...module.exports, files };
+}
+
+test("distinct canonical profile identities cannot share a pipe or accept another database", () => {
+  // A case-sensitive filesystem model; real ordinary/8.3 aliases are tested separately.
+  const api = virtualProfiles();
+  const root = resolve("canonical-profile-fixture");
+  const a = api.prepareProfile(settings(root, { "--data-dir": resolve(root, "Foo") }));
+  const b = api.prepareProfile(settings(root, { "--data-dir": resolve(root, "foo") }));
+  api.files.set(a.database, "database A"); api.files.set(b.database, "database B");
+  assert.notEqual(a.pipe, b.pipe);
+  assert.doesNotThrow(() => api.assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: a.pipe }, a));
+  assert.throws(() => api.assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: b.pipe }, b), /attachment refused/);
+});
+
+test("a marker creation loser validates the complete winning profile without overwriting it", () => {
+  for (const winner of ["same", "other-build", "other-mode"]) {
+    let winningText;
+    const api = virtualProfiles((name, text, files) => {
+      const marker = JSON.parse(text);
+      if (winner === "other-build") marker.coreSha256 = "b".repeat(64);
+      if (winner === "other-mode") marker.mode = "synthetic-test";
+      winningText = JSON.stringify(marker); files.set(name, winningText);
+    });
+    const options = settings(resolve("profile-race-" + winner));
+    if (winner === "same") assert.doesNotThrow(() => api.prepareProfile(options));
+    else assert.throws(() => api.prepareProfile(options), winner === "other-build" ? /another RC build/ : /different profile/);
+    assert.equal([...api.files.values()][0], winningText);
+  }
+});
+
+test("incomplete winner writes are bounded, and old or invalid identity metadata is never adopted", () => {
+  let reads = 0;
+  const partial = virtualProfiles((name, text, files) => files.set(name, text), (name, files) => ++reads < 3 ? "{" : files.get(name));
+  assert.doesNotThrow(() => partial.prepareProfile(settings(resolve("partial-marker-fixture"))));
+  assert.equal(reads, 3);
+  for (const kind of ["old-identity", "moved-identity", "invalid-json"]) {
+    let winner;
+    const api = virtualProfiles((name, text, files) => {
+      const data = JSON.parse(text);
+      if (kind === "old-identity") { delete data.identityVersion; delete data.profileKey; }
+      if (kind === "moved-identity") data.profileKey = "other-directory";
+      winner = kind === "invalid-json" ? "{" : JSON.stringify(data); files.set(name, winner);
+    });
+    assert.throws(() => api.prepareProfile(settings(resolve("invalid-marker-" + kind))), kind === "invalid-json" ? (error) => error.name === "SyntaxError" : /older or different path identity/);
+    assert.equal([...api.files.values()][0], winner);
+  }
+});
+
+test("real concurrent first-profile writers converge on one matching marker", { timeout: 20_000 }, async (t) => {
+  const root = fixture(t), profile = resolve(root, "profile"), marker = resolve(profile, "goalport-profile.json"), gate = resolve(root, "write.gate");
+  const moduleFile = resolve("electron/launch-config.cjs");
+  const children = [];
+  const code = `const fs=require('node:fs');const marker=${JSON.stringify(marker)},gate=${JSON.stringify(gate)};const write=fs.writeFileSync;fs.writeFileSync=function(name,text,options){if(name===marker&&options?.flag==='wx'){process.stdout.write('ready\\n');const end=Date.now()+10000;while(!fs.existsSync(gate)){if(Date.now()>end)throw Error('gate timed out');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}return write.apply(this,arguments);};try{const p=require(${JSON.stringify(moduleFile)}).prepareProfile(${JSON.stringify(settings(root, { "--data-dir": profile }))});process.stdout.write(JSON.stringify(p)+'\\n');}catch(e){process.stderr.write(String(e.stack));process.exitCode=1;}`;
+  try {
+    const records = Array.from({ length: 4 }, () => {
+      const child = spawn(process.execPath, ["-e", code], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }); children.push(child);
+      let stdout = "", stderr = "", readyResolve, readyReject;
+      const ready = new Promise((resolveReady, rejectReady) => { readyResolve = resolveReady; readyReject = rejectReady; });
+      child.stdout.on("data", (data) => { stdout += data; if (stdout.includes("ready" + String.fromCharCode(10))) readyResolve(); });
+      child.stderr.on("data", (data) => { stderr += data; });
+      const completed = new Promise((resolveDone, rejectDone) => {
+        child.once("error", (error) => { readyReject(error); rejectDone(error); });
+        child.once("exit", (code) => { if (!stdout.includes("ready" + String.fromCharCode(10))) readyReject(new Error(stderr || "child exited before barrier")); resolveDone({ code, stdout, stderr }); });
+      });
+      return { ready, completed };
+    });
+    await Promise.all(records.map((record) => record.ready));
+    writeFileSync(gate, "release all matching writers");
+    const results = await Promise.all(records.map((record) => record.completed));
+    for (const result of results) assert.equal(result.code, 0, result.stderr);
+    const profiles = results.map((result) => JSON.parse(result.stdout.split(String.fromCharCode(10)).filter(Boolean).at(-1)));
+    for (const value of profiles) assert.deepEqual(value, profiles[0]);
+    assert.equal(JSON.parse(readFileSync(marker, "utf8")).coreSha256, hash);
+  } finally {
+    for (const child of children) if (child.exitCode === null) child.kill();
+  }
 });
 
 test("legacy DB, mode change and changed build refuse without touching preimages", (t) => {

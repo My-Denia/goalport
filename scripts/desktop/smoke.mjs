@@ -12,12 +12,14 @@ import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
 import { collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 import { clickPointFor } from "./click-target.mjs";
+import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const normalize = launchConfig.normalizedPath;
 const argv = process.argv.slice(2);
 const normal = argv.includes("--normal");
-const args = argsFor(argv.filter((arg) => arg !== "--normal"), ["--package", "--out", "--test-profile"]);
+const failBeforeReceipt = argv.includes("--fail-before-receipt");
+const args = argsFor(argv.filter((arg) => !["--normal", "--fail-before-receipt"].includes(arg)), ["--package", "--out", "--test-profile"]);
 
 if (args.help) {
   console.log("Usage: node scripts/desktop/smoke.mjs --package <package-directory> --out <new-evidence-directory> [--normal | --test-profile <new-absolute-profile>]\nCopies the complete RC outside source; verifies real GUI, IPC and Core with Scenario only. Node >=22.19 required.\nNormal mode uses ordinary data handling and inert markers, with empty native configuration/PATH. Default mode is explicitly synthetic-only.");
@@ -29,6 +31,7 @@ async function smoke() {
   if (process.platform !== "win32") throw new Error("Packaged RC smoke requires Windows");
   if (!args["--package"] || !args["--out"]) throw new Error("--package and --out are required");
   if (normal && args["--test-profile"]) throw new Error("--normal and --test-profile cannot be combined");
+  if (normal && failBeforeReceipt) throw new Error("--fail-before-receipt requires the synthetic test mode");
   const originalPackage = resolve(args["--package"]);
   const identity = verifyPackage(originalPackage);
   const out = resolve(args["--out"]);
@@ -149,7 +152,7 @@ async function smoke() {
     return state;
   };
   const processInfo = (pid) => {
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${Number(pid)}'; if ($p) { $p | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate | ConvertTo-Json -Compress }`], { encoding: "utf8", windowsHide: true });
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${Number(pid)}'; if ($p) { $p | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate | ConvertTo-Json -Compress }`], { encoding: "utf8", windowsHide: true, timeout: 5000 });
     if (result.status !== 0) throw new Error(`Cannot verify owned process: ${result.stderr}`);
     return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   };
@@ -193,6 +196,10 @@ async function smoke() {
     const actualViewport = await viewport();
     (report.viewportStarts ??= []).push({ initial: initialViewport, actual: actualViewport });
     console.log(`PASS desktop viewport ${JSON.stringify({ initial: initialViewport, actual: actualViewport })}`);
+    if (failBeforeReceipt) {
+      stage = "forced-before-startup-receipt";
+      throw new Error("intentional smoke failure before assigning the renderer startup receipt");
+    }
     const info = await read("window.goalportCore.appInfo()");
     assert.equal(info.version, identity.version);
     assert.equal(info.testMode, !normal);
@@ -436,17 +443,17 @@ async function smoke() {
       try { await closeWindow(); } catch { page?.close(); child?.kill(); }
     } else if (child?.exitCode === null) child.kill();
     if (logFd !== undefined) { try { closeSync(logFd); } catch {} }
-    if (coreIdentity?.pid) {
-      try {
-        const observed = processInfo(coreIdentity.pid);
-        if (observed) {
-          const expected = resolve(packageRoot, "resources/goalport-core.exe");
-          assert.equal(normalize(observed.ExecutablePath), normalize(expected));
-          assert.equal(fileHash(expected), coreIdentity.executableSha256);
-          process.kill(coreIdentity.pid);
-          report.cleanup.push({ process: coreIdentity.pid, executable: expected, action: "stopped owned synthetic Core after identity check" });
-        }
-      } catch (error) { report.cleanup.push({ error: error.message, action: "retained; process identity unresolved" }); }
+    try {
+      report.cleanup.push(await cleanupOwnedCore({
+        profileDirectory: profile, packageRoot,
+        coreSha256: identity.artifacts.find((item) => item.path === "resources/goalport-core.exe").sha256,
+        version: identity.version, mode: normal ? "normal" : "synthetic-test", startedAt: report.startedAt,
+        observe: processInfo, stop: (pid) => process.kill(pid)
+      }));
+    } catch (error) {
+      const detail = sanitizeDiagnostic(error.message || String(error), [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]);
+      report.cleanup.push({ error: detail, action: "retained; process identity unresolved" });
+      report.status = "FAIL"; report.error ||= detail; process.exitCode = 1;
     }
     report.completedAt = new Date().toISOString();
     report.cleanup.push({ path: scratch, action: "retained for local inspection; contains only this smoke's package/profile/workspaces" });

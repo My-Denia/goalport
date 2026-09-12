@@ -24,7 +24,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Display-only Attempt identity used when a task has no persisted row.
 /// Admission must never persist or register this string.
@@ -2812,13 +2815,14 @@ impl UiController {
             "goal-runs/goalport-electron-stable-v1/evidence/locks/shared-interface-freeze.json",
         );
         let new_id = format!("attempt-handoff-{}", stable_suffix(&request.request_id));
+        let new_attempt = Attempt::new(
+            &new_id,
+            &task.id,
+            &provider,
+            format!("{provider}-cap-v1"),
+        );
         self.store
-            .insert_attempt(&Attempt::new(
-                &new_id,
-                &task.id,
-                &provider,
-                format!("{provider}-cap-v1"),
-            ))
+            .insert_rollover_attempt(&new_attempt, &old_attempt_id)
             .map_err(store_message)?;
         self.runtime_manager
             .select_runtime(
@@ -4553,7 +4557,18 @@ fn canonical_existing_workspace(value: &str) -> Result<String, String> {
     }
     let canonical = fs::canonicalize(&path)
         .map_err(|error| format!("workspaceRoot could not be canonicalized: {error}"))?;
-    Ok(crate::domain::normalize_workspace_key(&canonical))
+    Ok(operational_workspace_path(&canonical))
+}
+
+fn operational_workspace_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        value.into_owned()
+    }
 }
 
 fn payload_attempt_id(value: &Value, fallback: &str) -> String {

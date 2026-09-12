@@ -54,7 +54,7 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           cargo test -p goalport-core --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p goalport-core --test workspace_aliases --test electron_rc_core --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation
+          cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($case in @('r1_succeeded_send_replays_as_duplicate_success_without_delivery', 'r1b_succeeded_send_still_replays_as_success_after_the_attempt_became_terminal', 'r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing', 'n1_reuse_for_another_task_is_refused_and_the_selection_is_kept')) {
             cargo test --locked -p goalport-core --test registration_generation $case -- --exact
@@ -97,3 +97,5 @@ jobs:
         run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --normal --out artifacts/electron-rc/ci-normal-smoke
       - name: Packaged synthetic consecutive tasks
         run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-synthetic-smoke
+      - name: Early smoke failure cleans its owned Core
+        run: node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup

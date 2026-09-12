@@ -39,6 +39,10 @@ Windows terminals and CI runners can place processes in a supervised job. If tha
 
 Runtime selection currently requires a content viewport wider than 1020 CSS pixels: the existing narrow layout hides the Runtime sidebar. Widen the window to use those controls. Packaged workflow checks use a fixed 1440×900 viewport; the separate 1000-pixel screenshot checks layout only.
 
+Unpackaged development runs (`pnpm electron:dev`) default to `%APPDATA%/GoalPort/dev`; packaged RC runs keep `%APPDATA%/GoalPort/rc`. Each profile remains bound to its Core build. Explicit `--data-dir` and `--test-profile` paths take precedence and retain their existing identity checks; development does not import or migrate RC data.
+
+New profiles also pin their canonical directory identity. Markers from the earlier case-folded identity format, or moved profiles, are refused without rewriting data; choose a new data directory. Workspace comparison remains conservative: distinct canonical folders that collapse to the same workspace comparison key are refused rather than routed through another Project.
+
 ## Synthetic checks and limits
 
 **Scenario Runtime is an in-process synthetic test runtime**, not a real Agent or subscription admission. An explicit test profile allows Scenario only and rejects native Codex, Claude and Grok process starts:
@@ -56,15 +60,18 @@ pnpm lint
 pnpm test:unit
 pnpm test:desktop
 cargo test --locked -p goalport-core --lib
-cargo test --locked -p goalport-core --test electron_rc_core --test selection_preservation --test registration_boundary
+cargo test --locked -p goalport-core --test electron_rc_core --test handoff_lineage --test workspace_identity --test product_receipts --test selection_preservation --test registration_boundary
 cargo test --locked -p goalport-core-launcher
 ```
 
-The packaged smoke driver copies the verified application into a fresh directory outside the source tree and exercises its real renderer, IPC and Core. It creates its own profiles and synthetic workspaces, writes screenshots/results to the new `--out` directory, and stops only its own processes. It never calls real subscriptions:
+The packaged smoke driver copies the verified application into a fresh directory outside the source tree and exercises its real renderer, IPC and Core. It creates its own profiles and synthetic workspaces, writes screenshots/results to the new `--out` directory, and stops only its own processes. It never calls real subscriptions.
+
+CI also injects an early synthetic smoke failure before the renderer startup receipt is assigned. Its verifier requires the expected failure and independently confirms that the owned Core was cleaned up using its committed launch identity; an unknown identity is retained and reported rather than terminated by process name.
 
 ```powershell
 node scripts/desktop/smoke.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --normal --out artifacts/electron-rc/normal-smoke
 node scripts/desktop/smoke.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --out artifacts/electron-rc/synthetic-smoke
+node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --out artifacts/electron-rc/early-cleanup
 ```
 
 The Windows workflow in `.github/workflows/ci.yml` covers UI/Core regressions and a fresh Electron build with packaged smoke. A local run is not a remote CI result. Existing live-admission or broad soak scripts are separate, explicit workflows and are not invoked by these commands.
