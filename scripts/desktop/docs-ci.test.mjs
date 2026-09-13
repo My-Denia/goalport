@@ -64,4 +64,18 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
   assert.equal(smoke.length, 2);
   assert.equal(smoke.filter((command) => command.includes(" --normal ")).length, 1);
   for (const command of commands) assert.doesNotMatch(command, /verify:runtime|--live|goal-runs\/|\b(?:push|publish|release|deploy)\b/);
+  assert.ok(commands.includes("node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup"));
+});
+
+test("Desktop CI retains only redacted failure summaries and never tolerates a failed step", () => {
+  const { body } = desktopJob(workflow);
+  assert.doesNotMatch(workflow, /continue-on-error/);
+  const steps = body.split(/\r?\n(?=      - )/);
+  const last = steps.at(-1);
+  assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@v4\r?\n/);
+  assert.match(last, /\n\s+retention-days: 7\s*$/);
+  assert.match(last, /\n\s+if-no-files-found: ignore\r?\n/);
+  const paths = [...last.matchAll(/^ {12}(\S+)\s*$/gm)].map((match) => match[1]);
+  assert.deepEqual(paths, ["normal-smoke", "synthetic-smoke", "early-cleanup"].map((name) => `artifacts/electron-rc/ci-${name}/failure-summary.json`));
+  assert.equal(steps.filter((step) => /upload-artifact/.test(step)).length, 1);
 });

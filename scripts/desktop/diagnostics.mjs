@@ -21,7 +21,7 @@ export function sanitizeDiagnostic(text, privatePaths = []) {
     .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,})\b/g, "<redacted>");
 }
 
-function tail(file, privatePaths) {
+function tail(file, privatePaths, close) {
   let fd;
   try {
     fd = openSync(file, "r");
@@ -32,13 +32,16 @@ function tail(file, privatePaths) {
     return { available: true, truncated: size > read, text: sanitizeDiagnostic(text, privatePaths).slice(-TAIL_BYTES) };
   } catch (error) {
     return { available: false, code: error.code || "UNAVAILABLE" };
-  } finally { if (fd !== undefined) closeSync(fd); }
+  } finally {
+    // A failed close must not replace the failure these diagnostics describe.
+    if (fd !== undefined) { try { close(fd); } catch {} }
+  }
 }
 
-export function collectFailureDiagnostics({ stage, child, files, privatePaths }) {
+export function collectFailureDiagnostics({ stage, child, files, privatePaths, close = closeSync }) {
   return {
     stage,
     process: { pid: child?.pid ?? null, exitCode: child?.exitCode ?? null, signalCode: child?.signalCode ?? null, killed: Boolean(child?.killed) },
-    tails: Object.fromEntries(Object.entries(files).map(([name, file]) => [name, tail(file, privatePaths)]))
+    tails: Object.fromEntries(Object.entries(files).map(([name, file]) => [name, tail(file, privatePaths, close)]))
   };
 }

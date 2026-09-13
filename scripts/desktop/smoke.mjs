@@ -13,6 +13,7 @@ import launchConfig from "../../electron/launch-config.cjs";
 import { collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 import { clickPointFor } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
+import { observeProcess } from "./process-observer.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const normalize = launchConfig.normalizedPath;
@@ -150,11 +151,6 @@ async function smoke() {
       } else assert.equal(reply.length, 1, "one exact synthetic reply");
     }
     return state;
-  };
-  const processInfo = (pid) => {
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${Number(pid)}'; if ($p) { $p | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate | ConvertTo-Json -Compress }`], { encoding: "utf8", windowsHide: true, timeout: 5000 });
-    if (result.status !== 0) throw new Error(`Cannot verify owned process: ${result.stderr}`);
-    return result.stdout.trim() ? JSON.parse(result.stdout) : null;
   };
   const assertNoNativeChildren = () => {
     const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `@(Get-CimInstance Win32_Process -Filter 'ParentProcessId = ${Number(coreIdentity.pid)}' | Where-Object { $_.Name -notmatch '^(powershell|conhost)\\.exe$' } | Select-Object ProcessId,Name,ExecutablePath) | ConvertTo-Json -Compress`], { encoding: "utf8", windowsHide: true });
@@ -443,22 +439,45 @@ async function smoke() {
       try { await closeWindow(); } catch { page?.close(); child?.kill(); }
     } else if (child?.exitCode === null) child.kill();
     if (logFd !== undefined) { try { closeSync(logFd); } catch {} }
+    const privatePaths = [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()];
+    stage = "owned-core-cleanup";
     try {
       report.cleanup.push(await cleanupOwnedCore({
         profileDirectory: profile, packageRoot,
         coreSha256: identity.artifacts.find((item) => item.path === "resources/goalport-core.exe").sha256,
         version: identity.version, mode: normal ? "normal" : "synthetic-test", startedAt: report.startedAt,
-        observe: processInfo, stop: (pid) => process.kill(pid)
+        observe: (pid) => observeProcess(pid), stop: (pid) => process.kill(pid)
       }));
     } catch (error) {
-      const detail = sanitizeDiagnostic(error.message || String(error), [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]);
-      report.cleanup.push({ error: detail, action: "retained; process identity unresolved" });
+      const phase = error.phase || "cleanup";
+      const detail = sanitizeDiagnostic(error.message || String(error), privatePaths);
+      report.cleanup.push({ phase, error: detail, code: error.code, attempts: error.attempts, action: `retained; cleanup phase ${phase} failed` });
       report.status = "FAIL"; report.error ||= detail; process.exitCode = 1;
     }
     report.completedAt = new Date().toISOString();
     report.cleanup.push({ path: scratch, action: "retained for local inspection; contains only this smoke's package/profile/workspaces" });
     save();
     const publicPath = (value) => sanitizeDiagnostic(value, [process.env.USERPROFILE, process.env.HOME, tmpdir()]);
-    console.log(JSON.stringify({ status: report.status, mode: report.mode, report: publicPath(resolve(out, "report.json")), scratch: publicPath(scratch) }, null, 2));
+    const summary = { status: report.status, mode: report.mode, report: publicPath(resolve(out, "report.json")), scratch: publicPath(scratch) };
+    if (report.status !== "PASS") {
+      // CI keeps only this bounded, redacted summary; report.json stays local.
+      // A body failure has diagnostics; otherwise the run failed only in owned-Core cleanup.
+      const failedStage = report.diagnostics?.stage ?? "owned-core-cleanup";
+      const cleanup = report.cleanup.filter((entry) => entry.phase || entry.process).map(({ phase, error, code, attempts, action, verifiedCoreStopped }) => ({ phase, error, code, attempts, action, verifiedCoreStopped }));
+      const error = String(report.error || "").split("\n")[0];
+      try {
+        writeFileSync(resolve(out, "failure-summary.json"), `${sanitizeDiagnostic(JSON.stringify({
+          schemaVersion: 1, status: report.status, mode: report.mode, stage: failedStage, error, cleanup, stack: report.error, diagnostics: report.diagnostics,
+          steps: report.steps.map(({ name, at }) => ({ name, at })), launcherCreationMode: report.launcherCreationMode,
+          version: identity.version, sourceRevision: identity.sourceRevision
+        }, null, 2), privatePaths)}\n`);
+      } catch (writeError) {
+        // Report the lost summary without replacing the failure it was describing.
+        console.error(`failure-summary.json could not be written: ${sanitizeDiagnostic(writeError.message, privatePaths)}`);
+      }
+      const brief = cleanup.map(({ attempts = [], ...entry }) => ({ ...entry, attempts: attempts.length, lastAttempt: attempts.at(-1) }));
+      Object.assign(summary, JSON.parse(sanitizeDiagnostic(JSON.stringify({ stage: failedStage, error, cleanup: brief }), privatePaths)));
+    }
+    console.log(JSON.stringify(summary, null, 2));
   }
 }

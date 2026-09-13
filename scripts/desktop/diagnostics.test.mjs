@@ -15,6 +15,18 @@ test("JSON-escaped private paths in component diagnostics are redacted", () => {
   assert.match(sanitized, /<private-path>/);
 });
 
+test("a failing log close cannot replace the diagnostics it collected", (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), "goalport-diagnostic-close-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = resolve(root, "core.log");
+  writeFileSync(file, "stage=core-close\n");
+  const opened = [];
+  const report = collectFailureDiagnostics({ stage: "owned-core-cleanup", files: { core: file }, privatePaths: [root], close: (fd) => { opened.push(fd); closeSync(fd); throw Object.assign(new Error("close failed"), { code: "EIO" }); } });
+  assert.equal(opened.length, 1);
+  assert.equal(report.tails.core.available, true);
+  assert.match(report.tails.core.text, /stage=core-close/);
+});
+
 test("failed child exposes stage and bounded sanitized component logs", async (t) => {
   const root = mkdtempSync(resolve(tmpdir(), "goalport-diagnostic-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

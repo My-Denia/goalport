@@ -1,32 +1,43 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import launchConfig from "../../electron/launch-config.cjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 
-function fixture(t) {
-  const root = mkdtempSync(resolve(tmpdir(), "goalport-cleanup-test-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+function fixture(t, { alias = false } = {}) {
+  const base = mkdtempSync(resolve(tmpdir(), "goalport-cleanup-test-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const real = resolve(base, "real");
+  mkdirSync(real);
+  let root = real;
+  if (alias) { root = resolve(base, "alias"); symlinkSync(real, root, "junction"); }
   const packageRoot = resolve(root, "application"), profileDirectory = resolve(root, "profile");
   mkdirSync(resolve(packageRoot, "resources"), { recursive: true }); mkdirSync(profileDirectory);
-  const executablePath = resolve(packageRoot, "resources/goalport-core.exe");
+  const canonicalRoot = realpathSync.native(real);
+  const executablePath = resolve(canonicalRoot, "application/resources/goalport-core.exe");
   writeFileSync(executablePath, "inert executable identity fixture; never executed");
   const coreSha256 = createHash("sha256").update(readFileSync(executablePath)).digest("hex");
-  const key = createHash("sha256").update(launchConfig.normalizedPath(profileDirectory)).digest("hex").slice(0, 20);
+  const key = createHash("sha256").update(launchConfig.normalizedPath(resolve(canonicalRoot, "profile"))).digest("hex").slice(0, 20);
   const created = Date.now(), creationDate = `/Date(${created})/`;
   const core = { pid: 424242, creationDate, createdMs: created, executablePath, executableSha256: coreSha256 };
-  const ready = { kind: "launch-ready", readyState: "READY_COMMITTED", launchNonce: "fixture-nonce", coreEpochId: "core-epoch:fixture-nonce", startupReceiptId: "startup:fixture-nonce", databaseIdentity: resolve(profileDirectory, "goalport.sqlite"), pipeIdentity: `\\\\.\\pipe\\goalport-rc-${key}-${coreSha256.slice(0, 20)}`, core };
+  const ready = { kind: "launch-ready", readyState: "READY_COMMITTED", launchNonce: "fixture-nonce", coreEpochId: "core-epoch:fixture-nonce", startupReceiptId: "startup:fixture-nonce", databaseIdentity: resolve(canonicalRoot, "profile/goalport.sqlite"), pipeIdentity: `\\\\.\\pipe\\goalport-rc-${key}-${coreSha256.slice(0, 20)}`, core };
   writeFileSync(resolve(profileDirectory, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", mode: "synthetic-test", coreSha256, version: "1.0.0-rc.1" }));
   writeFileSync(ready.databaseIdentity, "inert DB bytes");
   const readyPath = resolve(profileDirectory, "goalport.sqlite.launch-ready");
   writeFileSync(readyPath, JSON.stringify(ready));
-  let live = true; const stops = [];
-  const options = { profileDirectory, packageRoot, coreSha256, version: "1.0.0-rc.1", mode: "synthetic-test", startedAt: new Date(created - 1000).toISOString(), waitMs: 20, observe: () => live ? { ProcessId: core.pid, ExecutablePath: executablePath, CreationDate: creationDate } : null, stop: (pid) => { stops.push(pid); live = false; } };
-  return { options, ready, readyPath, stops, core };
+  let live = true; const stops = [], observations = [];
+  const liveObservation = () => ({ state: "live", ProcessId: core.pid, ExecutablePath: executablePath, CreationDate: creationDate });
+  const options = {
+    profileDirectory, packageRoot, coreSha256, version: "1.0.0-rc.1", mode: "synthetic-test", startedAt: new Date(created - 1000).toISOString(), waitMs: 20, observeMs: 50, exitWaitMs: 50,
+    observe: () => { observations.push(live); return live ? liveObservation() : { state: "absent" }; },
+    stop: (pid) => { stops.push(pid); live = false; }
+  };
+  return { options, ready, readyPath, stops, core, observations, liveObservation, setLive: (value) => { live = value; } };
 }
+const unknown = (reason = "fixture observer timeout") => ({ state: "unknown", reason, errorCode: "ETIMEDOUT", status: null, elapsedMs: 5000 });
 
 test("independent launch-ready identity cleans Core before a renderer receipt exists", async (t) => {
   const f = fixture(t); const result = await cleanupOwnedCore(f.options);
@@ -41,7 +52,7 @@ test("wrong database, pipe, hash, nonce or stale PID is retained without termina
     if (kind === "pipe") f.ready.pipeIdentity += "-other";
     if (kind === "hash") f.ready.core.executableSha256 = "0".repeat(64);
     if (kind === "nonce") f.ready.coreEpochId = "core-epoch:stale";
-    if (kind === "pid-reuse") f.options.observe = () => ({ ProcessId: f.core.pid, ExecutablePath: f.core.executablePath, CreationDate: "/Date(1)/" });
+    if (kind === "pid-reuse") f.options.observe = () => ({ ...f.liveObservation(), CreationDate: "/Date(1)/" });
     writeFileSync(f.readyPath, JSON.stringify(f.ready));
     await assert.rejects(cleanupOwnedCore(f.options)); assert.deepEqual(f.stops, []);
   }
@@ -51,5 +62,73 @@ test("missing committed identity and failed termination cannot be called cleaned
   const missing = fixture(t); rmSync(missing.readyPath);
   await assert.rejects(cleanupOwnedCore(missing.options)); assert.deepEqual(missing.stops, []);
   const stuck = fixture(t); stuck.options.stop = (pid) => stuck.stops.push(pid);
-  await assert.rejects(cleanupOwnedCore(stuck.options), /did not exit/); assert.deepEqual(stuck.stops, [stuck.core.pid]);
+  await assert.rejects(cleanupOwnedCore(stuck.options), (error) => /did not exit/.test(error.message) && error.phase === "observe-after-stop"); assert.deepEqual(stuck.stops, [stuck.core.pid]);
+});
+
+test("unknown observations are retried within the phase deadline before one verified stop", async (t) => {
+  const f = fixture(t); const sequence = [unknown(), unknown()];
+  const observe = f.options.observe;
+  f.options.observeMs = 5000;
+  f.options.observe = (pid) => sequence.shift() ?? observe(pid);
+  const result = await cleanupOwnedCore(f.options);
+  assert.equal(result.verifiedCoreStopped, true); assert.deepEqual(f.stops, [f.core.pid]);
+  assert.equal(result.attempts.length, 2); assert.equal(result.attempts[0].errorCode, "ETIMEDOUT");
+});
+
+test("persistent unknown, contract violations and mismatches after unknown never stop", async (t) => {
+  const persistent = fixture(t); persistent.options.observe = () => unknown();
+  const started = Date.now();
+  await assert.rejects(cleanupOwnedCore(persistent.options), (error) => error.phase === "observe-before-stop" && error.attempts.length > 0 && /stayed unknown/.test(error.message));
+  assert.ok(Date.now() - started < persistent.options.observeMs + 1000); assert.deepEqual(persistent.stops, []);
+  const legacy = fixture(t); legacy.options.observe = () => null;
+  await assert.rejects(cleanupOwnedCore(legacy.options), /observer contract violation/); assert.deepEqual(legacy.stops, []);
+  const incomplete = fixture(t); incomplete.options.observe = () => ({ state: "live", ProcessId: incomplete.core.pid, ExecutablePath: incomplete.core.executablePath });
+  await assert.rejects(cleanupOwnedCore(incomplete.options), /observer contract violation/); assert.deepEqual(incomplete.stops, []);
+  const incompleteAfterStop = fixture(t); let stopped = false;
+  incompleteAfterStop.options.stop = (pid) => { incompleteAfterStop.stops.push(pid); stopped = true; };
+  incompleteAfterStop.options.observe = () => stopped ? { state: "live" } : incompleteAfterStop.liveObservation();
+  await assert.rejects(cleanupOwnedCore(incompleteAfterStop.options), (error) => /observer contract violation/.test(error.message) && error.phase === "observe-after-stop");
+  const mismatch = fixture(t); const sequence = [unknown()];
+  mismatch.options.observeMs = 5000;
+  mismatch.options.observe = () => sequence.shift() ?? { ...mismatch.liveObservation(), CreationDate: "/Date(1)/" };
+  await assert.rejects(cleanupOwnedCore(mismatch.options), /PID was reused/); assert.deepEqual(mismatch.stops, []);
+});
+
+test("transient identity reads and canonicalization are bounded retries, not mismatches", async (t) => {
+  const busyRead = fixture(t); let reads = 0;
+  busyRead.options.readText = (file) => { if (++reads === 1) throw Object.assign(new Error("busy"), { code: "EACCES" }); return readFileSync(file, "utf8"); };
+  busyRead.options.waitMs = 2000;
+  assert.equal((await cleanupOwnedCore(busyRead.options)).verifiedCoreStopped, true); assert.deepEqual(busyRead.stops, [busyRead.core.pid]);
+  const busyPath = fixture(t); let failures = 2;
+  busyPath.options.realpath = (value) => { if (failures-- > 0) throw Object.assign(new Error("busy"), { code: "EBUSY" }); return realpathSync.native(value); };
+  busyPath.options.waitMs = 2000;
+  assert.equal((await cleanupOwnedCore(busyPath.options)).verifiedCoreStopped, true); assert.deepEqual(busyPath.stops, [busyPath.core.pid]);
+  const stuckPath = fixture(t); let identityDone = false;
+  const identityObserve = stuckPath.options.observe;
+  stuckPath.options.observe = (pid) => { identityDone = true; return identityObserve(pid); };
+  stuckPath.options.realpath = (value) => { if (identityDone) throw Object.assign(new Error("busy"), { code: "EBUSY" }); return realpathSync.native(value); };
+  await assert.rejects(cleanupOwnedCore(stuckPath.options), (error) => error.phase === "observe-before-stop" && error.attempts[0].errorCode === "EBUSY"); assert.deepEqual(stuckPath.stops, []);
+});
+
+test("stop errors are phase-attributed and an already exited Core is verified", async (t) => {
+  const denied = fixture(t); denied.options.stop = () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); };
+  await assert.rejects(cleanupOwnedCore(denied.options), (error) => error.phase === "stop" && error.code === "EPERM");
+  const exited = fixture(t); exited.options.stop = (pid) => { exited.stops.push(pid); exited.setLive(false); throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+  assert.equal((await cleanupOwnedCore(exited.options)).verifiedCoreStopped, true);
+});
+
+test("slow post-stop observations cannot extend the exit deadline", async (t) => {
+  const slow = fixture(t);
+  const observe = slow.options.observe; let stopped = false;
+  slow.options.stop = (pid) => { slow.stops.push(pid); stopped = true; };
+  slow.options.observe = (pid) => { if (stopped) { const until = Date.now() + 80; while (Date.now() < until); } return observe(pid); };
+  const started = Date.now();
+  await assert.rejects(cleanupOwnedCore(slow.options), /did not exit/);
+  assert.ok(Date.now() - started < slow.options.exitWaitMs + 80 + 500);
+});
+
+test("an aliased package and profile spelling resolves to the same owned Core", { skip: process.platform !== "win32" }, async (t) => {
+  const f = fixture(t, { alias: true });
+  const result = await cleanupOwnedCore(f.options);
+  assert.equal(result.verifiedCoreStopped, true); assert.deepEqual(f.stops, [f.core.pid]);
 });

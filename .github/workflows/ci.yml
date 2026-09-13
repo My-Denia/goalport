@@ -99,3 +99,14 @@ jobs:
         run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-synthetic-smoke
       - name: Early smoke failure cleans its owned Core
         run: node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup
+      - name: Retain redacted smoke failure summaries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-smoke-failure
+          path: |
+            artifacts/electron-rc/ci-normal-smoke/failure-summary.json
+            artifacts/electron-rc/ci-synthetic-smoke/failure-summary.json
+            artifacts/electron-rc/ci-early-cleanup/failure-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
