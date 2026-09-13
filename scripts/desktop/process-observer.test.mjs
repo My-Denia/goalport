@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test from "node:test";
+import { observeKnown } from "./owned-core-cleanup.mjs";
 import { creationTime, observeProcess } from "./process-observer.mjs";
 
 const pid = 424242;
@@ -36,14 +37,21 @@ test("explicit absence and complete live identity are the only definite observat
   assert.throws(() => observeProcess(0), /valid process id/);
 });
 
-test("real Windows observation reports this process live and an unused PID absent", { skip: process.platform !== "win32" }, () => {
-  const self = observeProcess(process.pid);
-  assert.equal(self.state, "live", JSON.stringify(self));
+// A single CIM probe may time out on a loaded runner; that is `unknown`, which cleanup
+// retries. Judge the real observer the way cleanup does: definite within the same bound.
+const CLEANUP_OBSERVE_MS = 20000;
+test("real Windows observation reaches definite live and absent within the cleanup bound", { skip: process.platform !== "win32" }, async () => {
+  const selfAttempts = [];
+  const self = await observeKnown((pid) => observeProcess(pid), process.pid, Date.now() + CLEANUP_OBSERVE_MS, selfAttempts);
+  assert.equal(self.state, "live", JSON.stringify({ self, selfAttempts }));
   assert.equal(realpathSync.native(self.ExecutablePath).toLowerCase(), realpathSync.native(process.execPath).toLowerCase());
   assert.ok(Number.isFinite(creationTime(self.CreationDate)));
+  assert.ok(selfAttempts.every((attempt) => attempt.state === "unknown"), "only unknown observations are retried");
   let unused = 999_999;
   while (true) {
     try { process.kill(unused, 0); unused += 4; } catch (error) { if (error.code === "ESRCH") break; unused += 4; }
   }
-  assert.equal(observeProcess(unused).state, "absent");
+  const absentAttempts = [];
+  const absent = await observeKnown((pid) => observeProcess(pid), unused, Date.now() + CLEANUP_OBSERVE_MS, absentAttempts);
+  assert.equal(absent.state, "absent", JSON.stringify({ absent, absentAttempts }));
 });
