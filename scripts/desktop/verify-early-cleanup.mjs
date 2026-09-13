@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { argsFor, ROOT, fileHash } from "./package.mjs";
 import { cleanupOwnedCore, ownedCoreIdentity, creationTime, observeKnown } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
-import { sanitizeDiagnostic } from "./diagnostics.mjs";
+import { boundedFailureSummary, sanitizeDiagnostic } from "./diagnostics.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
 
 export async function verifyEarlyCleanup(packageInput, outInput, hooks = {}) {
@@ -63,7 +63,7 @@ export async function verifyEarlyCleanup(packageInput, outInput, hooks = {}) {
     if (report.status !== "PASS") {
       const privatePaths = [out, packageRoot, profile, smoke?.scratch, process.env.USERPROFILE, process.env.HOME, tmpdir()];
       const summary = { schemaVersion: 1, status: report.status, error: report.error, childExitCode: report.childExitCode, ownedCoreStillRunning: report.ownedCoreStillRunning, observationAttempts: report.observationAttempts, rescue: report.rescue };
-      try { writeFileSync(resolve(out, "failure-summary.json"), `${sanitizeDiagnostic(JSON.stringify(summary, null, 2), privatePaths)}\n`); } catch (writeError) {
+      try { writeFileSync(resolve(out, "failure-summary.json"), boundedFailureSummary(summary, privatePaths)); } catch (writeError) {
         console.error(`failure-summary.json could not be written: ${sanitizeDiagnostic(writeError.message, privatePaths)}`);
       }
     }

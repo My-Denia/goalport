@@ -10,7 +10,7 @@ import { argsFor, fileHash } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
-import { collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
+import { boundedFailureSummary, collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 import { clickPointFor } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
@@ -466,17 +466,21 @@ async function smoke() {
       const cleanup = report.cleanup.filter((entry) => entry.phase || entry.process).map(({ phase, error, code, attempts, action, verifiedCoreStopped }) => ({ phase, error, code, attempts, action, verifiedCoreStopped }));
       const error = String(report.error || "").split("\n")[0];
       try {
-        writeFileSync(resolve(out, "failure-summary.json"), `${sanitizeDiagnostic(JSON.stringify({
+        writeFileSync(resolve(out, "failure-summary.json"), boundedFailureSummary({
           schemaVersion: 1, status: report.status, mode: report.mode, stage: failedStage, error, cleanup, stack: report.error, diagnostics: report.diagnostics,
           steps: report.steps.map(({ name, at }) => ({ name, at })), launcherCreationMode: report.launcherCreationMode,
           version: identity.version, sourceRevision: identity.sourceRevision
-        }, null, 2), privatePaths)}\n`);
+        }, privatePaths));
       } catch (writeError) {
         // Report the lost summary without replacing the failure it was describing.
         console.error(`failure-summary.json could not be written: ${sanitizeDiagnostic(writeError.message, privatePaths)}`);
       }
       const brief = cleanup.map(({ attempts = [], ...entry }) => ({ ...entry, attempts: attempts.length, lastAttempt: attempts.at(-1) }));
-      Object.assign(summary, JSON.parse(sanitizeDiagnostic(JSON.stringify({ stage: failedStage, error, cleanup: brief }), privatePaths)));
+      try {
+        Object.assign(summary, JSON.parse(boundedFailureSummary({ stage: failedStage, error, cleanup: brief }, privatePaths)));
+      } catch (summaryError) {
+        console.error(`failure summary could not be bounded: ${sanitizeDiagnostic(summaryError.message, privatePaths)}`);
+      }
     }
     console.log(JSON.stringify(summary, null, 2));
   }

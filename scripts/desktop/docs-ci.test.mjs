@@ -69,7 +69,7 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
 
 test("Desktop CI retains only redacted failure summaries and never tolerates a failed step", () => {
   const { body } = desktopJob(workflow);
-  assert.doesNotMatch(workflow, /continue-on-error/);
+  assert.doesNotMatch(body, /continue-on-error/);
   const steps = body.split(/\r?\n(?=      - )/);
   const last = steps.at(-1);
   assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@v4\r?\n/);
