@@ -1075,7 +1075,7 @@ async function runM3(args, build) {
 }
 
 async function validateSupportMatrix(file, expectedBuildId) {
-  const matrixFile = workspacePath(file || path.join(ROOT, "docs", "runtime-support-matrix.md"), "support matrix");
+  const matrixFile = workspacePath(file || path.join(ROOT, "docs", "reference", "runtime-support-matrix.md"), "support matrix");
   const text = await fs.readFile(matrixFile, "utf8");
   const missingScenarios = SCENARIO_IDS.filter((id) => !text.includes("| " + id + " |"));
   if (missingScenarios.length > 0) fail("support matrix is missing scenario rows", { missingScenarios });

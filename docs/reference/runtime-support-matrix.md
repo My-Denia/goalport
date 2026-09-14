@@ -1,5 +1,7 @@
 # Runtime and scenario support matrix
 
+> **Reference record.** Dated contracts and evidence for specific historical builds, kept unchanged for audit. It is not a current guide; start at the [documentation index](../README.md).
+
 ## Independent Claude Stop contract (2026-09-05 candidate)
 
 The new local Electron candidate splits native turn interruption from residual execution quiescence. Its run of record is `goal-runs/claude-native-stop-product`; final candidate identity and current acceptance must be read from that run's manifest and GUI evidence. Implementation alone is not admission.

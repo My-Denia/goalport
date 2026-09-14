@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an improvement to GoalPort.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Native ownership and safety
+      description: Would this change how GoalPort touches Runtime configuration, credentials, permissions, resend or held workspace responsibility? GoalPort keeps those native and conservative by design.

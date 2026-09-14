@@ -1,5 +1,7 @@
 # Standalone Coding-Agent Control Plane
 
+> **Historical design record** (2026-08-31, pre-implementation). Where it differs from the code, the code wins; for example, Electron replaced Tauri as the release line. Index: [history](../README.md).
+
 ## V1 产品与架构设计规范 · r2
 
 - 修订日期：2026-08-31。

@@ -11,10 +11,10 @@ const value = (name, fallback) => {
 };
 const paths = {
   readme: resolve(ROOT, value("--readme", "README.md")),
-  runtimeMatrix: resolve(ROOT, value("--runtime-matrix", "docs/runtime-support-matrix.md")),
-  srd: resolve(ROOT, value("--srd", "docs/acceptance-srd.md")),
-  comparison: resolve(ROOT, value("--comparison", "docs/desktop-host-comparison.md")),
-  risks: resolve(ROOT, value("--risks", "docs/connected-preview-risks.md"))
+  runtimeMatrix: resolve(ROOT, value("--runtime-matrix", "docs/reference/runtime-support-matrix.md")),
+  srd: resolve(ROOT, value("--srd", "docs/reference/acceptance-srd.md")),
+  comparison: resolve(ROOT, value("--comparison", "docs/reference/desktop-host-comparison.md")),
+  risks: resolve(ROOT, value("--risks", "docs/reference/connected-preview-risks.md"))
 };
 const text = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, existsSync(path) ? readFileSync(path, "utf8") : ""]));
 const checks = {

@@ -1,5 +1,7 @@
 # GoalPort V1 · r2 修订记录
 
+> **Historical design record** (2026-08-31, pre-implementation). Index: [history](../README.md).
+
 日期：2026-08-31。范围：修订产品设计，不修改开发者的 Kernel、Goal Skill、agents、hooks，不实现或发布产品。
 
 ## 交付文件

@@ -1,5 +1,7 @@
 # ADR-0001: Runtime host and connection ownership
 
+> **Design record.** Written before implementation (2026-08-31); its status line is historical. The implemented system is described in [architecture](../architecture.md).
+
 Status: proposed for the Preview implementation. It is not a claim that a
 specific host topology or recovery level has passed live validation.
 

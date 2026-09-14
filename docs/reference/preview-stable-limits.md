@@ -1,5 +1,7 @@
 # Preview and Stable V1 limits
 
+> **Reference record.** Written for the earlier Preview and kept unchanged for audit; some limits below no longer describe the current RC. Current limits: [limitations](../limitations.md).
+
 The current repository is a Preview until direct evidence says otherwise.
 Creating a package, passing a TypeScript test, passing a deterministic
 Scenario, or seeing a Runtime executable does not make Stable V1.
@@ -35,7 +37,7 @@ SDK is a separate API/SDK surface and is excluded from native subscription
 routing in this product. GoalPort does not handle login, credentials, or paid
 API fallback, does not pass `--bare` or `--dangerously-skip-permissions`, and
 does not write `~/.claude`. Native `--resume` is unsupported until proven.
-See the [support matrix](runtime-support-matrix.md) and [ADR-0001](adr-0001-runtime-host.md).
+See the [support matrix](runtime-support-matrix.md) and [ADR-0001](../adr/adr-0001-runtime-host.md).
 
 ## Known limits
 

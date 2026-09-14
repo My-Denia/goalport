@@ -1,5 +1,7 @@
 # Validation matrix
 
+> **Reference record.** Dated contracts and evidence for specific historical builds, kept unchanged for audit. It is not a current guide; start at the [documentation index](../README.md).
+
 All gates are fail-closed. A command that exits zero with zero tests, all
 required tests skipped, no structured event range, a stale build ID, or an
 unreported timeout is a failed gate. Scenario evidence is S only. Runtime and
