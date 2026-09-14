@@ -32,6 +32,21 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 - **No sandbox.** `READ_ONLY` is a declaration, not an operating-system sandbox.
 - **Supervised launches may lose Core.** When GoalPort starts inside a job object that refuses breakaway (some terminals and CI runners), the supervisor can end Core when the job ends.
 
+## Local pipe security
+
+The Core pipe accepts only the Windows user account that runs Core and rejects remote clients ([architecture](architecture.md#processes)). What that does not cover:
+
+- **Processes of the same user are trusted.** Any process running as that user can open the pipe, including lower-integrity processes (the pipe has no integrity label). Such a process can also hold Core's single serving connection and stall the window's requests.
+- **Administrators and SYSTEM keep access.** Their privileges reach the pipe regardless of its access list.
+- **A pipe name taken while Core is down blocks Core.** Core refuses to start on a name another process created, and at startup the window refuses to attach to it, so launching GoalPort fails (a denial of service). A name taken while the window is already attached is covered by the snapshot-poll limitation below.
+- **Snapshot polls are not re-verified on every poll.** The window checks the pipe server with `goalport-core pipe-peer` before attaching, before every other request and after any connection failure. If Core stops and another process takes its pipe name between two polls, the window can show that process's data until the next command or connection failure triggers a check, which then refuses. The check and the connection are separate steps.
+- **A busy Core delays commands.** A command that needs a check waits at most 120 seconds from when it is issued for a successful check, including checks queued ahead of it and a repeated check after a connection failure. It is then refused rather than sent unchecked. The command's own response limit is another 120 seconds, so a command can wait about 240 seconds in total.
+- **The window's pipe client does not limit impersonation.** Node's named-pipe client connects without a security quality-of-service setting. A process holding `SeImpersonatePrivilege` that took over the pipe name in the gap above could impersonate the window's user on that connection. Core's Rust client does set identification-only impersonation; that flag is checked statically, not by a live test.
+- **An open connection can delay a Core restart.** An open client connection from a process of the same user to a Core that crashed keeps that crashed Core's process object referenced. A new Core on the same database treats the old one as still running and refuses to start until the connection closes. Earlier builds gave Everyone and Anonymous read access to the pipe, so principals outside the user could hold such a connection; now only processes of the user that runs Core can.
+- **Denial is tested with a restricted token, not a second Windows account.** The different-account squatting case is covered by the Windows API's first-instance rule and by `pipe-peer`'s access-list check.
+- **Remote rejection was tested only through local SMB loopback.** The tests open the pipe as `\\127.0.0.1\pipe\...` on the same machine. Clients on other machines rely on the documented `PIPE_REJECT_REMOTE_CLIENTS` behavior and were not tested from another host.
+- **Other clients do not check the server.** The `src-tauri` host and the developer tools in `scripts/connected` do not run `pipe-peer`. Neither does Electron started in the legacy isolated test mode without a data profile (`GOALPORT_REQUIRE_ISOLATED` without `--data-dir` or `--test-profile`); there the window performs no `pipe-peer` check. Process scans that match `goalport-core.exe` and the pipe name on the command line can also match a short-lived `pipe-peer` process.
+
 ## Window and UI
 
 - **The right rail needs a wide window.** At a viewport of 1020 CSS pixels or narrower (more physical pixels under display scaling), the right rail is hidden. The rail holds the Decision Inbox, Runtime selection, Stop, handoff and Blocked work actions, so a pending permission request can be out of sight. Widen the window.

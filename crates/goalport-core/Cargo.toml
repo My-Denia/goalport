@@ -25,4 +25,4 @@ sha2 = "0.10"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "handleapi", "namedpipeapi", "winbase", "winnt", "errhandlingapi", "winerror"] }
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "namedpipeapi", "winbase", "winnt", "errhandlingapi", "winerror", "accctrl", "aclapi", "minwinbase", "processthreadsapi", "sddl", "securitybaseapi"] }
