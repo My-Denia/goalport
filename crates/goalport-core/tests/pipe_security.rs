@@ -405,13 +405,14 @@ fn security_facts(handle: HANDLE, user: PSID) -> SecurityFacts {
 }
 
 /// C4 structural contract, read back from `handle`.
+///
+/// Compare owner and ACE with EqualSid, not an SDDL string. ConvertSecurityDescriptorToStringSecurityDescriptorW
+/// may emit a well-known alias (for example LA for the local Administrator account) while
+/// ConvertSidToStringSidW on the same token still returns the numeric form. Production
+/// `check_pipe_security` already uses EqualSid.
 fn assert_c4(handle: HANDLE) {
     let user = process_user();
     let facts = security_facts(handle, user.sid());
-    let expected_sddl = {
-        let sid = user_sid_string();
-        format!("O:{sid}D:P(A;;FA;;;{sid})")
-    };
     assert!(
         facts.dacl_present
             && facts.dacl_protected
@@ -420,8 +421,7 @@ fn assert_c4(handle: HANDLE) {
             && facts.ace_flags == 0
             && facts.mask == FILE_ALL_ACCESS
             && facts.owner_is_user
-            && facts.ace_sid_is_user
-            && facts.sddl == expected_sddl,
+            && facts.ace_sid_is_user,
         "pipe security does not satisfy C4: {facts:?}"
     );
 }
