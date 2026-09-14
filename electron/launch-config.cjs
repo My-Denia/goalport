@@ -87,6 +87,35 @@ function assertCoreIdentity(receipt, profile) {
   }
 }
 
+const PIPE_PEER_SCHEMA = "goalport.pipe-peer.v1";
+const PIPE_PEER_REFUSAL = "Core pipe server identity could not be verified; attachment refused";
+
+// Parses the single stdout line of `goalport-core pipe-peer`; anything else is null.
+function parsePipePeer(stdout) {
+  if (typeof stdout !== "string") return null;
+  const line = stdout.endsWith("\r\n") ? stdout.slice(0, -2) : stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
+  if (!line || /[\r\n]/.test(line)) return null;
+  let value;
+  try { value = JSON.parse(line); } catch { return null; }
+  return value && typeof value === "object" && value.schema === PIPE_PEER_SCHEMA ? value : null;
+}
+
+function pipePeerBusy(stdout) {
+  const peer = parsePipePeer(stdout);
+  return peer?.ok === false && peer.stage === "busy";
+}
+
+// The pipe server must be proven to run as this user (pipe-peer ok) and be the
+// Core process that committed the startup receipt.
+function assertPipePeer(peerStdout, receipt) {
+  const peer = parsePipePeer(peerStdout);
+  if (!peer || peer.ok !== true || !Number.isSafeInteger(peer.serverPid) || peer.serverPid <= 0 ||
+      receipt?.core?.pid !== peer.serverPid) {
+    throw new Error(PIPE_PEER_REFUSAL);
+  }
+  return peer;
+}
+
 function childEnvironment(env, profile) {
   if (!profile) return { ...env }; // Explicit legacy isolated tooling keeps its original contract.
   const result = { ...env };
@@ -105,4 +134,7 @@ function childEnvironment(env, profile) {
   return result;
 }
 
-module.exports = { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath };
+module.exports = {
+  launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath,
+  assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL
+};

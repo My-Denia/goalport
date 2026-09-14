@@ -26,7 +26,7 @@ Relevant reports include, for example:
 - a way for GoalPort to resend, replay or duplicate a command it reported as unknown;
 - bypassing a held workspace responsibility, a lease, or a permission Decision;
 - GoalPort reading or writing native Runtime configuration or credentials, or forwarding API keys to a Runtime;
-- the Core pipe being reachable by another user, or over the network;
+- the Core pipe being reachable over the network or by another Windows account. The pipe is meant to be open to only the Windows user account that runs Core, and remote named-pipe clients are rejected. Administrator and SYSTEM privileges are outside what this control can prevent; see [limitations](docs/limitations.md#local-pipe-security);
 - private data leaking into diagnostics, receipts or test artifacts.
 
 Out of scope:

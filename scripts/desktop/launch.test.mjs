@@ -328,3 +328,381 @@ test("close Stop consumes the acknowledged snapshot and requires the existing du
   assert.throws(() => acknowledgedStopSnapshot({ goalportRejected: true, error: "denied" }, "stop-1", true), /denied/);
   assert.doesNotThrow(() => acknowledgedStopSnapshot({ ...ack, snapshot: { attempt: { state: "failed" } } }, "stop-1", false));
 });
+
+const { assertPipePeer, pipePeerBusy, PIPE_PEER_REFUSAL } = require("../../electron/launch-config.cjs");
+const { verifyCoreServer, createCoreGate, VERIFY_DEADLINE_MS, SERVER_REFUSAL } = require("../../electron/core-client.cjs");
+const peerLine = (value) => `${JSON.stringify(value)}\n`;
+const okPeer = (pid) => peerLine({ schema: "goalport.pipe-peer.v1", ok: true, serverPid: pid });
+const busyPeer = peerLine({ schema: "goalport.pipe-peer.v1", ok: false, stage: "busy", code: 231 });
+
+test("pipe-peer assertion requires the exact single-line contract and the receipt Core PID", () => {
+  assert.equal(PIPE_PEER_REFUSAL, SERVER_REFUSAL);
+  const receipt = { core: { pid: 4242 } };
+  assert.deepEqual(assertPipePeer(okPeer(4242), receipt), { schema: "goalport.pipe-peer.v1", ok: true, serverPid: 4242 });
+  assert.doesNotThrow(() => assertPipePeer(okPeer(4242).replace("\n", "\r\n"), receipt));
+  for (const stdout of [
+    peerLine({ schema: "goalport.pipe-peer.v1", ok: false, stage: "dacl", code: 1338 }),
+    undefined, "", "not json\n",
+    peerLine({ schema: "goalport.pipe-peer.v2", ok: true, serverPid: 4242 }),
+    okPeer(4243),
+    okPeer(4242) + okPeer(4242),
+    `noise\n${okPeer(4242)}`,
+    peerLine({ schema: "goalport.pipe-peer.v1", ok: true, serverPid: "4242" })
+  ]) {
+    assert.throws(() => assertPipePeer(stdout, receipt), (error) => error.message === PIPE_PEER_REFUSAL, String(stdout));
+  }
+  assert.throws(() => assertPipePeer(okPeer(4242), {}), /could not be verified/);
+  assert.equal(pipePeerBusy(busyPeer), true);
+  assert.equal(pipePeerBusy(okPeer(1)), false);
+});
+
+function gateFixture({ peers = [], failNext = new Set(), receiptPid = 4242 } = {}) {
+  const log = [];
+  let clock = 0;
+  const now = () => clock;
+  const delay = async (ms) => { clock += ms; };
+  const runPeer = async () => {
+    log.push("peer");
+    const next = peers.length ? peers.shift() : { code: 0, stdout: okPeer(receiptPid) };
+    clock += next.elapsed ?? 30;
+    return next;
+  };
+  const exchange = async (request, options) => {
+    log.push(request.messageType);
+    if (failNext.has(request.messageType)) {
+      failNext.delete(request.messageType);
+      throw new Error(request.failWith || "Core connection closed before acknowledgement");
+    }
+    if (request.messageType === "get_startup_receipt") {
+      assert.ok(options.timeoutMs > 0 && options.timeoutMs <= VERIFY_DEADLINE_MS);
+      return { receipt: { core: { pid: receiptPid } } };
+    }
+    return { ok: true, requestId: request.requestId };
+  };
+  const verify = () => verifyCoreServer({
+    runPeer, isBusy: pipePeerBusy, now, delay,
+    requestReceipt: async (timeoutMs) => (await exchange({ messageType: "get_startup_receipt" }, { timeoutMs })).receipt,
+    assertPeer: (stdout, receipt) => assertPipePeer(stdout, receipt)
+  });
+  const gate = createCoreGate({ verify });
+  return { log, gate, send: (request) => gate.send(request, exchange), now, failNext };
+}
+
+test("the request gate verifies every non-snapshot request before sending it", async () => {
+  for (const messageType of ["send_message", "record_close_choice", "safe_stop"]) {
+    const fixture = gateFixture();
+    await fixture.send({ messageType, requestId: messageType });
+    assert.deepEqual(fixture.log, ["peer", "get_startup_receipt", messageType]);
+  }
+});
+
+test("a snapshot is re-verified only after a transport failure, a timeout or a refused verification", async () => {
+  const fixture = gateFixture();
+  await fixture.send({ messageType: "snapshot", requestId: "s1" });
+  assert.deepEqual(fixture.log, ["snapshot"], "no prior failure: no peer run");
+  for (const failWith of ["Core connection closed before acknowledgement", "Core IPC response timed out after 120 seconds"]) {
+    fixture.log.length = 0;
+    fixture.failNext.add("snapshot");
+    await assert.rejects(fixture.send({ messageType: "snapshot", requestId: "s2", failWith }), new RegExp(failWith));
+    await fixture.send({ messageType: "snapshot", requestId: "s3" });
+    await fixture.send({ messageType: "snapshot", requestId: "s4" });
+    assert.deepEqual(fixture.log, ["snapshot", "peer", "get_startup_receipt", "snapshot", "snapshot"]);
+  }
+  const refused = gateFixture({ peers: [{ code: 3, stdout: peerLine({ schema: "goalport.pipe-peer.v1", ok: false, stage: "server-user", code: 5 }) }] });
+  await assert.rejects(refused.send({ messageType: "send_message", requestId: "m1" }), /could not be verified/);
+  await refused.send({ messageType: "snapshot", requestId: "s5" });
+  assert.deepEqual(refused.log, ["peer", "peer", "get_startup_receipt", "snapshot"]);
+});
+
+test("a request waiting on a verification re-verifies when a transport failure happened while it was in flight", async () => {
+  const log = [];
+  const pending = [];
+  const tick = () => new Promise((done) => setImmediate(done));
+  const gate = createCoreGate({
+    verify: () => new Promise((resolveVerify) => { log.push(`verify${pending.length + 1}`); pending.push(resolveVerify); })
+  });
+  const transport = async (request) => {
+    log.push(`transport:${request.messageType}`);
+    if (request.fail) throw new Error("Core connection closed before acknowledgement");
+    return { ok: true };
+  };
+  const mutation = gate.send({ messageType: "send_message", requestId: "m" }, transport);
+  await tick();
+  assert.deepEqual(log, ["verify1"], "verification #1 is in flight");
+  await assert.rejects(gate.send({ messageType: "snapshot", requestId: "s", fail: true }, transport), /closed before acknowledgement/);
+  assert.deepEqual(log, ["verify1", "transport:snapshot"]);
+  pending[0]();
+  for (let index = 0; index < 5 && pending.length < 2; index += 1) await tick();
+  assert.deepEqual(log, ["verify1", "transport:snapshot", "verify2"], "the waiting request must not reach transport on verification #1");
+  pending[1]();
+  await mutation;
+  assert.deepEqual(log, ["verify1", "transport:snapshot", "verify2", "transport:send_message"]);
+  assert.equal(gate.needsVerification(), false);
+});
+
+// Virtual clock with injectable timers for the request gate deadline.
+function virtualGate() {
+  let clock = 0, nextId = 1;
+  const timers = new Map(), verifications = [], transports = [], unhandled = [];
+  const flush = async () => { for (let index = 0; index < 20; index += 1) await new Promise((done) => setImmediate(done)); };
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  const gate = createCoreGate({
+    verify: () => new Promise((resolveVerify, rejectVerify) => verifications.push({ resolve: resolveVerify, reject: rejectVerify, startedAt: clock })),
+    now: () => clock,
+    setTimer: (callback, ms) => { const id = nextId++; timers.set(id, { at: clock + Math.max(0, ms), callback }); return id; },
+    clearTimer: (id) => { timers.delete(id); }
+  });
+  const transport = async (request) => {
+    transports.push({ messageType: request.messageType, at: clock });
+    if (request.fail) throw new Error("Core IPC response timed out after 120 seconds");
+    return { ok: true, requestId: request.requestId };
+  };
+  const issue = (messageType, extra = {}) => {
+    const outcome = { enteredAt: clock };
+    outcome.promise = gate.send({ messageType, requestId: messageType, ...extra }, transport).then(
+      () => { outcome.sentAt = clock; },
+      (error) => { outcome.refusedAt = clock; outcome.error = error.message; }
+    );
+    return outcome;
+  };
+  const advanceTo = async (target) => {
+    await flush();
+    while (true) {
+      const due = [...timers.entries()].filter(([, timer]) => timer.at <= target).sort((left, right) => left[1].at - right[1].at)[0];
+      if (!due) break;
+      clock = due[1].at;
+      timers.delete(due[0]);
+      due[1].callback();
+      await flush();
+    }
+    clock = target;
+    await flush();
+  };
+  const dispose = () => process.off("unhandledRejection", onUnhandled);
+  return { gate, issue, advanceTo, flush, verifications, transports, timers, unhandled, dispose, now: () => clock };
+}
+
+test("a failure during check 1 and a long check 2 refuse the waiting command within 120 s of its entry", async () => {
+  const v = virtualGate();
+  try {
+    const stop = v.issue("safe_stop");
+    await v.advanceTo(10);
+    assert.equal(v.verifications.length, 1, "check 1 in flight");
+    const poll = v.issue("snapshot", { fail: true });
+    await v.advanceTo(20);
+    assert.equal(poll.error, "Core IPC response timed out after 120 seconds");
+    await v.advanceTo(100_000);
+    v.verifications[0].resolve();
+    await v.advanceTo(100_010);
+    assert.equal(v.verifications.length, 2, "the failure during check 1 requires check 2");
+    await v.advanceTo(120_000);
+    assert.equal(stop.error, SERVER_REFUSAL, `command must be refused by 120 000 ms; outcome=${JSON.stringify(stop)}`);
+    assert.ok(stop.refusedAt - stop.enteredAt <= VERIFY_DEADLINE_MS, `refused at ${stop.refusedAt}`);
+    assert.deepEqual(v.transports.map((entry) => entry.messageType), ["snapshot"], "the refused command never reaches transport");
+    assert.equal(v.timers.size, 0, "no pending gate timer after refusal");
+    v.verifications[1].reject(new Error("late check 2 failure"));
+    await v.flush();
+    assert.deepEqual(v.unhandled, [], "a late underlying verification outcome is not an unhandled rejection");
+    assert.equal(v.gate.needsVerification(), true, "local expiry did not mark a verification as successful");
+  } finally {
+    for (const pending of v.verifications) pending.resolve();
+    await v.flush();
+    v.dispose();
+  }
+});
+
+test("a command queued behind earlier checks is refused within 120 s of its own entry", async () => {
+  const v = virtualGate();
+  try {
+    const first = v.issue("send_message");
+    await v.advanceTo(50_000);
+    const poll = v.issue("snapshot", { fail: true });
+    await v.advanceTo(50_010);
+    assert.ok(poll.error);
+    await v.advanceTo(60_000);
+    const second = v.issue("record_close_choice");
+    await v.advanceTo(120_000);
+    assert.equal(first.error, SERVER_REFUSAL, `first command refused at its deadline; ${JSON.stringify(first)}`);
+    assert.ok(first.refusedAt - first.enteredAt <= VERIFY_DEADLINE_MS);
+    await v.advanceTo(170_000);
+    v.verifications[0].resolve();
+    await v.advanceTo(170_010);
+    assert.equal(v.verifications.length, 2, "the queued check starts only after check 1");
+    await v.advanceTo(180_000);
+    assert.equal(second.error, SERVER_REFUSAL, `queued command refused at its own deadline; ${JSON.stringify(second)}`);
+    assert.ok(second.refusedAt - second.enteredAt <= VERIFY_DEADLINE_MS, `refused ${second.refusedAt - second.enteredAt} ms after entry`);
+    assert.deepEqual(v.transports.map((entry) => entry.messageType), ["snapshot"]);
+    assert.equal(v.timers.size, 0);
+    v.verifications[1].resolve();
+    await v.flush();
+    assert.deepEqual(v.unhandled, []);
+  } finally {
+    for (const pending of v.verifications) pending.resolve();
+    await v.flush();
+    v.dispose();
+  }
+});
+
+test("a check that succeeds within the window sends the command before the deadline", async () => {
+  const v = virtualGate();
+  try {
+    const command = v.issue("send_message");
+    await v.advanceTo(90_000);
+    assert.equal(command.sentAt, undefined);
+    v.verifications[0].resolve();
+    await v.advanceTo(90_010);
+    assert.equal(command.sentAt, 90_000, "sent as soon as the check succeeds");
+    assert.equal(command.error, undefined);
+    assert.deepEqual(v.transports, [{ messageType: "send_message", at: 90_000 }]);
+    assert.equal(v.timers.size, 0, "the deadline timer is cleared after success");
+    assert.deepEqual(v.unhandled, []);
+  } finally {
+    for (const pending of v.verifications) pending.resolve();
+    await v.flush();
+    v.dispose();
+  }
+});
+
+test("a busy pipe peer is retried until it succeeds within the verification deadline", async () => {
+  const fixture = gateFixture({ peers: [{ code: 3, stdout: busyPeer, elapsed: 3000 }, { code: 3, stdout: busyPeer, elapsed: 3000 }] });
+  await fixture.send({ messageType: "safe_stop", requestId: "stop" });
+  assert.deepEqual(fixture.log, ["peer", "peer", "peer", "get_startup_receipt", "safe_stop"]);
+});
+
+test("a peer that stays busy until the 120 s deadline refuses, and other failures refuse without retry", async () => {
+  const always = gateFixture({ peers: Array.from({ length: 1000 }, () => ({ code: 3, stdout: busyPeer, elapsed: 3000 })) });
+  await assert.rejects(always.send({ messageType: "send_message", requestId: "m" }), (error) => error.message === SERVER_REFUSAL);
+  assert.ok(always.now() >= VERIFY_DEADLINE_MS - 3100 && always.now() <= VERIFY_DEADLINE_MS + 3000, `stopped at ${always.now()}`);
+  assert.ok(!always.log.includes("send_message") && !always.log.includes("get_startup_receipt"));
+  const peerRuns = always.log.filter((entry) => entry === "peer").length;
+  assert.ok(peerRuns > 30 && peerRuns < 40, `busy retries ${peerRuns}`);
+  for (const peer of [
+    { code: 3, stdout: peerLine({ schema: "goalport.pipe-peer.v1", ok: false, stage: "dacl", code: 1338 }) },
+    { code: 3, stdout: peerLine({ schema: "goalport.pipe-peer.v1", ok: false, stage: "open", code: 2 }) },
+    { code: null, stdout: "" },
+    { code: 0, stdout: okPeer(1) },
+    { code: 1, stdout: busyPeer }
+  ]) {
+    const fixture = gateFixture({ peers: [peer] });
+    await assert.rejects(fixture.send({ messageType: "record_close_choice", requestId: "c" }), /could not be verified/);
+    assert.equal(fixture.log.filter((entry) => entry === "peer").length, 1, JSON.stringify(peer));
+    assert.ok(!fixture.log.includes("record_close_choice"));
+  }
+});
+
+test("the real Electron entrypoint routes Core requests and close choices through the verified gate", async (t) => {
+  const { EventEmitter } = await import("node:events");
+  const { createHash } = await import("node:crypto");
+  const root = fixture(t);
+  const resources = resolve(root, "resources");
+  const data = resolve(root, "profile");
+  mkdirSync(resources, { recursive: true });
+  const coreBytes = "inert Core identity fixture; pipe-peer and the pipe are simulated";
+  writeFileSync(resolve(resources, "goalport-core.exe"), coreBytes);
+  const coreSha256 = createHash("sha256").update(coreBytes).digest("hex");
+  const log = [];
+  let peerPid = 4242, failSnapshot = false;
+  let profile;
+  const snapshot = { attempt: { id: "attempt-1", state: "active", provider: "scenario" } };
+  const respond = (request) => {
+    switch (request.messageType) {
+      case "get_startup_receipt":
+        return { ok: true, requestId: request.requestId, payload: { receipt: { startupState: "READY_COMMITTED", core: { executableSha256: coreSha256, pid: 4242 }, databaseIdentity: profile.database, pipeIdentity: profile.pipe } } };
+      case "snapshot":
+        return { ok: true, requestId: request.requestId, payload: { snapshot } };
+      case "record_close_choice":
+        return { ok: true, requestId: request.requestId, payload: { receipt: { receiptId: "receipt-1", choice: "continue-background" }, snapshot } };
+      default:
+        return { ok: true, requestId: request.requestId, payload: { requestId: request.requestId, accepted: true, snapshot } };
+    }
+  };
+  const net = {
+    createConnection: () => {
+      const socket = new EventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => {};
+      socket.end = () => {};
+      socket.write = (frame) => {
+        const request = JSON.parse(frame.subarray(4).toString("utf8"));
+        log.push(request.messageType);
+        setImmediate(() => {
+          if (request.messageType === "snapshot" && failSnapshot) { failSnapshot = false; socket.emit("error", new Error("pipe closed")); return; }
+          const payload = Buffer.from(JSON.stringify(respond(request)));
+          const reply = Buffer.alloc(4 + payload.length);
+          reply.writeUInt32LE(payload.length, 0);
+          payload.copy(reply, 4);
+          socket.emit("data", reply);
+        });
+      };
+      setImmediate(() => socket.emit("connect"));
+      return socket;
+    }
+  };
+  const childProcess = {
+    spawn: () => assert.fail("an attached Core must not be launched"),
+    execFile: (file, args, options, callback) => {
+      assert.equal(file, resolve(resources, "goalport-core.exe"));
+      assert.deepEqual(args, ["pipe-peer", "--pipe", profile.pipe]);
+      assert.equal(options.timeout, 5000);
+      log.push("peer");
+      setImmediate(() => callback(null, okPeer(peerPid), ""));
+    }
+  };
+  const windows = [], handlers = new Map(), dialogs = [];
+  class FakeWindow {
+    constructor() { this.webContents = { send: () => {}, executeJavaScript: async () => {} }; windows.push(this); }
+    static fromWebContents() { return windows[0]; }
+    loadFile() { return Promise.resolve(); }
+    on() {}
+    isDestroyed() { return false; }
+    destroy() {}
+  }
+  const electron = {
+    app: {
+      isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: (name) => name === "exe" ? resolve(root, "GoalPort.exe") : root,
+      setPath: () => {}, exit: (code) => assert.fail(`unexpected exit ${code}: ${dialogs.join(" ")}`), whenReady: () => Promise.resolve(),
+      commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}, quit: () => {}
+    },
+    BrowserWindow: FakeWindow, ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    Notification: { isSupported: () => false }, shell: {}, dialog: { showErrorBox: (title, message) => dialogs.push(message) }
+  };
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
+  const args = ["GoalPort.exe", "--data-dir", data];
+  profile = prepareProfile({ args: launchArguments(args), appData: root, version: "1.0.0-rc.1", coreSha256, isPackaged: true });
+  main(fakeRequire, { exports: {} }, {}, resolve("electron"), { argv: args, resourcesPath: resources, env: {}, pid: 1234, platform: "win32", execPath: process.execPath }, { error: (...values) => dialogs.push(values.join(" ")) });
+  const until = async (condition) => {
+    const deadline = Date.now() + 5000;
+    while (!condition()) { assert.ok(Date.now() < deadline, `timed out; log=${log.join(",")}`); await new Promise((done) => setTimeout(done, 5)); }
+  };
+  await until(() => windows.length === 1 && log.includes("snapshot"));
+  assert.deepEqual(log, ["peer", "get_startup_receipt", "snapshot"], "startup attachment verifies before the first snapshot");
+
+  const request = (messageType, requestId) => ({ protocolVersion: "goalport.ipc.v2", requestId, entityVersion: 0, messageType, payload: {} });
+  log.length = 0;
+  await handlers.get("goalport:core-command")(null, request("send_message", "send-1"));
+  assert.deepEqual(log, ["peer", "get_startup_receipt", "send_message"]);
+
+  log.length = 0;
+  await handlers.get("goalport:core-snapshot")(null, request("snapshot", "poll-1"));
+  assert.deepEqual(log, ["snapshot"], "a snapshot poll with no prior failure is not re-verified");
+
+  log.length = 0;
+  failSnapshot = true;
+  await handlers.get("goalport:core-snapshot")(null, request("snapshot", "poll-2"));
+  assert.deepEqual(log, ["snapshot", "peer", "get_startup_receipt", "snapshot"], "a failed snapshot re-verifies before its retry");
+
+  log.length = 0;
+  peerPid = 9999;
+  await assert.rejects(handlers.get("goalport:core-command")(null, request("safe_stop", "stop-1")), /could not be verified/);
+  assert.deepEqual(log, ["peer", "get_startup_receipt"], "a server whose PID is not the receipt Core receives no mutation");
+  peerPid = 4242;
+
+  log.length = 0;
+  const closed = await handlers.get("goalport:confirm-close-choice")({ sender: {} }, { choice: "continue", requestId: "close-1" });
+  assert.equal(closed.ok, true, JSON.stringify(closed));
+  assert.deepEqual(log, ["peer", "get_startup_receipt", "snapshot", "peer", "get_startup_receipt", "record_close_choice"]);
+});

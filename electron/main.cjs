@@ -1,12 +1,12 @@
 const { app, BrowserWindow, ipcMain, Notification, shell, dialog } = require("electron");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment } = require("./launch-config.cjs");
-const { invokeCoreRequest, acknowledgedStopSnapshot } = require("./core-client.cjs");
+const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 function reportStartupFailure(error) {
@@ -271,11 +271,11 @@ async function ensureCore() {
   if (!profile && isolatedRequired() && !isThisRunIsolatedPipe(process.env.GOALPORT_CORE_PIPE || configuredPipeName)) {
     throw new Error(`isolated Electron refused to attach to non this-run pipe: ${process.env.GOALPORT_CORE_PIPE || configuredPipeName}`);
   }
-  if (await pipeAvailable()) return verifyCoreConnection();
+  if (await pipeAvailable()) return coreGate.verify();
   if (coreLaunchPromise) return coreLaunchPromise;
   if (lastLaunchNonce) {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (await pipeAvailable()) return verifyCoreConnection();
+      if (await pipeAvailable()) return coreGate.verify();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error("Lifecycle-independent Core pipe disappeared; refusing to spawn a second Core");
@@ -318,7 +318,7 @@ async function ensureCore() {
     // expose the pipe instead of turning a slow first run into a false crash.
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (spawnError) throw new Error(`Core launcher could not start: ${spawnError.message}`);
-      if (await pipeAvailable()) return verifyCoreConnection();
+      if (await pipeAvailable()) return coreGate.verify();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     let detail = "";
@@ -330,24 +330,57 @@ async function ensureCore() {
   return coreLaunchPromise;
 }
 
-async function verifyCoreConnection() {
-  if (!profile) return;
-  const requestId = `identity-${randomUUID()}`;
-  const response = await exchange({
-    protocolVersion: "goalport.ipc.v2", requestId,
-    entityVersion: 0, messageType: "get_startup_receipt", payload: {}
+// Authenticates the pipe server before attachment: `goalport-core pipe-peer`
+// proves the server runs as this Windows user behind the Core-only descriptor,
+// and its PID must be the Core that committed the startup receipt.
+function runPipePeer() {
+  return new Promise((resolve) => {
+    const binary = coreBinary();
+    if (!binary) return resolve({ code: null, stdout: "" });
+    execFile(binary, ["pipe-peer", "--pipe", PIPE_NAME], { timeout: 5000, windowsHide: true }, (error, stdout) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : null) : 0, stdout: String(stdout ?? "") });
+    });
   });
-  if (!response || response.requestId !== requestId || response.ok === false) throw new Error("Core startup identity is unavailable; attachment refused");
-  assertCoreIdentity(response.payload?.receipt, profile);
 }
 
-function exchange(request) {
+// ONE full verification of the Core connection (profile mode only).
+async function verifyCoreConnection() {
+  if (!profile) return;
+  return verifyCoreServer({
+    runPeer: runPipePeer,
+    isBusy: pipePeerBusy,
+    now: () => Date.now(),
+    delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    requestReceipt: async (timeoutMs) => {
+      const requestId = `identity-${randomUUID()}`;
+      const response = await exchange({
+        protocolVersion: "goalport.ipc.v2", requestId,
+        entityVersion: 0, messageType: "get_startup_receipt", payload: {}
+      }, { timeoutMs });
+      if (!response || response.requestId !== requestId || response.ok === false) throw new Error("Core startup identity is unavailable; attachment refused");
+      return response.payload?.receipt;
+    },
+    assertPeer: (peerStdout, receipt) => {
+      assertPipePeer(peerStdout, receipt);
+      assertCoreIdentity(receipt, profile);
+    }
+  });
+}
+
+const coreGate = createCoreGate({ verify: verifyCoreConnection });
+
+// Every request to Core goes through this gate (see createCoreGate).
+function exchangeVerified(request) {
+  return coreGate.send(request, exchange);
+}
+
+function exchange(request, { timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(PIPE_NAME);
     const chunks = [];
     let expected = null;
     let settled = false;
-    const timeout = setTimeout(() => fail(new Error("Core IPC response timed out after 120 seconds")), 120000);
+    const timeout = setTimeout(() => fail(new Error(`Core IPC response timed out after ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`)), timeoutMs);
     const fail = (error) => { if (!settled) { settled = true; clearTimeout(timeout); socket.destroy(); reject(error); } };
     socket.on("error", fail);
     socket.on("end", () => { if (!settled) fail(new Error("Core closed the connection before acknowledging the request")); });
@@ -401,7 +434,7 @@ function notifyCloseChoiceFailed(payload) {
 }
 
 async function persistCloseChoice(payload) {
-  const response = await exchange({
+  const response = await exchangeVerified({
     protocolVersion: "goalport.ipc.v2",
     // Keep the owner operation in payload.requestId, while using a distinct
     // Core-ledger identity for the receipt command. Replays remain deterministic.
@@ -449,7 +482,7 @@ async function quitAfterCloseChoice() {
 
 async function invokeCore(request) {
   return invokeCoreRequest(request, {
-    exchange, ensureCore, delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    exchange: exchangeVerified, ensureCore, delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     onResult: (snapshot) => { cacheAttempt(snapshot); maybeNotify(request, snapshot); }
   });
 }

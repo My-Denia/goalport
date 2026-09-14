@@ -15,8 +15,16 @@ use goalport_core::{
 use serde_json::json;
 use std::{env, path::PathBuf, process::ExitCode};
 
+/// Exit code of `pipe-peer` for every verification failure.
+const PIPE_PEER_FAILURE_EXIT: u8 = 3;
+const PIPE_PEER_SCHEMA: &str = "goalport.pipe-peer.v1";
+
 fn main() -> ExitCode {
-    match run(env::args().skip(1).collect()) {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("pipe-peer") {
+        return pipe_peer(&args[1..]);
+    }
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("goalport-core: {error}");
@@ -98,6 +106,36 @@ fn serve(args: &[String]) -> Result<(), String> {
     {
         let _ = (pipe, server);
         Err("serve requires Windows Named Pipe support".into())
+    }
+}
+
+/// `pipe-peer --pipe NAME`: authenticate the server of a Core pipe without
+/// opening a Store, writing a receipt or sending a frame. Stdout is exactly one
+/// JSON line; success exits 0, any failure exits 3.
+fn pipe_peer(args: &[String]) -> ExitCode {
+    let result = match option(args, "--pipe").filter(|name| !name.trim().is_empty()) {
+        Some(name) => goalport_core::ipc::verify_pipe_peer(&name).map_err(|error| match error {
+            goalport_core::IpcError::PipeSecurity { stage, code } => (stage, code),
+            _ => ("open", 50),
+        }),
+        // ERROR_INVALID_PARAMETER: no pipe to open.
+        None => Err(("open", 87)),
+    };
+    match result {
+        Ok(peer) => {
+            // Fixed key order; every value is a number or a fixed ASCII token.
+            println!(
+                "{{\"schema\":\"{PIPE_PEER_SCHEMA}\",\"ok\":true,\"serverPid\":{}}}",
+                peer.server_pid
+            );
+            ExitCode::SUCCESS
+        }
+        Err((stage, code)) => {
+            println!(
+                "{{\"schema\":\"{PIPE_PEER_SCHEMA}\",\"ok\":false,\"stage\":\"{stage}\",\"code\":{code}}}"
+            );
+            ExitCode::from(PIPE_PEER_FAILURE_EXIT)
+        }
     }
 }
 
@@ -1282,7 +1320,7 @@ fn option(args: &[String], key: &str) -> Option<String> {
 
 fn print_usage() {
     println!(
-        "goalport-core v1\n\nUSAGE:\n  goalport-core serve [--pipe NAME] [--db PATH]\n  goalport-core preflight --provider PROVIDER [--executable PATH] [--version VERSION] [--workspace PATH]\n  goalport-core scenario [--provider NAME] [--prompt TEXT]\n  goalport-core status [--db PATH]"
+        "goalport-core v1\n\nUSAGE:\n  goalport-core serve [--pipe NAME] [--db PATH]\n  goalport-core pipe-peer --pipe NAME\n  goalport-core preflight --provider PROVIDER [--executable PATH] [--version VERSION] [--workspace PATH]\n  goalport-core scenario [--provider NAME] [--prompt TEXT]\n  goalport-core status [--db PATH]"
     );
 }
 

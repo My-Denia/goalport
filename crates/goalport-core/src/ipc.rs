@@ -1,6 +1,9 @@
 //! Versioned local IPC for the detached Core.
 //!
-//! Windows builds use a current-user Named Pipe. The JSON framing and request
+//! Windows builds use a Named Pipe whose security descriptor is set explicitly:
+//! only the Windows user that runs Core has access, remote clients are rejected,
+//! Core never joins a pipe name created by someone else, and every instance is
+//! read back and verified before use (fail closed). The JSON framing and request
 //! ledger are platform-independent, which lets contract tests run without a
 //! desktop or a provider Runtime.
 
@@ -162,6 +165,28 @@ pub enum IpcError {
     Store(#[from] StoreError),
     #[error("named pipes are unavailable on this platform")]
     UnsupportedPlatform,
+    /// Security setup or verification of a named pipe failed. The message is
+    /// bounded: it carries a fixed stage name and an OS code, never a SID,
+    /// security descriptor or path.
+    #[error("named pipe security setup failed at {stage} (os error {code})")]
+    PipeSecurity { stage: &'static str, code: i32 },
+    #[error("named pipe name is already in use by another instance")]
+    PipeNameOccupied,
+}
+
+/// Security descriptor of every Core pipe instance: owner and group are the
+/// Core process user, and the protected DACL grants full access to that user
+/// only (no SYSTEM, Administrators, Everyone or Anonymous entries).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn pipe_sddl(user_sid: &str) -> String {
+    format!("O:{user_sid}G:{user_sid}D:P(A;;FA;;;{user_sid})")
+}
+
+/// Identity of the process serving a named pipe, as proven by
+/// [`verify_pipe_peer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipePeer {
+    pub server_pid: u32,
 }
 
 pub fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, IpcError> {
@@ -418,15 +443,15 @@ impl CoreServer {
             let mut connection = match server.accept() {
                 Ok(connection) => connection,
                 Err(IpcError::Io(_)) => {
-                    // Continue-then-destroy can invalidate the listening
-                    // instance. Re-bind the same name so a later UI attaches
-                    // instead of spawning a second Core.
+                    // Continue-then-destroy, or a client that connected and
+                    // closed before this accept (ERROR_NO_DATA), can invalidate
+                    // the listening instance. Replace it with a further instance
+                    // of the same pipe while the old handle is still open, so the
+                    // name is never released to another creator and a later UI
+                    // attaches instead of spawning a second Core. Security
+                    // failures of the replacement are fatal.
                     thread::sleep(Duration::from_millis(20));
-                    match NamedPipeServer::bind(name) {
-                        Ok(next) => server = next,
-                        Err(IpcError::Io(_)) => {}
-                        Err(error) => return Err(error),
-                    }
+                    server.replace_listening_instance()?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -521,35 +546,318 @@ impl<S: Read + Write> IpcClient<S> {
 
 #[cfg(windows)]
 mod windows_pipe {
-    use super::{IpcClient, IpcError};
+    use super::{IpcClient, IpcError, PipePeer, pipe_sddl};
     use std::{
         ffi::OsStr,
         fs::File,
         io::{Read, Write},
         os::windows::ffi::OsStrExt,
         os::windows::io::FromRawHandle,
+        ptr::null_mut,
+        time::{Duration, Instant},
     };
-    use winapi::um::winnt::{FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE};
     use winapi::{
-        shared::{ntdef::NULL, winerror::ERROR_PIPE_CONNECTED},
+        ctypes::c_void,
+        shared::{
+            minwindef::{DWORD, FALSE, ULONG},
+            ntdef::NULL,
+            sddl::{
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SDDL_REVISION_1,
+            },
+            winerror::{
+                ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_OWNER,
+                ERROR_INVALID_PARAMETER, ERROR_INVALID_SECURITY_DESCR, ERROR_PIPE_BUSY,
+                ERROR_PIPE_CONNECTED,
+            },
+        },
         um::{
+            accctrl::SE_KERNEL_OBJECT,
+            aclapi::GetSecurityInfo,
             errhandlingapi::GetLastError,
             fileapi::{CreateFileW, OPEN_EXISTING},
             handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
-            namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW},
+            minwinbase::SECURITY_ATTRIBUTES,
+            namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW},
+            processthreadsapi::{GetCurrentProcess, OpenProcess, OpenProcessToken},
+            securitybaseapi::{EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation},
             winbase::{
-                PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
-                PIPE_WAIT,
+                FILE_FLAG_FIRST_PIPE_INSTANCE, GetNamedPipeServerProcessId, LocalFree,
+                PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, SECURITY_IDENTIFICATION,
+                SECURITY_SQOS_PRESENT,
             },
-            winnt::{GENERIC_READ, GENERIC_WRITE},
+            winnt::{
+                ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_ACE_TYPE, DACL_SECURITY_INFORMATION,
+                FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                GENERIC_READ, GENERIC_WRITE, HANDLE, OWNER_SECURITY_INFORMATION, PACL,
+                PROCESS_QUERY_LIMITED_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT,
+                SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            },
         },
     };
+
+    /// Every client open of a Core pipe (Rust client and `verify_pipe_peer`)
+    /// limits the server to identification-level impersonation.
+    pub(crate) const PIPE_CLIENT_FLAGS: DWORD =
+        FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
+    /// Every Core pipe instance rejects remote (SMB) clients.
+    pub(crate) const PIPE_SERVER_MODE: DWORD =
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
+    /// Total time `verify_pipe_peer` waits for a busy pipe, from its first attempt.
+    pub(crate) const PEER_BUSY_BUDGET: Duration = Duration::from_millis(3000);
 
     fn wide(value: &str) -> Vec<u16> {
         OsStr::new(value)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect()
+    }
+
+    fn pipe_path(name: &str) -> String {
+        if name.starts_with(r"\\.\pipe\") {
+            name.to_owned()
+        } else {
+            format!(r"\\.\pipe\{name}")
+        }
+    }
+
+    fn last_error() -> i32 {
+        unsafe { GetLastError() as i32 }
+    }
+
+    fn security(stage: &'static str, code: i32) -> IpcError {
+        IpcError::PipeSecurity { stage, code }
+    }
+
+    /// Closes a kernel handle on drop unless ownership was released.
+    struct OwnedHandle(HANDLE);
+    impl OwnedHandle {
+        fn into_raw(mut self) -> HANDLE {
+            std::mem::replace(&mut self.0, null_mut())
+        }
+    }
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    /// Frees a LocalAlloc-owned buffer returned by a Win32 API on drop.
+    struct LocalBuffer(*mut c_void);
+    impl Drop for LocalBuffer {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+    }
+
+    /// A `TOKEN_USER` buffer (aligned) whose SID pointer stays valid while it lives.
+    pub(crate) struct TokenUserSid {
+        buffer: Vec<u64>,
+    }
+    impl TokenUserSid {
+        fn sid(&self) -> PSID {
+            unsafe { (*(self.buffer.as_ptr() as *const TOKEN_USER)).User.Sid }
+        }
+    }
+
+    fn query_token_user(token: HANDLE) -> Result<TokenUserSid, i32> {
+        let mut needed: DWORD = 0;
+        unsafe {
+            GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(last_error());
+        }
+        let mut buffer = vec![0_u64; (needed as usize).div_ceil(8)];
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr() as *mut c_void,
+                (buffer.len() * 8) as DWORD,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        Ok(TokenUserSid { buffer })
+    }
+
+    /// `TokenUser` of the current process token.
+    fn current_user() -> Result<TokenUserSid, IpcError> {
+        let mut token: HANDLE = null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(security("token-open", last_error()));
+        }
+        let token = OwnedHandle(token);
+        query_token_user(token.0).map_err(|code| security("token-user", code))
+    }
+
+    fn sid_string(sid: PSID) -> Result<String, IpcError> {
+        let mut raw: *mut u16 = null_mut();
+        if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 || raw.is_null() {
+            return Err(security("sid-string", last_error()));
+        }
+        let _owned = LocalBuffer(raw as *mut c_void);
+        let text = unsafe {
+            let length = (0..).take_while(|&index| *raw.add(index) != 0).count();
+            String::from_utf16(std::slice::from_raw_parts(raw, length))
+        };
+        text.map_err(|_| security("sid-string", ERROR_INVALID_PARAMETER as i32))
+    }
+
+    enum SecurityMismatch {
+        Query(i32),
+        Owner,
+        Dacl,
+    }
+
+    /// Structural check of a pipe handle's owner and DACL against `expected`:
+    /// owner equals `expected`; DACL present and protected; exactly one
+    /// ACCESS_ALLOWED ACE with flags 0, mask FILE_ALL_ACCESS and SID `expected`.
+    fn check_pipe_security(handle: HANDLE, expected: PSID) -> Result<(), SecurityMismatch> {
+        unsafe {
+            let mut owner: PSID = null_mut();
+            let mut dacl: PACL = null_mut();
+            let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+            let status = GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                null_mut(),
+                &mut dacl,
+                null_mut(),
+                &mut descriptor,
+            );
+            if status != 0 {
+                return Err(SecurityMismatch::Query(status as i32));
+            }
+            let _descriptor = LocalBuffer(descriptor as *mut c_void);
+            if owner.is_null() || EqualSid(owner, expected) == 0 {
+                return Err(SecurityMismatch::Owner);
+            }
+            let mut control = 0;
+            let mut revision = 0;
+            if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0 {
+                return Err(SecurityMismatch::Query(last_error()));
+            }
+            if control & SE_DACL_PRESENT == 0 || control & SE_DACL_PROTECTED == 0 || dacl.is_null()
+            {
+                return Err(SecurityMismatch::Dacl);
+            }
+            if (*dacl).AceCount != 1 {
+                return Err(SecurityMismatch::Dacl);
+            }
+            let mut ace: *mut c_void = null_mut();
+            if GetAce(dacl, 0, &mut ace) == 0 || ace.is_null() {
+                return Err(SecurityMismatch::Dacl);
+            }
+            let ace = &*(ace as *const ACCESS_ALLOWED_ACE);
+            if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                || ace.Header.AceFlags != 0
+                || ace.Mask != FILE_ALL_ACCESS
+            {
+                return Err(SecurityMismatch::Dacl);
+            }
+            let ace_sid = &ace.SidStart as *const DWORD as PSID;
+            if EqualSid(ace_sid, expected) == 0 {
+                return Err(SecurityMismatch::Dacl);
+            }
+            Ok(())
+        }
+    }
+
+    /// The single production instance-creation path. `first` requests
+    /// FILE_FLAG_FIRST_PIPE_INSTANCE (used only by `bind`).
+    fn create_pipe_instance(path: &str, first: bool) -> Result<HANDLE, IpcError> {
+        let user = current_user()?;
+        let sid = sid_string(user.sid())?;
+        create_instance_with_sid(path, first, &sid, &user)
+    }
+
+    /// Test seam: the same creation path with the SID string supplied by the
+    /// caller (real SDDL conversion, `CreateNamedPipeW` and verification against
+    /// the process user). It accepts no DACL.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn create_pipe_instance_for_sid(
+        name: &str,
+        first: bool,
+        sid: &str,
+    ) -> Result<HANDLE, IpcError> {
+        let user = current_user()?;
+        create_instance_with_sid(&pipe_path(name), first, sid, &user)
+    }
+
+    fn create_instance_with_sid(
+        path: &str,
+        first: bool,
+        sid: &str,
+        user: &TokenUserSid,
+    ) -> Result<HANDLE, IpcError> {
+        let sddl = wide(&pipe_sddl(sid));
+        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1 as DWORD,
+                &mut descriptor,
+                null_mut(),
+            )
+        };
+        if converted == 0 || descriptor.is_null() {
+            return Err(security("sddl", last_error()));
+        }
+        let _descriptor = LocalBuffer(descriptor as *mut c_void);
+        let mut attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: FALSE,
+        };
+        let open_mode = PIPE_ACCESS_DUPLEX
+            | if first {
+                FILE_FLAG_FIRST_PIPE_INSTANCE
+            } else {
+                0
+            };
+        let name = wide(path);
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                open_mode,
+                PIPE_SERVER_MODE,
+                PIPE_UNLIMITED_INSTANCES,
+                65_536,
+                65_536,
+                0,
+                &mut attributes,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let code = last_error();
+            return Err(if first && code == ERROR_ACCESS_DENIED as i32 {
+                IpcError::PipeNameOccupied
+            } else {
+                security("create", code)
+            });
+        }
+        let handle = OwnedHandle(handle);
+        check_pipe_security(handle.0, user.sid()).map_err(|mismatch| match mismatch {
+            SecurityMismatch::Query(code) => security("verify", code),
+            SecurityMismatch::Owner => security("verify", ERROR_INVALID_OWNER as i32),
+            SecurityMismatch::Dacl => security("verify", ERROR_INVALID_SECURITY_DESCR as i32),
+        })?;
+        Ok(handle.into_raw())
     }
 
     #[derive(Debug)]
@@ -561,56 +869,47 @@ mod windows_pipe {
     unsafe impl Sync for NamedPipeServer {}
 
     impl NamedPipeServer {
+        /// Creates the first instance of `name`. Fails with
+        /// `PipeNameOccupied` when any instance of that name already exists.
         pub fn bind(name: &str) -> Result<Self, IpcError> {
-            let name = if name.starts_with(r"\\.\pipe\") {
-                name.to_owned()
-            } else {
-                format!(r"\\.\pipe\{name}")
-            };
-            let handle = create(&name)?;
-            Ok(Self { name, handle })
-        }
-
-        fn create_instance(&self) -> Result<*mut std::ffi::c_void, IpcError> {
-            create(&self.name)
+            let name = pipe_path(name);
+            let handle = create_pipe_instance(&name, true)?;
+            Ok(Self {
+                name,
+                handle: handle as _,
+            })
         }
 
         pub fn accept(&mut self) -> Result<NamedPipeConnection, IpcError> {
             let connected = unsafe { ConnectNamedPipe(self.handle as _, std::ptr::null_mut()) };
-            if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                return Err(IpcError::Io(std::io::Error::last_os_error()));
-            }
-            let handle = self.handle;
-            self.handle = std::ptr::null_mut();
-            let file = unsafe { File::from_raw_handle(handle as _) };
-            match self.create_instance() {
-                Ok(next) => {
-                    self.handle = next;
-                    Ok(NamedPipeConnection { file })
+            if connected == 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                    return Err(IpcError::Io(error));
                 }
-                Err(error) => Err(error),
             }
+            let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
+            let file = unsafe { File::from_raw_handle(handle as _) };
+            // The next instance is created while the connected handle is still
+            // open. A failure drops the connection and is fatal for the server.
+            let next = create_pipe_instance(&self.name, false)?;
+            self.handle = next as _;
+            Ok(NamedPipeConnection { file })
         }
-    }
 
-    fn create(name: &str) -> Result<*mut std::ffi::c_void, IpcError> {
-        let name = wide(name);
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                65_536,
-                65_536,
-                0,
-                std::ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(IpcError::Io(std::io::Error::last_os_error()));
+        /// Replaces an invalidated listening instance with a further instance
+        /// of the same pipe, created before the old handle is closed.
+        pub fn replace_listening_instance(&mut self) -> Result<(), IpcError> {
+            if self.handle.is_null() {
+                return Err(security("create", ERROR_INVALID_HANDLE as i32));
+            }
+            let next = create_pipe_instance(&self.name, false)?;
+            let old = std::mem::replace(&mut self.handle, next as _);
+            unsafe {
+                CloseHandle(old as _);
+            }
+            Ok(())
         }
-        Ok(handle as _)
     }
 
     impl Drop for NamedPipeServer {
@@ -649,12 +948,7 @@ mod windows_pipe {
     }
     impl NamedPipeClient {
         pub fn connect(name: &str) -> Result<Self, IpcError> {
-            let name = if name.starts_with(r"\\.\pipe\") {
-                name.to_owned()
-            } else {
-                format!(r"\\.\pipe\{name}")
-            };
-            let name = wide(&name);
+            let name = wide(&pipe_path(name));
             let handle = unsafe {
                 CreateFileW(
                     name.as_ptr(),
@@ -662,7 +956,7 @@ mod windows_pipe {
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     std::ptr::null_mut(),
                     OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
+                    PIPE_CLIENT_FLAGS,
                     NULL as _,
                 )
             };
@@ -690,10 +984,80 @@ mod windows_pipe {
             self.file.flush()
         }
     }
+
+    /// Authenticates the server of `name` without sending a frame: the pipe's
+    /// owner and DACL must match the Core contract for the calling user, and
+    /// the serving process must run as that same user. A busy pipe is waited
+    /// for within `PEER_BUSY_BUDGET`. Failures are `PipeSecurity` with one of
+    /// the stages open, busy, sd, owner, dacl, server-pid, server-token,
+    /// server-user.
+    pub fn verify_pipe_peer(name: &str) -> Result<PipePeer, IpcError> {
+        let path = wide(&pipe_path(name));
+        let started = Instant::now();
+        let connection = loop {
+            let handle = unsafe {
+                CreateFileW(
+                    path.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    PIPE_CLIENT_FLAGS,
+                    NULL as _,
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                break OwnedHandle(handle);
+            }
+            let code = last_error();
+            if code != ERROR_PIPE_BUSY as i32 {
+                return Err(security("open", code));
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= PEER_BUSY_BUDGET {
+                return Err(security("busy", ERROR_PIPE_BUSY as i32));
+            }
+            let remaining = (PEER_BUSY_BUDGET - elapsed).as_millis().max(1) as DWORD;
+            // The result is not trusted: the loop re-opens and re-checks time.
+            unsafe {
+                WaitNamedPipeW(path.as_ptr(), remaining);
+            }
+        };
+        let caller = current_user().map_err(|error| match error {
+            IpcError::PipeSecurity { code, .. } => security("sd", code),
+            other => other,
+        })?;
+        check_pipe_security(connection.0, caller.sid()).map_err(|mismatch| match mismatch {
+            SecurityMismatch::Query(code) => security("sd", code),
+            SecurityMismatch::Owner => security("owner", ERROR_INVALID_OWNER as i32),
+            SecurityMismatch::Dacl => security("dacl", ERROR_INVALID_SECURITY_DESCR as i32),
+        })?;
+        let mut server_pid: ULONG = 0;
+        if unsafe { GetNamedPipeServerProcessId(connection.0, &mut server_pid) } == 0 {
+            return Err(security("server-pid", last_error()));
+        }
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, server_pid) };
+        if process.is_null() {
+            return Err(security("server-token", last_error()));
+        }
+        let process = OwnedHandle(process);
+        let mut token: HANDLE = null_mut();
+        if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(security("server-token", last_error()));
+        }
+        let token = OwnedHandle(token);
+        let server_user =
+            query_token_user(token.0).map_err(|code| security("server-token", code))?;
+        if unsafe { EqualSid(server_user.sid(), caller.sid()) } == 0 {
+            return Err(security("server-user", ERROR_ACCESS_DENIED as i32));
+        }
+        drop(connection);
+        Ok(PipePeer { server_pid })
+    }
 }
 
 #[cfg(windows)]
-pub use windows_pipe::{NamedPipeClient, NamedPipeConnection, NamedPipeServer};
+pub use windows_pipe::{NamedPipeClient, NamedPipeConnection, NamedPipeServer, verify_pipe_peer};
 
 #[cfg(not(windows))]
 #[derive(Debug)]
@@ -716,6 +1080,10 @@ impl NamedPipeClient {
     pub fn connect(_name: &str) -> Result<Self, IpcError> {
         Err(IpcError::UnsupportedPlatform)
     }
+}
+#[cfg(not(windows))]
+pub fn verify_pipe_peer(_name: &str) -> Result<PipePeer, IpcError> {
+    Err(IpcError::UnsupportedPlatform)
 }
 
 #[cfg(test)]
@@ -813,5 +1181,142 @@ mod tests {
             .unwrap();
         assert_eq!(camel_response["ok"], true);
         assert_eq!(snake_response["ok"], true);
+    }
+
+    #[test]
+    fn u1_pipe_sddl_grants_only_the_core_user_with_protected_dacl() {
+        assert_eq!(
+            pipe_sddl("S-1-5-21-1-2-3-1001"),
+            "O:S-1-5-21-1-2-3-1001G:S-1-5-21-1-2-3-1001D:P(A;;FA;;;S-1-5-21-1-2-3-1001)"
+        );
+    }
+
+    #[test]
+    fn pipe_security_errors_are_bounded_and_carry_no_identity() {
+        let security = IpcError::PipeSecurity {
+            stage: "verify",
+            code: 1338,
+        };
+        assert_eq!(
+            security.to_string(),
+            "named pipe security setup failed at verify (os error 1338)"
+        );
+        assert_eq!(
+            IpcError::PipeNameOccupied.to_string(),
+            "named pipe name is already in use by another instance"
+        );
+    }
+
+    #[cfg(windows)]
+    mod windows_security {
+        use super::super::{IpcError, windows_pipe};
+        use std::{
+            ffi::OsStr,
+            os::windows::ffi::OsStrExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        use winapi::{
+            shared::winerror::ERROR_FILE_NOT_FOUND,
+            um::{
+                errhandlingapi::GetLastError,
+                fileapi::{CreateFileW, OPEN_EXISTING},
+                handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
+                processthreadsapi::{GetCurrentProcess, OpenProcessToken},
+                securitybaseapi::GetTokenInformation,
+                winbase::{PIPE_REJECT_REMOTE_CLIENTS, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT},
+                winnt::{GENERIC_READ, GENERIC_WRITE, TOKEN_QUERY, TOKEN_USER, TokenUser},
+            },
+        };
+
+        fn unique_path(label: &str) -> String {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            format!(r"\\.\pipe\goalport-{label}-{}-{nanos}", std::process::id())
+        }
+
+        fn open_client(path: &str) -> Result<(), u32> {
+            let wide: Vec<u16> = OsStr::new(path)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    windows_pipe::PIPE_CLIENT_FLAGS,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(unsafe { GetLastError() });
+            }
+            unsafe { CloseHandle(handle) };
+            Ok(())
+        }
+
+        fn current_user_sid_string() -> String {
+            unsafe {
+                let mut token = std::ptr::null_mut();
+                assert_ne!(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token), 0);
+                let mut buffer = vec![0_u64; 128];
+                let mut needed = 0;
+                assert_ne!(
+                    GetTokenInformation(
+                        token,
+                        TokenUser,
+                        buffer.as_mut_ptr().cast(),
+                        (buffer.len() * 8) as u32,
+                        &mut needed,
+                    ),
+                    0
+                );
+                CloseHandle(token);
+                let sid = (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
+                let mut raw: *mut u16 = std::ptr::null_mut();
+                assert_ne!(winapi::shared::sddl::ConvertSidToStringSidW(sid, &mut raw), 0);
+                let length = (0..).take_while(|&index| *raw.add(index) != 0).count();
+                let text = String::from_utf16(std::slice::from_raw_parts(raw, length)).unwrap();
+                winapi::um::winbase::LocalFree(raw.cast());
+                text
+            }
+        }
+
+        #[test]
+        fn u2_invalid_sid_fails_closed_and_leaves_no_pipe() {
+            let path = unique_path("u2-invalid-sid");
+            let result = windows_pipe::create_pipe_instance_for_sid(&path, true, "not-a-sid");
+            assert!(
+                matches!(result, Err(IpcError::PipeSecurity { stage: "sddl", .. })),
+                "invalid SID must fail at SDDL conversion: {result:?}"
+            );
+            assert_eq!(open_client(&path), Err(ERROR_FILE_NOT_FOUND));
+        }
+
+        #[test]
+        fn u2_control_real_user_sid_creates_a_connectable_pipe() {
+            let path = unique_path("u2-control");
+            let handle =
+                windows_pipe::create_pipe_instance_for_sid(&path, true, &current_user_sid_string())
+                    .expect("real user SID creates and verifies the pipe");
+            assert_eq!(open_client(&path), Ok(()));
+            unsafe { CloseHandle(handle) };
+        }
+
+        #[test]
+        fn client_and_server_modes_carry_the_static_security_flags() {
+            assert_eq!(
+                windows_pipe::PIPE_CLIENT_FLAGS & (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION),
+                SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION
+            );
+            assert_eq!(
+                windows_pipe::PIPE_SERVER_MODE & PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_REJECT_REMOTE_CLIENTS
+            );
+        }
     }
 }
