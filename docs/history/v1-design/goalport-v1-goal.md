@@ -1,5 +1,7 @@
 # GoalPort V1 开发目标
 
+> **Historical development goal** (2026-08-31, pre-implementation). Index: [history](../README.md).
+
 依据同目录的 [V1 r2 产品设计](2026-08-31-goalport-v1-design-r2.md)，在当前明确的项目工作区实现并验证一个 Windows 纯对话式、多原生 Coding Agent 桌面客户端。GoalPort 暂作项目名。
 
 目标不是再做一个支持三个模型的聊天壳，也不是把开发者的 Goal Skill 做成产品，而是同时解决四项问题：长任务可持续与安全恢复；结果有可核查证据；多个现有订阅的可解释路由；减少用户管理任务、搬运上下文和处理异常的负担。

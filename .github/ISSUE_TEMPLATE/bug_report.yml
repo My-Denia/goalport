@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in GoalPort does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic content only. Do not paste credentials, tokens, account identifiers, private transcripts, native Runtime configuration, or paths that contain your user name.
+  - type: input
+    id: version
+    attributes:
+      label: GoalPort version or commit
+      description: Shown in the window's top bar, or `source.revision` in the package's package-manifest.json.
+      placeholder: 1.0.0-rc.1 / commit abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime involved
+      options:
+        - None
+        - Codex
+        - Claude Code
+        - Grok
+        - Scenario (synthetic)
+    validations:
+      required: true
+  - type: input
+    id: runtime-version
+    attributes:
+      label: Runtime CLI version
+      description: Output of the CLI's version command, if a native Runtime is involved.
+  - type: dropdown
+    id: launch
+    attributes:
+      label: How GoalPort was started
+      options:
+        - Packaged RC (GoalPort.exe or pnpm electron:start)
+        - Packaged RC with --data-dir
+        - Packaged RC with --test-profile
+        - Development (pnpm electron:dev)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: 1. Create a Campaign in an empty folder ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted diagnostics
+      description: Relevant lines from goalport.sqlite.core.log or goalport.sqlite.launcher.log in the profile directory, with private paths removed.
+      render: text

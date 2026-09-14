@@ -1,5 +1,7 @@
 # Residual risks (Electron Stable V1 RC)
 
+> **Reference record.** Dated contracts and evidence for specific historical builds, kept unchanged for audit. It is not a current guide; start at the [documentation index](../README.md).
+
 Freeze: Core `1f9321dfde8b0974f79ad5e38f4bc7ff62092a15bc9b17ead05cc4eb65d7d8da`, EXE `cb32e182da8efdd56444a7dbc96a038624734a9fd1eda098ce2e11797505dae6`, asar `f5b6e82c6962be8f52b57614c7ac5244631a02f1f6ba4ed76a4da2a76eab4155`.
 
 - Soak 1800.006s / 6 turns on the frozen package is UNMET because `evidenceValidation.process=false`. DUR-01/04, EFF-01/03, RES-02 follow soak UNMET. Do not stamp PASS.

@@ -1,10 +1,52 @@
 # GoalPort
 
-GoalPort is a Windows desktop control plane for local Coding Agent runtimes. Electron is the release line, backed by a Rust Core and SQLite. The repository builds **1.0.0-rc.1**; the product remains **Stable V1 RC**.
+**One Windows desktop for the coding agents you already use.**
 
-## Build and launch
+GoalPort drives Codex, Claude Code and Grok through their own installed CLIs, so subscriptions, logins, skills, hooks, MCP servers and permission rules stay native. It adds durable Campaigns, Runtime switching, recovery and safety controls, all stored locally.
 
-From a fresh clone on Windows x64:
+[![CI](https://github.com/My-Denia/goalport/actions/workflows/ci.yml/badge.svg)](https://github.com/My-Denia/goalport/actions/workflows/ci.yml)
+![Version](https://img.shields.io/badge/version-1.0.0--rc.1-blue)
+![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
+
+![GoalPort showing a Campaign conversation, the Runtime support list and the active Attempt](docs/assets/screenshots/campaign-conversation.png)
+
+<sub>GoalPort 1.0.0-rc.1 on the built-in synthetic Scenario runtime (no real agent account involved).</sub>
+
+## Why GoalPort
+
+Agent CLIs work well inside one terminal session. Long tasks outgrow it: the terminal closes, a tool call's outcome is unclear, another agent should continue, or you return the next day and need to know what actually happened. GoalPort keeps that continuity in a local control plane, while the agents stay exactly as you configured them.
+
+## GoalPort vs using the CLIs directly
+
+| | CLI on its own | CLI through GoalPort |
+| --- | --- | --- |
+| Agent | Your installed CLI | The same installed CLI, started by GoalPort |
+| Login, subscription, skills, hooks, MCP | Owned by the CLI | Unchanged, still owned by the CLI |
+| Task state | Lives in the terminal session | Campaign → Task → Attempt, persisted in local SQLite |
+| Closing the window | Usually ends the session | Work can continue in the background; reopen and reconnect |
+| Switching agents | Copy context by hand | Assign the next step to another Runtime; the handoff is recorded |
+| Permission prompts | Answered in the terminal | Answered in a Decision Inbox |
+| Lost acknowledgement | Depends on the tool | Shown as unknown, never resent automatically |
+
+## Features
+
+- **Native Runtimes, one window.** Codex (app-server), Claude Code (stream-json) and Grok (ACP), plus a synthetic Scenario runtime for testing.
+- **Durable work model.** Campaigns, Tasks, Attempts and their ordered events survive window closes and restarts.
+- **Runtime selection and handoff.** Conflicting selections are refused, and a replacement Attempt records the one it replaced.
+- **Core outlives the window.** Continue in the background, then reopen and reconnect.
+- **Honest recovery.** After a restart, in-flight commands become unknown and prompts are never replayed.
+- **Held responsibility after a Claude Code Stop.** Tools that may still be running keep conflicting work blocked.
+- **Local-first.** No GoalPort account, server or telemetry.
+- **Traceable build.** Locked dependencies, a hashed package manifest, and packaged GUI smoke tests in CI.
+
+| Permission decisions | Runtime support |
+| --- | --- |
+| ![A pending permission Decision with Allow once, Decline permission and Keep waiting](docs/assets/screenshots/permission-decision.png) | ![The Codex Runtime row expanded, showing capability status](docs/assets/screenshots/runtime-support.png) |
+
+## Quick start
+
+There is no downloadable release yet. Build the RC from source on Windows x64 ([prerequisites](docs/building.md#prerequisites)):
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -13,67 +55,59 @@ pnpm electron:verify --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 ```
 
-The build compiles the frontend, Core and launcher, then packages Electron. It also includes the existing optional Claude broker component; packaging does not enable it. No previous `target`, `dist`, local EXE, asar, acceptance database or historical run folder is needed. Choose a new output name for each build. Omitting `--out` creates a timestamped directory under `artifacts/electron-rc`; an existing destination is always refused.
+1. Install and sign in to a Runtime CLI: Codex, Claude Code or Grok.
+2. In GoalPort, choose a workspace folder and enter a Campaign goal.
+3. Select a Runtime and send a message. Keep the window wider than 1020 px, or the right rail (Runtimes, Decision Inbox, Stop) is hidden.
 
-You can move the complete `GoalPort-win32-x64` folder outside the checkout and open `GoalPort.exe` directly. Keep its `resources`, DLLs, locales and other files together. Node, pnpm, Rust and the source checkout are build tools, not requirements for running the packaged app. The local package is unsigned.
+Data lives in `%APPDATA%\GoalPort\rc`. The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
 
-Prerequisites are Git, Node **22.19 or newer on the 22.x line, or 24+**, pnpm **11.22.0**, Rust **1.96.1** with the Windows MSVC target, and Visual Studio C++ Build Tools with a Windows SDK. `rust-toolchain.toml` selects Rust. `pnpm-lock.yaml` and `Cargo.lock` lock dependencies; Electron is **44.0.0**, React **19.2.8**, TypeScript **7.0.2** and Vite **8.2.2**. Dependency downloads need registry access. No account login or model call is part of the build.
+## How it works
 
-`package-manifest.json` records the RC version, source revision, whether source changes were uncommitted, the source inventory digest and packaged file hashes. `resources/app.asar` contains the matching build identity. A source revision plus a dirty source digest identifies a local candidate; it does not claim those changes have been committed.
-
-## First use and data
-
-A normal first launch starts with no projects, Campaigns or Runtime sessions. Choose an existing workspace folder and enter a Campaign goal. Creating a Campaign saves local metadata. Select a Runtime, then send a message explicitly to start its work. Native subscriptions, credentials, skills, hooks, MCP and permissions stay with the installed native CLI. GoalPort does not create accounts or rewrite CLI configuration.
-
-Normal data is in `%APPDATA%\GoalPort\rc`: `goalport.sqlite`, the Core launch log/receipts and Electron profile data. It is separate from the old generic GoalPort profile and historical acceptance databases. For a separate normal profile, use:
-
-```powershell
-pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --data-dir C:\GoalPortData\rc1
+```text
+GoalPort window (Electron + React)
+        │  Named Pipe IPC
+GoalPort Core (Rust) ── SQLite
+        │  stdio
+codex app-server · claude -p stream-json · grok agent stdio
 ```
 
-A profile is bound to its mode, RC version and Core binary identity. An unrelated database or a profile from another build is refused before automatic migration. Use a new directory when changing builds; database migration/import is not provided in this RC.
+The window only presents. Core owns all GoalPort state and supervises each Runtime through its native protocol. Read more in [Architecture](docs/architecture.md) and [Safety](docs/safety.md).
 
-Closing the window while a task is active offers the existing background/stop choices. Reopening the same package/profile reconnects to its matching Core. A lost command acknowledgement is reported without automatic resend. After a terminal Attempt, choosing a Runtime starts the next Attempt; repeated or stale conflicting choices cannot create competing replacements. Independent Campaigns retain separate identities. Held or unknown workspace responsibility remains enforced.
+## Native, not reimplemented
 
-Windows terminals and CI runners can place processes in a supervised job. If that job refuses a breakaway request, the launcher can start Core under the existing job constraints. Core survives the GoalPort window and launcher closing, but the external supervisor can still terminate it when its job ends. The launcher records its creation mode beside the database. See [Windows job lifetimes](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+- GoalPort starts the CLI you installed. It does not reimplement an agent or proxy a model API.
+- It never writes Runtime configuration or passes permission-bypass flags.
+- It strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `XAI_API_KEY` from Runtime processes and never introduces API-key authentication.
 
-Runtime selection currently requires a content viewport wider than 1020 CSS pixels: the existing narrow layout hides the Runtime sidebar. Widen the window to use those controls. Packaged workflow checks use a fixed 1440×900 viewport; the separate 1000-pixel screenshot checks layout only.
+Details: [runtime integration](docs/runtimes.md).
 
-Unpackaged development runs (`pnpm electron:dev`) default to `%APPDATA%/GoalPort/dev`; packaged RC runs keep `%APPDATA%/GoalPort/rc`. Each profile remains bound to its Core build. Explicit `--data-dir` and `--test-profile` paths take precedence and retain their existing identity checks; development does not import or migrate RC data.
+## Status
 
-New profiles also pin their canonical directory identity. Markers from the earlier case-folded identity format, or moved profiles, are refused without rewriting data; choose a new data directory. Workspace comparison remains conservative: distinct canonical folders that collapse to the same workspace comparison key are refused rather than routed through another Project.
+GoalPort **1.0.0-rc.1** is a **Stable V1 RC**: a release candidate, not Stable V1.
 
-## Synthetic checks and limits
+- Windows only, built from source, unsigned. No database migration between builds.
+- Admission differs per Runtime (Codex partial, Claude Code partially admitted, Grok admitted), recorded for specific builds, not re-checked for builds from current source.
+- After a Claude Code Stop, residual execution is unproven, and held workspaces cannot be released yet.
 
-**Scenario Runtime is an in-process synthetic test runtime**, not a real Agent or subscription admission. An explicit test profile allows Scenario only and rejects native Codex, Claude and Grok process starts:
+Full list: [limitations](docs/limitations.md).
 
-```powershell
-pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --test-profile C:\GoalPortData\synthetic-rc1
-```
+## Documentation
 
-Normal and test profiles cannot share a data directory. Scenario failure/hold markers are active only under explicit isolation; in a normal profile they are ordinary text. The native Runtime integrations retain their existing limitations. Synthetic checks do not admit a new native version, prove safe interruption of every native tool, release a held workspace, or establish Stable V1 closure. Tauri remains a bounded shared-contract regression target.
+| Topic | Pages |
+| --- | --- |
+| Build, run, local data | [Building](docs/building.md) · [Local data](docs/local-data.md) · [Limitations](docs/limitations.md) |
+| How it works | [Architecture](docs/architecture.md) · [Runtime integration](docs/runtimes.md) · [Safety and recovery](docs/safety.md) · [Privacy](docs/privacy.md) |
+| Contributing | [Development](docs/development.md) · [Testing and CI](docs/testing.md) |
+| Records | [Reference records](docs/reference/README.md) · [History](docs/history/README.md) |
 
-Run the local code checks with:
+## Contributing
 
-```powershell
-pnpm lint
-pnpm test:unit
-pnpm test:desktop
-cargo test --locked -p goalport-core --lib
-cargo test --locked -p goalport-core --test electron_rc_core --test handoff_lineage --test workspace_identity --test product_receipts --test selection_preservation --test registration_boundary
-cargo test --locked -p goalport-core-launcher
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-The packaged smoke driver copies the verified application into a fresh directory outside the source tree and exercises its real renderer, IPC and Core. It creates its own profiles and synthetic workspaces, writes screenshots/results to the new `--out` directory, and stops only its own processes. It never calls real subscriptions.
+## Security
 
-CI also injects an early synthetic smoke failure before the renderer startup receipt is assigned. Its verifier requires the expected failure and independently confirms that the owned Core was cleaned up using its committed launch identity; an unknown identity is retained and reported rather than terminated by process name.
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
-```powershell
-node scripts/desktop/smoke.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --normal --out artifacts/electron-rc/normal-smoke
-node scripts/desktop/smoke.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --out artifacts/electron-rc/synthetic-smoke
-node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --out artifacts/electron-rc/early-cleanup
-```
+## License
 
-The Windows workflow in `.github/workflows/ci.yml` covers UI/Core regressions and a fresh Electron build with packaged smoke. A local run is not a remote CI result. Existing live-admission or broad soak scripts are separate, explicit workflows and are not invoked by these commands.
-
-[Historical Desktop admission notes](docs/history/desktop-admission-notes.md) retain the old freezes and launch references for context. They are not the current package or startup instructions.
+No license has been chosen yet; `Cargo.toml` declares `UNLICENSED`. Until a `LICENSE` file is added, this code is not licensed for reuse.

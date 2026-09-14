@@ -1,5 +1,7 @@
 # Electron and Tauri candidate comparison
 
+> **Reference record.** Dated contracts and evidence for specific historical builds, kept unchanged for audit. It is not a current guide; start at the [documentation index](../README.md).
+
 Both candidates use the same React bundle, Core protocol, Core executable, SQLite schema and RuntimeManager. Only the host bridge differs. The final comparison ran the required step order on the same Windows machine, shared synthetic database, Core `b063fa…4376fb`, prompt and input hashes. Every sample was captured after the final packages were built.
 
 | Item | Electron 44.0.0 | Tauri 2.11.x / WebView2 151 | Result |
