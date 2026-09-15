@@ -60,7 +60,7 @@ On startup, Core reconciles before it serves:
 | Pending permission requests | still pending |
 | Prompts | never replayed |
 
-Each Core launch is a numbered epoch. Only a committed ready receipt counts as a valid start. A prior Core that is still alive, or whose state cannot be known, prevents a second Core from starting on the same database.
+Each Core launch is a numbered epoch. Only a committed ready receipt counts as a valid start. A prior Core that is still executing, or whose identity cannot be confirmed, prevents a second Core from starting on the same database. A prior Core that Windows has confirmed terminated does not, even if a same-user client still holds a handle to its process object. Confirming that exit does not re-attach native Runtime processes, release held or uncertain responsibility, or replay prompts.
 
 ## Closing the window
 
