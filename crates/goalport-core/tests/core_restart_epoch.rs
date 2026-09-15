@@ -3,6 +3,8 @@
 use goalport_core::{
     AccessMode, Attempt, AttemptRecovery, Command, CommandState, Decision, DecisionState,
     LeaseState, OutboxIntent, OutboxState, Store, WorkspaceLease,
+    ipc::{NamedPipeClient, decode_frame, read_frame, write_frame},
+    process_identity::{ProcessObservation, observe_process},
     product_receipts::{
         PriorCoreStatus, begin_startup_epoch, classify_recorded_process, fail_startup_epoch,
     },
@@ -100,6 +102,61 @@ fn wait_rejected(child: &mut Child) {
     panic!("competing Core did not reject promptly");
 }
 
+fn connect_client(pipe: &str) -> NamedPipeClient {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match NamedPipeClient::connect(pipe) {
+            Ok(client) => return client,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("Core pipe did not accept a client: {error}"),
+        }
+    }
+}
+
+fn snapshot_ok(pipe: &str, request_id: &str) {
+    let mut client = connect_client(pipe);
+    write_frame(
+        &mut client,
+        &json!({
+            "protocolVersion": "goalport.ipc.v1",
+            "requestId": request_id,
+            "entityVersion": 0,
+            "messageType": "snapshot",
+            "payload": {}
+        }),
+    )
+    .unwrap();
+    let frame = read_frame(&mut client)
+        .unwrap()
+        .expect("Core returned no snapshot");
+    let response: serde_json::Value = decode_frame(&frame).unwrap();
+    assert_eq!(response["ok"], true, "snapshot {request_id}: {response}");
+}
+
+fn independent_process_signaled(pid: u32) -> bool {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+    unsafe {
+        unsafe extern "system" {
+            fn OpenProcess(
+                desired_access: u32,
+                inherit_handle: i32,
+                process_id: u32,
+            ) -> *mut std::ffi::c_void;
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let wait = WaitForSingleObject(handle, 10_000);
+        CloseHandle(handle);
+        wait == WAIT_OBJECT_0
+    }
+}
+
 fn wait_prior_ended(store: &Store) {
     let prior = store.latest_core_launch_epoch().unwrap().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -117,6 +174,25 @@ fn wait_prior_ended(store: &Store) {
     panic!("prior Core identity did not become decisively ended");
 }
 
+fn assert_recorded_ended_while_retained(store: &Store, retained_pid: u32) {
+    assert!(
+        independent_process_signaled(retained_pid),
+        "OS must confirm pid {retained_pid} terminated on a test-owned handle"
+    );
+    let prior = store.latest_core_launch_epoch().unwrap().unwrap();
+    let pid = u32::try_from(prior.core_pid).unwrap();
+    assert_eq!(pid, retained_pid);
+    assert!(
+        matches!(observe_process(pid), ProcessObservation::NotRunning),
+        "terminated Core with a retained object must not be Live: {:?}",
+        observe_process(pid)
+    );
+    assert_eq!(
+        classify_recorded_process(pid, &prior.core_creation_date, &prior.core_executable_path),
+        PriorCoreStatus::Ended
+    );
+}
+
 #[test]
 fn real_process_restart_preserves_history_and_uncertainty() {
     let dir = tempfile::tempdir().unwrap();
@@ -126,6 +202,8 @@ fn real_process_restart_preserves_history_and_uncertainty() {
     let nonce_two = "22222222-2222-4222-8222-222222222222";
     let mut first = spawn_core(&db, &pipe, nonce_one);
     wait_ready(&db, nonce_one);
+    snapshot_ok(&pipe, "restart-live");
+    let lingering = connect_client(&pipe);
 
     let mut duplicate = spawn_core(&db, &pipe, nonce_one);
     wait_rejected(&mut duplicate);
@@ -198,12 +276,15 @@ fn real_process_restart_preserves_history_and_uncertainty() {
     let attempt_count_before = store.counts().unwrap().attempts;
     let event_count_before = store.list_events("attempt-restart").unwrap().len();
 
+    let first_pid = first.id();
     first.kill().unwrap();
     first.wait().unwrap();
     drop(first);
-    wait_prior_ended(&store);
+    assert_recorded_ended_while_retained(&store, first_pid);
     let mut second = spawn_core(&db, &pipe, nonce_two);
     wait_ready(&db, nonce_two);
+    snapshot_ok(&pipe, "restart-after-exit");
+    drop(lingering);
 
     let store = Store::open(&db).unwrap();
     let epochs = store.list_core_launch_epochs().unwrap();
@@ -432,6 +513,67 @@ fn startup_ready_failure_windows_abort_and_allow_reconciled_restart() {
         recovered.kill().unwrap();
         recovered.wait().unwrap();
     }
+}
+
+#[test]
+fn still_active_exit_code_with_retained_handle_is_not_running() {
+    let mut child = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-Command", "exit 259"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(259));
+    assert!(
+        independent_process_signaled(pid),
+        "OS must confirm the STILL_ACTIVE exit while the Child handle is retained"
+    );
+    assert!(
+        matches!(observe_process(pid), ProcessObservation::NotRunning),
+        "exit code 259 must not be classified as Live: {:?}",
+        observe_process(pid)
+    );
+    assert_eq!(
+        classify_recorded_process(pid, "/Date(1)/", r"C:\not-the-occupant.exe"),
+        PriorCoreStatus::Ended
+    );
+}
+
+#[test]
+fn unconfirmable_identity_still_refuses_startup() {
+    let _guard = crate_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("unknown.sqlite");
+    let store = Store::open(&db).unwrap();
+    store
+        .put_product_receipt(
+            "startup:99999999-9999-4999-8999-999999999999",
+            "startup",
+            Some("99999999-9999-4999-8999-999999999999"),
+            None,
+            None,
+            &json!({
+                "kind":"startup",
+                "launchNonce":"99999999-9999-4999-8999-999999999999",
+                "core":{"pid":4,"creationDate":"/Date(1)/","executablePath":"C:\\Windows\\System32\\ntoskrnl.exe","executableSha256":"unknown"}
+            }),
+        )
+        .unwrap();
+    unsafe {
+        env::set_var("GOALPORT_REQUIRE_ISOLATED", "1");
+        env::set_var(
+            "GOALPORT_LAUNCH_NONCE",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        );
+    }
+    let error = begin_startup_epoch(&store, "unknown-identity", &db).unwrap_err();
+    assert!(
+        error.contains("prior Core identity is unknown"),
+        "unexpected refusal: {error}"
+    );
+    assert!(store.list_core_launch_epochs().unwrap().is_empty());
 }
 
 fn crate_env_lock() -> std::sync::MutexGuard<'static, ()> {

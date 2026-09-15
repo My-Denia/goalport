@@ -43,7 +43,7 @@ use winapi::{
         handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
         minwinbase::SECURITY_ATTRIBUTES,
         namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW},
-        processthreadsapi::{GetCurrentProcess, OpenProcessToken},
+        processthreadsapi::{GetCurrentProcess, OpenProcess, OpenProcessToken},
         securitybaseapi::{
             CreateRestrictedToken, CreateWellKnownSid, EqualSid, GetAce,
             GetSecurityDescriptorControl, GetTokenInformation, ImpersonateLoggedOnUser,
@@ -606,6 +606,24 @@ fn assert_peer_ok(pipe: &str, pid: u32) {
     assert_eq!(run.json["serverPid"], json!(pid), "{}", run.stdout);
 }
 
+fn independent_process_signaled(pid: u32) -> bool {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_OBJECT_0: u32 = 0;
+    unsafe {
+        unsafe extern "system" {
+            fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let wait = WaitForSingleObject(handle, 10_000);
+        CloseHandle(handle);
+        wait == WAIT_OBJECT_0
+    }
+}
+
 fn wait_prior_ended(db: &Path) {
     let store = Store::open(db).unwrap();
     let prior = store.latest_core_launch_epoch().unwrap().unwrap();
@@ -924,11 +942,6 @@ fn t9_spawned_core_fails_closed_on_a_squatted_name_with_a_bounded_message() {
 
 #[test]
 fn t10_restarted_core_rebinds_its_name_with_a_lingering_client_and_reports_the_new_pid() {
-    // The database differs while the old client lingers: a killed pipe server's
-    // process object stays referenced while a client handle to its pipe is
-    // open, so restart-epoch classification would still see the prior Core as
-    // live on the same database. The same-database restart follows once the
-    // client is closed.
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t10.sqlite");
     let pipe = unique("t10");
@@ -940,27 +953,18 @@ fn t10_restarted_core_rebinds_its_name_with_a_lingering_client_and_reports_the_n
     first.0.wait().unwrap();
     drop(first);
 
-    // Same name, lingering client still open: the first-instance bind succeeds.
-    let other_db = dir.path().join("t10-lingering.sqlite");
-    let mut second =
-        spawn_ready_core(&other_db, &pipe, "10101010-0000-4000-8000-00000000000b");
+    assert!(
+        independent_process_signaled(first_pid),
+        "OS must confirm the first Core exited while the old client remains open"
+    );
+    wait_prior_ended(&db);
+
+    let second = spawn_ready_core(&db, &pipe, "10101010-0000-4000-8000-00000000000b");
     assert_ne!(second.0.id(), first_pid);
     let client = open_local_retry(&pipe, GENERIC_READ | GENERIC_WRITE);
     assert_c4(client.0);
     drop(client);
     assert_peer_ok(&pipe, second.0.id());
-
-    // Same name and same database once the lingering client is closed.
-    drop(lingering);
-    wait_prior_ended(&db);
-    second.0.kill().unwrap();
-    second.0.wait().unwrap();
-    drop(second);
-    let third = spawn_ready_core(&db, &pipe, "10101010-0000-4000-8000-00000000000c");
-    let client = open_local_retry(&pipe, GENERIC_READ | GENERIC_WRITE);
-    assert_c4(client.0);
-    drop(client);
-    assert_peer_ok(&pipe, third.0.id());
 }
 
 #[test]

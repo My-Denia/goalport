@@ -61,8 +61,11 @@ pub fn current_identity() -> ProcessIdentity {
     }
 }
 
-/// Observe an exact process identity. Access-denied or incomplete observations
-/// remain Unknown; callers must not turn them into proof that a prior Core ended.
+/// Observe an exact process identity. On Windows, a readable process object is
+/// not proof of execution: `WaitForSingleObject(handle, 0)` returning signaled
+/// is `NotRunning`, including a process whose exit code is 259. Access-denied,
+/// incomplete identity, and wait/query failures remain Unknown; callers must
+/// not turn them into proof that a prior Core ended.
 pub fn observe_process(pid: u32) -> ProcessObservation {
     #[cfg(windows)]
     {
@@ -218,9 +221,12 @@ fn file_time_ms(created: &FileTime) -> u64 {
 #[cfg(windows)]
 fn windows_process_identity(pid: u32) -> ProcessObservation {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     const ERROR_INVALID_PARAMETER: u32 = 87;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
     unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid);
         if process.is_null() {
             let error = GetLastError();
             return if error == ERROR_INVALID_PARAMETER {
@@ -228,6 +234,17 @@ fn windows_process_identity(pid: u32) -> ProcessObservation {
             } else {
                 ProcessObservation::Unknown(format!("OpenProcess({pid}) failed with {error}"))
             };
+        }
+        let wait = WaitForSingleObject(process, 0);
+        if wait == WAIT_OBJECT_0 {
+            CloseHandle(process);
+            return ProcessObservation::NotRunning;
+        }
+        if wait != WAIT_TIMEOUT {
+            CloseHandle(process);
+            return ProcessObservation::Unknown(format!(
+                "WaitForSingleObject({pid}) failed with {wait}"
+            ));
         }
         let result = (|| {
             let mut created = FileTime::default();
@@ -315,6 +332,7 @@ unsafe extern "system" {
     ) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn GetLastError() -> u32;
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
     fn QueryFullProcessImageNameW(
         process: *mut std::ffi::c_void,
         flags: u32,

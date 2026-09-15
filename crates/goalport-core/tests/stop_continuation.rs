@@ -438,6 +438,61 @@ fn row2_not_running_is_reachable_only_from_a_real_absent_process() {
     assert_eq!(held.residual_execution_state, "unknown");
 }
 
+#[cfg(windows)]
+#[test]
+fn row2_terminated_process_with_retained_handle_still_holds() {
+    use goalport_core::process_identity::{ProcessObservation, observe_process};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    assert!(
+        matches!(observe_process(pid), ProcessObservation::NotRunning),
+        "retained Child handle must not keep a terminated pid Live: {:?}",
+        observe_process(pid)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Store::memory().unwrap();
+    seed_held(&store, &workspace.to_string_lossy(), "attempt-zombie");
+    record_stop_trace(
+        &store,
+        "attempt-zombie",
+        1,
+        json!({
+            "operation_id": "operation-recheck-1",
+            "bound_pid": pid,
+            "bound_creation_date": "/Date(1700000000000)/",
+            "bound_executable_sha256": "0".repeat(64)
+        }),
+    );
+    let mut controller = UiController::new(store.clone()).unwrap();
+    recheck(&mut controller, "attempt-zombie", 1);
+    let row = store
+        .latest_recheck_observation("attempt-zombie")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.runtime_observation, RuntimeObservation::NotRunning);
+    assert_eq!(
+        row.verdict,
+        RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown
+    );
+    let held = store
+        .stop_responsibility_for_attempt("attempt-zombie")
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.write_responsibility, "held");
+    assert_eq!(held.residual_execution_state, "unknown");
+}
+
 // --- the continuation: refusals first, then the one path that works ---------
 //
 // Refusals are tested before the happy path deliberately. A continuation that
