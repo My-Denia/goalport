@@ -35,6 +35,7 @@ export function authenticodeInventory(packageRoot) {
   if (!relPaths.length) throw new Error(`No PE files found under ${root}`);
   const script = `
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $paths = @(${relPaths.map((p) => `'${resolve(root, p).replace(/'/g, "''")}'`).join(",")})
 $results = foreach ($path in $paths) {
