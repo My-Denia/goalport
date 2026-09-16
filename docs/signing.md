@@ -17,7 +17,24 @@ RC. Nothing in this round changes that default.
 Produced by `pnpm release:authenticode -- <package-directory>`
 (`scripts/release/authenticode-inventory.mjs`, which only calls
 PowerShell's `Get-AuthenticodeSignature`; it signs nothing) against the
-`GoalPort-win32-x64` package built from commit `29ccf2291c28dc037374c89cc47b214c3403bb90`:
+`GoalPort-win32-x64` package built from commit `29ccf2291c28dc037374c89cc47b214c3403bb90`.
+
+Release-maintainer tooling depends explicitly on **PowerShell 7 (`pwsh`)**
+for this check, not Windows PowerShell 5.1. Windows PowerShell's
+`powershell.exe` was tried first and disproven on a real GitHub-hosted
+`windows-latest` runner: `Get-AuthenticodeSignature` failed to autoload on
+one run ("CouldNotAutoloadMatchingModule"), and an explicit `Import-Module`
+added to work around that instead threw a terminating
+`FormatXmlUpdateException` ("member already present") on a later run,
+because that runner's session had already registered the module's
+format/type data. PowerShell 7 ships `Microsoft.PowerShell.Security`
+(the module `Get-AuthenticodeSignature` lives in) as a built-in part of the
+engine rather than a lazily autoloaded snap-in, and reproduced neither
+failure — verified directly against both a local Windows dev machine and a
+cold GitHub Actions `windows-latest` checkout, not assumed from either
+alone. `pwsh` ships preinstalled on GitHub's `windows-latest` runner image;
+a local maintainer machine needs it installed separately from Windows
+PowerShell.
 
 | File | Category | Status | Signer |
 | --- | --- | --- | --- |

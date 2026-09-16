@@ -20,6 +20,12 @@ real signal that users need an installer, not before.
 
 ## From a verified package to a release candidate
 
+Beyond [building](building.md)'s prerequisites, `release:bundle` needs
+**PowerShell 7 (`pwsh`)** on `PATH` for its Authenticode inventory step (it
+still uses Windows PowerShell's `Compress-Archive` to build the ZIP itself)
+— see [signing](signing.md) for why Windows PowerShell 5.1 is not used for
+the Authenticode check specifically.
+
 ```powershell
 pnpm install --frozen-lockfile
 pnpm electron:package --out artifacts/release-candidates/build

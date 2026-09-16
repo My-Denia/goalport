@@ -29,50 +29,43 @@ function classify(path) {
   return "electron-upstream";
 }
 
+// Windows PowerShell 5.1 (powershell.exe) was tried first and disproven on a
+// real GitHub-hosted runner: Get-AuthenticodeSignature failed to autoload on
+// one image ("CouldNotAutoloadMatchingModule"), and an explicit
+// Import-Module worked around for a second image instead threw a
+// terminating FormatXmlUpdateException on a third ("member already
+// present") that no -ErrorAction value suppressed. PowerShell 7 (pwsh)
+// ships Microsoft.PowerShell.Security as a built-in part of the engine
+// rather than a lazily autoloaded snap-in, and reproduces neither failure
+// locally or on the hosted runner (see docs/signing.md). Release-maintainer
+// tooling depends on pwsh being installed for this reason.
+const POWERSHELL = "pwsh";
+
 export function authenticodeInventory(packageRoot) {
   const root = resolve(packageRoot);
   const relPaths = findPeFiles(root);
   if (!relPaths.length) throw new Error(`No PE files found under ${root}`);
-  // Two distinct real-runner failure modes were observed here and neither is
-  // fixable by presupposing one fixed remedy: some runner sessions never
-  // autoload Get-AuthenticodeSignature at all ("CouldNotAutoloadMatchingModule");
-  // others already have the module's format/type data registered, so an
-  // unconditional explicit Import-Module instead fails with a terminating
-  // FormatXmlUpdateException ("member already present"), which -ErrorAction
-  // on that cmdlet call does not suppress. So: try the cmdlet directly first
-  // (the common case, needing no import at all); only if that fails, attempt
-  // an explicit Force-import as one remediation, swallowing whatever it
-  // raises, and retry once. If the retry still fails, let it propagate --
-  // that is a genuine inspection failure and must fail closed, never be
-  // reported as "unsigned".
   const script = `
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $paths = @(${relPaths.map((p) => `'${resolve(root, p).replace(/'/g, "''")}'`).join(",")})
-$compute = {
-  foreach ($path in $paths) {
-    $sig = Get-AuthenticodeSignature -FilePath $path
-    [PSCustomObject]@{
-      Path = $path
-      Status = $sig.Status.ToString()
-      StatusMessage = $sig.StatusMessage
-      SignerSubject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
-      SignerThumbprint = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { $null }
-      HasTimestamp = [bool]$sig.TimeStamperCertificate
-    }
+$results = foreach ($path in $paths) {
+  $sig = Get-AuthenticodeSignature -FilePath $path
+  [PSCustomObject]@{
+    Path = $path
+    Status = $sig.Status.ToString()
+    StatusMessage = $sig.StatusMessage
+    SignerSubject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
+    SignerThumbprint = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { $null }
+    HasTimestamp = [bool]$sig.TimeStamperCertificate
   }
-}
-try {
-  $results = & $compute
-} catch {
-  try { Import-Module Microsoft.PowerShell.Security -Force -ErrorAction SilentlyContinue } catch {}
-  $results = & $compute
 }
 $results | ConvertTo-Json -Depth 4
 `;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+  const result = spawnSync(POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
     encoding: "utf8", maxBuffer: 32 * 1024 * 1024, windowsHide: true
   });
+  if (result.error?.code === "ENOENT") throw new Error(`${POWERSHELL} was not found; install PowerShell 7 to run release Authenticode inspection`);
   if (result.status !== 0) throw new Error(`Authenticode inspection failed: ${result.stderr || result.error}`);
   const raw = JSON.parse(result.stdout);
   const rows = Array.isArray(raw) ? raw : [raw];
