@@ -33,24 +33,40 @@ export function authenticodeInventory(packageRoot) {
   const root = resolve(packageRoot);
   const relPaths = findPeFiles(root);
   if (!relPaths.length) throw new Error(`No PE files found under ${root}`);
+  // Two distinct real-runner failure modes were observed here and neither is
+  // fixable by presupposing one fixed remedy: some runner sessions never
+  // autoload Get-AuthenticodeSignature at all ("CouldNotAutoloadMatchingModule");
+  // others already have the module's format/type data registered, so an
+  // unconditional explicit Import-Module instead fails with a terminating
+  // FormatXmlUpdateException ("member already present"), which -ErrorAction
+  // on that cmdlet call does not suppress. So: try the cmdlet directly first
+  // (the common case, needing no import at all); only if that fails, attempt
+  // an explicit Force-import as one remediation, swallowing whatever it
+  // raises, and retry once. If the retry still fails, let it propagate --
+  // that is a genuine inspection failure and must fail closed, never be
+  // reported as "unsigned".
   const script = `
 $ErrorActionPreference = 'Stop'
-# -ErrorAction SilentlyContinue: on some runner images the module's type data
-# is already registered by the session, and a plain re-import raises non-fatal
-# "member already present" errors that -Stop would otherwise treat as fatal.
-Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $paths = @(${relPaths.map((p) => `'${resolve(root, p).replace(/'/g, "''")}'`).join(",")})
-$results = foreach ($path in $paths) {
-  $sig = Get-AuthenticodeSignature -FilePath $path
-  [PSCustomObject]@{
-    Path = $path
-    Status = $sig.Status.ToString()
-    StatusMessage = $sig.StatusMessage
-    SignerSubject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
-    SignerThumbprint = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { $null }
-    HasTimestamp = [bool]$sig.TimeStamperCertificate
+$compute = {
+  foreach ($path in $paths) {
+    $sig = Get-AuthenticodeSignature -FilePath $path
+    [PSCustomObject]@{
+      Path = $path
+      Status = $sig.Status.ToString()
+      StatusMessage = $sig.StatusMessage
+      SignerSubject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null }
+      SignerThumbprint = if ($sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { $null }
+      HasTimestamp = [bool]$sig.TimeStamperCertificate
+    }
   }
+}
+try {
+  $results = & $compute
+} catch {
+  try { Import-Module Microsoft.PowerShell.Security -Force -ErrorAction SilentlyContinue } catch {}
+  $results = & $compute
 }
 $results | ConvertTo-Json -Depth 4
 `;

@@ -22,7 +22,10 @@ const ROOT = resolve(import.meta.dirname, "../..");
 export const OUTPUT_PATH = resolve(ROOT, "release/THIRD_PARTY_NOTICES.txt");
 
 function readLicenseText(path) {
-  try { return readFileSync(path, "utf8").trimEnd(); } catch { return null; }
+  // Some upstream license files use CRLF (e.g. generic-array's). Normalize to
+  // LF so the generated document has one canonical line ending throughout,
+  // regardless of the platform or git autocrlf setting doing the generating.
+  try { return readFileSync(path, "utf8").replace(/\r\n/g, "\n").trimEnd(); } catch { return null; }
 }
 
 function sqliteAmalgamationNotice() {
