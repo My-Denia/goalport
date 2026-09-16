@@ -1,6 +1,6 @@
 # Building and running
 
-GoalPort has no downloadable release yet. You build the Windows x64 RC package from source, and the result is a self-contained folder you can run and move.
+GoalPort has no downloadable release yet. You build the Windows x64 RC package from source, and the result is a self-contained folder you can run and move. See [releasing](releasing.md) for how a verified package becomes a downloadable release candidate.
 
 ## Prerequisites
 
