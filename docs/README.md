@@ -25,6 +25,8 @@ Start with the [project README](../README.md) for what GoalPort is and how to ru
 | --- | --- |
 | [Development](development.md) | Prerequisites, repository layout, dev mode |
 | [Testing and CI](testing.md) | Local checks, packaged smoke tests, the CI workflow |
+| [Releasing](releasing.md) | Turning a verified package into a downloadable release candidate |
+| [Signing](signing.md) | Authenticode inventory, signing route comparison, SmartScreen, native-evidence gate |
 | [Contributing guide](../CONTRIBUTING.md) | How to propose changes |
 
 ## Reference and history
