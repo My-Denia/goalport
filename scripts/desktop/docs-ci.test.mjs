@@ -116,7 +116,7 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
   assert.match(body, /runs-on: windows-latest/);
   assert.match(body, /node-version: 22\.19\.0/);
   assert.match(body, /version: 11\.22\.0/);
-  assert.match(body, /dtolnay\/rust-toolchain@1\.96\.1/);
+  assert.match(body, /dtolnay\/rust-toolchain@[0-9a-f]{40} # master[^\n]*\r?\n\s+with:\r?\n\s+toolchain: 1\.96\.1/);
   assert.equal(pkg.packageManager, "pnpm@11.22.0");
   assert.match(readFileSync(resolve(ROOT, "rust-toolchain.toml"), "utf8"), /channel = "1\.96\.1"/);
   const install = commands.indexOf("pnpm install --frozen-lockfile");
@@ -136,7 +136,7 @@ test("Desktop CI retains only redacted failure summaries and never tolerates a f
   assert.doesNotMatch(body, /continue-on-error/);
   const steps = body.split(/\r?\n(?=      - )/);
   const last = steps.at(-1);
-  assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@v4\r?\n/);
+  assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v4\.\d+\.\d+\r?\n/);
   assert.match(last, /\n\s+retention-days: 7\s*$/);
   assert.match(last, /\n\s+if-no-files-found: ignore\r?\n/);
   const paths = [...last.matchAll(/^ {12}(\S+)\s*$/gm)].map((match) => match[1]);
