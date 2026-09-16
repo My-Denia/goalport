@@ -127,7 +127,11 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
   assert.ok(commands.includes("pnpm test:desktop"));
   assert.equal(smoke.length, 2);
   assert.equal(smoke.filter((command) => command.includes(" --normal ")).length, 1);
-  for (const command of commands) assert.doesNotMatch(command, /verify:runtime|--live|goal-runs\/|\b(?:push|publish|release|deploy)\b/);
+  assert.ok(commands.includes("pnpm test:release"));
+  for (const command of commands) {
+    if (command === "pnpm test:release") continue;
+    assert.doesNotMatch(command, /verify:runtime|--live|goal-runs\/|\b(?:push|publish|release|deploy)\b/);
+  }
   assert.ok(commands.includes("node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup"));
 });
 
