@@ -35,7 +35,10 @@ export function authenticodeInventory(packageRoot) {
   if (!relPaths.length) throw new Error(`No PE files found under ${root}`);
   const script = `
 $ErrorActionPreference = 'Stop'
-Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+# -ErrorAction SilentlyContinue: on some runner images the module's type data
+# is already registered by the session, and a plain re-import raises non-fatal
+# "member already present" errors that -Stop would otherwise treat as fatal.
+Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $paths = @(${relPaths.map((p) => `'${resolve(root, p).replace(/'/g, "''")}'`).join(",")})
 $results = foreach ($path in $paths) {
