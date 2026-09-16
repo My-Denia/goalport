@@ -1,6 +1,7 @@
 {
   "name": "goalport-electron-host",
   "private": true,
+  "license": "Apache-2.0",
   "version": "1.0.0-rc.1",
   "main": "main.cjs"
 }

@@ -2,6 +2,10 @@ name: Feature request
 description: Suggest an improvement to GoalPort.
 labels: [enhancement]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Use synthetic content only. Do not paste credentials, tokens, account identifiers, private transcripts, native Runtime configuration, or paths that contain your user name.
   - type: textarea
     id: problem
     attributes:
