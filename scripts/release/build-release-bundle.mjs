@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { argsFor, claimOutput, fileHash, ROOT, sha256, sourceIdentity } from "../desktop/package.mjs";
+import { argsFor, claimOutput, fileHash, ROOT, sourceIdentity } from "../desktop/package.mjs";
 import { verifyPackage } from "../desktop/verify-package.mjs";
 import { authenticodeInventory } from "./authenticode-inventory.mjs";
 
