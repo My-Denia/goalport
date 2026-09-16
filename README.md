@@ -110,4 +110,4 @@ Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
-No license has been chosen yet; `Cargo.toml` declares `UNLICENSED`. Until a `LICENSE` file is added, this code is not licensed for reuse.
+Licensed under the [Apache License 2.0](LICENSE).

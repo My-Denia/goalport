@@ -6,9 +6,13 @@ GoalPort is a release candidate built from source. There are no maintained relea
 
 ## Reporting a vulnerability
 
-Please **do not open a public issue** for a vulnerability.
+Please **do not open a public issue** for a vulnerability, and do not include technical details, credentials, tokens, transcripts or private paths in any public issue.
 
-Use GitHub private vulnerability reporting for this repository: **Security** tab → **Report a vulnerability**. If that option is not available, open a short issue asking the maintainers for a private contact, and include no technical details in it.
+GitHub private vulnerability reporting (Security tab → Report a vulnerability) is a feature of public repositories after the owner enables it. It is not available while this repository is private.
+
+While the repository is private, or if that option is not shown, open a short issue asking the maintainers for a private contact and include no technical details in it.
+
+After the repository is public and private vulnerability reporting is enabled, use **Security** → **Report a vulnerability**.
 
 A useful report includes:
 

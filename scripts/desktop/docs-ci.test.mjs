@@ -59,6 +59,24 @@ test("README current entry points resolve and RC versions agree", () => {
 // Historical records are kept unchanged; their one dangling target predates the move.
 const HISTORICAL_BROKEN = { "docs/history/v1-design/2026-08-31-goalport-v1-r2-changes.md": ["2026-08-31-goalport-v1-r2-validation.json"] };
 
+test("Apache-2.0 LICENSE and package metadata stay consistent", () => {
+  assert.ok(existsSync(resolve(ROOT, "LICENSE")), "LICENSE file exists");
+  assert.match(readFileSync(resolve(ROOT, "Cargo.toml"), "utf8"), /^license = "Apache-2.0"$/m);
+  assert.equal(pkg.license, "Apache-2.0");
+  const electron = JSON.parse(readFileSync(resolve(ROOT, "electron/package.json"), "utf8"));
+  assert.equal(electron.license, "Apache-2.0");
+  assert.match(readme, /\[[^\]]*Apache License 2\.0[^\]]*\]\(LICENSE\)|\[[^\]]*LICENSE[^\]]*\]\(LICENSE\)/);
+  assert.doesNotMatch(readme, /No license has been chosen yet|UNLICENSED/);
+});
+
+test("SECURITY.md does not present private vulnerability reporting as available on a private repository", () => {
+  const security = readFileSync(resolve(ROOT, "SECURITY.md"), "utf8");
+  assert.match(security, /do not open a public issue/i);
+  assert.match(security, /repository is private/i);
+  assert.match(security, /public repositories/i);
+  assert.doesNotMatch(security, /Use GitHub private vulnerability reporting for this repository/);
+});
+
 test("public documentation links and images resolve with exact case", () => {
   const files = ["README.md", "CONTRIBUTING.md", "SECURITY.md", ...markdownFiles(ROOT, "docs")];
   assert.deepEqual(brokenLinks(ROOT, files, { allow: HISTORICAL_BROKEN }), []);
