@@ -11,15 +11,20 @@ use crate::{
     domain::{
         AccessMode, AgentEventEnvelope, AgentEventType, Attempt, AttemptState, Campaign,
         Command, CommandState, Decision, DecisionState, Event, Evidence, Project, Task,
-        Verdict,
-        WorkspaceLease,
+        Verdict, WorkspaceLease,
     },
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, UiCommandRequest},
+    product_conversation::{
+        ProductConversation, ProductConversationContext, ProductRuntimeSelection, ProductTurn,
+        product_conversation,
+    },
     runtime_manager::{RegistrationWithdrawal, RuntimeManager, TransportState},
     store::{
-        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, EventRecord,
-        NewRecheckObservation, RecheckVerdict, RuntimeEpochBinding, RuntimeObservation,
-        StopNativeTurnState, StopResponsibility, StopResponsibilityUpdate, Store, StoreError,
+        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization,
+        ConversationPrepareOutcome, ConversationRequestPhase, ConversationRequestRow,
+        ConversationStart, ConfirmedStopSuccessor, EventRecord, NewRecheckObservation,
+        RecheckVerdict, RuntimeEpochBinding, RuntimeObservation, StopNativeTurnState,
+        StopResponsibility, StopResponsibilityUpdate, Store, StoreError,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -84,6 +89,12 @@ pub struct UiTask {
 pub struct UiTimelineItem {
     pub id: String,
     pub kind: String,
+    /// Raw journal event kind (e.g. `message.user`). Additive, display-only:
+    /// lets the GUI distinguish a user-authored message from other `message`
+    /// cards without changing any gate or persistence semantics. Older GUIs
+    /// ignore it; an older Core omits it and the GUI falls back to the actor.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub event_kind: String,
     pub actor: String,
     pub title: String,
     pub body: String,
@@ -119,6 +130,7 @@ pub struct UiRuntimeCapabilities {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiDecision {
+    pub action_known: bool,
     pub id: String,
     pub title: String,
     pub kind: String,
@@ -202,6 +214,11 @@ pub struct CoreSnapshot {
     /// workspace, where `stop_responsibility` is empty and the blocked-work panel
     /// would otherwise vanish exactly when it became useful.
     pub related_holds: Vec<UiStopResponsibility>,
+    /// The product conversation read model (plan product-interaction-reset):
+    /// allowlisted items across the campaign's full attempt history, the selected
+    /// Runtime preference independent of any live turn, and the fail-closed turn
+    /// model with canStop/canSend. Additive; the raw timeline above is unchanged.
+    pub product_conversation: ProductConversation,
     pub preview: bool,
     pub notices: Vec<String>,
 }
@@ -368,6 +385,21 @@ impl UiController {
                 evidence: Vec::new(),
                 stop_responsibility: None,
                 related_holds: Vec::new(),
+                product_conversation: ProductConversation {
+                    items: Vec::new(),
+                    runtime: ProductRuntimeSelection {
+                        state: "none".into(),
+                        provider: String::new(),
+                        name: String::new(),
+                    },
+                    turn: ProductTurn {
+                        state: "idle".into(),
+                        can_stop: false,
+                        can_send: false,
+                        reason: Some("no conversation is selected".into()),
+                    },
+                    title: String::new(),
+                },
                 preview: false,
                 notices: self.notices.clone(),
             });
@@ -422,7 +454,17 @@ impl UiController {
             .as_deref()
             .and_then(|id| attempts.iter().find(|attempt| attempt.id == id))
             .cloned()
-            .or_else(|| attempts.last().cloned())
+            .or_else(|| {
+                // A failed admission can leave a durable attempt for diagnostics.
+                // Preserve an explicit unassigned selection instead of selecting
+                // that row merely because a snapshot was requested. Fresh/reopened
+                // controllers still restore the latest attempt when no selection exists.
+                if self.selected_attempt_id.as_deref() == Some(UNASSIGNED_ATTEMPT_ID) {
+                    None
+                } else {
+                    attempts.last().cloned()
+                }
+            })
             .unwrap_or_else(|| unassigned_attempt(active_task_id.clone().unwrap_or_default()));
         self.selected_campaign_id = active_campaign.as_ref().map(|item| item.id.clone());
         self.selected_task_id = active_task_id;
@@ -443,7 +485,7 @@ impl UiController {
             .map_err(store_message)?
             .into_iter()
             .filter(|decision| decision.attempt_id == active_attempt.id)
-            .map(decision_to_ui)
+            .map(|decision| decision_to_ui(decision, &self.store))
             .collect::<Vec<_>>();
         let evidence = self
             .store
@@ -517,6 +559,30 @@ impl UiController {
                 }
             }
         }
+        // The product read model is built from the durable campaign journal, the
+        // persisted preference and the live turn facts -- never from
+        // `Attempt.active` (plan R2/R3). The root task title is the title fallback
+        // for conversations that predate preferences.
+        let root_task_title = active_campaign
+            .as_ref()
+            .and_then(|campaign| {
+                tasks
+                    .iter()
+                    .find(|task| task.id == campaign.root_task_id)
+                    .or_else(|| tasks.first())
+            })
+            .map(|task| task.title.clone())
+            .unwrap_or_default();
+        let product_conversation = product_conversation(
+            &self.store,
+            &mut self.runtime_manager,
+            &ProductConversationContext {
+                campaign_id: &active_campaign_id,
+                attempt: &active_attempt,
+                workspace_root: &selected_project.workspace_root,
+                root_task_title: &root_task_title,
+            },
+        )?;
         Ok(CoreSnapshot {
             related_holds,
             protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
@@ -535,6 +601,7 @@ impl UiController {
             decisions,
             evidence,
             stop_responsibility,
+            product_conversation,
             preview: active_attempt.id != UNASSIGNED_ATTEMPT_ID
                 && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
@@ -583,6 +650,15 @@ impl UiController {
             }
             "select_runtime" | "select_attempt" => {
                 self.select_runtime(&request)?;
+            }
+            "start_conversation" => {
+                duplicate = self.start_conversation(&request)?;
+            }
+            "conversation_send" => {
+                duplicate = self.conversation_send(&request)?;
+            }
+            "rename_conversation" => {
+                self.rename_conversation(&request)?;
             }
             "send_message" => {
                 duplicate = self.send_message(&request)?;
@@ -1595,6 +1671,11 @@ impl UiController {
             }
             // Idempotent reuse: only the selection is committed. No store write, no
             // runtime call, no event; reuse grants nothing the checks above denied.
+            // The persisted Runtime preference follows the accepted selection (it
+            // is never cleared by turn terminality).
+            self.store
+                .set_conversation_provider(&campaign.id, &provider)
+                .map_err(store_message)?;
             self.selected_project_id = project.id;
             self.selected_campaign_id = Some(campaign.id);
             self.selected_task_id = Some(task.id);
@@ -1644,7 +1725,37 @@ impl UiController {
             }
             Err(_) => false,
         };
-        if !retry_of_withdrawn_failure {
+        // A row pre-reserved by `start_conversation` (or a confirmed-stop
+        // successor) is already the exact queued Attempt this admission wants;
+        // re-inserting it would conflict on its reserved first event. The
+        // discriminator is durable row shape, not a caller claim: exactly one
+        // event, and that event is either the reserved `message.user` (first
+        // send) or an `attempt.created` carrying `rolledFrom` lineage
+        // (confirmed-stop successor). A seeded `attempt.created`-only row (A5a)
+        // or a row with an admission-failure record keeps the existing
+        // conflict/retry-gate behavior.
+        let reserved_row = match self.store.get_attempt(&attempt_id) {
+            Ok(row)
+                if row.task_id == task.id
+                    && row.provider == provider
+                    && row.state == AttemptState::Queued
+                    && row.provider_session.is_none()
+                    && row.last_event_seq == 1 =>
+            {
+                self.store
+                    .list_event_records(&attempt_id, 0)
+                    .map_err(store_message)?
+                    .first()
+                    .is_some_and(|record| {
+                        let payload = record.payload.as_ref();
+                        record.event.kind == "message.user"
+                            || (record.event.kind == "attempt.created"
+                                && payload.is_some_and(|value| value.get("rolledFrom").is_some()))
+                    })
+            }
+            _ => false,
+        };
+        if !retry_of_withdrawn_failure && !reserved_row {
             let attempt = Attempt::new(
                 &attempt_id,
                 &task.id,
@@ -1652,19 +1763,33 @@ impl UiController {
                 format!("{provider}-cap-v1"),
             );
             let created_new = self.store.get_attempt(&attempt_id).is_err();
-            self.store.insert_attempt(&attempt).map_err(store_message)?;
-            if created_new {
-                let mut created = json!({ "provider": provider });
-                if let Ok(source_id) = payload_text(&request.payload, "attemptId") {
-                    if source_id != attempt_id {
-                        if let Ok(source) = self.store.get_attempt(&source_id) {
-                            if source.state.is_terminal() && source.task_id == task.id {
-                                created["rolledFrom"] = json!(source_id);
-                            }
-                        }
-                    }
+            // R3: when this admission rolls a terminal source attempt over, the
+            // new row and its lineage event are committed atomically through
+            // `insert_rollover_attempt` instead of a row insert followed by a
+            // separate event append.
+            let mut rolled_from: Option<String> = None;
+            if let Ok(source_id) = payload_text(&request.payload, "attemptId") {
+                if source_id != attempt_id
+                    && let Ok(source) = self.store.get_attempt(&source_id)
+                    && source.state.is_terminal()
+                    && source.task_id == task.id
+                {
+                    rolled_from = Some(source_id);
                 }
-                self.persist_event(&attempt_id, "attempt.created", created, None)?;
+            }
+            if created_new && let Some(source_id) = rolled_from.as_deref() {
+                self.store
+                    .insert_rollover_attempt(&attempt, source_id)
+                    .map_err(store_message)?;
+            } else {
+                self.store.insert_attempt(&attempt).map_err(store_message)?;
+                if created_new {
+                    let mut created = json!({ "provider": provider });
+                    if let Some(source_id) = rolled_from.as_deref() {
+                        created["rolledFrom"] = json!(source_id);
+                    }
+                    self.persist_event(&attempt_id, "attempt.created", created, None)?;
+                }
             }
         }
         // The registration stage needs no compensation of its own: `attempts` and
@@ -1708,6 +1833,11 @@ impl UiController {
         }
         // Commit the selection last, after every fallible step of the admission. Any error
         // returned above leaves the four fields exactly as they were before the command.
+        // The persisted Runtime preference follows the accepted selection (it is
+        // never cleared by turn terminality).
+        self.store
+            .set_conversation_provider(&campaign.id, &provider)
+            .map_err(store_message)?;
         self.selected_project_id = project.id;
         self.selected_campaign_id = Some(campaign.id);
         self.selected_task_id = Some(task.id);
@@ -1975,6 +2105,23 @@ impl UiController {
     }
 
     fn send_message(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
+        self.send_message_with_reservation(request, None)
+    }
+
+    /// `send_message` with an optional orchestration binding (first-send /
+    /// confirmed-stop successor). The binding is what R3 adds:
+    /// - the native send command id must equal the `native_command_id` fixed at
+    ///   preparation, so a forged or mismatched binding refuses before any
+    ///   native call;
+    /// - when the orchestration already reserved the first `message.user` event
+    ///   in its transaction, the send does NOT append a second one — the
+    ///   product's initial user event appears exactly once even if everything
+    ///   after the reservation fails.
+    fn send_message_with_reservation(
+        &mut self,
+        request: &UiCommandRequest,
+        orchestration: Option<&OrchestrationBinding>,
+    ) -> Result<bool, String> {
         let attempt_id = payload_text(&request.payload, "attemptId")?;
         let campaign_id = payload_text(&request.payload, "campaignId")?;
         let message = payload_text(&request.payload, "message")?;
@@ -2057,6 +2204,17 @@ impl UiController {
             return Err("current campaign authorization denies send; historical PolicySnapshot is explanatory only".into());
         }
         let command_id = command.command.id.clone();
+        // R3 command binding: an orchestrated send may only run under the
+        // native_command_id fixed at preparation. A forged or mismatched
+        // binding refuses before anything is recorded or delivered.
+        if let Some(binding) = orchestration {
+            if binding.native_command_id != command_id {
+                return Err(format!(
+                    "orchestrated send command identity {} does not match the prepared native command {}; the send is refused",
+                    command_id, binding.native_command_id
+                ));
+            }
+        }
         // A new row is stamped with THIS request id at insert (plan v12), so even a Pending row
         // left by a crash before the Executing transition can refuse a colliding request id.
         let persisted = self
@@ -2093,13 +2251,19 @@ impl UiController {
         // input accepted; UNKNOWN where a write may have crossed the transport unconfirmed.
         let mut delivery = "FAILED";
         let result = (|| -> Result<(), String> {
-            let mut user_payload = json!({ "text": message, "requestId": request.request_id });
-            if let Some(binding) = self.persist_runtime_epoch_binding(&attempt_id)? {
-                let observed_at = store::utc_now_iso();
-                user_payload["goalportRuntime"] =
-                    runtime_binding_payload(&binding, &observed_at, &observed_at);
+            // The first user message of an orchestrated conversation was already
+            // reserved inside the preparation transaction; it is never appended a
+            // second time.
+            let reserved_first_message = orchestration.is_some_and(|binding| binding.first_message_reserved);
+            if !reserved_first_message {
+                let mut user_payload = json!({ "text": message, "requestId": request.request_id });
+                if let Some(binding) = self.persist_runtime_epoch_binding(&attempt_id)? {
+                    let observed_at = store::utc_now_iso();
+                    user_payload["goalportRuntime"] =
+                        runtime_binding_payload(&binding, &observed_at, &observed_at);
+                }
+                self.persist_event(&attempt_id, "message.user", user_payload, None)?;
             }
-            self.persist_event(&attempt_id, "message.user", user_payload, None)?;
             let provider = attempt.provider.clone();
             // Increment 6: a Codex registration whose output stream is closed is not usable. Refuse
             // BEFORE the liveness check, so the `!runtime_live` re-registration path is never
@@ -2317,24 +2481,19 @@ impl UiController {
                     let _ = self.persist_event(
                         &attempt_id,
                         "runtime.send.failed",
-                        json!({ "error": first, "retry": true }),
+                        json!({
+                            "error": first,
+                            "retry": false,
+                            "deliveryState": "UNKNOWN"
+                        }),
                         None,
                     );
+                    // R2 (explicitly in scope to REMOVE the old generic retry):
+                    // any send error gets ONE native call only. An unconfirmed
+                    // delivery is classified UNKNOWN fail-closed; nothing is
+                    // silently re-sent, even when the transport looks open.
                     delivery = "UNKNOWN";
-                    std::thread::sleep(std::time::Duration::from_millis(120));
-                    self.runtime_manager
-                        .send_prompt(&attempt_id, &prompt)
-                        .map_err(|retry| {
-                            let message = format!("{first}; retry: {retry}");
-                            eprintln!("goalport-core: send_prompt retry failed: {message}");
-                            let _ = self.persist_event(
-                                &attempt_id,
-                                "runtime.send.failed",
-                                json!({ "error": message, "retry": false }),
-                                None,
-                            );
-                            message
-                        })?
+                    return Err(first);
                 }
             };
             // The adapter's answer decides: from here on a failure is a failure AFTER delivery.
@@ -2429,6 +2588,516 @@ impl UiController {
                 Err(error)
             }
         }
+    }
+
+    /// The full first-send orchestration (plan R2/R3). One Core command with
+    /// request-derived identities reserves the campaign, root task, initial
+    /// queued attempt, Runtime preference, original first user message and the
+    /// `conversation_requests` prepared record in ONE IMMEDIATE SQLite
+    /// transaction; native admission happens afterwards through the existing
+    /// gates; the native send runs only from the winning claim, under the
+    /// native_command_id fixed at preparation. A repeated request answers its
+    /// recorded outcome and never repeats the native send. An uncertain
+    /// delivery is never replayed.
+    fn start_conversation(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
+        let workspace_root_text = payload_text(&request.payload, "workspaceRoot")?;
+        let provider = payload_text(&request.payload, "provider")?.to_ascii_lowercase();
+        let message = payload_text(&request.payload, "message")?;
+        let canonical = canonical_existing_workspace(&workspace_root_text)?;
+        // Provider validity is checked before any write, exactly as an explicit
+        // select would (unknown providers must not leave rows behind).
+        RuntimeManager::intended_binding(
+            &provider,
+            None,
+            runtime_version(&provider),
+            &PathBuf::from(&canonical),
+        )
+        .map_err(|error| error.to_string())?;
+        self.runtime_manager
+            .ensure_provider_allowed(&provider)
+            .map_err(|error| error.to_string())?;
+
+        let request_id = request.request_id.clone();
+        let payload_hash = conversation_payload_hash(&canonical, &provider, &message);
+        let native_command_id = format!("ui-send-{}", stable_suffix(&request_id));
+        if let Some(row) = self
+            .store
+            .conversation_request(&request_id)
+            .map_err(store_message)?
+        {
+            if row.payload_hash != payload_hash {
+                return Err(format!(
+                    "request {request_id} was already recorded with a different payload; the new payload is refused and nothing was sent"
+                ));
+            }
+            // A settled success answers as a duplicate with the recorded
+            // conversation (the snapshot this response carries); every other
+            // recorded phase is a status-only refusal — nothing is re-executed.
+            if row.phase == "succeeded" {
+                return Ok(true);
+            }
+            return Err(conversation_request_status_error(&row));
+        }
+
+        let claim_token = fresh_claim_token();
+        let request_hash = sha256_hex(request_id.as_bytes());
+        let campaign_id = format!("campaign-{request_hash}");
+        let task_id = format!("task-{request_hash}");
+        let attempt_id = format!("attempt-{request_hash}");
+        let title = deterministic_conversation_title(&message);
+        let goal = bounded_core_text(&message, 2048);
+        let start = ConversationStart {
+            request_id: request_id.clone(),
+            payload_hash: payload_hash.clone(),
+            claim_token: claim_token.clone(),
+            native_command_id: native_command_id.clone(),
+            project: Project {
+                id: format!("project-{}", sha256_hex(canonical.as_bytes())),
+                workspace_root: canonical.clone(),
+            },
+            campaign: Campaign {
+                id: campaign_id.clone(),
+                goal,
+                root_task_id: task_id.clone(),
+                state: crate::domain::WorkStatus::InProgress,
+            },
+            task: Task {
+                id: task_id.clone(),
+                campaign_id: campaign_id.clone(),
+                title: title.clone(),
+                acceptance:
+                    "Persist ordered Runtime events and recover without replay.".into(),
+                state: crate::domain::WorkStatus::InProgress,
+            },
+            policy_id: format!("policy-{request_hash}"),
+            policy_payload_json: json!({
+                "campaignId": campaign_id,
+                "goal": bounded_core_text(&message, 512),
+                "providerAuthorized": true,
+                "transferAuthorized": true,
+                "actionAuthorized": true
+            })
+            .to_string(),
+            authorization: CampaignAuthorization::granted(),
+            attempt: Attempt::new(
+                &attempt_id,
+                &task_id,
+                &provider,
+                format!("{provider}-cap-v1"),
+            ),
+            selected_provider: provider.clone(),
+            first_user_message: message.clone(),
+        };
+        let project = match self.store.prepare_conversation_start(&start) {
+            Ok(ConversationPrepareOutcome::Prepared { project, .. }) => {
+                project.ok_or_else(|| "prepared conversation has no project".to_string())?
+            }
+            Ok(ConversationPrepareOutcome::Existing(row)) => {
+                if row.phase == "succeeded" {
+                    return Ok(true);
+                }
+                return Err(conversation_request_status_error(&row));
+            }
+            Err(error) => return Err(store_message(error)),
+        };
+        // The message is durable even if native admission fails. Keep its
+        // conversation visible so retrying cannot silently create a second goal.
+        self.selected_project_id = project.id.clone();
+        self.selected_campaign_id = Some(campaign_id.clone());
+        self.selected_task_id = Some(task_id.clone());
+        self.selected_attempt_id = Some(attempt_id.clone());
+        // Only the invocation whose INSERT succeeded holds this claim token.
+        if let Err(error) = self
+            .store
+            .claim_conversation_request(&request_id, &claim_token)
+        {
+            let row = self
+                .store
+                .conversation_request(&request_id)
+                .map_err(store_message)?
+                .ok_or_else(|| store_message(error))?;
+            return Err(conversation_request_status_error(&row));
+        }
+
+        // Native admission through the current gates, naming the reserved
+        // queued attempt explicitly. A failure here keeps the conversation and
+        // its first user message in the snapshot and records a failed outcome;
+        // nothing is dispatched automatically afterwards.
+        let admission = self.admit_runtime(
+            &UiCommandRequest {
+                protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+                request_id: format!("{request_id}:admit"),
+                entity_version: request.entity_version,
+                message_type: "select_runtime".into(),
+                payload: json!({
+                    "projectId": project.id,
+                    "campaignId": campaign_id,
+                    "taskId": task_id,
+                    "provider": provider,
+                    "attemptId": attempt_id
+                }),
+            },
+            false,
+        );
+        if let Err(error) = admission {
+            let _ = self.store.finish_conversation_request(
+                &request_id,
+                ConversationRequestPhase::Failed,
+                &json!({
+                    "requestId": request_id,
+                    "stage": "admission",
+                    "error": error
+                }),
+            );
+            return Err(error);
+        }
+
+        // CAS claimed -> dispatching; only a row this invocation changed permits
+        // the native call.
+        if let Err(error) = self
+            .store
+            .begin_dispatch_conversation_request(&request_id, &claim_token)
+        {
+            let row = self
+                .store
+                .conversation_request(&request_id)
+                .map_err(store_message)?
+                .ok_or_else(|| store_message(error))?;
+            return Err(conversation_request_status_error(&row));
+        }
+        let send_request = UiCommandRequest {
+            protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+            request_id: request_id.clone(),
+            entity_version: request.entity_version,
+            message_type: "send_message".into(),
+            payload: json!({
+                "campaignId": campaign_id,
+                "taskId": task_id,
+                "attemptId": attempt_id,
+                "message": message
+            }),
+        };
+        let binding = OrchestrationBinding {
+            native_command_id: native_command_id.clone(),
+            first_message_reserved: true,
+        };
+        let send_outcome = self.send_message_with_reservation(&send_request, Some(&binding));
+        let command_result = self
+            .store
+            .command_result(&native_command_id)
+            .map_err(store_message)?;
+        let delivery = command_result
+            .as_ref()
+            .and_then(|value| value.get("deliveryState"))
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        match send_outcome {
+            Ok(duplicate) => {
+                self.store
+                    .finish_conversation_request(
+                        &request_id,
+                        ConversationRequestPhase::Succeeded,
+                        &json!({
+                            "requestId": request_id,
+                            "deliveryState": delivery,
+                            "duplicate": duplicate
+                        }),
+                    )
+                    .map_err(store_message)?;
+                Ok(duplicate)
+            }
+            Err(error) => {
+                let phase = if delivery == "UNKNOWN" {
+                    ConversationRequestPhase::Unknown
+                } else {
+                    ConversationRequestPhase::Failed
+                };
+                let _ = self.store.finish_conversation_request(
+                    &request_id,
+                    phase,
+                    &json!({
+                        "requestId": request_id,
+                        "deliveryState": delivery,
+                        "error": error
+                    }),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// Explicit Send on an existing conversation, including the confirmed-stop
+    /// successor path (plan R2/R3): when the campaign's selected attempt is
+    /// CANCELLED with durable confirmed-cancellation evidence, no held stop
+    /// responsibility and no unsettled outbox, the next explicit Send creates a
+    /// same-provider replacement attempt (with recorded lineage) in one
+    /// transaction and delivers the message to it. An uncertain or unconfirmed
+    /// source is refused transactionally. No send is ever triggered by runtime
+    /// selection or UI reconnect — only by this explicit command.
+    fn conversation_send(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
+        let campaign_id = payload_text(&request.payload, "campaignId")?;
+        let message = payload_text(&request.payload, "message")?;
+        let campaign = self.store.get_campaign(&campaign_id).map_err(store_message)?;
+        let tasks = self
+            .store
+            .tasks_for_campaign(&campaign_id)
+            .map_err(store_message)?;
+        let task = tasks
+            .iter()
+            .find(|task| task.id == campaign.root_task_id)
+            .or_else(|| tasks.first())
+            .ok_or_else(|| format!("campaign {campaign_id} has no task"))?;
+        let attempts = self
+            .store
+            .attempts_for_task(&task.id)
+            .map_err(store_message)?;
+        let attempt_id = payload_text(&request.payload, "attemptId")
+            .ok()
+            .or_else(|| attempts.last().map(|attempt| attempt.id.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "campaign {campaign_id} has no attempt to send to; select a Runtime or start a conversation first"
+                )
+            })?;
+        let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
+
+        if attempt.state.is_terminal() {
+            if attempt.state != AttemptState::Cancelled {
+                return Err(format!(
+                    "attempt is terminal ({}); select a Runtime to start a new Attempt",
+                    attempt_state_label(attempt.state)
+                ));
+            }
+            return self.send_confirmed_stop_successor(request, &attempt, task, &message);
+        }
+
+        // Explicit send on the current, non-terminal attempt. The Core
+        // selection must already name it — an explicit Send never performs an
+        // implicit admission or selection change, so every existing send gate
+        // (Core selection, ingress, authorization, turn-in-flight, replay
+        // ledger) runs exactly as for send_message. Selecting a Runtime or
+        // recovering one is the separate explicit user action.
+        if self.selected_attempt_id.as_deref() != Some(attempt_id.as_str()) {
+            return Err(format!(
+                "attempt {attempt_id} is not selected by Core; select the Runtime for this conversation first"
+            ));
+        }
+        let send_request = UiCommandRequest {
+            protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+            request_id: request.request_id.clone(),
+            entity_version: request.entity_version,
+            message_type: "send_message".into(),
+            payload: json!({
+                "campaignId": campaign_id,
+                "taskId": task.id,
+                "attemptId": attempt_id,
+                "message": message
+            }),
+        };
+        self.send_message(&send_request)
+    }
+
+    /// The confirmed-stop successor transaction plus its explicit send.
+    fn send_confirmed_stop_successor(
+        &mut self,
+        request: &UiCommandRequest,
+        source: &Attempt,
+        task: &Task,
+        message: &str,
+    ) -> Result<bool, String> {
+        let request_id = request.request_id.clone();
+        let payload_hash = conversation_payload_hash(
+            &source.id,
+            &source.provider,
+            message,
+        );
+        let native_command_id = format!("ui-send-{}", stable_suffix(&request_id));
+        if let Some(row) = self
+            .store
+            .conversation_request(&request_id)
+            .map_err(store_message)?
+        {
+            if row.payload_hash != payload_hash {
+                return Err(format!(
+                    "request {request_id} was already recorded with a different payload; the new payload is refused and nothing was sent"
+                ));
+            }
+            // A settled success answers as a duplicate with the recorded
+            // conversation; every other recorded phase refuses without
+            // executing — including recovered unsettled rows.
+            if row.phase == "succeeded" {
+                return Ok(true);
+            }
+            return Err(conversation_request_status_error(&row));
+        }
+        let workspace = self.workspace_for_campaign(&task.campaign_id)?;
+        self.ensure_workspace_ingress_allowed(&workspace, "continue after Stop")?;
+        let auth = self.store.get_campaign_authorization(&task.campaign_id).map_err(store_message)?;
+        if !auth.provider_authorized || !auth.action_authorized {
+            return Err("Current conversation authorization denies sending; no successor was created".into());
+        }
+        let successor_hash =
+            sha256_hex(format!("{request_id}:confirmed-stop-successor").as_bytes());
+        let successor_attempt = Attempt::new(
+            format!("attempt-{successor_hash}"),
+            &task.id,
+            &source.provider,
+            format!("{}-cap-v1", source.provider),
+        );
+        let claim_token = fresh_claim_token();
+        let successor = ConfirmedStopSuccessor {
+            source_attempt_id: source.id.clone(),
+            request_id: request_id.clone(),
+            payload_hash: payload_hash.clone(),
+            claim_token: claim_token.clone(),
+            native_command_id: native_command_id.clone(),
+            successor_attempt: successor_attempt.clone(),
+        };
+        let outcome = self
+            .store
+            .insert_confirmed_stop_successor(&successor)
+            .map_err(store_message)?;
+        let row = match outcome {
+            ConversationPrepareOutcome::Prepared { row, .. } => row,
+            ConversationPrepareOutcome::Existing(row) => {
+                if row.phase == "succeeded" {
+                    return Ok(true);
+                }
+                return Err(conversation_request_status_error(&row));
+            }
+        };
+        let attempt_id = row.attempt_id.clone();
+        let campaign_id = row.campaign_id.clone();
+        let task_id = row.task_id.clone();
+        if let Err(error) = self
+            .store
+            .claim_conversation_request(&request_id, &claim_token)
+        {
+            let row = self
+                .store
+                .conversation_request(&request_id)
+                .map_err(store_message)?
+                .ok_or_else(|| store_message(error))?;
+            return Err(conversation_request_status_error(&row));
+        }
+        let project_id = self
+            .store
+            .campaign_project(&campaign_id)
+            .map_err(store_message)?
+            .unwrap_or_else(|| self.selected_project_id.clone());
+        let admission = self.admit_runtime(
+            &UiCommandRequest {
+                protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+                request_id: format!("{request_id}:admit"),
+                entity_version: request.entity_version,
+                message_type: "select_runtime".into(),
+                payload: json!({
+                    "projectId": project_id,
+                    "campaignId": campaign_id,
+                    "taskId": task_id,
+                    "provider": source.provider,
+                    "attemptId": attempt_id
+                }),
+            },
+            false,
+        );
+        if let Err(error) = admission {
+            let _ = self.store.finish_conversation_request(
+                &request_id,
+                ConversationRequestPhase::Failed,
+                &json!({
+                    "requestId": request_id,
+                    "stage": "successor-admission",
+                    "error": error
+                }),
+            );
+            return Err(error);
+        }
+        if let Err(error) = self
+            .store
+            .begin_dispatch_conversation_request(&request_id, &claim_token)
+        {
+            let row = self
+                .store
+                .conversation_request(&request_id)
+                .map_err(store_message)?
+                .ok_or_else(|| store_message(error))?;
+            return Err(conversation_request_status_error(&row));
+        }
+        let send_request = UiCommandRequest {
+            protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
+            request_id: request_id.clone(),
+            entity_version: request.entity_version,
+            message_type: "send_message".into(),
+            payload: json!({
+                "campaignId": campaign_id,
+                "taskId": task_id,
+                "attemptId": attempt_id,
+                "message": message
+            }),
+        };
+        let binding = OrchestrationBinding {
+            native_command_id: native_command_id.clone(),
+            first_message_reserved: false,
+        };
+        let send_outcome = self.send_message_with_reservation(&send_request, Some(&binding));
+        let command_result = self
+            .store
+            .command_result(&native_command_id)
+            .map_err(store_message)?;
+        let delivery = command_result
+            .as_ref()
+            .and_then(|value| value.get("deliveryState"))
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN");
+        match send_outcome {
+            Ok(duplicate) => {
+                self.store
+                    .finish_conversation_request(
+                        &request_id,
+                        ConversationRequestPhase::Succeeded,
+                        &json!({
+                            "requestId": request_id,
+                            "deliveryState": delivery,
+                            "duplicate": duplicate
+                        }),
+                    )
+                    .map_err(store_message)?;
+                Ok(duplicate)
+            }
+            Err(error) => {
+                let phase = if delivery == "UNKNOWN" {
+                    ConversationRequestPhase::Unknown
+                } else {
+                    ConversationRequestPhase::Failed
+                };
+                let _ = self.store.finish_conversation_request(
+                    &request_id,
+                    phase,
+                    &json!({
+                        "requestId": request_id,
+                        "deliveryState": delivery,
+                        "error": error
+                    }),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// Rename a conversation: updates the product title durably. The original
+    /// prompt and history are never rewritten; only the preference column
+    /// changes, and no native title request exists.
+    fn rename_conversation(&mut self, request: &UiCommandRequest) -> Result<(), String> {
+        let campaign_id = payload_text(&request.payload, "campaignId")?;
+        let title = payload_text(&request.payload, "title")?;
+        self.store
+            .get_campaign(&campaign_id)
+            .map_err(store_message)?;
+        self.store
+            .set_conversation_title(&campaign_id, &title)
+            .map_err(store_message)?;
+        Ok(())
     }
 
     fn resolve_decision(&mut self, request: &UiCommandRequest) -> Result<(), String> {
@@ -2529,6 +3198,25 @@ impl UiController {
         if attempt.provider.eq_ignore_ascii_case("claude") {
             self.stop_claude_with_operation(&attempt_id, &request.request_id, "ui.stop", None)?;
             return Ok(());
+        }
+        // R2: Stop is offered only for a proven cancellable live turn. For Codex
+        // that means an acknowledged native turn with an open transport — a
+        // Starting turn (turn start written but not yet acknowledged by the
+        // provider) has no real interrupt target yet, so the generic interrupt
+        // rejects instead of firing a stop at nothing. Scenario/Grok keep their
+        // existing synchronous/ACP stop behavior; CodexExec remains explicitly
+        // unsupported inside the RuntimeManager.
+        if attempt.provider.eq_ignore_ascii_case("codex") {
+            let stoppable = self
+                .runtime_manager
+                .turn_facts(&attempt_id)
+                .is_some_and(|facts| facts.stoppable);
+            if !stoppable {
+                return Err(format!(
+                    "attempt {attempt_id} has no proven cancellable live turn: the Codex turn \
+                     start has not been acknowledged (or its transport is closed); Stop is not offered"
+                ));
+            }
         }
         let result = self
             .runtime_manager
@@ -2950,6 +3638,23 @@ impl UiController {
     }
 
     fn reconstruct_from_store(&mut self) -> Result<(), String> {
+        // R3 restart recovery: every conversation request that was not settled
+        // before this Core process started becomes 'unknown'. Nothing is ever
+        // dispatched by recovery; a repeat answers its recorded status and the
+        // user sends again explicitly.
+        let unsettled = self
+            .store
+            .mark_unsettled_conversation_requests_unknown()
+            .map_err(store_message)?;
+        if unsettled > 0 {
+            self.notices.insert(
+                0,
+                format!(
+                    "{unsettled} conversation request(s) were not settled before the Core \
+                     restarted; they are marked unknown and never dispatched automatically"
+                ),
+            );
+        }
         let records = self.store.list_attempt_recovery().map_err(store_message)?;
         for record in records {
             self.runtime_manager
@@ -4213,6 +4918,7 @@ fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
     UiTimelineItem {
         id: record.event.id.clone(),
         kind: kind.into(),
+        event_kind: record.event.kind.clone(),
         actor: if record.event.kind.starts_with("runtime") {
             "Native Runtime"
         } else {
@@ -4249,17 +4955,24 @@ fn timeline_title(kind: &str) -> String {
     .into()
 }
 
-fn decision_to_ui(decision: Decision) -> UiDecision {
+fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
+    let action = store.list_event_records(&decision.attempt_id, 0).ok()
+        .and_then(|records| records.into_iter().rev().find_map(|record| {
+            if record.event.kind != "runtime.permission.request" { return None; }
+            let payload = record.payload?;
+            let id = payload.get("request_id").or_else(|| payload.get("requestId"))?.as_str()?;
+            if id != decision.id { return None; }
+            payload.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(str::to_owned)
+        }));
+    let provider = store.get_attempt(&decision.attempt_id).ok().map(|attempt| attempt.provider).unwrap_or_else(|| "Runtime".into());
     UiDecision {
+        action_known: action.is_some(),
         id: decision.id,
-        title: format!("{} permission", decision.kind),
+        title: format!("{provider} wants your approval"),
         kind: decision.kind,
-        facts: vec![
-            "Request came from the Core-owned Runtime event path".into(),
-            "No external effect is replayed automatically".into(),
-        ],
-        recommendation: "Review the exact Runtime request before allowing it.".into(),
-        default_behavior: "Remain blocked and do not retry automatically.".into(),
+        facts: vec![action.unwrap_or_else(|| "The Runtime did not provide action details. Keep waiting or decline.".into())],
+        recommendation: "Allow only if you understand the requested action.".into(),
+        default_behavior: "Keep waiting; no approval is sent.".into(),
         state: if decision.state == DecisionState::Pending {
             "pending"
         } else {
@@ -4852,6 +5565,90 @@ fn stop_native_turn_state_str(state: StopNativeTurnState) -> &'static str {
         StopNativeTurnState::Interrupted => "interrupted",
         StopNativeTurnState::Unconfirmed => "unconfirmed",
     }
+}
+
+/// An orchestration binding for an orchestrated native send (first-send or
+/// confirmed-stop successor). See `send_message_with_reservation`.
+#[derive(Debug, Clone)]
+struct OrchestrationBinding {
+    native_command_id: String,
+    first_message_reserved: bool,
+}
+
+/// The payload hash of a conversation-scope request: binds the identity the
+/// request is about (workspace for a first send, source attempt for a
+/// successor), the provider and the exact prompt. A same-id request with any of
+/// these changed is a conflict, never a replay.
+fn conversation_payload_hash(identity: &str, provider: &str, message: &str) -> String {
+    sha256_hex(
+        json!({
+            "identity": identity,
+            "provider": provider,
+            "message": message
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+/// A unique-per-invocation claim token. Unpredictability is not a security
+/// boundary here (the store is single-writer); uniqueness is what the claim CAS
+/// needs so a later invocation cannot complete another invocation's claim.
+fn fresh_claim_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "claim-{}-{nanos}-{}",
+        std::process::id(),
+        sha256_hex(format!("{nanos}-{}", std::process::id()).as_bytes())
+    )
+}
+
+/// The local deterministic title for a new conversation: the first prompt,
+/// whitespace-normalized, truncated to its first 44 Unicode characters.
+fn deterministic_conversation_title(first_prompt: &str) -> String {
+    let normalized: String = first_prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized.chars().take(44).collect()
+}
+
+/// The status-only answer for a repeated conversation request. Every phase is a
+/// repeat answer — including recovered unsettled rows, which are uncertain and
+/// never dispatched automatically; the user sends again explicitly.
+fn conversation_request_status_error(row: &ConversationRequestRow) -> String {
+    let outcome = match row.phase.as_str() {
+        "succeeded" => format!(
+            "it already succeeded{}",
+            row.result
+                .as_ref()
+                .and_then(|value| value.get("deliveryState"))
+                .and_then(Value::as_str)
+                .map(|state| format!(" (delivery {state})"))
+                .unwrap_or_default()
+        ),
+        "failed" => format!(
+            "it already failed{}",
+            row.result
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(Value::as_str)
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default()
+        ),
+        "unknown" => "its delivery is UNKNOWN; it is never dispatched automatically and never re-sent".into(),
+        other => format!(
+            "it is {other} (unsetted after an interrupted invocation or a Core restart); \
+             it is never dispatched automatically"
+        ),
+    };
+    format!(
+        "conversation request {} was already recorded: {outcome}; send again explicitly with a new request",
+        row.request_id
+    )
 }
 
 /// The exact `CoreCommand` `send_message` records for a request, exposed so a caller (or a

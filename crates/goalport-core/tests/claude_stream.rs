@@ -1032,6 +1032,38 @@ fn snapshot_of(response: &Value) -> Value {
     response["payload"]["snapshot"].clone()
 }
 
+/// `create_campaign` derives campaign/task identity from the request hash and
+/// requires an existing workspace, so fixtures must read the real ids back
+/// from the successful command snapshot instead of hardcoding
+/// `campaign-<request-id>` / `task-<request-id>`.
+fn create_campaign_fixture(
+    server: &CoreServer,
+    request_id: &str,
+    workspace: &Path,
+    goal: &str,
+) -> (String, String) {
+    let response = call(
+        server,
+        request_id,
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.to_string_lossy(),
+            "goal": goal
+        }),
+    );
+    assert_eq!(response["ok"], true, "create_campaign refused: {response}");
+    let snapshot = snapshot_of(&response);
+    let campaign_id = snapshot["activeCampaignId"]
+        .as_str()
+        .expect("campaign id in create snapshot")
+        .to_owned();
+    let task_id = snapshot["activeTask"]["id"]
+        .as_str()
+        .expect("root task id in create snapshot")
+        .to_owned();
+    (campaign_id, task_id)
+}
+
 static EPOCH_LOCK: Mutex<()> = Mutex::new(());
 
 fn seed_core_epoch(store: &Store, workspace: &Path, nonce: &str) {
@@ -1085,19 +1117,19 @@ fn send_to_terminal_attempt_is_refused() {
     seed_core_epoch(&store, &workspace, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
     let server = CoreServer::new(store.clone());
     let executable = fake_cli().to_string_lossy().into_owned();
-    call(
+    let (campaign_id, task_id) = create_campaign_fixture(
         &server,
         "claude-campaign-terminal",
-        "create_campaign",
-        json!({ "goal": "terminal guard" }),
+        &workspace,
+        "terminal guard",
     );
     let selected = snapshot_of(&call(
         &server,
         "claude-select-terminal",
         "select_runtime",
         json!({
-            "campaignId": "campaign-claude-campaign-terminal",
-            "taskId": "task-claude-campaign-terminal",
+            "campaignId": campaign_id,
+            "taskId": task_id,
             "provider": "claude",
             "executable": executable
         }),
@@ -1112,7 +1144,7 @@ fn send_to_terminal_attempt_is_refused() {
         "claude-send-1",
         "send_message",
         json!({
-            "campaignId": "campaign-claude-campaign-terminal",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "first turn"
         }),
@@ -1158,7 +1190,7 @@ fn send_to_terminal_attempt_is_refused() {
         "claude-send-2",
         "send_message",
         json!({
-            "campaignId": "campaign-claude-campaign-terminal",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "second turn"
         }),
@@ -1184,12 +1216,12 @@ fn uncertain_claude_send_is_attempted_once_and_holds_responsibility() {
     store.insert_project(&Project{id:"project-claude-fixture".into(),workspace_root:workspace.to_string_lossy().into_owned()}).unwrap();
     seed_core_epoch(&store,&workspace,"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeef");
     let server=CoreServer::new(store.clone());
-    call(&server,"uncertain-campaign","create_campaign",json!({"goal":"uncertain send"}));
+    let (campaign_id, task_id)=create_campaign_fixture(&server,"uncertain-campaign",&workspace,"uncertain send");
     let selected=snapshot_of(&call(&server,"uncertain-select","select_runtime",json!({
-        "campaignId":"campaign-uncertain-campaign","taskId":"task-uncertain-campaign",
+        "campaignId":campaign_id,"taskId":task_id,
         "provider":"claude","executable":fake_cli().to_string_lossy()})));
     let attempt=selected["attempt"]["id"].as_str().unwrap();
-    let sent=call(&server,"uncertain-input","send_message",json!({"campaignId":"campaign-uncertain-campaign","attemptId":attempt,"message":"one input only"}));
+    let sent=call(&server,"uncertain-input","send_message",json!({"campaignId":campaign_id,"attemptId":attempt,"message":"one input only"}));
     assert_eq!(sent["ok"],false,"{sent}");
     let mut input_count=0;
     for _ in 0..40 {
@@ -1205,7 +1237,7 @@ fn uncertain_claude_send_is_attempted_once_and_holds_responsibility() {
     let held=store.stop_responsibility_for_attempt(attempt).unwrap().unwrap();
     assert_eq!(held.native_turn_state,goalport_core::store::StopNativeTurnState::Unconfirmed);
     assert_eq!(held.write_responsibility,"held");
-    let again=call(&server,"uncertain-second-input","send_message",json!({"campaignId":"campaign-uncertain-campaign","attemptId":attempt,"message":"must not be sent"}));
+    let again=call(&server,"uncertain-second-input","send_message",json!({"campaignId":campaign_id,"attemptId":attempt,"message":"must not be sent"}));
     assert_eq!(again["ok"],false);
     assert_eq!(fs::read_to_string(workspace.join(".fake-claude-send-attempts")).unwrap().lines().count(),1);
 }
@@ -1357,28 +1389,34 @@ fn deny_resolve_decision_inserts_bound_notice_in_snapshot() {
     seed_core_epoch(&store, &workspace, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeac6e");
     let server = CoreServer::new(store.clone());
     let executable = fake_cli().to_string_lossy().into_owned();
-    call(
+    let (campaign_id, task_id) = create_campaign_fixture(
         &server,
         "claude-campaign-ac6e",
-        "create_campaign",
-        json!({ "goal": "ac6e notices" }),
+        &workspace,
+        "ac6e notices",
     );
     let selected = snapshot_of(&call(
         &server,
         "claude-select-ac6e",
         "select_runtime",
         json!({
-            "campaignId": "campaign-claude-campaign-ac6e",
-            "taskId": "task-claude-campaign-ac6e",
+            "campaignId": campaign_id,
+            "taskId": task_id,
             "provider": "claude",
             "executable": executable
         }),
     ));
-    let campaign_id = selected["activeCampaignId"]
-        .as_str()
-        .expect("campaign")
-        .to_owned();
-    let task_id = selected["activeTask"]["id"].as_str().expect("task").to_owned();
+    // The selection snapshot must carry exactly the campaign created above.
+    assert_eq!(
+        selected["activeCampaignId"].as_str().unwrap_or_default(),
+        campaign_id,
+        "select snapshot must carry the created campaign"
+    );
+    assert_eq!(
+        selected["activeTask"]["id"].as_str().unwrap_or_default(),
+        task_id,
+        "select snapshot must carry the created root task"
+    );
     let attempt = selected["attempt"]["id"]
         .as_str()
         .expect("attempt id")

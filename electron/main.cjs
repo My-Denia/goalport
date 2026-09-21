@@ -1,12 +1,14 @@
-const { app, BrowserWindow, ipcMain, Notification, shell, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, Notification, screen, shell, dialog } = require("electron");
 const { spawn, execFile } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { launchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
+const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 function reportStartupFailure(error) {
@@ -15,17 +17,83 @@ function reportStartupFailure(error) {
   app.exit(1);
 }
 
-let appVersion, profile;
+// Build identity: distribution separates the release channel from development
+// candidates. Packaged apps read it from build-info.json (inside the asar);
+// an unpackaged run is `dev`. A packaged app without build-info falls back to
+// `release` (the historical behavior; verify-package flags such a package).
+function readBuildInfo() {
+  for (const candidate of [path.join(__dirname, "build-info.json"), path.join(appRoot, "build-info.json")]) {
+    try { return JSON.parse(fs.readFileSync(candidate, "utf8")); } catch { /* absent or unreadable */ }
+  }
+  return null;
+}
+function resolveChannel() {
+  if (!app.isPackaged) return "dev";
+  const info = readBuildInfo();
+  return info?.distribution === "dev-candidate" ? "dev-candidate" : "release";
+}
+function channelLabel(channel) {
+  if (channel === "release") return "RC";
+  if (channel === "dev-candidate") return "Dev candidate";
+  return "Dev";
+}
+
+// The standard Chromium switch relocates the application-data ROOT (profiles
+// live under <dir>/GoalPort/<channel>). This is a real product feature for
+// redirected/portable homes, not a test hook: the full default profile
+// selection (channel namespace, discovery, compatibility) keeps running inside
+// the relocated root. Windows known-folder resolution ignores the APPDATA
+// environment variable, so this switch is the supported way to relocate.
+function appDataRoot(argv, electronAppData) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    if (arg === "--user-data-dir" && argv[index + 1] && path.isAbsolute(argv[index + 1])) return path.resolve(argv[index + 1]);
+    if (arg.startsWith("--user-data-dir=")) {
+      const value = arg.slice("--user-data-dir=".length);
+      if (value && path.isAbsolute(value)) return path.resolve(value);
+    }
+  }
+  return electronAppData;
+}
+
+let appVersion, profile, profileManager, launchChannel;
+let legacyIsolated = false;
 try {
   const launchArgs = launchArguments(process.argv);
-  const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
   appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
-  profile = legacyIsolated ? null : prepareProfile({
-    args: launchArgs, appData: app.getPath("appData"), version: appVersion, isPackaged: app.isPackaged,
+  launchChannel = legacyIsolated ? null : resolveChannel();
+  profile = legacyIsolated ? null : resolveProfilePaths({
+    args: launchArgs, appData: appDataRoot(process.argv, app.getPath("appData")), channel: launchChannel,
     coreSha256: fileSha256(coreBinary() || "")
   });
   if (profile) {
+    // Create the profile directory before Electron initializes the session so
+    // userData/session caches of DIFFERENT profiles never share files. Nothing
+    // else is decided here: every compatibility/ownership decision happens in
+    // the post-ready bootstrap with a real window on screen.
+    fs.mkdirSync(profile.directory, { recursive: true });
+    // Chromium itself needs a writable userData; probe now so an unwritable
+    // directory produces an honest refusal instead of a silent exit.
+    {
+      const probe = path.join(profile.directory, `.write-probe-${process.pid}`);
+      fs.writeFileSync(probe, "writable-probe");
+      fs.rmSync(probe, { force: true });
+    }
     app.setPath("userData", profile.directory);
+    profileManager = new ProfileManager({
+      directory: profile.directory,
+      appData: appDataRoot(process.argv, app.getPath("appData")),
+      build: {
+        version: appVersion,
+        distribution: app.isPackaged ? launchChannel : "dev",
+        channel: profile.channel,
+        coreSha256: profile.coreSha256,
+        mode: profile.mode,
+        profileKey: profile.profileKey
+      },
+      deps: { execCore: runCoreProfileCommand, log: (line) => console.log(`[profile] ${line}`) }
+    });
     const env = childEnvironment(process.env, profile);
     for (const key of Object.keys(process.env)) {
       if (key.startsWith("GOALPORT_") && !(key in env)) delete process.env[key];
@@ -267,9 +335,18 @@ function pipeAvailable() {
   });
 }
 
+// The profile bootstrap owns the decision whether this build may open the
+// data at all; the renderer's snapshot polling must not spawn a Core before
+// that decision is made (in the old pre-ready-marker architecture this could
+// not happen because the profile was settled before any window existed).
+let profileReady = false;
+
 async function ensureCore() {
   if (!profile && isolatedRequired() && !isThisRunIsolatedPipe(process.env.GOALPORT_CORE_PIPE || configuredPipeName)) {
     throw new Error(`isolated Electron refused to attach to non this-run pipe: ${process.env.GOALPORT_CORE_PIPE || configuredPipeName}`);
+  }
+  if (profileManager && !profileReady) {
+    throw new Error("GoalPort is still preparing this data profile; Core start is gated");
   }
   if (await pipeAvailable()) return coreGate.verify();
   if (coreLaunchPromise) return coreLaunchPromise;
@@ -365,6 +442,224 @@ async function verifyCoreConnection() {
       assertCoreIdentity(receipt, profile);
     }
   });
+}
+
+// Synchronous-looking async wrapper for `goalport-core profile ...`
+// subcommands (inspect / backup / import). Never spawns a server, never
+// migrates a database.
+const { execFile: execFileAsync } = require("node:child_process");
+function runCoreProfileCommand(args) {
+  const binary = coreBinary();
+  if (!binary) return Promise.resolve({ code: -1, stdout: "", error: "Core binary is missing" });
+  return new Promise((resolve) => {
+    execFileAsync(binary, args, { timeout: 120000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0, stdout: String(stdout ?? ""), error: error?.message });
+    });
+  });
+}
+
+// ---------- profile bootstrap (startup continuity) ----------
+// All profile compatibility/ownership decisions run here, after a real window
+// exists, with structured states pushed to the renderer. The renderer only
+// displays facts and forwards user actions; it never decides.
+let bootstrapWaiter = null;
+function waitForBootstrapAction() {
+  return new Promise((resolve) => { bootstrapWaiter = resolve; });
+}
+let lastBootstrapState = { phase: "checking" };
+function pushBootstrap(state) {
+  lastBootstrapState = state;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send("goalport:bootstrap-state", state); } catch { /* window mid-close */ }
+}
+function importFacts(discovery) {
+  return {
+    sourcePath: discovery?.path ?? null,
+    createdBy: discovery?.marker?.createdBy ?? null,
+    markerSchema: discovery?.marker?.markerSchemaVersion ?? null,
+    counts: discovery?.inspection?.counts ?? null,
+    schemaVersion: discovery?.inspection?.schemaVersion ?? null,
+    bytes: discovery?.inspection?.bytes ?? null,
+    needsRecovery: Boolean(discovery?.inspection?.needsRecovery),
+    liveSource: discovery?.inspection?.latestEpoch?.priorCore === "live-exact"
+  };
+}
+function quitFromBootstrap() {
+  allowQuitAfterCloseChoice = true;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  app.exit(0);
+}
+async function chooseFreshDirectoryAndRelaunch() {
+  const choice = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose an empty folder for a fresh GoalPort data profile",
+    properties: ["openDirectory", "createDirectory", "dontAddToRecent"]
+  });
+  if (choice.canceled || !choice.filePaths[0]) return false;
+  const args = [...process.argv.slice(1).filter((arg) => arg !== "--"), "--data-dir", choice.filePaths[0]];
+  app.relaunch({ args });
+  quitFromBootstrap();
+  return true;
+}
+const BOOTSTRAP_ERROR_SCREENS = {
+  "newer-schema": { canChooseDir: true, headline: "This data profile is from a newer GoalPort." },
+  "unsupported-legacy": { canChooseDir: true, headline: "This data profile uses an unsupported legacy format." },
+  "corrupt": { canChooseDir: true, headline: "This data profile failed an integrity check." },
+  "corrupt-marker": { canChooseDir: true, headline: "This data profile's record file is damaged." },
+  "missing-database": { canChooseDir: true, headline: "This data profile record exists but its database is missing." },
+  "not-a-profile": { canChooseDir: true, headline: "This data directory is not an empty or existing GoalPort profile." },
+  "identity-mismatch": { canChooseDir: true, headline: "This data directory belongs to a different profile identity." },
+  "readonly-dir": { canChooseDir: true, headline: "The data directory cannot be written." },
+  "disk-full": { canChooseDir: true, headline: "There is not enough disk space to continue." },
+  "import-failed": { canChooseDir: true, headline: "Importing the existing data did not complete." },
+  "backup-failed": { canChooseDir: true, headline: "A safety backup of the existing data could not be created." },
+  "core-start": { canChooseDir: false, headline: "The local Core could not start with this data profile." },
+  "internal-error": { canChooseDir: false, headline: "GoalPort hit an unexpected condition while opening this data profile." }
+};
+async function bootstrapErrorScreen(kind, message) {
+  const screen = BOOTSTRAP_ERROR_SCREENS[kind] || BOOTSTRAP_ERROR_SCREENS["internal-error"];
+  pushBootstrap({ phase: "error", kind, headline: screen.headline, message: String(message || ""), canChooseDir: screen.canChooseDir, dataPath: profile?.directory ?? null });
+  while (true) {
+    const action = await waitForBootstrapAction();
+    if (action?.type === "choose-dir") { if (await chooseFreshDirectoryAndRelaunch()) return "exit"; continue; }
+    if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+    if (action?.type === "exit") return "exit";
+  }
+}
+function classifyFsError(error) {
+  const code = String(error?.code || "");
+  if (["EACCES", "EPERM", "EROFS"].includes(code)) return "readonly-dir";
+  if (["ENOSPC", "EDQUOT"].includes(code)) return "disk-full";
+  return "internal-error";
+}
+async function runProfileBootstrap() {
+  pushBootstrap({ phase: "checking" });
+  let outcome;
+  try {
+    outcome = await profileManager.resolve();
+  } catch (error) {
+    return (await bootstrapErrorScreen(classifyFsError(error), error?.message)) === "exit" ? "exit" : "exit";
+  }
+  switch (outcome.kind) {
+    case "fresh":
+      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return "continue";
+    case "resume-import":
+      try { profileManager.finalizeImport(outcome.journal); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return "continue";
+    case "reopen":
+      if (outcome.needsBackup) {
+        pushBootstrap({ phase: "backing-up" });
+        try { await profileManager.backupOwnDatabase(); } catch (error) { return await bootstrapExitOnError("backup-failed", error); }
+      }
+      return "continue";
+    case "adopt-v1": {
+      // Explicit --data-dir carrying a v1 marker: verified backup, then an
+      // in-place marker upgrade (metadata only; the database never moves).
+      pushBootstrap({ phase: "backing-up" });
+      try { await profileManager.backupOwnDatabase(); } catch (error) { return await bootstrapExitOnError("backup-failed", error); }
+      try {
+        const state = profileManager.readMarker();
+        if (!state || state.problem) throw new Error(state?.problem || "marker disappeared");
+        profileManager.adoptV1Marker(state);
+      } catch (error) { return await bootstrapExitOnError("internal-error", error); }
+      return "continue";
+    }
+    case "import-offer": {
+      const facts = importFacts(outcome.discovery);
+      pushBootstrap({ phase: "import-offer", facts });
+      const action = await waitForBootstrapAction();
+      if (action?.type === "import-accept") {
+        pushBootstrap({ phase: "importing", facts });
+        try {
+          await profileManager.runImport(outcome.discovery, { allowSourceRecovery: Boolean(facts.needsRecovery) });
+        } catch (error) {
+          return await bootstrapExitOnError("import-failed", error);
+        }
+        return "continue";
+      }
+      // Decline is an explicit choice recorded as a fresh profile.
+      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return "continue";
+    }
+    case "import-incompatible": {
+      pushBootstrap({ phase: "import-incompatible", facts: importFacts(outcome.discovery), reason: outcome.reason });
+      while (true) {
+        const action = await waitForBootstrapAction();
+        if (action?.type === "fresh") {
+          try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+          return "continue";
+        }
+        if (action?.type === "open-folder" && outcome.discovery?.path) { shell.openPath(outcome.discovery.path); continue; }
+        if (action?.type === "exit") return "exit";
+      }
+    }
+    case "live-core":
+    case "unknown-core": {
+      const live = outcome.kind === "live-core";
+      while (true) {
+        pushBootstrap({
+          phase: "coordination",
+          kind: outcome.kind,
+          headline: live
+            ? "Your GoalPort data is still in use by a running GoalPort Core."
+            : "GoalPort cannot confirm whether a previous Core is still using this data.",
+          detail: outcome.epoch ?? null,
+          dataPath: profile?.directory ?? null
+        });
+        const action = await waitForBootstrapAction();
+        if (action?.type === "retry") {
+          return await runProfileBootstrap();
+        }
+        if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+        if (action?.type === "exit") return "exit";
+      }
+    }
+    default:
+      return await bootstrapExitOnError(outcome.kind, outcome.reason || outcome.kind);
+  }
+}
+async function bootstrapExitOnError(kind, error) {
+  const disposition = await bootstrapErrorScreen(kind, error?.message || error);
+  return disposition === "exit" ? "exit" : "exit";
+}
+// The Core spawn itself can still lose an ownership race with a Core that
+// became live between inspection and spawn: classify structurally, never by
+// matching the error text.
+async function startCoreWithCoordination() {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await ensureCore();
+      return true;
+    } catch (error) {
+      let outcome = null;
+      try { outcome = await profileManager.resolve(); } catch { /* classify below */ }
+      if (attempt < 20 && (outcome?.kind === "live-core" || outcome?.kind === "unknown-core")) {
+        const disposition = await coordinationFromOutcome(outcome);
+        if (disposition === "retry") continue;
+        return false;
+      }
+      await bootstrapExitOnError("core-start", error);
+      return false;
+    }
+  }
+}
+async function coordinationFromOutcome(outcome) {
+  const live = outcome.kind === "live-core";
+  while (true) {
+    pushBootstrap({
+      phase: "coordination",
+      kind: outcome.kind,
+      headline: live
+        ? "Your GoalPort data is still in use by a running GoalPort Core."
+        : "GoalPort cannot confirm whether a previous Core is still using this data.",
+      detail: outcome.epoch ?? null,
+      dataPath: profile?.directory ?? null
+    });
+    const action = await waitForBootstrapAction();
+    if (action?.type === "retry") return "retry";
+    if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+    if (action?.type === "exit") return "exit";
+  }
 }
 
 const coreGate = createCoreGate({ verify: verifyCoreConnection });
@@ -476,7 +771,10 @@ function promptRendererCloseChoice() {
 async function quitAfterCloseChoice() {
   allowQuitAfterCloseChoice = true;
   closePromptOpen = false;
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    saveWindowState({ statePath: path.join(app.getPath("userData"), STATE_FILE), win: mainWindow });
+    mainWindow.destroy();
+  }
   app.quit();
 }
 
@@ -501,14 +799,48 @@ function maybeNotify(request, result) {
   }
 }
 
+// Integrated title bar (Windows): keep the native window controls via the
+// Window Controls Overlay and let the renderer own the bar surface. The height
+// matches the CSS title bar height in styles.css; colors follow the app surface.
+const TITLE_BAR_HEIGHT = 40;
+
+// The screen API can be absent in embedded/test hosts; window sizing then falls
+// back to the rc.1 defaults instead of refusing to start.
+function primaryDisplay() {
+  try {
+    return screen?.getPrimaryDisplay?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function allDisplays() {
+  try {
+    return screen?.getAllDisplays?.() ?? [];
+  } catch {
+    return [];
+  }
+}
+
 async function createWindow() {
-  await ensureCore();
+  const primary = primaryDisplay();
+  const displays = allDisplays();
+  const state = loadWindowState({
+    statePath: path.join(app.getPath("userData"), STATE_FILE),
+    displays,
+    primaryDisplay: primary ?? { workArea: { x: 0, y: 0, width: 1440, height: 920 } }
+  });
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 720,
-    minHeight: 640,
-    title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : "RC"}`,
+    ...state.bounds,
+    minWidth: 480,
+    minHeight: 420,
+    title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : (launchChannel ? channelLabel(launchChannel) : "RC")}`,
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#1a1a1e",
+      symbolColor: "#c8c7c5",
+      height: TITLE_BAR_HEIGHT
+    },
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -516,23 +848,59 @@ async function createWindow() {
       sandbox: true
     }
   });
+  if (state.maximized) mainWindow.maximize();
+  const rememberWindowState = () => saveWindowState({
+    statePath: path.join(app.getPath("userData"), STATE_FILE),
+    win: mainWindow
+  });
+  mainWindow.on("resize", rememberWindowState);
+  mainWindow.on("move", rememberWindowState);
   await mainWindow.loadFile(path.join(appRoot, "dist", "index.html"));
   if (isolatedRequired() && mainWindow && !mainWindow.isDestroyed()) {
     await mainWindow.webContents.executeJavaScript("window.__GOALPORT_ISOLATED=1");
   }
   mainWindow.on("close", (event) => {
+    saveWindowState({ statePath: path.join(app.getPath("userData"), STATE_FILE), win: mainWindow });
     if (allowQuitAfterCloseChoice) return;
     if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
     event.preventDefault();
     promptRendererCloseChoice();
   });
+  if (profileManager && profile && profile.mode === "normal" && !profile.testMode) {
+    const disposition = await runProfileBootstrap();
+    if (disposition !== "continue") { quitFromBootstrap(); return; }
+    profileReady = true;
+    if (!(await startCoreWithCoordination())) { quitFromBootstrap(); return; }
+    try { profileManager.recordOpen(null); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    pushBootstrap({ phase: "done" });
+  } else {
+    // Synthetic test profiles and legacy isolated tooling keep the direct
+    // contract: no discovery, no import, first user is the marker.
+    profileReady = true;
+    await ensureCore();
+  }
   await refreshAttemptCache();
 }
 
 app.whenReady().then(() => {
   ipcMain.handle("goalport:app-info", () => ({
-    version: appVersion, channel: "Stable V1 RC", testMode: isolatedRequired(), dataPath: app.getPath("userData")
+    version: appVersion,
+    channel: profile?.testMode ? "Synthetic test" : (launchChannel === "release" || !launchChannel ? "Stable V1 RC" : channelLabel(launchChannel)),
+    distribution: app.isPackaged ? (launchChannel || "release") : "dev",
+    testMode: isolatedRequired(), dataPath: app.getPath("userData")
   }));
+  ipcMain.handle("goalport:bootstrap-current", () => lastBootstrapState);
+  ipcMain.handle("goalport:bootstrap-action", (event, payload) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      return { ok: false, error: "window-mismatch" };
+    }
+    if (bootstrapWaiter) {
+      const resolve = bootstrapWaiter;
+      bootstrapWaiter = null;
+      resolve(payload);
+    }
+    return { ok: true };
+  });
   ipcMain.handle("goalport:choose-workspace", async () => {
     const choice = await dialog.showOpenDialog(mainWindow, { title: "Choose a project workspace", properties: ["openDirectory"] });
     return choice.canceled ? null : choice.filePaths[0] || null;

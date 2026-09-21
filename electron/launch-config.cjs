@@ -20,25 +20,6 @@ function canonicalPath(value) {
 }
 const normalizedPath = (value) => canonicalPath(value).replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("/", "\\");
 
-function validateProfileMarker(marker, { mode, coreSha256, version, profileKey }) {
-  const deadline = Date.now() + 1000;
-  let existing;
-  while (true) {
-    try {
-      existing = JSON.parse(fs.readFileSync(marker, "utf8"));
-      break;
-    } catch (error) {
-      // An exclusive creator may have opened the file but not finished its
-      // first write. Never overwrite it; wait briefly for a complete marker.
-      if (!(error instanceof SyntaxError || error.code === "ENOENT") || Date.now() >= deadline) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
-  }
-  if (existing?.product !== "GoalPort" || existing.schemaVersion !== 1 || existing.mode !== mode) throw new Error("This data directory belongs to a different profile; choose a new directory");
-  if (existing.coreSha256 !== coreSha256 || existing.version !== version) throw new Error("This data profile belongs to another RC build. Choose a new --data-dir; automatic migration is not supported");
-  if (existing.identityVersion !== 2 || existing.profileKey !== profileKey) throw new Error("This data profile uses an older or different path identity. Choose a new --data-dir; automatic migration is not supported");
-}
-
 function launchArguments(argv) {
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -52,31 +33,56 @@ function launchArguments(argv) {
   return result;
 }
 
-// Normal RC state has a new product-owned location. Existing arbitrary/legacy
-// SQLite files are never adopted or migrated just because they are nearby.
-function prepareProfile({ args, appData, version, coreSha256, isPackaged = true }) {
+// Channel namespaces own separate profile directories under the product root.
+// `release` keeps the historical `rc` directory; every development build
+// (packaged dev candidates and unpackaged dev) shares `dev`, so development
+// data stays stable across builds instead of forking per Core hash.
+// A synthetic test profile is an explicit per-test directory and never
+// participates in channel discovery.
+const CHANNEL_DIRECTORIES = Object.freeze({ release: "rc", "dev-candidate": "dev", dev: "dev" });
+
+function profileDirectoryFor({ args, appData, channel }) {
+  if (args["--test-profile"] || args["--data-dir"]) return path.resolve(args["--test-profile"] || args["--data-dir"]);
+  const leaf = CHANNEL_DIRECTORIES[channel] || "dev";
+  return path.join(appData, "GoalPort", leaf);
+}
+
+// Pure path/identity computation for one profile directory. It never reads or
+// writes the marker, never validates builder identity, and never refuses on
+// build hash: those decisions belong to the profile manager's compatibility
+// flow (data-format authority is the schema_migrations table, inspected
+// read-only by the Core binary).
+function resolveProfilePaths({ args, appData, channel, coreSha256 }) {
   if (!/^[a-f0-9]{64}$/.test(coreSha256)) throw new Error("Packaged Core identity is unavailable");
   const mode = args["--test-profile"] ? "synthetic-test" : "normal";
-  const directory = path.resolve(args["--test-profile"] || args["--data-dir"] || path.join(appData, "GoalPort", isPackaged ? "rc" : "dev"));
-  const marker = path.join(directory, "goalport-profile.json");
-  if (fs.existsSync(directory) && !fs.existsSync(marker) && fs.readdirSync(directory).length && !fs.existsSync(marker)) {
-    throw new Error("Data directory is not an empty or existing GoalPort RC profile; legacy databases are not imported");
-  }
-  fs.mkdirSync(directory, { recursive: true });
-  const canonical = fs.realpathSync.native(directory);
+  const directory = profileDirectoryFor({ args, appData, channel });
+  const canonical = canonicalPath(directory);
   const key = hash(normalizedPath(canonical)).slice(0, 20);
-  try {
-    fs.writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", version, coreSha256, mode }, null, 2)}\n`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    validateProfileMarker(marker, { mode, coreSha256, version, profileKey: key });
-  }
   const slug = `goalport-rc-${key}`;
   return {
-    mode, directory: canonical, database: path.join(canonical, "goalport.sqlite"),
-    pipe: `\\\\.\\pipe\\${slug}-${coreSha256.slice(0, 20)}`, slug,
-    coreSha256, version, testMode: mode === "synthetic-test"
+    mode,
+    channel: args["--test-profile"] || args["--data-dir"] ? null : channel,
+    directory: canonical,
+    marker: path.join(canonical, "goalport-profile.json"),
+    database: path.join(canonical, "goalport.sqlite"),
+    profileKey: key,
+    pipe: `\\\\.\\pipe\\${slug}-${coreSha256.slice(0, 20)}`,
+    slug,
+    coreSha256,
+    testMode: mode === "synthetic-test"
   };
+}
+
+// Marker identity (NOT data-format compatibility): the marker proves this
+// directory belongs to this product/mode/path identity. Builder version and
+// Core hash in the marker are provenance metadata (`createdBy`,
+// `lastOpenedBy`), never reopen conditions.
+function validateProfileIdentity(marker, { mode, profileKey }) {
+  if (!marker || marker.product !== "GoalPort") throw new Error("This data directory belongs to a different product; choose a new directory");
+  const schema = marker.markerSchemaVersion ?? marker.schemaVersion;
+  if (schema !== 1 && schema !== 2) throw new Error("This data profile uses an unknown profile-record format; choose a new directory");
+  if (marker.mode !== mode) throw new Error("This data directory belongs to a different profile mode; choose a new directory");
+  if (marker.identityVersion !== 2 || marker.profileKey !== profileKey) throw new Error("This data profile uses an older or different path identity. Choose a new --data-dir; automatic migration is not supported");
 }
 
 function assertCoreIdentity(receipt, profile) {
@@ -135,6 +141,7 @@ function childEnvironment(env, profile) {
 }
 
 module.exports = {
-  launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath,
-  assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL
+  launchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
+  childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
+  CHANNEL_DIRECTORIES
 };

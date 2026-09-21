@@ -105,7 +105,13 @@ async function smoke() {
     await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 });
     await page.cdp("Input.insertText", { text });
   };
+  const openInspector = async () => {
+    const state = await read("Boolean(document.querySelector('.inspector[data-open='true']'))");
+    if (!state) await click("button[aria-label='Open details panel']");
+    await until("inspector open", () => read("Boolean(document.querySelector('.inspector[data-open='true']'))"));
+  };
   const choose = async (name) => {
+    await openInspector();
     const selector = ".runtime-row summary";
     const summary = await read(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.textContent.trim()`);
     const open = await read(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.parentElement.open`);
@@ -113,7 +119,7 @@ async function smoke() {
     await click(".runtime-row button", `Select ${name}`);
   };
   const create = async (workspace, goal, first = false) => {
-    if (!first) await click("button[aria-label='Add project']");
+    if (!first) await click("button[aria-label='New goal']");
     await until("campaign form", () => read("Boolean(document.querySelector('#campaign-goal'))"));
     await fill("#project-folder", workspace);
     await fill("#campaign-goal", goal);
@@ -217,7 +223,10 @@ async function smoke() {
     report.appInfo = info; report.coreIdentity = coreIdentity; report.startupReceipt = receipt.receipt; save();
   };
   const closeWindow = async () => {
-    await click("button[aria-label='Close window']");
+    // The app close entry lives in the title-bar application menu; the native
+    // overlay X is the other close path and requestClose shares the controlled flow.
+    await click("button[aria-label='Application menu']");
+    await click("div[role='menu'] button[aria-label='Close window']");
     await sleep(150);
     if (child.exitCode === null) {
       const text = await body().catch(() => "");
@@ -234,14 +243,14 @@ async function smoke() {
     assert.equal(empty.preview, false);
     assert.deepEqual(counts(), { projects: 0, campaigns: 0, tasks: 0, attempts: 0, commands: 0, outbox: 0 });
     assert.equal(empty.attempt.id, "attempt-unassigned");
-    const emptyComposer = await read("({disabled:document.querySelector('textarea[aria-label=\"Message composer\"]').disabled,placeholder:document.querySelector('textarea[aria-label=\"Message composer\"]').placeholder})");
-    assert.equal(emptyComposer.disabled, true, "no Campaign means there is no draft target");
-    assert.match(emptyComposer.placeholder, /Create or select a Campaign/);
+    const emptyState = await read("({composer: Boolean(document.querySelector('textarea[aria-label=\"Message composer\"]')), cta: Boolean(Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Start a goal')))})");
+    assert.equal(emptyState.composer, false, "no goal means no composer in the DOM at all");
+    assert.equal(emptyState.cta, true, "empty state owns the start-goal CTA");
     await screen("01-first-run");
     marker("empty ordinary product projection and no automatic input", { counts: counts() });
 
-    await click("button[aria-label='Add project']");
-    await until("first campaign form opened by user", () => read("Boolean(document.querySelector('#project-folder'))"));
+    await click("button[aria-label='New goal']");
+    await until("first goal form opened by user", () => read("Boolean(document.querySelector('#project-folder'))"));
     await fill("#project-folder", resolve(scratch, "does-not-exist"));
     await fill("#campaign-goal", "Keep this failed form");
     await click(".first-run-dialog button[type='submit']");
@@ -325,6 +334,7 @@ async function smoke() {
       marker("isolated Scenario produces a true failed Attempt", { terminal, events: events(terminal).map((event) => event.kind) });
       // Open both actual Runtime sections, then issue two real button click
       // events in one renderer task so neither response can update the view.
+      await openInspector();
       for (const name of ["Scenario Runtime", "Codex"]) {
         const summary = await read(`Array.from(document.querySelectorAll('.runtime-row summary')).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.textContent.trim()`);
         const open = await read(`Array.from(document.querySelectorAll('.runtime-row summary')).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.parentElement.open`);
@@ -413,8 +423,10 @@ async function smoke() {
     marker("close/reopen keeps current Core, task and history without resend", { corePid: oldCorePid, countsBefore: beforeClose, countsAfterManualSend: counts() });
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1000, height: 800, deviceScaleFactor: 1, mobile: false });
     await screen("09-narrow-window");
-    report.narrowLayout = { ...(await viewport()), coverage: "layout only; Runtime controls are unavailable at this existing breakpoint" };
-    await assert.rejects(() => read(`(${clickPointFor.toString()})(document.querySelector('.runtime-row summary'))`), /no visible area/);
+    report.narrowLayout = { ...(await viewport()), coverage: "at 1000 CSS px the inspector drawer stays reachable (fixed rc.1 gap)" };
+    await openInspector();
+    await until("runtime controls reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(document.querySelector('.runtime-row summary')))`));
+    await click("button[aria-label='Close details panel']");
     await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
     await until("desktop viewport restored", async () => (await viewport()).width === desktopViewport.width);
     assertNoNativeChildren();

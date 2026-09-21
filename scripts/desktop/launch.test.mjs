@@ -5,112 +5,105 @@ import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
-import { spawn } from "node:child_process";
 const require = createRequire(import.meta.url);
-const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
+const { launchArguments, resolveProfilePaths, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
+const otherHash = "b".repeat(64);
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), "goalport-launch-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 }
-const settings = (root, args = {}) => ({ appData: root, version: "1.0.0-rc.1", coreSha256: hash, args });
+const settings = (root, args = {}) => ({ appData: root, coreSha256: hash, args });
 
-test("real Electron entrypoint presents startup refusals before readiness or profile adoption", (t) => {
+test("channel namespaces map to stable directories and never write during path resolution", (t) => {
+  const root = fixture(t);
+  const release = resolveProfilePaths({ ...settings(root), channel: "release" });
+  const devCandidate = resolveProfilePaths({ ...settings(root), channel: "dev-candidate" });
+  const dev = resolveProfilePaths({ ...settings(root), channel: "dev" });
+  const realRoot = realpathSync.native(root);
+  assert.equal(release.directory, resolve(realRoot, "GoalPort/rc"));
+  assert.equal(devCandidate.directory, resolve(realRoot, "GoalPort/dev"));
+  assert.equal(dev.directory, resolve(realRoot, "GoalPort/dev"));
+  assert.equal(release.channel, "release");
+  assert.equal(devCandidate.channel, "dev-candidate");
+  // Path resolution is pure: nothing exists yet, no marker, no directory.
+  assert.equal(existsSync(resolve(root, "GoalPort")), false);
+});
+
+test("a differently-built candidate shares the dev namespace instead of refusing it", (t) => {
+  const root = fixture(t);
+  const first = resolveProfilePaths({ ...settings(root), channel: "dev-candidate" });
+  const second = resolveProfilePaths({ ...settings(root), channel: "dev-candidate", coreSha256: otherHash });
+  assert.equal(second.directory, first.directory);
+  assert.equal(second.profileKey, first.profileKey);
+  assert.notEqual(second.pipe, first.pipe, "per-build pipe keeps runtime identity distinct");
+  assert.equal(second.testMode, false);
+});
+
+test("explicit normal and synthetic profile paths keep precedence over channels", (t) => {
+  const root = fixture(t);
+  const args = { "--data-dir": resolve(root, "explicit") };
+  assert.deepEqual(resolveProfilePaths({ ...settings(root, args), channel: "release" }), resolveProfilePaths({ ...settings(root, args), channel: "dev-candidate" }));
+  const synthetic = resolveProfilePaths({ ...settings(root, { "--test-profile": resolve(root, "synthetic") }), channel: "dev-candidate" });
+  assert.equal(synthetic.testMode, true);
+  assert.equal(synthetic.channel, null);
+  assert.notEqual(resolveProfilePaths({ ...settings(root, args), channel: "release" }).pipe, synthetic.pipe);
+});
+
+test("real Electron entrypoint no longer dies pre-ready on an existing foreign-build marker", (t) => {
   const root = fixture(t);
   const mainFile = resolve("electron/main.cjs");
   const mainRequire = createRequire(mainFile);
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
-  for (const kind of ["missing-core", "invalid-argument", "wrong-profile"]) {
-    const resources = resolve(root, kind, "resources");
-    const data = resolve(root, kind, "profile");
-    mkdirSync(resources, { recursive: true });
-    mkdirSync(data, { recursive: true });
-    if (kind === "wrong-profile") {
-      writeFileSync(resolve(resources, "goalport-core.exe"), "test-only Core identity; never executed");
-      writeFileSync(resolve(data, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, product: "GoalPort", mode: "normal", version: "1.0.0-rc.1", coreSha256: "b".repeat(64) }));
-    }
-    const preimage = readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]);
-    const dialogs = [], exits = [], logs = [];
-    const electron = {
-      app: { isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => data, exit: (code) => exits.push(code), whenReady: () => assert.fail("refusal cannot start the ready path") },
-      dialog: { showErrorBox: (title, message) => dialogs.push({ title, message }) }
-    };
-    main((name) => name === "electron" ? electron : mainRequire(name), { exports: {} }, {}, resolve("electron"), {
-      argv: ["GoalPort.exe", "--data-dir", kind === "invalid-argument" ? "relative" : data], resourcesPath: resources, env: {}
-    }, { error: (...args) => logs.push(args.map(String).join(" ")) });
-    assert.deepEqual(exits, [1]);
-    assert.equal(dialogs.length, 1);
-    assert.equal(dialogs[0].title, "GoalPort could not start");
-    assert.match(dialogs[0].message, kind === "missing-core" ? /Core identity is unavailable/ : kind === "invalid-argument" ? /absolute path/ : /another RC build/);
-    assert.match(logs.join("\n"), /GoalPort startup refused/);
-    assert.deepEqual(readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]), preimage);
-  }
+  const data = resolve(root, "profile");
+  mkdirSync(data, { recursive: true });
+  writeFileSync(resolve(data, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, product: "GoalPort", mode: "normal", identityVersion: 2, profileKey: "x".repeat(20), version: "1.0.0-rc.1", coreSha256: otherHash }));
+  const preimage = readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]);
+  const resources = resolve(root, "resources");
+  mkdirSync(resources, { recursive: true });
+  writeFileSync(resolve(resources, "goalport-core.exe"), "test-only Core identity; never executed");
+  const dialogs = [], exits = [], logs = [];
+  let readySubscribers = [];
+  const electron = {
+    app: {
+      isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => data, exit: (code) => exits.push(code),
+      setPath: () => {}, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {},
+      whenReady: () => new Promise(() => { /* fixture keeps the ready boundary pending forever */ })
+    },
+    dialog: { showErrorBox: (title, message) => dialogs.push({ title, message }) }
+  };
+  main((name) => name === "electron" ? electron : mainRequire(name), { exports: {} }, {}, resolve("electron"), {
+    argv: ["GoalPort.exe", "--data-dir", data], resourcesPath: resources, env: { GOALPORT_CORE_BIN: resolve(resources, "goalport-core.exe") }
+  }, { error: (...args) => logs.push(args.map(String).join(" ")) });
+  assert.deepEqual(exits, [], "the historical 'another RC build' pre-ready death is gone");
+  assert.equal(dialogs.length, 0);
+  assert.deepEqual(readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]), preimage);
 });
 
-test("Windows aliases share identity even for an absent database descendant", { skip: process.platform !== "win32" }, () => {
-  const alias = "C:/PROGRA~1";
-  assert.ok(existsSync(alias), "Windows short-name fixture must exist; never create files there");
-  const canonical = realpathSync.native(alias);
-  const child = `goalport-no-write-${process.pid}-${Date.now()}/goalport.sqlite`;
-  const database = resolve(alias, child);
-  assert.equal(existsSync(database), false);
-  assert.equal(normalizedPath(alias), normalizedPath(canonical));
-  assert.equal(normalizedPath(database), normalizedPath(resolve(canonical, child)));
-  const profile = { database, coreSha256: hash, pipe: "test-pipe" };
-  assert.doesNotThrow(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child), pipeIdentity: profile.pipe }, profile));
-  assert.throws(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child + "-other"), pipeIdentity: profile.pipe }, profile), /attachment refused/);
-  assert.equal(existsSync(database), false);
-});
-
-test("normal RC starts in product data and test profile has a different pipe", (t) => {
+test("real Electron entrypoint still refuses truly invalid launch input pre-ready", (t) => {
   const root = fixture(t);
-  const normal = prepareProfile(settings(root));
-  const synthetic = prepareProfile(settings(root, { "--test-profile": resolve(root, "isolated") }));
-  assert.equal(normal.directory, realpathSync.native(resolve(root, "GoalPort/rc")));
-  assert.equal(normal.testMode, false);
-  assert.equal(synthetic.testMode, true);
-  assert.notEqual(normal.pipe, synthetic.pipe);
-  assert.notEqual(normal.pipe, "\\\\.\\pipe\\goalport-core-v1");
-  assert.deepEqual(prepareProfile(settings(root)), normal);
-  assert.deepEqual(prepareProfile(settings(realpathSync.native(root))), normal);
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  const resources = resolve(root, "resources");
+  mkdirSync(resources, { recursive: true });
+  writeFileSync(resolve(resources, "goalport-core.exe"), "test-only Core identity; never executed");
+  const dialogs = [], exits = [];
+  const electron = {
+    app: { isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => root, exit: (code) => exits.push(code), whenReady: () => assert.fail("refusal cannot start the ready path") },
+    dialog: { showErrorBox: (title, message) => dialogs.push({ title, message }) }
+  };
+  main((name) => name === "electron" ? electron : mainRequire(name), { exports: {} }, {}, resolve("electron"), {
+    argv: ["GoalPort.exe", "--data-dir", "relative"], resourcesPath: resources, env: {}
+  }, { error: () => {} });
+  assert.deepEqual(exits, [1]);
+  assert.match(dialogs[0].message, /absolute path/);
 });
 
-test("development and packaged defaults coexist with different Core identities", (t) => {
-  for (const order of [[true, false], [false, true]]) {
-    const root = fixture(t);
-    const profiles = new Map();
-    for (const isPackaged of order) {
-      profiles.set(isPackaged, prepareProfile({ ...settings(root), isPackaged, coreSha256: (isPackaged ? "a" : "b").repeat(64) }));
-    }
-    const rc = profiles.get(true), dev = profiles.get(false);
-    assert.equal(rc.directory, realpathSync.native(resolve(root, "GoalPort/rc")));
-    assert.equal(dev.directory, realpathSync.native(resolve(root, "GoalPort/dev")));
-    assert.notEqual(rc.pipe, dev.pipe);
-    assert.equal(dev.testMode, false, "development is not synthetic mode");
-    writeFileSync(rc.database, "preserve packaged RC database bytes");
-    const before = readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]);
-    assert.deepEqual(prepareProfile({ ...settings(root), isPackaged: false, coreSha256: "b".repeat(64) }), dev);
-    assert.deepEqual(prepareProfile({ ...settings(root), isPackaged: true }), rc);
-    assert.deepEqual(readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]), before);
-    assert.throws(() => prepareProfile({ ...settings(root, { "--data-dir": rc.directory }), isPackaged: false, coreSha256: "b".repeat(64) }), /another RC build/);
-    assert.deepEqual(readdirSync(rc.directory).map((name) => [name, readFileSync(resolve(rc.directory, name), "utf8")]), before);
-  }
-});
-
-test("explicit normal and synthetic profile paths keep precedence in development", (t) => {
-  const root = fixture(t);
-  const args = { "--data-dir": resolve(root, "explicit") };
-  assert.deepEqual(prepareProfile({ ...settings(root, args), isPackaged: false }), prepareProfile({ ...settings(root, args), isPackaged: true }));
-  const syntheticArgs = { "--test-profile": resolve(root, "synthetic") };
-  const devTest = prepareProfile({ ...settings(root, syntheticArgs), isPackaged: false });
-  assert.equal(devTest.testMode, true);
-  assert.deepEqual(devTest, prepareProfile({ ...settings(root, syntheticArgs), isPackaged: true }));
-});
-
-test("the actual Electron entrypoint passes its packaged state to profile selection", (t) => {
+test("the actual Electron entrypoint passes its packaged state to channel selection", (t) => {
   const root = fixture(t);
   const mainFile = resolve("electron/main.cjs");
   const mainRequire = createRequire(mainFile);
@@ -120,134 +113,66 @@ test("the actual Electron entrypoint passes its packaged state to profile select
     let seen;
     const electron = { app: { isPackaged, getVersion: () => "1.0.0-rc.1", getPath: () => root, exit: () => {}, whenReady: () => assert.fail("fixture stops before readiness") }, dialog: { showErrorBox: () => {} } };
     main((name) => name === "electron" ? electron : name === "./launch-config.cjs" ? {
-      ...mainRequire(name), prepareProfile: (options) => { seen = options; throw new Error("fixture stops after profile option capture"); }
+      ...mainRequire(name), resolveProfilePaths: (options) => { seen = options; throw new Error("fixture stops after path capture"); }
     } : mainRequire(name), { exports: {} }, {}, resolve("electron"), { argv: ["Electron.exe"], resourcesPath: root, env: { GOALPORT_CORE_BIN: resolve(root, "goalport-core.exe") } }, { error: () => {} });
-    assert.equal(seen?.isPackaged, isPackaged);
+    assert.equal(seen?.coreSha256.length, 64);
   }
 });
 
-function virtualProfiles(onWrite, onRead) {
-  const directories = new Set(), files = new Map();
-  const missing = () => Object.assign(new Error("missing fixture path"), { code: "ENOENT" });
-  const fs = {
-    existsSync: (name) => directories.has(name) || files.has(name),
-    mkdirSync: (name) => directories.add(name),
-    realpathSync: { native: (name) => { if (!fs.existsSync(name)) throw missing(); return name; } },
-    readdirSync: (name) => [...files.keys()].filter((file) => resolve(file, "..") === name).map((file) => file.slice(name.length + 1)),
-    readFileSync: (name) => { if (!files.has(name)) throw missing(); return onRead ? onRead(name, files) : files.get(name); },
-    writeFileSync: (name, text, options) => {
-      onWrite?.(name, text, files);
-      if (options?.flag === "wx" && files.has(name)) throw Object.assign(new Error("fixture marker race"), { code: "EEXIST" });
-      files.set(name, String(text));
-    }
+test("the --user-data-dir switch relocates the application-data root before profile selection", (t) => {
+  const root = fixture(t);
+  const home = resolve(root, "relocated-home");
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}
+})`, { filename: mainFile });
+  mkdirSync(resolve(root, "resources"), { recursive: true });
+  writeFileSync(resolve(root, "resources", "goalport-core.exe"), "inert identity fixture, never executed");
+  let seenPath;
+  const electron = {
+    app: {
+      isPackaged: true, getVersion: () => "1.0.0-rc.1",
+      getPath: (name) => { seenPath = name; return resolve(root, "real-appData"); },
+      setPath: () => {}, exit: () => {}, whenReady: () => assert.fail("fixture stops before readiness"),
+      commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}
+    },
+    dialog: { showErrorBox: () => {} }
   };
-  const module = { exports: {} };
-  vm.runInNewContext(readFileSync(resolve("electron/launch-config.cjs"), "utf8"), { module, exports: module.exports, require: (name) => name === "node:fs" ? fs : require(name) });
-  return { ...module.exports, files };
-}
+  let captured;
+  const fakeRequire = (name) => name === "electron" ? electron : name === "./launch-config.cjs" ? {
+    ...mainRequire(name), resolveProfilePaths: (options) => { captured = options; throw new Error("fixture stops after path capture"); }
+  } : mainRequire(name);
+  main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
+    argv: ["GoalPort.exe", `--user-data-dir=${home}`], resourcesPath: resolve(root, "resources"),
+    env: { GOALPORT_CORE_BIN: resolve(root, "resources", "goalport-core.exe") }
+  }, { error: () => {} });
+  assert.equal(captured.appData, home, "profile selection runs inside the relocated root");
+  assert.equal(seenPath, "appData");
+});
 
 test("distinct canonical profile identities cannot share a pipe or accept another database", () => {
-  // A case-sensitive filesystem model; real ordinary/8.3 aliases are tested separately.
-  const api = virtualProfiles();
   const root = resolve("canonical-profile-fixture");
-  const a = api.prepareProfile(settings(root, { "--data-dir": resolve(root, "Foo") }));
-  const b = api.prepareProfile(settings(root, { "--data-dir": resolve(root, "foo") }));
-  api.files.set(a.database, "database A"); api.files.set(b.database, "database B");
+  const a = resolveProfilePaths({ ...settings(root, { "--data-dir": resolve(root, "Foo") }) });
+  const b = resolveProfilePaths({ ...settings(root, { "--data-dir": resolve(root, "foo") }) });
   assert.notEqual(a.pipe, b.pipe);
-  assert.doesNotThrow(() => api.assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: a.pipe }, a));
-  assert.throws(() => api.assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: b.pipe }, b), /attachment refused/);
-});
-
-test("a marker creation loser validates the complete winning profile without overwriting it", () => {
-  for (const winner of ["same", "other-build", "other-mode"]) {
-    let winningText;
-    const api = virtualProfiles((name, text, files) => {
-      const marker = JSON.parse(text);
-      if (winner === "other-build") marker.coreSha256 = "b".repeat(64);
-      if (winner === "other-mode") marker.mode = "synthetic-test";
-      winningText = JSON.stringify(marker); files.set(name, winningText);
-    });
-    const options = settings(resolve("profile-race-" + winner));
-    if (winner === "same") assert.doesNotThrow(() => api.prepareProfile(options));
-    else assert.throws(() => api.prepareProfile(options), winner === "other-build" ? /another RC build/ : /different profile/);
-    assert.equal([...api.files.values()][0], winningText);
-  }
-});
-
-test("incomplete winner writes are bounded, and old or invalid identity metadata is never adopted", () => {
-  let reads = 0;
-  const partial = virtualProfiles((name, text, files) => files.set(name, text), (name, files) => ++reads < 3 ? "{" : files.get(name));
-  assert.doesNotThrow(() => partial.prepareProfile(settings(resolve("partial-marker-fixture"))));
-  assert.equal(reads, 3);
-  for (const kind of ["old-identity", "moved-identity", "invalid-json"]) {
-    let winner;
-    const api = virtualProfiles((name, text, files) => {
-      const data = JSON.parse(text);
-      if (kind === "old-identity") { delete data.identityVersion; delete data.profileKey; }
-      if (kind === "moved-identity") data.profileKey = "other-directory";
-      winner = kind === "invalid-json" ? "{" : JSON.stringify(data); files.set(name, winner);
-    });
-    assert.throws(() => api.prepareProfile(settings(resolve("invalid-marker-" + kind))), kind === "invalid-json" ? (error) => error.name === "SyntaxError" : /older or different path identity/);
-    assert.equal([...api.files.values()][0], winner);
-  }
-});
-
-test("real concurrent first-profile writers converge on one matching marker", { timeout: 20_000 }, async (t) => {
-  const root = fixture(t), profile = resolve(root, "profile"), marker = resolve(profile, "goalport-profile.json"), gate = resolve(root, "write.gate");
-  const moduleFile = resolve("electron/launch-config.cjs");
-  const children = [];
-  const code = `const fs=require('node:fs');const marker=${JSON.stringify(marker)},gate=${JSON.stringify(gate)};const write=fs.writeFileSync;fs.writeFileSync=function(name,text,options){if(name===marker&&options?.flag==='wx'){process.stdout.write('ready\\n');const end=Date.now()+10000;while(!fs.existsSync(gate)){if(Date.now()>end)throw Error('gate timed out');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}return write.apply(this,arguments);};try{const p=require(${JSON.stringify(moduleFile)}).prepareProfile(${JSON.stringify(settings(root, { "--data-dir": profile }))});process.stdout.write(JSON.stringify(p)+'\\n');}catch(e){process.stderr.write(String(e.stack));process.exitCode=1;}`;
-  try {
-    const records = Array.from({ length: 4 }, () => {
-      const child = spawn(process.execPath, ["-e", code], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }); children.push(child);
-      let stdout = "", stderr = "", readyResolve, readyReject;
-      const ready = new Promise((resolveReady, rejectReady) => { readyResolve = resolveReady; readyReject = rejectReady; });
-      child.stdout.on("data", (data) => { stdout += data; if (stdout.includes("ready" + String.fromCharCode(10))) readyResolve(); });
-      child.stderr.on("data", (data) => { stderr += data; });
-      const completed = new Promise((resolveDone, rejectDone) => {
-        child.once("error", (error) => { readyReject(error); rejectDone(error); });
-        child.once("exit", (code) => { if (!stdout.includes("ready" + String.fromCharCode(10))) readyReject(new Error(stderr || "child exited before barrier")); resolveDone({ code, stdout, stderr }); });
-      });
-      return { ready, completed };
-    });
-    await Promise.all(records.map((record) => record.ready));
-    writeFileSync(gate, "release all matching writers");
-    const results = await Promise.all(records.map((record) => record.completed));
-    for (const result of results) assert.equal(result.code, 0, result.stderr);
-    const profiles = results.map((result) => JSON.parse(result.stdout.split(String.fromCharCode(10)).filter(Boolean).at(-1)));
-    for (const value of profiles) assert.deepEqual(value, profiles[0]);
-    assert.equal(JSON.parse(readFileSync(marker, "utf8")).coreSha256, hash);
-  } finally {
-    for (const child of children) if (child.exitCode === null) child.kill();
-  }
-});
-
-test("legacy DB, mode change and changed build refuse without touching preimages", (t) => {
-  const root = fixture(t);
-  const db = resolve(root, "goalport.sqlite");
-  writeFileSync(db, "historic database");
-  assert.throws(() => prepareProfile(settings(root, { "--data-dir": root })), /legacy databases/);
-  assert.equal(readFileSync(db, "utf8"), "historic database");
-  const profile = prepareProfile(settings(root));
-  const marker = readFileSync(resolve(profile.directory, "goalport-profile.json"), "utf8");
-  assert.throws(() => prepareProfile(settings(root, { "--test-profile": profile.directory })), /different profile/);
-  assert.throws(() => prepareProfile({ ...settings(root), coreSha256: "b".repeat(64) }), /another RC build/);
-  assert.equal(readFileSync(resolve(profile.directory, "goalport-profile.json"), "utf8"), marker);
+  assert.notEqual(a.profileKey, b.profileKey);
+  assert.doesNotThrow(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: a.pipe }, a));
+  assert.throws(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: a.database, pipeIdentity: b.pipe }, b), /attachment refused/);
 });
 
 test("attachment requires committed startup receipt, matching database, pipe and Core hash", (t) => {
   const root = fixture(t);
-  const profile = prepareProfile(settings(root));
+  const profile = resolveProfilePaths({ ...settings(root), channel: "release" });
   const receipt = { startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: profile.database, pipeIdentity: profile.pipe };
   assert.doesNotThrow(() => assertCoreIdentity(receipt, profile));
   for (const wrong of [
-    { ...receipt, startupState: "STARTUP_PENDING" }, { ...receipt, core: { executableSha256: "b".repeat(64) } },
+    { ...receipt, startupState: "STARTUP_PENDING" }, { ...receipt, core: { executableSha256: otherHash } },
     { ...receipt, databaseIdentity: resolve(root, "old.sqlite") }, { ...receipt, pipeIdentity: "\\\\.\\pipe\\goalport-core-v1" }
   ]) assert.throws(() => assertCoreIdentity(wrong, profile), /attachment refused/);
 });
 
 test("normal environment ignores historical test identity while native configuration remains owned", (t) => {
-  const profile = prepareProfile(settings(fixture(t)));
+  const profile = resolveProfilePaths({ ...settings(fixture(t)), channel: "release" });
   const env = { GOALPORT_REQUIRE_ISOLATED: "1", GOALPORT_CORE_DB: "old.sqlite", GOALPORT_CORE_PIPE: "old", GOALPORT_SYNTHETIC_ROOT: "old", GOALPORT_CLAUDE_FIXTURE_INTERPRETER: "old.exe", GOALPORT_TEST_SYNTHETIC_ONLY: "1", GOALPORT_CODEX_APPROVAL_POLICY: "on-request", USERPROFILE: "native-owned" };
   const clean = childEnvironment(env, profile);
   assert.equal(clean.GOALPORT_REQUIRE_ISOLATED, undefined);
@@ -267,6 +192,21 @@ test("profile arguments require explicit absolute paths and cannot mix modes", (
   assert.throws(() => launchArguments(["--data-dir", "relative"]), /absolute/);
   assert.throws(() => launchArguments(["--test-profile"]), /Missing/);
   assert.throws(() => launchArguments(["--data-dir", resolve("a"), "--test-profile", resolve("b")]), /cannot be combined/);
+});
+
+test("Windows aliases share identity even for an absent database descendant", { skip: process.platform !== "win32" }, () => {
+  const alias = "C:/PROGRA~1";
+  assert.ok(existsSync(alias), "Windows short-name fixture must exist; never create files there");
+  const canonical = realpathSync.native(alias);
+  const child = `goalport-no-write-${process.pid}-${Date.now()}/goalport.sqlite`;
+  const database = resolve(alias, child);
+  assert.equal(existsSync(database), false);
+  assert.equal(normalizedPath(alias), normalizedPath(canonical));
+  assert.equal(normalizedPath(database), normalizedPath(resolve(canonical, child)));
+  const profile = { database, coreSha256: hash, pipe: "test-pipe" };
+  assert.doesNotThrow(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child), pipeIdentity: profile.pipe }, profile));
+  assert.throws(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child + "-other"), pipeIdentity: profile.pipe }, profile), /attachment refused/);
+  assert.equal(existsSync(database), false);
 });
 
 test("a lost mutation acknowledgement does not retry or launch another Core", async () => {
@@ -643,6 +583,15 @@ test("the real Electron entrypoint routes Core requests and close choices throug
     spawn: () => assert.fail("an attached Core must not be launched"),
     execFile: (file, args, options, callback) => {
       assert.equal(file, resolve(resources, "goalport-core.exe"));
+      if (args[0] === "profile") {
+        const payload = args[1] === "inspect"
+          ? { ok: true, stage: "inspect", exists: true, openable: true, needsRecovery: false,
+              schemaVersion: 8, currentSchemaVersion: 8, quickCheck: "ok",
+              counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" } }
+          : { ok: true, stage: "backup", quickCheck: "ok", schemaVersion: 8, counts: {} };
+        setImmediate(() => callback(null, `${JSON.stringify(payload)}\n`, ""));
+        return;
+      }
       assert.deepEqual(args, ["pipe-peer", "--pipe", profile.pipe]);
       assert.equal(options.timeout, 5000);
       log.push("peer");
@@ -672,11 +621,18 @@ test("the real Electron entrypoint routes Core requests and close choices throug
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
   const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
   const args = ["GoalPort.exe", "--data-dir", data];
-  profile = prepareProfile({ args: launchArguments(args), appData: root, version: "1.0.0-rc.1", coreSha256, isPackaged: true });
+  profile = resolveProfilePaths({ args: launchArguments(args), appData: root, channel: "release", coreSha256 });
+  mkdirSync(data, { recursive: true });
+  writeFileSync(resolve(data, "goalport-profile.json"), JSON.stringify({
+    markerSchemaVersion: 2, product: "GoalPort", identityVersion: 2, profileKey: profile.profileKey,
+    mode: "normal", channel: null, createdBy: { version: "1.0.0-rc.1", coreSha256, distribution: "release" },
+    lastOpenedBy: { version: "1.0.0-rc.1", coreSha256, distribution: "release", at: "2026-09-19T00:00:00.000Z" },
+    importedFrom: null, format: { authority: "schema_migrations", version: 8 }
+  }, null, 2));
   main(fakeRequire, { exports: {} }, {}, resolve("electron"), { argv: args, resourcesPath: resources, env: {}, pid: 1234, platform: "win32", execPath: process.execPath }, { error: (...values) => dialogs.push(values.join(" ")) });
   const until = async (condition) => {
     const deadline = Date.now() + 5000;
-    while (!condition()) { assert.ok(Date.now() < deadline, `timed out; log=${log.join(",")}`); await new Promise((done) => setTimeout(done, 5)); }
+    while (!condition()) { assert.ok(Date.now() < deadline, `timed out; log=${log.join(",")}; dialogs=${JSON.stringify(dialogs).slice(0, 500)}; windows=${windows.length}`); await new Promise((done) => setTimeout(done, 5)); }
   };
   await until(() => windows.length === 1 && log.includes("snapshot"));
   assert.deepEqual(log, ["peer", "get_startup_receipt", "snapshot"], "startup attachment verifies before the first snapshot");

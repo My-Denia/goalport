@@ -2025,31 +2025,29 @@ fn r12_distinct_request_ids_sharing_a_command_identity_are_refused_not_replayed(
 }
 
 // ---------------------------------------------------------------------------------------------
-// R13 (delta audit on v11, blocking 1): a refused RETRY must not erase the first attempt's
-// uncertainty. Codex exec transport: the first invocation prints one non-JSON line and exits 0
-// (send_prompt fails on the parse -> not closed-transport, not "delivery unknown" -> the generic
-// retry runs, delivery already UNKNOWN); the second invocation exits 1 (accepted:false; its
-// TurnFailed envelope is then refused by the product as in R11). The recorded delivery must stay
-// UNKNOWN - the first process DID receive the input (two invocation lines) - and the replay must
-// say so.
+// R13 (plan R2: the generic retry after an unconfirmed delivery is REMOVED): a malformed
+// native answer is never silently re-sent. Codex exec transport: the single invocation prints
+// one non-JSON line and exits 0 (send_prompt fails on the parse). The product records that
+// failure once - a `runtime.send.failed` event with `retry:false`, the command row FAILED with
+// deliveryState UNKNOWN - and an identical replay answers the recorded reason without running
+// the process again or appending another event. One native call per send error; the unconfirmed
+// delivery stays fail-closed UNKNOWN.
 // ---------------------------------------------------------------------------------------------
 #[test]
-fn r13_refused_retry_keeps_the_first_attempts_unknown_delivery() {
+fn r13_malformed_native_answer_sends_once_and_stays_unknown() {
     let _lock = lock();
     assert_env_pinned();
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r13", "linger");
     // As in R11: no Core epoch is seeded on purpose - the exec transport has no process binding,
-    // so the canonical-binding refusal happens with or without one.
+    // so no native envelope would persist anyway; the parse failure below never produces one.
     let invocations = case.workspace.join(".exec-invocations.txt");
-    let first_done = case.workspace.join(".exec-first-done");
-    let script = case.workspace.join("codex-exec-flaky.cmd");
+    let script = case.workspace.join("codex-exec-nonjson.cmd");
     fs::write(
         &script,
         format!(
-            "@echo off\r\necho invoked %*>>\"{inv}\"\r\nif exist \"{done}\" exit /b 1\r\necho.>\"{done}\"\r\necho this line is not json\r\nexit /b 0\r\n",
-            inv = invocations.display(),
-            done = first_done.display()
+            "@echo off\r\necho invoked %*>>\"{inv}\"\r\necho this line is not json\r\nexit /b 0\r\n",
+            inv = invocations.display()
         ),
     )
     .unwrap();
@@ -2060,30 +2058,36 @@ fn r13_refused_retry_keeps_the_first_attempts_unknown_delivery() {
 
     let first = send(&server, "r13-send", &case, &attempt, "maybe delivered");
     let first_error = error_of(&first);
-    assert!(first_error.contains("no canonical Runtime binding"), "{first_error}");
+    assert!(first_error.contains("json error"), "the send fails on the malformed native answer: {first_error}");
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
-    assert_eq!(lines.lines().count(), 2, "first attempt + retry both ran a process: {lines:?}");
-    // The marker line carries the process's arguments: the prompt text reached BOTH processes.
-    assert!(lines.lines().all(|line| line.contains("maybe delivered")), "the input reached the processes: {lines:?}");
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "the failed send ran the executable exactly once - no automatic retry: {lines:?}"
+    );
+    // The marker line carries the process's arguments: the prompt text reached the one process.
+    assert!(lines.lines().all(|line| line.contains("maybe delivered")), "the input reached the process: {lines:?}");
     let row = server.processor().store().get_attempt(&attempt).unwrap();
-    assert!(!row.state.is_terminal(), "the refused envelope leaves the attempt live: {:?}", row.state);
+    assert!(!row.state.is_terminal(), "the parse failure fakes no terminal native state: {:?}", row.state);
     drain(&server, "r13");
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 1);
-    let intermediate: Vec<&Value> = records_of(&baseline, "runtime.send.failed");
-    assert!(intermediate.iter().any(|r| r["retry"] == true), "the generic retry record was written: {baseline:?}");
+    let failures: Vec<&Value> = records_of(&baseline, "runtime.send.failed");
+    assert_eq!(failures.len(), 1, "the failure is recorded exactly once: {baseline:?}");
+    assert_eq!(failures[0]["retry"], false, "no automatic retry is advertised: {baseline:?}");
+    assert_eq!(failures[0]["deliveryState"], "UNKNOWN", "the unconfirmed delivery is fail-closed UNKNOWN: {baseline:?}");
     let row_id = send_message_command("r13-send", &attempt, "maybe delivered").unwrap().command.id;
     let recorded = server.processor().store().command_result(&row_id).unwrap().expect("the failure row carries its result");
-    assert_eq!(recorded["deliveryState"], "UNKNOWN", "the first attempt's uncertainty survives the refused retry: {recorded}");
+    assert_eq!(recorded["deliveryState"], "UNKNOWN", "the failed command keeps its UNKNOWN delivery: {recorded}");
 
     let again = send(&server, "r13-send", &case, &attempt, "maybe delivered");
-    assert_replay_refusal(&again, "r13-send", "FAILED", "UNKNOWN", "no canonical Runtime binding");
+    assert_replay_refusal(&again, "r13-send", "FAILED", "UNKNOWN", &first_error);
     assert!(error_of(&again).contains(&first_error), "the replay carries the recorded reason verbatim");
     drain(&server, "r13-after");
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
-    assert_eq!(lines.lines().count(), 2, "the replay ran no process: {lines:?}");
+    assert_eq!(lines.lines().count(), 1, "the replay ran no process (count stays 1): {lines:?}");
     assert_eq!(events(&server, &attempt), baseline);
-    i7_marker("r13", "completed (codex exec transport, flaky cmd.exe script)");
+    i7_marker("r13", "completed (codex exec transport, one invocation, no retry)");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { type CoreCommand } from "./ipc";
-import { DEMO_SNAPSHOT } from "./types";
+import { DEMO_SNAPSHOT, type CoreSnapshot } from "./types";
 
 afterEach(() => {
   cleanup();
@@ -18,30 +18,72 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function mountElectron(snapshot: unknown, command?: (request: CoreCommand) => Promise<unknown>) {
+  window.__GOALPORT_ELECTRON__ = true;
+  window.goalportCore = {
+    snapshot: async () => snapshot,
+    command: command ?? (async () => snapshot),
+    startCore: async () => snapshot,
+    openInVsCode: async () => undefined
+  } as never;
+  return render(<App />);
+}
+
+function accept(request: CoreCommand, snapshot: unknown) {
+  return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot });
+}
+
+/** Open the composer Runtime chooser (aria-label "Select Runtime"), waiting for boot. */
+async function openRuntimePicker() {
+  fireEvent.click(await screen.findByRole("button", { name: /select runtime/i }));
+}
+
+/** The app close entry lives in the title-bar application menu (the native X
+ *  is the other close path); open the menu, then click the entry. */
+function clickCloseWindow() {
+  fireEvent.click(screen.getByRole("button", { name: "Application menu" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Close window" }));
+}
+
+/** The Send path for an existing conversation now dispatches conversation_send. */
+const SEND_TYPE = "conversation_send";
+
 describe("GoalPort preview", () => {
-  it("renders the three-column conversation workspace with campaign continuity", () => {
+  it("renders the three-column conversation workspace with campaign continuity", async () => {
     render(<App />);
 
     expect(screen.getByRole("banner").textContent).toContain("GoalPort");
-    expect(screen.getByRole("complementary", { name: /projects and campaigns/i })).toBeTruthy();
-    expect(screen.getByRole("main", { name: /campaign conversation/i })).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: /runtime context/i })).toBeTruthy();
-    expect(screen.getByText("Campaign → Task → Attempt")).toBeTruthy();
-    expect(screen.getAllByText("Preview").length).toBeGreaterThan(0);
-    expect(screen.getByText("Claude Code")).toBeTruthy();
-    expect(screen.getAllByText("Codex").length).toBeGreaterThan(0);
+    expect(screen.getByRole("navigation", { name: /workspace and goals/i })).toBeTruthy();
+    expect(screen.getByRole("main", { name: /goal conversation/i })).toBeTruthy();
+    // Session details is an overlay opened on demand.
+    fireEvent.click(screen.getByRole("button", { name: /open details panel/i }));
+    expect(screen.getByRole("complementary", { name: /session details/i })).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: /close details panel/i })[0]);
+    // The conversation is the product conversation: user message + grouped
+    // activity + runtime reply. No raw lifecycle events.
+    expect(screen.getByText("Summarize the workspace and list the open risks.")).toBeTruthy();
+    expect(screen.getByText(/activity updates/i)).toBeTruthy();
+    expect(screen.queryByText(/Attempt updated/i)).toBeNull();
+    expect(screen.queryByText(/Plan accepted/i)).toBeNull();
+    // Runtime catalog lives behind the composer chooser, not on the surface.
+    await openRuntimePicker();
+    expect(screen.getAllByText("Limited").length).toBeGreaterThan(0);
+    expect(screen.getByRole("option", { name: /claude code/i })).toBeTruthy();
+    // Developer diagnostics is menu-only.
+    expect(document.querySelector(".diagnostics-drawer")).toBeNull();
   });
 
-  it("sends a composer message into the structured timeline", () => {
+  it("sends a composer message into the product conversation", async () => {
     render(<App />);
 
-    const composer = screen.getByRole("textbox", { name: /message composer/i });
+    const composer = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Continue the evidence check" } });
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
+    // Honest preview note, never a fake native reply.
+    expect(await screen.findByText(/Browser preview: recorded locally/i)).toBeTruthy();
     expect(screen.getByText("Continue the evidence check")).toBeTruthy();
-    expect(screen.getByText("Message queued for the active Attempt")).toBeTruthy();
-    expect((composer as HTMLTextAreaElement).value).toBe("");
+    expect(composer.value).toBe("");
   });
 
   it("does not display native-cancel copy on a stop card", () => {
@@ -57,7 +99,7 @@ describe("GoalPort preview", () => {
     expect(within(inbox).getByText(/Workspace write permission/i)).toBeTruthy();
     fireEvent.click(within(inbox).getByRole("button", { name: /decline permission/i }));
 
-    expect(screen.getByText("Permission denied")).toBeTruthy();
+    expect(screen.getAllByText(/Permission denied/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/No write action was sent/i).length).toBeGreaterThan(0);
   });
 
@@ -67,25 +109,29 @@ describe("GoalPort preview", () => {
     const inbox = screen.getByRole("region", { name: /decision inbox/i });
     fireEvent.click(within(inbox).getByRole("button", { name: /allow once/i }));
 
-    expect(screen.getByText("Permission allowed once")).toBeTruthy();
-    expect(screen.queryByText("Permission denied")).toBeNull();
+    expect(screen.getAllByText(/Permission allowed once/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Permission denied/i)).toBeNull();
   });
 
-  it("shows the reconnect boundary and keeps the no-resend promise explicit", () => {
+  it("shows the reconnect boundary and keeps the no-resend promise explicit", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: /simulate offline/i }));
+    // Fault injection lives in Developer diagnostics (this preview reports a
+    // development distribution, so the controls are available there).
+    fireEvent.click(screen.getByRole("button", { name: /application menu/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /developer diagnostics/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /simulate offline/i }));
     expect(screen.getAllByText("Core disconnected").length).toBeGreaterThan(0);
     expect(screen.getByText(/No prompt will be replayed/i)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /reconnect core/i }));
-    expect(screen.getAllByText("Core connected").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole("button", { name: /reconnect core/i })[0]);
+    await waitFor(() => expect(screen.getAllByText("Core connected").length).toBeGreaterThan(0));
   });
 
   it("opens Continue in background close-choice from Close window", () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    clickCloseWindow();
     const dialog = screen.getByRole("dialog", { name: "Continue running in the background?" });
     expect(dialog).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "Continue in background" })).toBeTruthy();
@@ -95,7 +141,7 @@ describe("GoalPort preview", () => {
   it("Continue in background dismisses the renderer close-choice dialog", () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    clickCloseWindow();
     fireEvent.click(screen.getByRole("button", { name: "Continue in background" }));
     expect(screen.queryByRole("dialog", { name: "Continue running in the background?" })).toBeNull();
   });
@@ -115,7 +161,7 @@ describe("GoalPort preview", () => {
       confirmCloseChoice
     };
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    clickCloseWindow();
     fireEvent.click(screen.getByRole("button", { name: "Continue in background" }));
     expect(await screen.findByRole("dialog", { name: "Continue running in the background?" })).toBeTruthy();
     await waitFor(() => {
@@ -128,7 +174,7 @@ describe("GoalPort preview", () => {
   it("Stop background work and quit dismisses the renderer close-choice dialog", () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    clickCloseWindow();
     fireEvent.click(screen.getByRole("button", { name: "Stop background work and quit" }));
     expect(screen.queryByRole("dialog", { name: "Continue running in the background?" })).toBeNull();
   });
@@ -148,29 +194,27 @@ describe("GoalPort preview", () => {
       confirmCloseChoice
     };
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    clickCloseWindow();
     fireEvent.click(screen.getByRole("button", { name: "Stop background work and quit" }));
     expect(await screen.findByRole("dialog", { name: "Continue running in the background?" })).toBeTruthy();
     expect(await screen.findByText(/Stop was not durably acknowledged by Core/i)).toBeTruthy();
     expect(confirmCloseChoice).toHaveBeenCalledOnce();
   });
 
-  it("opens a first-run campaign form and creates a local preview campaign", () => {
+  it("starts a goal from a local draft with one first send (no dialog)", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getAllByRole("button", { name: /new campaign/i })[0]);
-    expect(screen.getByRole("dialog", { name: /start your first campaign/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+    // A local draft composer opens inline — no modal, no title question.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("textbox", { name: /project folder/i })).toBeTruthy();
+    const composer = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    // Typing is possible before a Runtime is chosen.
+    fireEvent.change(composer, { target: { value: "Ship a safe preview" } });
 
-    fireEvent.change(screen.getByRole("textbox", { name: /project folder/i }), {
-      target: { value: "C:\\workspace\\demo" }
-    });
-    fireEvent.change(screen.getByRole("textbox", { name: /campaign goal/i }), {
-      target: { value: "Ship a safe preview" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: /begin preview/i }));
-
-    expect(screen.getAllByText("Ship a safe preview").length).toBeGreaterThan(0);
-    expect(screen.getByText("C:\\workspace\\demo")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /discard draft/i }));
+    expect(screen.getAllByText(/Summarize the workspace/i).length).toBeGreaterThan(0);
+    void composer;
   });
 
   it("shows native and residual Stop state independently and disables conflicting work", async () => {
@@ -207,29 +251,43 @@ describe("GoalPort preview", () => {
     expect(within(stopRegion).getByText(/Write responsibility: held/i)).toBeTruthy();
     expect((screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: /allow once/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /assign next step/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /select claude code/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /Stop native turn/i }) as HTMLButtonElement).disabled).toBe(false);
+    // No Stop is offered: the product turn is not a live cancellable turn.
+    expect(screen.queryByRole("button", { name: /stop the running runtime turn/i })).toBeNull();
+    // Runtime selection stays blocked under the hold.
+    await openRuntimePicker();
+    const claudeOption = await screen.findByRole("option", { name: /claude code/i });
+    expect((claudeOption as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("disables Stop on a terminal selection without a workspace hold", async () => {
+  it("offers no Stop on a terminal selection and keeps the provider visible", async () => {
     window.__GOALPORT_ELECTRON__ = true;
-    const snapshot={...DEMO_SNAPSHOT,preview:false,attempt:{...DEMO_SNAPSHOT.attempt,state:"completed"},stopResponsibility:null} as const;
-    window.goalportCore={snapshot:async()=>snapshot,command:async()=>snapshot,startCore:async()=>({}),openInVsCode:async()=>undefined};
+    const snapshot = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      attempt: { ...DEMO_SNAPSHOT.attempt, state: "completed" },
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation,
+        turn: { state: "stopped", canStop: false, canSend: true }
+      },
+      stopResponsibility: null
+    } as const;
+    window.goalportCore = { snapshot: async () => snapshot, command: async () => snapshot, startCore: async () => ({}), openInVsCode: async () => undefined };
     render(<App />);
-    expect((await screen.findByRole("button",{name:/No active turn/i}) as HTMLButtonElement).disabled).toBe(true);
+    // Idle/terminal: Send (per canSend), never an idle Stop button.
+    expect(await screen.findByRole("button", { name: /send message/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /stop the running runtime turn/i })).toBeNull();
+    expect(screen.getByText("Stopped")).toBeTruthy();
   });
-
   it("labels close Stop for the active selected provider under a foreign Claude hold", async () => {
     window.__GOALPORT_ELECTRON__ = true;
-    const snapshot={...DEMO_SNAPSHOT,preview:false,attempt:{...DEMO_SNAPSHOT.attempt,provider:"codex",state:"active"},stopResponsibility:{attemptId:"older-claude",operationId:"older-stop",provider:"claude",nativeTurnState:"unconfirmed",residualExecutionState:"unknown",writeResponsibility:"held",inputUuid:"input",sessionHash:"hash",turnEpoch:1,processEpoch:"epoch",source:"ui.stop"}} as const;
-    window.goalportCore={snapshot:async()=>snapshot,command:async()=>snapshot,startCore:async()=>({}),openInVsCode:async()=>undefined};
+    const snapshot = { ...DEMO_SNAPSHOT, preview: false, attempt: { ...DEMO_SNAPSHOT.attempt, provider: "codex", state: "active" }, stopResponsibility: { attemptId: "older-claude", operationId: "older-stop", provider: "claude", nativeTurnState: "unconfirmed", residualExecutionState: "unknown", writeResponsibility: "held", inputUuid: "input", sessionHash: "hash", turnEpoch: 1, processEpoch: "epoch", source: "ui.stop" } } as const;
+    window.goalportCore = { snapshot: async () => snapshot, command: async () => snapshot, startCore: async () => ({}), openInVsCode: async () => undefined };
     render(<App />);
-    await screen.findByRole("region",{name:/stop responsibility/i});
-    fireEvent.click(screen.getByRole("button",{name:"Close window"}));
-    const dialog=screen.getByRole("dialog",{name:"Continue running in the background?"});
-    expect(within(dialog).getByRole("button",{name:"Stop background work and quit"})).toBeTruthy();
-    expect(within(dialog).queryByRole("button",{name:"Stop Claude turn and quit"})).toBeNull();
+    await screen.findByRole("region", { name: /stop responsibility/i });
+    clickCloseWindow();
+    const dialog = screen.getByRole("dialog", { name: "Continue running in the background?" });
+    expect(within(dialog).getByRole("button", { name: "Stop background work and quit" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Stop Claude turn and quit" })).toBeNull();
   });
 
   it("discloses a workspace hold on close even when the viewed Attempt is terminal", async () => {
@@ -259,7 +317,8 @@ describe("GoalPort preview", () => {
       openInVsCode: async () => undefined
     };
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Close window" }));
+    await screen.findByRole("region", { name: /stop responsibility/i });
+    clickCloseWindow();
     const dialog = screen.getByRole("dialog", { name: "Continue running in the background?" });
     expect(within(dialog).getByText(/residual execution remains unknown/i)).toBeTruthy();
     expect(within(dialog).getByText(/Core keeps write responsibility held/i)).toBeTruthy();
@@ -283,7 +342,8 @@ describe("GoalPort preview", () => {
     };
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
+    await openRuntimePicker();
+    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -304,7 +364,8 @@ describe("GoalPort preview", () => {
     };
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
+    await openRuntimePicker();
+    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -326,12 +387,7 @@ describe("GoalPort preview", () => {
         support: "unknown" as const
       }]
     };
-    const command = vi.fn(async (request: CoreCommand) => ({
-      requestId: request.requestId,
-      accepted: true,
-      duplicate: false,
-      snapshot
-    }));
+    const command = vi.fn(async (request: CoreCommand) => accept(request, snapshot));
     window.goalportCore = {
       snapshot: async () => snapshot,
       command,
@@ -340,7 +396,8 @@ describe("GoalPort preview", () => {
     };
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: /select opaque runtime/i }));
+    await openRuntimePicker();
+    fireEvent.click(await screen.findByRole("option", { name: /opaque runtime/i }));
     await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true));
 
     const request = command.mock.calls.find(([candidate]) => candidate.messageType === "select_runtime")![0];
@@ -363,7 +420,8 @@ describe("GoalPort preview", () => {
     };
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: /select claude code/i }));
+    await openRuntimePicker();
+    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -372,12 +430,12 @@ describe("GoalPort preview", () => {
     expect(selectCalls[0][0].payload.attemptId).toBe("attempt-codex-executor-1");
   });
 
-  it("keeps the footer notice when a reselect fails to reach Core", async () => {
+  it("surfaces a failed reselect honestly without a success banner", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const base = { ...DEMO_SNAPSHOT, preview: false } as const;
     let selects = 0;
     const command = vi.fn(async (request: CoreCommand) => {
-      if (request.messageType !== "select_runtime") return base;
+      if (request.messageType !== "select_runtime") return accept(request, base);
       selects += 1;
       if (selects === 1) {
         return { goalportRejected: true, requestId: request.requestId, error: "already bound" };
@@ -385,7 +443,7 @@ describe("GoalPort preview", () => {
       if (selects === 2) {
         throw new Error("ECONNRESET");
       }
-      return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: { ...base, connection: "connected" as const, notices: [] } };
+      return accept(request, { ...base, connection: "connected" as const, notices: [] });
     });
     window.goalportCore = {
       snapshot: async () => base,
@@ -395,21 +453,20 @@ describe("GoalPort preview", () => {
     };
 
     render(<App />);
-    const select = await screen.findByRole("button", { name: /select claude code/i });
-    fireEvent.click(select);
-    expect(await screen.findByText("Core refused: already bound")).toBeTruthy();
-    fireEvent.click(select);
-    expect(await screen.findByText("Core request failed: ECONNRESET")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /reconnect core/i }));
-    const reconnectedSelect = await screen.findByRole("button", { name: /select claude code/i });
-    await waitFor(() => expect((reconnectedSelect as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(reconnectedSelect);
-    await waitFor(() => {
-      expect(screen.getByText("Core owns continuity · UI owns presentation")).toBeTruthy();
-    });
+    await openRuntimePicker();
+    const claudeOption = await screen.findByRole("option", { name: /claude code/i });
+    fireEvent.click(claudeOption);
+    // The exact raw refusal stays visible inside Technical details.
+    expect(await screen.findByText("already bound")).toBeTruthy();
+    expect(screen.queryByText(/successfully selected/i)).toBeNull();
+    await openRuntimePicker();
+    const retryOption = await screen.findByRole("option", { name: /claude code/i });
+    await waitFor(() => expect((retryOption as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(retryOption);
+    await waitFor(() => expect(screen.getAllByText(/core connected/i).length).toBeGreaterThan(0));
   });
 
-  it("opens a normal empty RC without demo data, a prompt, or a routable Attempt", async () => {
+  it("opens a normal empty RC straight into the draft composer, without demo data", async () => {
     window.history.replaceState(null, "", "/?firstRun=1");
     window.__GOALPORT_ELECTRON__ = true;
     const empty = {
@@ -426,7 +483,8 @@ describe("GoalPort preview", () => {
       timeline: [],
       decisions: [],
       evidence: [],
-      notices: []
+      notices: [],
+      productConversation: null
     };
     const command = vi.fn(async () => empty);
     window.goalportCore = {
@@ -439,27 +497,34 @@ describe("GoalPort preview", () => {
 
     render(<App />);
 
-    expect((await screen.findAllByText("No Runtime selected")).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("dialog", { name: /start your first campaign/i })).toBeNull();
+    // First use: the local draft composer is immediately present and focused;
+    // no dialog, no demo goal, no permission.
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+    expect(screen.queryByRole("dialog", { name: /start a goal/i })).toBeNull();
     expect(screen.queryByText("Build a durable preview")).toBeNull();
     expect(screen.queryByText("Workspace write permission")).toBeNull();
-    const composer = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
-    expect(composer.disabled).toBe(true);
-    expect(composer.placeholder).toBe("Create or select a Campaign before drafting a message…");
-    fireEvent.change(composer, { target: { value: "must not be discarded" } });
-    expect(composer.value).toBe("");
-    expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /select claude code/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("heading", { name: /start a goal/i })).toBeTruthy();
     expect(command).not.toHaveBeenCalled();
-    expect((await screen.findAllByText(/STABLE V1 RC 1\.0\.0-rc\.1/)).length).toBeGreaterThan(0);
+    // About carries version only — no protocol/hash/data-path ledger.
+    fireEvent.click(screen.getByRole("button", { name: /application menu/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /about goalport/i }));
+    const about = screen.getByRole("dialog", { name: /about goalport/i });
+    expect(within(about).getByText(/stable v1 rc/i)).toBeTruthy();
+    expect(within(about).getByText(/1\.0\.0-rc\.1/i)).toBeTruthy();
+    expect(within(about).queryByText(/protocol/i)).toBeNull();
+    expect(within(about).queryByText(/data path/i)).toBeNull();
   });
 
-  it("keeps uncertain Runtime identity visible and blocks sending", async () => {
+  it("blocks sending when the product turn does not allow it (uncertain)", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const uncertain = {
       ...DEMO_SNAPSHOT,
       preview: false,
-      attempt: { ...DEMO_SNAPSHOT.attempt, state: "uncertain" as const, sessionLabel: "projection mismatch" }
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation,
+        turn: { state: "uncertain", canStop: false, canSend: false, reason: "the previous send could not be confirmed delivered" }
+      }
     };
     window.goalportCore = {
       snapshot: async () => uncertain,
@@ -470,11 +535,11 @@ describe("GoalPort preview", () => {
 
     render(<App />);
 
-    expect((await screen.findAllByText("Runtime identity uncertain")).length).toBeGreaterThan(0);
+    expect(await screen.findAllByText("Blocked").then((nodes) => nodes.length)).toBeGreaterThan(0);
     expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("uses the native workspace picker and preserves the form on create refusal", async () => {
+  it("uses the native workspace picker and preserves the draft on a refused first send", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const base = { ...DEMO_SNAPSHOT, preview: false };
     const command = vi.fn(async (request: CoreCommand) => ({
@@ -490,55 +555,25 @@ describe("GoalPort preview", () => {
       chooseWorkspace: async () => "C:\\work\\chosen"
     };
     render(<App />);
-    fireEvent.click((await screen.findAllByRole("button", { name: /new campaign/i }))[0]);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
     fireEvent.click(screen.getByRole("button", { name: /browse/i }));
     const workspace = screen.getByRole("textbox", { name: /project folder/i }) as HTMLInputElement;
     await waitFor(() => expect(workspace.value).toBe("C:\\work\\chosen"));
-    const goal = screen.getByRole("textbox", { name: /campaign goal/i }) as HTMLTextAreaElement;
+    const goal = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.change(goal, { target: { value: "Keep this exact goal" } });
-    fireEvent.click(screen.getByRole("button", { name: /create campaign/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Select Runtime" }));
+    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
-    expect((await screen.findByRole("alert")).textContent).toContain("Core refused: workspace is already held");
+    expect((await screen.findByRole("alert")).textContent).toContain("could not complete that action");
+    expect(document.body.textContent).toContain("workspace is already held");
     expect(workspace.value).toBe("C:\\work\\chosen");
     expect(goal.value).toBe("Keep this exact goal");
     const request = command.mock.calls.at(-1)?.[0];
     expect(request).toBeDefined();
-    expect(request!.payload).toEqual(expect.objectContaining({ workspaceRoot: "C:\\work\\chosen", goal: "Keep this exact goal" }));
+    expect(request!.messageType).toBe("start_conversation");
+    expect(request!.payload).toEqual(expect.objectContaining({ workspaceRoot: "C:\\work\\chosen", provider: "claude", message: "Keep this exact goal" }));
     expect(request!.payload.projectId).toBeUndefined();
-  });
-
-  it("creates a normal campaign without sending its goal and leaves Runtime unassigned", async () => {
-    window.__GOALPORT_ELECTRON__ = true;
-    const base = { ...DEMO_SNAPSHOT, preview: false };
-    const created = {
-      ...base,
-      campaigns: [{ ...base.campaigns[0], id: "campaign-new", title: "Fresh campaign", goal: "Fresh campaign" }],
-      activeCampaignId: "campaign-new",
-      activeTask: { id: "task-new", title: "Fresh campaign", acceptance: "", state: "in-progress" as const },
-      attempt: { id: "attempt-unassigned", taskId: "task-new", provider: "unassigned", role: "executor" as const, state: "waiting" as const, sessionLabel: "No Runtime selected", eventCount: 0 },
-      timeline: [], decisions: [], evidence: [], notices: []
-    };
-    const command = vi.fn(async (request: CoreCommand) => ({
-      requestId: request.requestId,
-      accepted: true,
-      duplicate: false,
-      snapshot: created
-    }));
-    window.goalportCore = { snapshot: async () => base, command, startCore: async () => base, openInVsCode: async () => undefined };
-    render(<App />);
-    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "Unsent draft from the previous campaign" } });
-    fireEvent.click((await screen.findAllByRole("button", { name: /new campaign/i }))[0]);
-    fireEvent.change(screen.getByRole("textbox", { name: /project folder/i }), { target: { value: "C:\\work\\fresh" } });
-    fireEvent.change(screen.getByRole("textbox", { name: /campaign goal/i }), { target: { value: "Fresh campaign" } });
-    fireEvent.click(screen.getByRole("button", { name: /create campaign/i }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: /start your first campaign/i })).toBeNull());
-    expect(composer.value).toBe("");
-    expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText("Campaign created. Select a Runtime before sending work.")).toBeTruthy();
-    expect(command).toHaveBeenCalledTimes(1);
-    expect(command.mock.calls[0][0].messageType).toBe("create_campaign");
   });
 
   it("preserves a failed send and reports the exact refusal", async () => {
@@ -551,7 +586,8 @@ describe("GoalPort preview", () => {
     fireEvent.change(composer, { target: { value: "Do not lose this input" } });
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
-    expect(await screen.findByText("Core refused: delivery unknown; it was not sent again")).toBeTruthy();
+    expect(await screen.findByText(/could not complete that action/i)).toBeTruthy();
+    expect(document.body.textContent).toContain("delivery unknown; it was not sent again");
     expect(composer.value).toBe("Do not lose this input");
   });
 
@@ -571,90 +607,90 @@ describe("GoalPort preview", () => {
     pending.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: base });
 
     await waitFor(() => expect(composer.value).toBe("Second input drafted while waiting"));
+    expect(request.messageType).toBe(SEND_TYPE);
     expect(request.payload).toEqual(expect.objectContaining({
       campaignId: base.activeCampaignId,
-      taskId: base.activeTask.id,
       attemptId: base.attempt.id,
       message: "First input"
     }));
-    expect(await screen.findByText(new RegExp(`Message recorded for task ${base.activeTask.id}`))).toBeTruthy();
   });
 
   it("keeps a delayed refused send and its draft with the original campaign", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const campaignA = { ...DEMO_SNAPSHOT, preview: false };
-    const campaignB = {
+    const campaignB: CoreSnapshot = {
       ...campaignA,
+      productConversation: { ...campaignA.productConversation!, title: "Task B" },
       activeCampaignId: "campaign-evidence-loop",
-      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" },
       attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
       timeline: [], notices: []
     };
     const pendingSend = deferred<unknown>();
     const command = vi.fn((request: CoreCommand) => {
-      if (request.messageType === "send_message") return pendingSend.promise;
+      if (request.messageType === SEND_TYPE) return pendingSend.promise;
       const selected = request.payload.campaignId === campaignB.activeCampaignId ? campaignB : campaignA;
-      return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: selected });
+      return accept(request, selected);
     });
     window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
     render(<App />);
     const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
-    await screen.findByText("Task B");
+    await screen.findByRole("heading", { name: "Task B" });
     fireEvent.change(composer, { target: { value: "Campaign B draft" } });
     fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
     await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
     fireEvent.change(composer, { target: { value: "Campaign A input" } });
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
-    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "send_message")).toBe(true));
-    const sendRequest = command.mock.calls.find(([request]) => request.messageType === "send_message")![0];
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === SEND_TYPE)).toBe(true));
+    const sendRequest = command.mock.calls.find(([request]) => request.messageType === SEND_TYPE)![0];
     fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
     pendingSend.resolve({ goalportRejected: true, requestId: sendRequest.requestId, error: "A delivery remains unknown" });
 
-    await screen.findByText("Task B");
+    await screen.findByRole("heading", { name: "Task B" });
     expect(composer.value).toBe("Campaign B draft");
-    expect(screen.queryByText("Core refused: A delivery remains unknown")).toBeNull();
+    expect(screen.queryByText("A delivery remains unknown")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
-    expect(await screen.findByText("Core refused: A delivery remains unknown")).toBeTruthy();
+    expect(await screen.findByText("A delivery remains unknown")).toBeTruthy();
     expect(composer.value).toBe("Campaign A input");
   });
 
   it("clears only the accepted campaign draft when another campaign has identical text", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const campaignA = { ...DEMO_SNAPSHOT, preview: false };
-    const campaignB = {
+    const campaignB: CoreSnapshot = {
       ...campaignA,
+      productConversation: { ...campaignA.productConversation!, title: "Task B" },
       activeCampaignId: "campaign-evidence-loop",
-      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" },
       attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
       timeline: [], notices: []
     };
     const pendingSend = deferred<unknown>();
     const command = vi.fn((request: CoreCommand) => {
-      if (request.messageType === "send_message") return pendingSend.promise;
+      if (request.messageType === SEND_TYPE) return pendingSend.promise;
       const selected = request.payload.campaignId === campaignB.activeCampaignId ? campaignB : campaignA;
-      return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: selected });
+      return accept(request, selected);
     });
     window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
     render(<App />);
     const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
-    await screen.findByText("Task B");
+    await screen.findByRole("heading", { name: "Task B" });
     fireEvent.change(composer, { target: { value: "Identical draft" } });
     fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
     await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
     fireEvent.change(composer, { target: { value: "Identical draft" } });
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
-    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "send_message")).toBe(true));
-    const sendRequest = command.mock.calls.find(([request]) => request.messageType === "send_message")![0];
+    await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === SEND_TYPE)).toBe(true));
+    const sendRequest = command.mock.calls.find(([request]) => request.messageType === SEND_TYPE)![0];
     fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
     pendingSend.resolve({ requestId: sendRequest.requestId, accepted: true, duplicate: false, snapshot: campaignA });
 
-    await screen.findByText("Task B");
+    await screen.findByRole("heading", { name: "Task B" });
     expect(composer.value).toBe("Identical draft");
     expect(sendRequest.payload).toEqual(expect.objectContaining({
       campaignId: campaignA.activeCampaignId,
-      taskId: campaignA.activeTask.id,
       attemptId: campaignA.attempt.id,
       message: "Identical draft"
     }));
@@ -666,17 +702,18 @@ describe("GoalPort preview", () => {
   it("binds typing during a pending selection to the campaign still shown", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const campaignA = { ...DEMO_SNAPSHOT, preview: false };
-    const campaignB = {
+    const campaignB: CoreSnapshot = {
       ...campaignA,
+      productConversation: { ...campaignA.productConversation!, title: "Task B" },
       activeCampaignId: "campaign-evidence-loop",
-      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" as const },
+      activeTask: { id: "task-b", title: "Task B", acceptance: "B", state: "in-progress" },
       attempt: { ...campaignA.attempt, id: "attempt-b", taskId: "task-b" },
       timeline: [], notices: []
     };
     const pendingSelect = deferred<unknown>();
     const command = vi.fn((request: CoreCommand) => request.payload.campaignId === campaignB.activeCampaignId
       ? pendingSelect.promise
-      : Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot: campaignA }));
+      : accept(request, campaignA));
     window.goalportCore = { snapshot: async () => campaignA, command, startCore: async () => campaignA, openInVsCode: async () => undefined };
     render(<App />);
     const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
@@ -686,35 +723,15 @@ describe("GoalPort preview", () => {
     const selectRequest = command.mock.calls[0][0];
     fireEvent.change(composer, { target: { value: "Typed while Campaign A remains visible" } });
     expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId);
+    expect(selectRequest.messageType).toBe("select_campaign");
+    expect(selectRequest.payload.campaignId).toBe(campaignB.activeCampaignId);
     pendingSelect.resolve({ requestId: selectRequest.requestId, accepted: true, duplicate: false, snapshot: campaignB });
 
-    await screen.findByText("Task B");
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignB.activeCampaignId));
+    expect(screen.getByRole("heading", { name: "Task B" })).toBeTruthy();
     expect(composer.value).toBe("");
     fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
     await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe(campaignA.activeCampaignId));
     expect(composer.value).toBe("Typed while Campaign A remains visible");
-  });
-
-  it("presents Scenario Runtime activity and Stop as explicitly synthetic", async () => {
-    window.__GOALPORT_ELECTRON__ = true;
-    const nativeActor = "Native Runtime · session";
-    const nativeSession = "native session · adapter-local";
-    const scenario = {
-      ...DEMO_SNAPSHOT,
-      preview: true,
-      attempt: { ...DEMO_SNAPSHOT.attempt, provider: "scenario", state: "active" as const, sessionLabel: nativeSession },
-      timeline: [{ ...DEMO_SNAPSHOT.timeline[0], id: "scenario-event", actor: nativeActor }]
-    };
-    window.goalportCore = { snapshot: async () => scenario, command: async () => scenario, startCore: async () => scenario, openInVsCode: async () => undefined };
-    render(<App />);
-
-    expect(await screen.findByText("Synthetic Scenario Runtime · session")).toBeTruthy();
-    expect(screen.queryByText(nativeActor)).toBeNull();
-    expect(screen.getByText("Synthetic Scenario · synthetic session · adapter-local")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /stop synthetic scenario turn/i })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
-    expect(screen.getByRole("button", { name: /stop synthetic scenario and quit/i })).toBeTruthy();
-    expect(scenario.timeline[0].actor).toBe(nativeActor);
-    expect(scenario.attempt.sessionLabel).toBe(nativeSession);
   });
 });

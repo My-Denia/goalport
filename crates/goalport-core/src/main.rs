@@ -24,6 +24,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("pipe-peer") {
         return pipe_peer(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("profile") {
+        return profile(&args[1..]);
+    }
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -106,6 +109,70 @@ fn serve(args: &[String]) -> Result<(), String> {
     {
         let _ = (pipe, server);
         Err("serve requires Windows Named Pipe support".into())
+    }
+}
+
+/// `profile inspect|backup|import …`: startup-continuity storage operations.
+/// Never migrates a database. Output contract: exactly one JSON line on
+/// stdout; success exits 0, failure exits 3 with `{ok:false, stage, error}`.
+fn profile(args: &[String]) -> ExitCode {
+    use goalport_core::profile_ops;
+    let Some(command) = args.first().map(String::as_str) else {
+        println!("{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"usage\",\"error\":\"profile requires inspect|backup|import\"}}", profile_ops::PROFILE_OPS_SCHEMA);
+        return ExitCode::from(profile_ops::PROFILE_OPS_FAILURE_EXIT);
+    };
+    let flags = |name: &str| -> Option<String> {
+        option(args, name).or_else(|| {
+            if args.iter().any(|arg| arg == name) {
+                Some(String::new())
+            } else {
+                None
+            }
+        })
+    };
+    let result: Result<serde_json::Value, String> = match command {
+        "inspect" => match option(args, "--db") {
+            Some(db) => profile_ops::inspect(&PathBuf::from(db), flags("--quick-check").is_some()),
+            None => Err("profile inspect requires --db".into()),
+        },
+        "backup" => match (option(args, "--db"), option(args, "--out")) {
+            (Some(db), Some(out)) => profile_ops::backup(
+                &PathBuf::from(db),
+                &PathBuf::from(out),
+                flags("--allow-write-open").is_some(),
+            ),
+            _ => Err("profile backup requires --db and --out".into()),
+        },
+        "import" => match (option(args, "--source-db"), option(args, "--staging-dir")) {
+            (Some(source), Some(staging)) => {
+                let provenance = option(args, "--provenance")
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or(serde_json::json!(null));
+                profile_ops::import(
+                    &PathBuf::from(source),
+                    &PathBuf::from(staging),
+                    &provenance,
+                    flags("--allow-source-recovery").is_some(),
+                )
+            }
+            _ => Err("profile import requires --source-db and --staging-dir".into()),
+        },
+        unknown => Err(format!("unknown profile subcommand {unknown}; use inspect|backup|import")),
+    };
+    match result {
+        Ok(mut value) => {
+            value["ok"] = serde_json::json!(true);
+            println!("{}", value);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"profile\",\"error\":{}}}",
+                profile_ops::PROFILE_OPS_SCHEMA,
+                serde_json::to_string(&error).unwrap_or_else(|_| "\"error\"".into())
+            );
+            ExitCode::from(profile_ops::PROFILE_OPS_FAILURE_EXIT)
+        }
     }
 }
 

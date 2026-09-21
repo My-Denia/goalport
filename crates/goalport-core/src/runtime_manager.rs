@@ -130,6 +130,19 @@ pub struct RuntimeIdentitySummary {
     pub native: bool,
 }
 
+/// Per-attempt turn facts for the product read model (plan R2/R3): what the
+/// live Runtime can actually prove right now. Nothing here is inferred from
+/// `Attempt.active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnFacts {
+    /// The Runtime still owes a response for a prompt (send exclusion).
+    pub in_flight: bool,
+    /// A proven cancellable live turn exists. Stop is offered only for this.
+    pub stoppable: bool,
+    /// A Codex start whose delivery could not be confirmed; fail-closed.
+    pub delivery_unknown: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProcessBinding {
     pub process_epoch: String,
@@ -1052,14 +1065,59 @@ impl RuntimeManager {
         }
     }
 
-    /// Whether the Runtime attached to this Attempt still owes a response for a prompt.
-    /// Only the live ACP transport can be in that state; every other adapter answers
-    /// synchronously or has no turn concept.
+    /// Whether the Runtime attached to this Attempt still owes a response for a
+    /// prompt. R3: the Codex arm is included — an acknowledged native turn OR a
+    /// pending, successfully-written start request both count for send
+    /// exclusion. A `delivery_unknown` write does not (it is degraded, not
+    /// in flight), and CodexExec has no turn concept.
     pub fn turn_in_flight(&self, attempt_id: &str) -> bool {
         match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Codex(process)) => process.turn_in_flight(),
             Some(ManagedRuntime::Grok(process)) => process.turn_in_flight(),
             Some(ManagedRuntime::Claude(process)) => process.turn_in_flight(),
             _ => false,
+        }
+    }
+
+    /// The turn facts the product projection needs, per provider, without
+    /// inferring anything from `Attempt.active`:
+    /// - `in_flight`: the Runtime still owes a response (send exclusion);
+    /// - `stoppable`: a proven cancellable live turn exists — for Codex an
+    ///   acknowledged native turn with an open output transport; for Claude and
+    ///   Grok an in-flight turn, whose stop paths are directly defined;
+    /// - `delivery_unknown`: a Codex start whose delivery could not be confirmed;
+    ///   such a registration never reports a ready turn.
+    /// Claude residual-hold behavior is unchanged: it lives in the store, not
+    /// here.
+    pub fn turn_facts(&self, attempt_id: &str) -> Option<TurnFacts> {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Codex(process)) => Some(TurnFacts {
+                in_flight: process.turn_in_flight(),
+                stoppable: process.acknowledged_turn_in_flight() && !process.transport.ended(),
+                delivery_unknown: process.delivery_unknown,
+            }),
+            Some(ManagedRuntime::Grok(process)) => {
+                let in_flight = process.turn_in_flight();
+                Some(TurnFacts {
+                    in_flight,
+                    stoppable: in_flight,
+                    delivery_unknown: false,
+                })
+            }
+            Some(ManagedRuntime::Claude(process)) => {
+                let in_flight = process.turn_in_flight();
+                Some(TurnFacts {
+                    in_flight,
+                    stoppable: in_flight,
+                    delivery_unknown: false,
+                })
+            }
+            Some(ManagedRuntime::CodexExec(_) | ManagedRuntime::Scenario(_)) => Some(TurnFacts {
+                in_flight: false,
+                stoppable: false,
+                delivery_unknown: false,
+            }),
+            None => None,
         }
     }
 
@@ -1191,7 +1249,19 @@ struct CodexProcess {
     permission_tx: Option<Sender<PermissionCommand>>,
     next_id: u64,
     thread_id: Option<String>,
-    turn_id: Option<String>,
+    /// R3 turn facts, deliberately split so a locally generated request id can
+    /// never masquerade as a provider turn:
+    /// - `pending_start_request_id`: a turn/start whose JSON write succeeded but
+    ///   whose native acknowledgement has not been observed yet. Set only AFTER
+    /// the write succeeds.
+    /// - `native_turn_id`: the turn id the provider itself acknowledged (matched
+    /// by request id, or a correlated started notification on the bound thread).
+    /// Never a generated `turn-N`.
+    /// - `delivery_unknown`: a turn/start write whose delivery could not be
+    ///   confirmed. Latched; such a registration never reports a ready turn.
+    pending_start_request_id: Option<u64>,
+    native_turn_id: Option<String>,
+    delivery_unknown: bool,
     sequence: i64,
     attempt_id: Option<String>,
     campaign_id: Option<String>,
@@ -1247,7 +1317,9 @@ impl CodexProcess {
             permission_tx: None,
             next_id: 1,
             thread_id: None,
-            turn_id: None,
+            pending_start_request_id: None,
+            native_turn_id: None,
+            delivery_unknown: false,
             sequence: 0,
             attempt_id: None,
             campaign_id: None,
@@ -1270,6 +1342,17 @@ impl CodexProcess {
             protocol: CODEX_PROTOCOL_VERSION.into(),
             native: true,
         }
+    }
+
+    /// R3: an in-flight turn is an acknowledged native turn OR a pending,
+    /// successfully-written start request (send exclusion).
+    fn turn_in_flight(&self) -> bool {
+        self.native_turn_id.is_some() || self.pending_start_request_id.is_some()
+    }
+
+    /// R3: a cancellable turn requires the provider's own acknowledgement.
+    fn acknowledged_turn_in_flight(&self) -> bool {
+        self.native_turn_id.is_some()
     }
 
     fn ensure_started(&mut self) -> Result<(), AdapterError> {
@@ -1524,10 +1607,10 @@ impl CodexProcess {
             )));
         }
         let id = self.next_request_id();
-        self.turn_id = Some(format!("turn-{id}"));
-        // A write failure here is a delivery whose outcome cannot be confirmed: it is reported as
-        // UNKNOWN and, like a closed transport, never automatically re-sent.
-        if let Err(error) = self.send_json(&json!({
+        // R3: pending is marked only after the write succeeds; a write failure
+        // latches delivery_unknown instead. The generated request id is never
+        // recorded as a native turn.
+        let written = self.send_json(&json!({
             "id": id,
             "method": "turn/start",
             "params": {
@@ -1535,11 +1618,14 @@ impl CodexProcess {
                 "input": [{ "type": "text", "text": request.text }],
                 "clientUserMessageId": request.idempotency_key
             }
-        })) {
+        }));
+        if let Err(error) = written {
+            self.delivery_unknown = true;
             return Err(AdapterError::Connection(format!(
                 "Codex input write failed; delivery unknown: {error}"
             )));
         }
+        self.pending_start_request_id = Some(id);
         // The reader thread now owns the provider stdout. Returning after the
         // request is flushed keeps the UI responsive and lets Core snapshots
         // persist pre-terminal events while the native turn is still active.
@@ -1568,7 +1654,22 @@ impl CodexProcess {
                     if !self.stream_closed {
                         self.stream_closed = true;
                         let reason = self.transport.reason_str();
-                        if let Some(turn_id) = self.turn_id.take() {
+                        // R3: an acknowledged native turn is referenced by its
+                        // provider turn id; a still-pending start by its request
+                        // id. Both are cleared; a closed stream can never become
+                        // a ready turn again.
+                        let turn_reference = self
+                            .native_turn_id
+                            .take()
+                            .map(|turn_id| format!("codex-turn:{turn_id}"))
+                            .or_else(|| {
+                                self.pending_start_request_id
+                                    .take()
+                                    .map(|request_id| {
+                                        format!("codex-turn-start-request:{request_id}")
+                                    })
+                            });
+                        if let Some(turn_reference) = turn_reference {
                             self.closure_failed_turn = true;
                             self.sequence += 1;
                             events.push(AgentEventEnvelope {
@@ -1584,7 +1685,7 @@ impl CodexProcess {
                                 sequence: self.sequence,
                                 occurred_at: now(),
                                 received_at: now(),
-                                provider_event_reference: Some(format!("codex-turn:{turn_id}")),
+                                provider_event_reference: Some(turn_reference),
                                 event_type: AgentEventType::TurnFailed,
                                 payload: json!({
                                     "status": "failed",
@@ -1597,35 +1698,99 @@ impl CodexProcess {
                     break;
                 }
             };
-            if let Some(thread_id) = value
-                .get("result")
-                .and_then(|result| result.get("turn"))
-                .and_then(|turn| turn.get("id"))
-                .and_then(Value::as_str)
-            {
-                self.turn_id = Some(thread_id.into());
-            }
+            self.observe_native_message(&value);
             let method = value
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("notification");
-            if let Some(event) = self.native_event(attempt_id, method, &value) {
+            let terminal = matches!(classify_codex_method(method, &value),
+                AgentEventType::TurnCompleted | AgentEventType::TurnFailed | AgentEventType::Cancelled);
+            // Never let an old/foreign terminal finish the current turn or
+            // transition its durable Attempt. Preserve unmatched frames as raw evidence.
+            let params = value.get("params");
+            let terminal_turn = params.and_then(|p| p.get("turnId")
+                .or_else(|| p.get("turn").and_then(|t| t.get("id"))))
+                .and_then(Value::as_str);
+            let terminal_thread = params.and_then(|p| p.get("threadId")).and_then(Value::as_str);
+            let terminal_matches = terminal_turn.is_some()
+                && terminal_turn == self.native_turn_id.as_deref()
+                && terminal_thread == self.thread_id.as_deref();
+            if let Some(mut event) = self.native_event(attempt_id, method, &value) {
+                if terminal && !terminal_matches { event.event_type = AgentEventType::Unknown; }
                 self.sequence += 1;
                 let mut event = event;
                 event.sequence = self.sequence;
                 event.event_id = format!("codex-event-{}", self.sequence);
                 events.push(event);
             }
-            if matches!(
-                classify_codex_method(method, &value),
-                AgentEventType::TurnCompleted
-                    | AgentEventType::TurnFailed
-                    | AgentEventType::Cancelled
-            ) {
-                self.turn_id = None;
+            if terminal && terminal_matches {
+                // R3: a terminal for the bound turn clears BOTH facts. A stale or
+                // unsolicited response arriving afterwards finds no pending and
+                // no native turn and can never resurrect one.
+                self.native_turn_id = None;
+                self.pending_start_request_id = None;
             }
         }
         Ok(events)
+    }
+
+    /// R3 turn-fact matcher. Runs for every native message before it is
+    /// classified:
+    /// - a RESPONSE whose id equals `pending_start_request_id` either promotes
+    ///   the provider's `result.turn.id` to `native_turn_id` (valid ack) or, on
+    ///   an error response, clears the pending start;
+    /// - a NOTIFICATION correlated with the bound thread (`params.threadId`) that
+    ///   carries a `turnId` promotes it while a start is still pending;
+    /// - anything else — a response for another request, an unsolicited frame,
+    ///   a notification for another thread — is ignored, and nothing can set a
+    ///   native turn once the facts are clear (after a terminal or a closure).
+    fn observe_native_message(&mut self, value: &Value) {
+        let pending = match self.pending_start_request_id {
+            Some(pending) => pending,
+            None => return,
+        };
+        if let Some(response_id) = value.get("id").and_then(Value::as_u64) {
+            if response_id != pending || value.get("method").is_some() {
+                return;
+            }
+            if value.get("error").is_some() {
+                // An error response answers the start: the turn was not created.
+                self.pending_start_request_id = None;
+                return;
+            }
+            if let Some(turn_id) = value
+                .get("result")
+                .and_then(|result| result.get("turn"))
+                .and_then(|turn| turn.get("id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+            {
+                self.native_turn_id = Some(turn_id.to_owned());
+                self.pending_start_request_id = None;
+            }
+            return;
+        }
+        // Only a start notification can acknowledge a pending request.
+        // Deltas and terminal frames may belong to a previous turn.
+        if value.get("method").and_then(Value::as_str) != Some("turn/started") {
+            return;
+        }
+        let bound_thread = value
+            .get("params")
+            .and_then(|params| params.get("threadId"))
+            .and_then(Value::as_str);
+        if bound_thread.is_none() || bound_thread != self.thread_id.as_deref() {
+            return;
+        }
+        if let Some(turn_id) = value
+            .get("params")
+            .and_then(|params| params.get("turnId").or_else(|| params.get("turn").and_then(|turn| turn.get("id"))))
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        {
+            self.native_turn_id = Some(turn_id.to_owned());
+            self.pending_start_request_id = None;
+        }
     }
 
     fn start_reader(&mut self) -> Result<(), AdapterError> {
@@ -1760,11 +1925,17 @@ impl CodexProcess {
                 "Codex thread is not active".into(),
             ));
         };
-        let Some(turn_id) = self.turn_id.clone() else {
+        // R3: an interrupt needs a proven cancellable target — the turn id the
+        // provider itself acknowledged. A pending (written but unacknowledged)
+        // start, or an unknown delivery, has no real interrupt target yet.
+        let Some(turn_id) = self.native_turn_id.clone() else {
             return Ok(crate::adapters::CancelResult {
                 requested: false,
                 confirmed: false,
-                reason: Some("no active turn".into()),
+                reason: Some(
+                    "no acknowledged native turn to interrupt; the turn start has not been confirmed by Codex"
+                        .into(),
+                ),
             });
         };
         let id = self.next_request_id();
@@ -5436,7 +5607,12 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             .or_else(|| params.get("approvalId"))
             .map(bounded_scalar)
             .unwrap_or_else(|| "native-permission".into());
-        return Some(json!({ "request_id": request_id, "kind": "native-permission" }));
+        let command = params.get("command").and_then(|value| {
+            value.as_str().map(str::to_owned).or_else(|| value.as_array().map(|parts|
+                parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")))
+        });
+        let action = command;
+        return Some(json!({ "request_id": request_id, "kind": "native-permission", "text": action.map(|text| bounded_text(&text)) }));
     }
     if lower.contains("error") || value.get("error").is_some() {
         return Some(json!({ "status": "failed", "error": "native Runtime error" }));
@@ -6239,5 +6415,238 @@ mod tests {
             classify_codex_method("turn/completed", &value),
             AgentEventType::Cancelled
         );
+    }
+}
+
+/// R3 Codex turn-fact machine tests: pending start request vs acknowledged
+/// native turn vs unknown delivery. These drive `CodexProcess` directly (no
+/// child process) through the same `poll_events` the reader thread feeds.
+#[cfg(test)]
+mod codex_turn_fact_tests {
+    use super::*;
+
+    fn process_with_thread() -> CodexProcess {
+        let mut process = CodexProcess::new(
+            PathBuf::from("codex"),
+            "0.152.0".into(),
+            PathBuf::from(r"Z:\goalport-turn-facts"),
+            "on-request".into(),
+        );
+        process.thread_id = Some("thread-1".into());
+        process.attempt_id = Some("attempt-turn".into());
+        process.task_id = Some("task-turn".into());
+        process.campaign_id = Some("campaign-turn".into());
+        let (_tx, rx) = mpsc::channel();
+        process.event_rx = Some(rx);
+        process
+    }
+
+    fn feed(process: &mut CodexProcess, value: Value) {
+        let (tx, rx) = mpsc::channel();
+        tx.send(NativeMessage::Json(value)).unwrap();
+        drop(tx);
+        process.event_rx = Some(rx);
+        let _ = process.poll_events("attempt-turn").unwrap();
+    }
+
+    #[test]
+    fn idle_session_has_no_turn_and_is_not_stoppable() {
+        let mut manager = RuntimeManager::new();
+        manager
+            .select_runtime(
+                "attempt-idle",
+                "codex",
+                Some(PathBuf::from(r"Z:\codex.exe")),
+                "test",
+                &PathBuf::from(r"Z:\goalport-turn-facts"),
+            )
+            .unwrap();
+        let facts = manager.turn_facts("attempt-idle").unwrap();
+        assert!(!facts.in_flight);
+        assert!(!facts.stoppable);
+        assert!(!facts.delivery_unknown);
+    }
+
+    #[test]
+    fn pending_start_is_in_flight_but_not_stoppable() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        assert!(process.turn_in_flight());
+        assert!(!process.acknowledged_turn_in_flight());
+        // A pending start with no ack has no interrupt target: the generated
+        // request id is never a native turn.
+        assert!(process.native_turn_id.is_none());
+    }
+
+    #[test]
+    fn matching_response_acknowledges_the_native_turn() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(
+            &mut process,
+            json!({ "id": 7, "result": { "turn": { "id": "turn-provider-1" } } }),
+        );
+        assert_eq!(process.native_turn_id.as_deref(), Some("turn-provider-1"));
+        assert!(process.pending_start_request_id.is_none());
+        assert!(process.turn_in_flight());
+        assert!(process.acknowledged_turn_in_flight());
+    }
+
+    #[test]
+    fn stale_response_for_another_request_never_acknowledges() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(
+            &mut process,
+            json!({ "id": 9, "result": { "turn": { "id": "turn-stale" } } }),
+        );
+        assert_eq!(process.native_turn_id, None);
+        assert_eq!(process.pending_start_request_id, Some(7));
+    }
+
+    #[test]
+    fn unsolicited_response_with_no_pending_start_is_ignored() {
+        let mut process = process_with_thread();
+        feed(
+            &mut process,
+            json!({ "id": 9, "result": { "turn": { "id": "turn-unsolicited" } } }),
+        );
+        assert_eq!(process.native_turn_id, None);
+    }
+
+    #[test]
+    fn correlated_started_notification_on_bound_thread_acknowledges() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(
+            &mut process,
+            json!({
+                "method": "turn/started",
+                "params": { "threadId": "thread-1", "turn": { "id": "turn-notif" } }
+            }),
+        );
+        assert_eq!(process.native_turn_id.as_deref(), Some("turn-notif"));
+    }
+
+    #[test]
+    fn notification_for_another_thread_is_ignored() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(
+            &mut process,
+            json!({
+                "method": "item/agentMessage/delta",
+                "params": { "threadId": "thread-other", "turnId": "turn-foreign", "delta": "x" }
+            }),
+        );
+        assert_eq!(process.native_turn_id, None);
+        assert_eq!(process.pending_start_request_id, Some(7));
+    }
+
+    #[test]
+    fn error_response_clears_the_pending_start() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(&mut process, json!({ "id": 7, "error": { "code": -1, "message": "no" } }));
+        assert_eq!(process.pending_start_request_id, None);
+        assert_eq!(process.native_turn_id, None);
+        assert!(!process.turn_in_flight());
+    }
+
+    #[test]
+    fn terminal_clears_both_facts_and_a_late_ack_cannot_resurrect() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(7);
+        feed(
+            &mut process,
+            json!({ "id": 7, "result": { "turn": { "id": "turn-done" } } }),
+        );
+        assert!(process.acknowledged_turn_in_flight());
+        feed(
+            &mut process,
+            json!({
+                "method": "turn/completed",
+                "params": { "threadId": "thread-1", "turn": { "id": "turn-done", "status": "completed" } }
+            }),
+        );
+        assert_eq!(process.native_turn_id, None);
+        assert_eq!(process.pending_start_request_id, None);
+        assert!(!process.turn_in_flight());
+        // A stale response for the completed turn's request arrives late: no
+        // pending start exists, so it cannot resurrect the turn.
+        feed(
+            &mut process,
+            json!({ "id": 7, "result": { "turn": { "id": "turn-done" } } }),
+        );
+        assert_eq!(process.native_turn_id, None);
+        assert!(!process.turn_in_flight());
+    }
+
+    #[test]
+    fn unknown_write_is_latched_and_never_a_ready_turn() {
+        let mut process = process_with_thread();
+        process.delivery_unknown = true;
+        assert!(!process.turn_in_flight());
+        assert!(!process.acknowledged_turn_in_flight());
+        // Even a matching response cannot acknowledge a start that was never
+        // confirmed written: no pending request id exists to match.
+        feed(
+            &mut process,
+            json!({ "id": 7, "result": { "turn": { "id": "turn-ghost" } } }),
+        );
+        assert_eq!(process.native_turn_id, None);
+        assert!(process.delivery_unknown);
+    }
+
+    #[test]
+    fn closure_fails_a_pending_start_and_references_the_request_id() {
+        let mut process = process_with_thread();
+        process.pending_start_request_id = Some(12);
+        let (tx, rx) = mpsc::channel();
+        tx.send(NativeMessage::Closed).unwrap();
+        drop(tx);
+        process.event_rx = Some(rx);
+        let events = process.poll_events("attempt-turn").unwrap();
+        assert_eq!(process.pending_start_request_id, None);
+        assert_eq!(process.native_turn_id, None);
+        let failed = events
+            .iter()
+            .find(|event| event.event_type == AgentEventType::TurnFailed)
+            .expect("closure fails the pending turn");
+        assert_eq!(
+            failed.provider_event_reference.as_deref(),
+            Some("codex-turn-start-request:12")
+        );
+    }
+
+    #[test]
+    fn closure_fails_an_acknowledged_turn_by_its_native_id() {
+        let mut process = process_with_thread();
+        process.native_turn_id = Some("turn-live".into());
+        let (tx, rx) = mpsc::channel();
+        tx.send(NativeMessage::Closed).unwrap();
+        drop(tx);
+        process.event_rx = Some(rx);
+        let events = process.poll_events("attempt-turn").unwrap();
+        let failed = events
+            .iter()
+            .find(|event| event.event_type == AgentEventType::TurnFailed)
+            .expect("closure fails the acknowledged turn");
+        assert_eq!(
+            failed.provider_event_reference.as_deref(),
+            Some("codex-turn:turn-live")
+        );
+    }
+
+    #[test]
+    fn restart_leaves_no_turn_facts() {
+        // A brand-new CodexProcess (what a Core restart would register) has no
+        // turn facts at all: uncertainty on restart must come from durable
+        // records, never from an invented in-flight turn.
+        let process = process_with_thread();
+        assert_eq!(process.pending_start_request_id, None);
+        assert_eq!(process.native_turn_id, None);
+        assert!(!process.delivery_unknown);
+        assert!(!process.turn_in_flight());
     }
 }

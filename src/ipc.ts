@@ -1,11 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  appendPreviewConversationMessage,
   appendPreviewMessage,
   createPreviewCampaign,
   DEMO_SNAPSHOT,
   EMPTY_SNAPSHOT,
+  renamePreviewConversation,
   resolveCoreSnapshot,
   resolvePermission,
+  startPreviewConversation,
   withConnection,
   type ConnectionState,
   type CoreCommandOutcome,
@@ -51,6 +54,9 @@ export interface CoreCommand {
     | "create_campaign"
     | "create_campaign_with_task"
     | "select_runtime"
+    | "start_conversation"
+    | "conversation_send"
+    | "rename_conversation"
     | "send_message"
     | "resolve_decision"
     | "permission_response"
@@ -97,14 +103,52 @@ export interface CoreClient {
   chooseWorkspace?(): Promise<string | null>;
   appInfo?(): Promise<AppInfo>;
   dispatch?(request: CoreCommand): Promise<CoreSnapshot>;
+  /**
+   * First-send orchestration (product-interaction-reset): ONE
+   * `start_conversation` dispatch carrying a caller-stable request id. Optional
+   * for compatibility with older CoreClient fixtures; the desktop
+   * implementations dispatch the new command.
+   */
+  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot>;
+  /** Explicit Send on an existing conversation: `conversation_send`, gated by product.turn.canSend upstream. */
+  conversationSend?(message: string, campaignId: string, attemptId?: string): Promise<CoreSnapshot>;
+  /** Durable product title rename. */
+  renameConversation?(campaignId: string, title: string): Promise<CoreSnapshot>;
 }
 
 export interface AppInfo {
   version: string;
   channel: string;
+  distribution?: string;
   testMode: boolean;
   dataPath: string;
 }
+
+export interface BootstrapFacts {
+  sourcePath: string | null;
+  createdBy: { version: string | null; coreSha256: string | null; distribution: string | null } | null;
+  markerSchema: number | null;
+  counts: Record<string, number> | null;
+  schemaVersion: number | null;
+  bytes: number | null;
+  needsRecovery: boolean;
+  liveSource: boolean;
+}
+
+export type BootstrapState =
+  | { phase: "checking" | "backing-up" | "importing" | "done" }
+  | { phase: "import-offer"; facts: BootstrapFacts }
+  | { phase: "import-incompatible"; facts: BootstrapFacts; reason: string }
+  | { phase: "coordination"; kind: "live-core" | "unknown-core"; headline: string; detail: Record<string, unknown> | null; dataPath: string | null }
+  | { phase: "error"; kind: string; headline: string; message: string; canChooseDir: boolean; dataPath: string | null };
+
+export type BootstrapActionType =
+  | "import-accept"
+  | "fresh"
+  | "retry"
+  | "exit"
+  | "open-folder"
+  | "choose-dir";
 
 export interface CommandTraceEntry {
   phase: "issued" | "settled";
@@ -140,6 +184,9 @@ declare global {
       requestClose?: () => Promise<unknown>;
       confirmCloseChoice?: (payload: CloseChoicePayload | "continue" | "stop") => Promise<unknown>;
       dismissCloseChoice?: () => Promise<unknown>;
+      bootstrapCurrent?: () => Promise<BootstrapState>;
+      bootstrapAction?: (payload: { type: BootstrapActionType }) => Promise<unknown>;
+      onBootstrapState?: (callback: (state: BootstrapState) => void) => () => void;
       onClosePrompt?: (callback: () => void) => () => void;
       onCloseChoiceFailed?: (callback: (payload?: unknown) => void) => () => void;
     };
@@ -207,9 +254,32 @@ class PreviewCoreClient implements CoreClient {
     return this.state;
   }
 
+  async startConversation(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot> {
+    this.state = startPreviewConversation(this.state, workspaceRoot, provider, message, requestId);
+    return this.state;
+  }
+
+  async conversationSend(message: string): Promise<CoreSnapshot> {
+    // appendPreviewMessage records the legacy timeline copy (diagnostics) and the
+    // product items (conversation) in one step, with an honest preview note.
+    this.state = appendPreviewMessage(this.state, message);
+    return this.state;
+  }
+
+  async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
+    this.state = renamePreviewConversation(this.state, campaignId, title);
+    return this.state;
+  }
+
   async openInVsCode(): Promise<void> {
     // The browser preview cannot launch a local editor. The UI keeps this action explicit.
     return Promise.resolve();
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    // The browser preview is a development surface, and says so honestly:
+    // fault injection in Developer diagnostics is gated on exactly this.
+    return { version: "preview", channel: "preview", distribution: "dev", testMode: false, dataPath: "" };
   }
 }
 
@@ -441,6 +511,42 @@ class TauriCoreClient implements CoreClient {
     const persisted = persistedAttemptId(attemptId);
     if (persisted) payload.attemptId = persisted;
     return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_runtime", payload });
+  }
+
+  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string): Promise<CoreSnapshot> {
+    // ONE dispatch for the whole first-send orchestration; Core owns the
+    // at-most-once claim with this request identity. The caller keeps the id
+    // stable across retries of the same intent.
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: stableRequestId,
+      entityVersion: this.entityVersion,
+      messageType: "start_conversation",
+      payload: { workspaceRoot, provider, message }
+    });
+  }
+
+  async conversationSend(message: string, campaignId: string, attemptId?: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string | number | boolean> = { message, campaignId };
+    const persisted = persistedAttemptId(attemptId);
+    if (persisted) payload.attemptId = persisted;
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: requestId(),
+      entityVersion: this.entityVersion,
+      messageType: "conversation_send",
+      payload
+    });
+  }
+
+  async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: requestId(),
+      entityVersion: this.entityVersion,
+      messageType: "rename_conversation",
+      payload: { campaignId, title }
+    });
   }
 
   private rememberIsolatedSnapshot(): void {

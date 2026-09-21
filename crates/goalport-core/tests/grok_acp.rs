@@ -366,6 +366,38 @@ fn snapshot_of(response: &Value) -> Value {
     response["payload"]["snapshot"].clone()
 }
 
+/// `create_campaign` derives campaign/task identity from the request hash and
+/// requires an existing workspace, so fixtures must read the real ids back
+/// from the successful command snapshot instead of hardcoding
+/// `campaign-<request-id>` / `task-<request-id>`.
+fn create_campaign_fixture(
+    server: &CoreServer,
+    request_id: &str,
+    workspace: &Path,
+    goal: &str,
+) -> (String, String) {
+    let response = call(
+        server,
+        request_id,
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.to_string_lossy(),
+            "goal": goal
+        }),
+    );
+    assert_eq!(response["ok"], true, "create_campaign refused: {response}");
+    let snapshot = snapshot_of(&response);
+    let campaign_id = snapshot["activeCampaignId"]
+        .as_str()
+        .expect("campaign id in create snapshot")
+        .to_owned();
+    let task_id = snapshot["activeTask"]["id"]
+        .as_str()
+        .expect("root task id in create snapshot")
+        .to_owned();
+    (campaign_id, task_id)
+}
+
 static EPOCH_LOCK: Mutex<()> = Mutex::new(());
 
 /// A native Runtime event is only persisted against a committed Core launch
@@ -430,19 +462,19 @@ fn permission_ids_unique_across_sessions() {
     let mut attempts = Vec::new();
 
     for suffix in ["ida", "idb"] {
-        call(
+        let (campaign_id, task_id) = create_campaign_fixture(
             &server,
             &format!("grok-campaign-{suffix}"),
-            "create_campaign",
-            json!({ "goal": format!("decision id fixture {suffix}") }),
+            &workspace,
+            &format!("decision id fixture {suffix}"),
         );
         let response = call(
             &server,
             &format!("grok-select-{suffix}"),
             "select_runtime",
             json!({
-                "campaignId": format!("campaign-grok-campaign-{suffix}"),
-                "taskId": format!("task-grok-campaign-{suffix}"),
+                "campaignId": campaign_id,
+                "taskId": task_id,
                 "provider": "grok",
                 "executable": executable
             }),
@@ -453,9 +485,16 @@ fn permission_ids_unique_across_sessions() {
             .as_str()
             .unwrap_or_else(|| panic!("attempt id missing in {selected}"))
             .to_owned();
+        // Fresh admission derives the attempt id deterministically from the
+        // root task id and provider: `attempt-<sanitized task, 48 chars>-grok`.
+        let sanitized_task: String = task_id
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+            .take(48)
+            .collect();
         assert_eq!(
             attempt,
-            format!("attempt-task-grok-campaign-{suffix}-grok"),
+            format!("attempt-{sanitized_task}-grok"),
             "attempt ids stay deterministic per task and provider"
         );
         let sent = call(
@@ -463,7 +502,7 @@ fn permission_ids_unique_across_sessions() {
             &format!("grok-send-{suffix}"),
             "send_message",
             json!({
-                "campaignId": format!("campaign-grok-campaign-{suffix}"),
+                "campaignId": campaign_id,
                 "attemptId": attempt,
                 "message": "fixture prompt"
             }),
@@ -526,17 +565,30 @@ fn permission_ids_unique_across_sessions() {
 fn send_to_terminal_attempt_is_refused() {
     let workspace = fixture_workspace("terminal-guard", "end_turn");
     let (server, store) = core_server(&workspace, "66666666-7777-4888-8999-aaaaaaaaaaaa");
-    let selected = snapshot_of(&call(
+    // CoreServer::new no longer seeds the synthetic preview campaign; the
+    // fixture creates a real campaign on the existing fixture workspace and
+    // reads its ids back from the command snapshot.
+    let (campaign_id, task_id) = create_campaign_fixture(
+        &server,
+        "terminal-campaign",
+        &workspace,
+        "terminal guard refusal",
+    );
+    let response = call(
         &server,
         "terminal-select",
         "select_runtime",
         json!({
-            "campaignId": "campaign-synthetic-preview",
-            "taskId": "task-synthetic-preview",
+            "campaignId": campaign_id,
+            "taskId": task_id,
             "provider": "scenario"
         }),
-    ));
-    let attempt = selected["attempt"]["id"]
+    );
+    assert_eq!(
+        response["ok"], true,
+        "scenario runtime was refused: {response}"
+    );
+    let attempt = snapshot_of(&response)["attempt"]["id"]
         .as_str()
         .expect("attempt id")
         .to_owned();
@@ -546,7 +598,7 @@ fn send_to_terminal_attempt_is_refused() {
         "terminal-send-1",
         "send_message",
         json!({
-            "campaignId": "campaign-synthetic-preview",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "first turn"
         }),
@@ -576,7 +628,7 @@ fn send_to_terminal_attempt_is_refused() {
         "terminal-send-2",
         "send_message",
         json!({
-            "campaignId": "campaign-synthetic-preview",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "second turn"
         }),
@@ -662,19 +714,19 @@ fn cancelled_permission_decision_is_not_left_pending() {
     let workspace = fixture_workspace("cancel-pending-decision", "permission");
     let (server, store) = core_server(&workspace, "22222222-3333-4444-8555-666666666666");
     let executable = fake_agent().to_string_lossy().into_owned();
-    call(
+    let (campaign_id, task_id) = create_campaign_fixture(
         &server,
         "grok-campaign-cancelpend",
-        "create_campaign",
-        json!({ "goal": "cancel a pending permission" }),
+        &workspace,
+        "cancel a pending permission",
     );
     let response = call(
         &server,
         "grok-select-cancelpend",
         "select_runtime",
         json!({
-            "campaignId": "campaign-grok-campaign-cancelpend",
-            "taskId": "task-grok-campaign-cancelpend",
+            "campaignId": campaign_id,
+            "taskId": task_id,
             "provider": "grok",
             "executable": executable
         }),
@@ -689,7 +741,7 @@ fn cancelled_permission_decision_is_not_left_pending() {
         "grok-send-cancelpend",
         "send_message",
         json!({
-            "campaignId": "campaign-grok-campaign-cancelpend",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "fixture prompt"
         }),
@@ -795,19 +847,19 @@ fn second_message_while_turn_in_flight_is_refused_before_persisting() {
     let workspace = fixture_workspace("second-message", "cancel");
     let (server, store) = core_server(&workspace, "33333333-4444-4555-8666-777777777777");
     let executable = fake_agent().to_string_lossy().into_owned();
-    call(
+    let (campaign_id, task_id) = create_campaign_fixture(
         &server,
         "grok-campaign-inflight",
-        "create_campaign",
-        json!({ "goal": "second message while in flight" }),
+        &workspace,
+        "second message while in flight",
     );
     let response = call(
         &server,
         "grok-select-inflight",
         "select_runtime",
         json!({
-            "campaignId": "campaign-grok-campaign-inflight",
-            "taskId": "task-grok-campaign-inflight",
+            "campaignId": campaign_id,
+            "taskId": task_id,
             "provider": "grok",
             "executable": executable
         }),
@@ -822,7 +874,7 @@ fn second_message_while_turn_in_flight_is_refused_before_persisting() {
         "grok-send-inflight-1",
         "send_message",
         json!({
-            "campaignId": "campaign-grok-campaign-inflight",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "first prompt"
         }),
@@ -838,7 +890,7 @@ fn second_message_while_turn_in_flight_is_refused_before_persisting() {
         "grok-send-inflight-2",
         "send_message",
         json!({
-            "campaignId": "campaign-grok-campaign-inflight",
+            "campaignId": campaign_id,
             "attemptId": attempt,
             "message": "second prompt"
         }),

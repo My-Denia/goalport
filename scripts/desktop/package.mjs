@@ -130,7 +130,7 @@ function run(command, args, root, env, log) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const args = argsFor(argv, ["--out"]);
+  const args = argsFor(argv, ["--out", "--distribution"]);
   if (args.help) {
     console.log("Build the Windows Electron RC from current source:\n  pnpm electron:package [--out <new-directory>]\nRequires Git, Node >=22.19, pnpm 11.22.0, Rust 1.96.1 MSVC and Visual Studio C++ build tools.\nBuilds frontend, Core, launcher and optional broker; never reuses target/dist or overwrites outputs.");
     return;
@@ -138,6 +138,10 @@ export async function main(argv = process.argv.slice(2)) {
   if (process.platform !== "win32" || process.arch !== "x64") throw new Error("This RC build supports Windows x64 only");
   const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
   if (!/^\d+\.\d+\.\d+-rc\.[0-9]+$/.test(pkg.version)) throw new Error("Package version must explicitly identify an RC");
+  // Distribution separates the release channel from local development
+  // candidates. The default keeps the historical CI contract (no flags).
+  const distribution = args["--distribution"] || "release";
+  if (!["release", "dev-candidate"].includes(distribution)) throw new Error(`Unknown distribution: ${distribution}`);
   const out = claimOutput(args["--out"] || resolve(ROOT, "artifacts/electron-rc", `${pkg.version}-${new Date().toISOString().replace(/[:.]/g, "-")}`));
   const log = [];
   try {
@@ -161,7 +165,7 @@ export async function main(argv = process.argv.slice(2)) {
       if (!version.endsWith(` ${pkg.version}`)) throw new Error(`Component version mismatch: ${name}: ${version}`);
     }
     const buildInfo = {
-      schemaVersion: 1, product: "GoalPort", version: pkg.version, channel: "Stable V1 RC",
+      schemaVersion: 1, product: "GoalPort", version: pkg.version, channel: "Stable V1 RC", distribution,
       electronVersion: pkg.devDependencies.electron,
       source, builtAtUtc: new Date().toISOString(),
       tools: { node: process.version, pnpm: pkg.packageManager, cargo: cargoVersion, rust: rustVersion },
@@ -169,9 +173,9 @@ export async function main(argv = process.argv.slice(2)) {
     };
     const stage = resolve(out, "stage");
     mkdirSync(stage);
-    for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
+    for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
     cpSync(frontend, resolve(stage, "dist"), { recursive: true });
-    writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, main: "main.cjs" }, null, 2));
+    writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, main: "main.cjs" }, null, 2));
     writeFileSync(resolve(stage, "build-info.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);
     const { default: packager } = await import("electron-packager");
     const packages = await packager({
@@ -179,7 +183,7 @@ export async function main(argv = process.argv.slice(2)) {
       overwrite: false, asar: true, prune: false,
       electronVersion: pkg.devDependencies.electron, appVersion: pkg.version,
       buildVersion: pkg.version, extraResource: binaries,
-      win32metadata: { ProductName: "GoalPort", FileDescription: `GoalPort ${pkg.version} (RC)`, CompanyName: "GoalPort" }
+      win32metadata: { ProductName: "GoalPort", FileDescription: distribution === "dev-candidate" ? `GoalPort ${pkg.version} (RC, dev candidate)` : `GoalPort ${pkg.version} (RC)`, CompanyName: "GoalPort" }
     });
     if (packages.length !== 1) throw new Error("Expected exactly one Windows x64 package");
     const packageRoot = packages[0];

@@ -23,6 +23,13 @@ contextBridge.exposeInMainWorld("goalportCore", {
     ipcRenderer.on("goalport:close-prompt", listener);
     return () => ipcRenderer.removeListener("goalport:close-prompt", listener);
   },
+  bootstrapCurrent: () => ipcRenderer.invoke("goalport:bootstrap-current"),
+  bootstrapAction: (payload) => ipcRenderer.invoke("goalport:bootstrap-action", payload),
+  onBootstrapState: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("goalport:bootstrap-state", listener);
+    return () => ipcRenderer.removeListener("goalport:bootstrap-state", listener);
+  },
   onCloseChoiceFailed: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("goalport:close-choice-failed", listener);

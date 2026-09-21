@@ -11,7 +11,9 @@ pub mod commands;
 pub mod domain;
 pub mod ipc;
 pub mod process_identity;
+pub mod product_conversation;
 pub mod product_receipts;
+pub mod profile_ops;
 pub mod projection;
 pub mod runtime_manager;
 pub mod store;
@@ -30,12 +32,17 @@ pub use ipc::{
     CoreServer, IpcClient, IpcError, IpcRequest, IpcResponse, UiCommandRequest, UiCommandResponse,
 };
 pub use projection::{CoreSnapshot, UiCommandResult, UiController};
+pub use product_conversation::{
+    ProductConversation, ProductConversationItem, ProductRuntimeSelection, ProductTurn,
+};
 pub use runtime_manager::{
-    RuntimeIdentitySummary, RuntimeManager, RuntimeSendResult, RuntimeSessionResult,
+    RuntimeIdentitySummary, RuntimeManager, RuntimeSendResult, RuntimeSessionResult, TurnFacts,
 };
 pub use store::{
-    AppendEventOutcome, AttemptRecovery, CampaignAuthorization, CoreLaunchEpoch, EventRecord,
-    SqliteStore, Store, StoreCounts, StoreError,
+    AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ConfirmedStopSuccessor,
+    ConversationPreference, ConversationPrepareOutcome, ConversationRequestPhase,
+    ConversationRequestRow, ConversationStart, CoreLaunchEpoch, EventRecord, SqliteStore, Store,
+    StoreCounts, StoreError,
 };
 
 pub const CORE_PROTOCOL_VERSION: &str = "goalport.core.v1";
