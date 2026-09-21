@@ -64,9 +64,22 @@ function readOwnedIdentity({ profileDirectory, packageRoot, coreSha256, version,
   const canonical = (value) => canonicalIdentityPath(value, realpath);
   const marker = JSON.parse(readText(resolve(profileDirectory, "goalport-profile.json")));
   const ready = JSON.parse(readText(resolve(profileDirectory, "goalport.sqlite.launch-ready")));
-  assert.equal(marker.product, "GoalPort"); assert.equal(marker.schemaVersion, 1);
-  assert.equal(marker.coreSha256, coreSha256); assert.equal(marker.version, version); assert.equal(marker.mode, mode);
+  // Marker schema v1 (rc.1-era {schemaVersion: 1}) or v2 (packaged
+  // {markerSchemaVersion: 2}); same field precedence as the product's
+  // parseMarkerText. Anything else is unknown and refuses cleanup.
+  const markerSchema = marker.markerSchemaVersion ?? marker.schemaVersion;
+  assert.equal(marker.product, "GoalPort");
+  assert.ok(markerSchema === 1 || markerSchema === 2, `unknown profile marker schema ${JSON.stringify(markerSchema)}`);
+  assert.equal(marker.mode, mode);
   assert.ok(marker.identityVersion === undefined || marker.identityVersion === 2, "unknown profile identity format");
+  if (markerSchema === 1) {
+    assert.equal(marker.coreSha256, coreSha256); assert.equal(marker.version, version);
+  } else {
+    // v2 builder provenance (createdBy/lastOpenedBy, and any inline version or
+    // coreSha256) is never cleanup authority: build identity stays bound to the
+    // committed ready record and the expected executable path + file hash below.
+    assert.equal(marker.identityVersion, 2, "marker v2 must carry identityVersion 2");
+  }
   // Legacy receipt support is only for cleaning owned test processes, never for
   // profile adoption. Database comparison below always preserves canonical case.
   const directoryKey = marker.identityVersion === 2 ? canonical(profileDirectory) : canonical(profileDirectory).toLowerCase();

@@ -92,7 +92,7 @@ try {
         mode: profile.mode,
         profileKey: profile.profileKey
       },
-      deps: { execCore: runCoreProfileCommand, log: (line) => console.log(`[profile] ${line}`) }
+      deps: { execCore: runTracedCoreProfileCommand, log: (line) => console.log(`[profile] ${line}`) }
     });
     const env = childEnvironment(process.env, profile);
     for (const key of Object.keys(process.env)) {
@@ -456,6 +456,139 @@ function runCoreProfileCommand(args) {
       resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0, stdout: String(stdout ?? ""), error: error?.message });
     });
   });
+}
+
+// ---------- Original startup inspection diagnostics ----------
+// Bounded, in-memory trace of the `goalport-core profile inspect` that the
+// profile bootstrap itself issues during startup. This is the ONLY record of
+// the original startup inspection; the separately-labelled post-failure
+// re-probe lives in scripts/desktop/diagnostics.mjs and never substitutes for
+// it. Diagnostic constraints:
+//   * additive only: the trace observes execCore results and NEVER alters
+//     them, the profile decision, the phase/kind contract or any
+//     goalport:bootstrap-state notification. It is exposed solely as the
+//     optional `diagnostics` child of the goalport:bootstrap-current result.
+//   * bounded and sanitized at the source: at most
+//     ORIGINAL_INSPECT_MAX_RECORDS records are kept; every captured string is
+//     capped and user-profile paths are redacted; stdout is never captured or
+//     exposed — only selected fact fields of the parsed report survive.
+//   * fail-safe: any error inside the trace is swallowed; diagnostics can
+//     never mask, delay or replace the original startup failure.
+const ORIGINAL_INSPECT_MAX_RECORDS = 8;
+const ORIGINAL_INSPECT_STRING_CAP = 200;
+const originalInspectTrace = { records: [], total: 0 };
+
+function redactTraceText(value) {
+  return String(value ?? "")
+    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi, "<user-profile>")
+    .replace(/\/(?:home|Users)\/[^/\s"']+/g, "<user-profile>")
+    .slice(0, ORIGINAL_INSPECT_STRING_CAP);
+}
+
+// Selected fact fields of the inspect report only. Anything else the report
+// carries (counts, epochs, foreign tables, arbitrary extra fields) is dropped.
+function selectedInspectFacts(value) {
+  if (!value || typeof value !== "object") return null;
+  const facts = {};
+  for (const key of ["ok", "exists", "openable", "needsRecovery", "empty"]) {
+    facts[key] = typeof value[key] === "boolean" ? value[key] : null;
+  }
+  for (const key of ["schemaVersion", "currentSchemaVersion"]) {
+    facts[key] = Number.isSafeInteger(value[key]) && value[key] >= 0 ? value[key] : null;
+  }
+  facts.quickCheck = typeof value.quickCheck === "string" ? redactTraceText(value.quickCheck) : null;
+  facts.errorReason = typeof value.error === "string" ? redactTraceText(value.error) : null;
+  return facts;
+}
+
+// Names the inspected database WITHOUT recording any path: the bootstrap's
+// own profile database vs. a discovery/import inspection of other data.
+function originalInspectTarget(args) {
+  try {
+    const dbIndex = args.indexOf("--db");
+    if (dbIndex < 0 || !args[dbIndex + 1] || !profile) return "unknown";
+    const relative = path.relative(path.resolve(profile.directory), path.resolve(String(args[dbIndex + 1])));
+    return relative.toLowerCase() === "goalport.sqlite" ? "own-database" : "other-database";
+  } catch {
+    return "unknown";
+  }
+}
+
+function beginOriginalInspectRecord(args) {
+  const record = {
+    target: originalInspectTarget(args),
+    status: "pending",
+    startedAt: isoNow(),
+    startedAtMs: Date.now(),
+    endedAt: null,
+    elapsedMs: null,
+    exitCode: null,
+    execError: null,
+    malformed: null,
+    parseNote: null,
+    facts: null
+  };
+  originalInspectTrace.records.push(record);
+  originalInspectTrace.total += 1;
+  if (originalInspectTrace.records.length > ORIGINAL_INSPECT_MAX_RECORDS) {
+    originalInspectTrace.records.splice(0, originalInspectTrace.records.length - ORIGINAL_INSPECT_MAX_RECORDS);
+  }
+  return record;
+}
+
+function completeOriginalInspectRecord(record, result) {
+  record.status = "completed";
+  record.endedAt = isoNow();
+  record.elapsedMs = Math.max(0, Date.now() - record.startedAtMs);
+  record.exitCode = Number.isInteger(result?.code) ? result.code : null;
+  record.execError = result?.error ? redactTraceText(result.error) : null;
+  try {
+    const line = String(result?.stdout || "").split(/\r?\n/).find((candidate) => candidate.trim());
+    if (!line) {
+      record.malformed = true;
+      record.parseNote = "no parsable output line";
+      return;
+    }
+    record.facts = selectedInspectFacts(JSON.parse(line));
+    record.malformed = false;
+  } catch (error) {
+    record.malformed = true;
+    record.parseNote = redactTraceText(error?.message || error);
+  }
+}
+
+// Snapshot for the optional diagnostics child of goalport:bootstrap-current.
+// A pending record reports its elapsed-so-far in the copy only; the live
+// record keeps waiting for its completion facts.
+function originalInspectDiagnostics() {
+  return {
+    kind: "original-startup-inspect-trace",
+    note: "bounded in-memory trace of the original startup `goalport-core profile inspect` recorded by this build; distinct from any post-failure diagnostic re-probe",
+    totalInspections: originalInspectTrace.total,
+    droppedRecords: Math.max(0, originalInspectTrace.total - originalInspectTrace.records.length),
+    records: originalInspectTrace.records.map((record) => {
+      const { startedAtMs, ...snapshot } = { ...record };
+      if (snapshot.status === "pending") snapshot.elapsedMs = Math.max(0, Date.now() - startedAtMs);
+      return snapshot;
+    })
+  };
+}
+
+function runTracedCoreProfileCommand(args) {
+  let record = null;
+  try {
+    if (Array.isArray(args) && args[0] === "profile" && args[1] === "inspect") record = beginOriginalInspectRecord(args);
+  } catch { /* diagnostics must never break startup */ }
+  const finish = (result) => {
+    try { if (record) completeOriginalInspectRecord(record, result); } catch { /* swallow */ }
+  };
+  return runCoreProfileCommand(args).then(
+    (result) => { finish(result); return result; },
+    (error) => {
+      finish({ code: -1, stdout: "", error: String(error?.message || error) });
+      throw error;
+    }
+  );
 }
 
 // ---------- profile bootstrap (startup continuity) ----------
@@ -929,7 +1062,18 @@ app.whenReady().then(() => {
     distribution: app.isPackaged ? (launchChannel || "release") : "dev",
     testMode: isolatedRequired(), dataPath: app.getPath("userData")
   }));
-  ipcMain.handle("goalport:bootstrap-current", () => lastBootstrapState);
+  ipcMain.handle("goalport:bootstrap-current", () => {
+    // An additive optional diagnostics child exposes
+    // the bounded original-inspect trace. The bootstrap state itself — every
+    // phase/kind and every goalport:bootstrap-state notification — is returned
+    // unchanged, and the child is never stored into lastBootstrapState.
+    if (!profileManager) return lastBootstrapState;
+    try {
+      return { ...lastBootstrapState, diagnostics: { originalProfileInspect: originalInspectDiagnostics() } };
+    } catch {
+      return lastBootstrapState;
+    }
+  });
   ipcMain.handle("goalport:bootstrap-action", (event, payload) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
       return { ok: false, error: "window-mismatch" };

@@ -10,22 +10,80 @@ import { argsFor, fileHash } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
-import { boundedFailureSummary, collectFailureDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
+import { boundedFailureSummary, collectFailureDiagnostics, collectStartupDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 import { clickPointFor } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const normalize = launchConfig.normalizedPath;
+const WORKSPACE_PRIVATE_PATHS = [process.cwd(), process.env.USERPROFILE, process.env.HOME, tmpdir()];
 const argv = process.argv.slice(2);
 const normal = argv.includes("--normal");
 const failBeforeReceipt = argv.includes("--fail-before-receipt");
 const args = argsFor(argv.filter((arg) => !["--normal", "--fail-before-receipt"].includes(arg)), ["--package", "--out", "--test-profile"]);
 
+// ---------------------------------------------------------------------------
+// This packaged regression driver exercises the
+// conversation-first UI of f372c50 ("make desktop conversations primary"):
+// draft-first goal creation (start_conversation), inline Runtime picker,
+// quiet successful sends, Session details, Scenario-only synthetic safety.
+// The previous driver asserted the superseded naming-dialog flow, permanent
+// details Runtime rows, the removed "Message recorded for task" banner and
+// creation-before-send assumptions. Every one of those assertions is mapped to
+// the equivalent current contract in `assertionMap` below; safety coverage is
+// retained, never deleted. UI steps are driven through CDP synthesized input
+// (mouse/keyboard events, NOT a physical-pointer test) and labelled `ui-cdp`;
+// direct `window.goalportCore.command` probes are labelled `api`; SQLite reads
+// are labelled `db`. No native provider subscription/end-to-end is claimed:
+// the native search path is empty and Scenario is the only admitted Runtime.
+// ---------------------------------------------------------------------------
+const ASSERTION_MAP = [
+  { superseded: "no goal means no composer in the DOM at all; empty state owns the start-goal CTA", current: "draft-first composer (#draft-workspace/#draft-message) is present with ZERO durable rows; first Send is the only creation path" },
+  { superseded: "#project-folder + #campaign-goal inside .first-run-dialog create form", current: ".draft-composer-form; workspace + inline draft Runtime picker + message; no naming step; title is deterministic from the first prompt" },
+  { superseded: "create campaign first, then select Runtime in permanent details rows (.runtime-row summary / Select X)", current: "Runtime chosen inline in the draft/composer .runtime-picker; Session details keeps a Change Runtime affordance" },
+  { superseded: "workspace-selection creates only Campaign and task (commands=0, attempts=0)", current: "first Send (start_conversation) atomically creates one project/campaign/task/attempt/reserved first message + succeeded conversation_request; no automatic second send" },
+  { superseded: "\"Message recorded for task\" success banner wait", current: "quiet success: draft cleared, no success banner, exact-once durable message/reply, rendered product conversation" },
+  { retained: "UI attempt.state labels remain lowercase", current: "waiting|active|completed|failed from attempt_to_ui; durable attempt states and refusal labels are separate contracts" },
+  { superseded: "terminal cross-provider race via two UI Select buttons clicked in one renderer task", current: "UI picker serializes (list closes on select); Core race proof retained through two concurrent raw select_runtime commands (labelled api)" },
+  { superseded: "explicit replay of send_message answers duplicate from any selected conversation", current: "replay of the exact UI conversation_send command/requestId: answered duplicate when its conversation is selected; refused fail-closed (\"not selected by Core\") while another conversation is displayed — recorded, not weakened" },
+  { superseded: "refusal text matched in page body (\"Core refused: ...\")", current: "visible readable refusal sentence in the notice banner plus the exact Core reason read from its collapsed technical disclosure and from durable rows" },
+  { superseded: "responsive check of .context-rail/.runtime-row summary", current: "responsive check of .campaign-nav, the composer .runtime-picker and the Session details drawer" }
+];
+const SELECTOR_MAP = {
+  draftComposer: ".draft-composer-form",
+  draftWorkspace: "#draft-workspace",
+  draftMessage: "#draft-message",
+  draftSubmit: ".draft-composer-form button[type='submit']",
+  draftRuntimePicker: ".draft-runtime-picker button[aria-label='Select Runtime']",
+  conversationComposer: ".composer textarea[aria-label='Message composer']",
+  sendButton: ".composer button[aria-label='Send message']",
+  composerRuntimePicker: ".composer-dock .runtime-picker button[aria-label='Select Runtime']",
+  runtimeOption: ".runtime-picker-item",
+  noticeBanner: ".status-banners .banner-notice",
+  technicalDetails: ".banner-notice .technical-details-pre",
+  newGoal: "button[aria-label='New goal']",
+  campaignItem: ".campaign-item",
+  sessionDetails: ".inspector[data-open='true']",
+  openDetails: "button[aria-label='Open details panel']",
+  closeDetails: "button[aria-label='Close details panel']",
+  changeRuntime: ".session-details-actions button",
+  renderedConversation: "[data-product-conversation='true']"
+};
+const PROTOCOL_MAP = {
+  transport: "window.goalportCore.command({protocolVersion:'goalport.ipc.v2', requestId, entityVersion:0, messageType, payload}) over the Electron preload IPC bridge",
+  firstSend: "DraftGoalComposer submit -> start_conversation {workspaceRoot, provider, message} with a caller-stable requestId (one command, at-most-once claim machine in Core)",
+  continuationSend: "Composer submit -> conversation_send {message, campaignId, attemptId} (send_message remains the Core-internal/native ledger command)",
+  runtimeChoice: "runtime-picker -> select_runtime {provider, campaignId, taskId, attemptId?} (draft picker is local state only; no Core command before first Send)",
+  responses: "accepted envelope {requestId, accepted:true, duplicate, snapshot} | refusal {goalportRejected:true, requestId, error}",
+  attemptStates: "UI: waiting|active|completed|failed; database state casing is checked separately"
+};
+
+// Initialize all driver contracts before entering the async smoke runner.
 if (args.help) {
   console.log("Usage: node scripts/desktop/smoke.mjs --package <package-directory> --out <new-evidence-directory> [--normal | --test-profile <new-absolute-profile>]\nCopies the complete RC outside source; verifies real GUI, IPC and Core with Scenario only. Node >=22.19 required.\nNormal mode uses ordinary data handling and inert markers, with empty native configuration/PATH. Default mode is explicitly synthetic-only.");
 } else {
-  await smoke().catch((error) => { console.error(sanitizeDiagnostic(error.stack || error, [process.env.USERPROFILE, process.env.HOME, tmpdir()])); process.exitCode = 1; });
+  await smoke().catch((error) => { console.error(sanitizeDiagnostic(error.stack || error, WORKSPACE_PRIVATE_PATHS)); process.exitCode = 1; });
 }
 
 async function smoke() {
@@ -47,9 +105,18 @@ async function smoke() {
   const nativeHome = resolve(scratch, "empty-native-home");
   const report = {
     schemaVersion: 1, status: "RUNNING", mode: normal ? "normal" : "synthetic-test",
+    driverRevision: "conversation-first-v1",
     startedAt: new Date().toISOString(), identity,
     originalPackage, packageRoot, scratch, profile, workspaceA, workspaceB,
     boundaryStates: ["first-run", "concurrent", "error-path", "interrupted"],
+    assertionMap: ASSERTION_MAP, selectorMap: SELECTOR_MAP, protocolMap: PROTOCOL_MAP,
+    probeKinds: {
+      uiInput: "CDP Input.dispatchMouseEvent/Input.insertText synthesized renderer input (not a physical-pointer test)",
+      apiProbes: "direct window.goalportCore.command IPC calls",
+      durableChecks: "read-only SQLite inspection of the profile database",
+      nativeEndToEnd: false,
+      nativeSubscriptionAdmission: false
+    },
     steps: [], cleanup: [], realSubscriptionAdmission: false
   };
   const save = () => writeFileSync(resolve(out, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
@@ -59,6 +126,7 @@ async function smoke() {
   for (const dir of [workspaceA, workspaceB, nativeHome]) mkdirSync(dir, { recursive: true });
   let child, page, coreIdentity, logFd;
   let stage = "prepare-launch";
+  const zeroCounts = () => ({ projects: 0, campaigns: 0, tasks: 0, attempts: 0, commands: 0, outbox: 0, conversation_requests: 0, conversation_preferences: 0 });
   const marker = (name, evidence = {}) => {
     report.steps.push({ name, at: new Date().toISOString(), ...evidence }); save();
     console.log(`PASS ${name}`);
@@ -77,7 +145,7 @@ async function smoke() {
     const db = new DatabaseSync(resolve(profile, "goalport.sqlite"), { readOnly: true });
     try { return db.prepare(sql).all(...params); } finally { db.close(); }
   };
-  const counts = () => Object.fromEntries(["projects", "campaigns", "tasks", "attempts", "commands", "outbox"].map((name) => [name, dbRows(`SELECT COUNT(*) AS n FROM ${name}`)[0].n]));
+  const counts = () => Object.fromEntries(["projects", "campaigns", "tasks", "attempts", "commands", "outbox", "conversation_requests", "conversation_preferences"].map((name) => [name, dbRows(`SELECT COUNT(*) AS n FROM ${name}`)[0].n]));
   const events = (attempt) => dbRows("SELECT seq,kind,payload_json FROM events WHERE attempt_id = ? ORDER BY seq", attempt).map((row) => ({ ...row, payload: row.payload_json ? JSON.parse(row.payload_json) : null }));
   const read = (expression) => page.evaluate(expression, true);
   const snapshot = () => read("window.goalportCore.snapshot()");
@@ -85,76 +153,121 @@ async function smoke() {
   const body = () => read("document.body.innerText");
   const uiAttempt = () => read("document.querySelector('[data-attempt-id]')?.dataset.attemptId");
   const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false };
-  const viewport = () => read("(() => { const rail = document.querySelector('.context-rail'); const rect = document.querySelector('.runtime-row summary')?.getBoundingClientRect(); return { width: innerWidth, height: innerHeight, devicePixelRatio, railDisplay: rail ? getComputedStyle(rail).display : null, runtimeSummary: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null }; })()");
+  const viewport = () => read("(() => { const nav = document.querySelector('.campaign-nav'); const picker = document.querySelector('.runtime-picker-button'); const rect = picker?.getBoundingClientRect(); return { width: innerWidth, height: innerHeight, devicePixelRatio, navDisplay: nav ? getComputedStyle(nav).display : null, runtimePicker: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null }; })()");
   const screen = async (name) => {
     const image = await page.cdp("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     writeFileSync(resolve(out, `${name}.png`), Buffer.from(image.data, "base64"));
     writeFileSync(resolve(out, `${name}.txt`), await body());
   };
-  const click = async (selector, exactText) => {
-    const expression = `(() => { const el = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}); if (!el) throw Error('control missing'); if (el.disabled) throw Error('control disabled'); el.scrollIntoView({block:'center',inline:'center'}); return true; })()`;
-    await read(expression);
+  const clickFound = async (finderJs) => {
+    await read(`(() => { const el = ${finderJs}; if (!el) throw Error('control missing'); if (el.disabled) throw Error('control disabled'); el.scrollIntoView({block:'center',inline:'center'}); return true; })()`);
     await sleep(50);
-    const point = await read(`(${clickPointFor.toString()})(Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"}))`);
+    const point = await read(`(${clickPointFor.toString()})(${finderJs})`);
     await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
     await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
   };
+  const click = (selector, exactText) => clickFound(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"})`);
   const fill = async (selector, text) => {
     await click(selector);
     await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 });
     await page.cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 });
     await page.cdp("Input.insertText", { text });
   };
+  const pickRuntime = async (name, scope = "composer") => {
+    const root = scope === "draft" ? ".draft-runtime-picker" : ".composer-dock .runtime-picker";
+    await click(`${root} button[aria-label='Select Runtime']`);
+    const finder = `Array.from(document.querySelectorAll('${root} .runtime-picker-item')).find(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)})`;
+    await until(`${name} runtime option visible`, () => read(`Boolean(${finder})`));
+    await clickFound(finder);
+  };
+  const notice = () => read("(() => { const banner = document.querySelector('.status-banners .banner-notice'); return banner ? { sentence: banner.innerText.split('\\n')[0], technical: banner.querySelector('.technical-details-pre')?.textContent ?? null } : null; })()");
+  const dismissNotice = async () => {
+    if (await read("Boolean(document.querySelector('.status-banners .banner-notice'))")) {
+      await click("button[aria-label='Dismiss notification']");
+      await until("notice dismissed", () => read("Boolean(!document.querySelector('.status-banners .banner-notice'))"));
+    }
+  };
+  const openNoticeDetails = async () => {
+    const summary = ".status-banners .banner-notice .technical-details > summary";
+    if (await read(`Boolean(document.querySelector(${JSON.stringify(summary)}))`)) {
+      await click(summary);
+      await until("technical disclosure open", () => read("Boolean(document.querySelector('.status-banners .banner-notice .technical-details[open]'))"));
+    }
+  };
   const openInspector = async () => {
-    const state = await read("Boolean(document.querySelector('.inspector[data-open='true']'))");
-    if (!state) await click("button[aria-label='Open details panel']");
-    await until("inspector open", () => read("Boolean(document.querySelector('.inspector[data-open='true']'))"));
+    if (!(await read("Boolean(document.querySelector('.inspector[data-open=\"true\"]'))"))) await click("button[aria-label='Open details panel']");
+    await until("session details open", () => read("Boolean(document.querySelector('.inspector[data-open=\"true\"]'))"));
   };
-  const choose = async (name) => {
-    await openInspector();
-    const selector = ".runtime-row summary";
-    const summary = await read(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.textContent.trim()`);
-    const open = await read(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.parentElement.open`);
-    if (!open) await click(selector, summary);
-    await click(".runtime-row button", `Select ${name}`);
+  const closeInspector = async () => {
+    await click("button[aria-label='Close details panel']");
+    await until("session details closed", () => read("Boolean(!document.querySelector('.inspector[data-open=\"true\"]'))"));
   };
-  const create = async (workspace, goal, first = false) => {
-    if (!first) await click("button[aria-label='New goal']");
-    await until("campaign form", () => read("Boolean(document.querySelector('#campaign-goal'))"));
-    await fill("#project-folder", workspace);
-    await fill("#campaign-goal", goal);
-    await click(".first-run-dialog button[type='submit']");
-    await until(`campaign ${goal}`, async () => {
+  const composerProbe = "(() => { const button = document.querySelector('.composer button[aria-label=\"Send message\"]'); const area = document.querySelector('.composer textarea[aria-label=\"Message composer\"]'); return { disabled: button ? button.disabled : null, busy: button ? button.textContent.includes('Sending') : null, draft: area ? area.value : null, banner: Boolean(document.querySelector('.status-banners .banner-notice')) }; })()";
+  // First-send: the draft is local; one start_conversation command creates the
+  // whole conversation and delivers the first message exactly once.
+  const startGoal = async (workspace, message, first = false) => {
+    if (!first) {
+      await click("button[aria-label='New goal']");
+      await until("new goal draft opened", () => read("Boolean(document.querySelector('#draft-workspace'))"));
+    } else {
+      await until("first draft composer", () => read("Boolean(document.querySelector('#draft-workspace'))"));
+    }
+    await fill("#draft-workspace", workspace);
+    await pickRuntime("Scenario Runtime", "draft");
+    await fill("#draft-message", message);
+    await until("draft ready to send", () => read("(() => { const button = document.querySelector('.draft-composer-form button[type=\"submit\"]'); return Boolean(button && !button.disabled); })()"));
+    await click(".draft-composer-form button[type='submit']");
+    await until(`conversation ${message}`, async () => {
+      if (await read("Boolean(document.querySelector('#draft-message'))")) return false;
       const state = await snapshot();
-      return state.campaigns.some((campaign) => campaign.title === goal) && !(await read("Boolean(document.querySelector('#campaign-goal'))"));
+      return state.activeCampaignId !== ""
+        && state.attempt.provider === "scenario"
+        && (state.productConversation?.items ?? []).some((item) => item.kind === "user-message" && item.body === message);
     });
     const state = await snapshot();
     assert.equal(normalize(state.project.workspaceRoot), normalize(workspace));
-    assert.equal(state.attempt.id, "attempt-unassigned");
+    assert.ok(state.attempt.id !== "attempt-unassigned");
+    const campaign = state.campaigns.find((row) => row.id === state.activeCampaignId);
+    assert.equal(campaign?.title, message, "deterministic title is the normalized first prompt");
     return state;
   };
+  // Explicit Send on an existing conversation (conversation_send). Success is
+  // quiet: cleared draft plus durable exact-once rows and a rendered reply —
+  // the removed success banner is never waited for.
   const send = async (text, { fail = false, turnFailure = false, timeout = 20000 } = {}) => {
-    await fill("textarea[aria-label='Message composer']", text);
-    await click("button[aria-label='Send message']");
+    const beforeAttempt = (await snapshot()).attempt.id;
+    const beforeSeq = events(beforeAttempt).at(-1)?.seq ?? 0;
+    await dismissNotice();
+    await fill(".composer textarea[aria-label='Message composer']", text);
+    await click(".composer button[aria-label='Send message']");
     await until("send disposition", async () => {
-      const content = await body();
-      const form = await read("({busy:document.querySelector('button[aria-label=\"Send message\"]')?.textContent.includes('Sending'),draft:document.querySelector('textarea[aria-label=\"Message composer\"]')?.value})");
-      return !form.busy && (fail ? content.includes("Core refused:") && form.draft === text : content.includes("Message recorded for task") && form.draft === "");
+      const form = await read(composerProbe);
+      return !form.busy && (fail ? form.banner === true && form.draft === text : form.draft === "");
     }, timeout);
-    const draft = await read("document.querySelector('textarea[aria-label=\"Message composer\"]').value");
+    const draft = await read("document.querySelector('.composer textarea[aria-label=\"Message composer\"]').value");
     assert.equal(draft, fail ? text : "");
+    if (!fail) assert.ok((await body()).includes(text.split("\n")[0]), "message visible in the rendered conversation");
     const state = await snapshot();
     if (!fail) {
-      const rows = events(state.attempt.id);
+      // A conversation already contains its first-send turn. Assert this
+      // explicit turn's events, not the entire attempt's historical totals.
+      const rows = events(state.attempt.id).filter((event) => state.attempt.id !== beforeAttempt || event.seq > beforeSeq);
       const user = rows.filter((event) => event.kind === "message.user" && (event.payload?.text ?? event.payload?.message) === text);
       const reply = rows.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === text);
       assert.equal(user.length, 1, "one exact user message");
+      assert.ok((state.productConversation?.items ?? []).some((item) => item.kind === "user-message" && item.body === text), "user message rendered in the product conversation");
       if (turnFailure) {
         assert.equal(reply.length, 0, "failed synthetic turn cannot fabricate a reply");
         assert.equal(rows.filter((event) => event.kind === "runtime.turn.failed").length, 1);
-        assert.equal(rows.filter((event) => ["runtime.tool.activity", "runtime.waiting", "runtime.turn.completed"].includes(event.kind)).length, 0);
-        assert.equal(state.attempt.state, "failed");
-      } else assert.equal(reply.length, 1, "one exact synthetic reply");
+        assert.equal(rows.filter((event) => event.kind === "runtime.tool.activity").length, 0);
+        assert.equal(rows.filter((event) => event.kind === "runtime.waiting").length, 0);
+        assert.equal(rows.filter((event) => event.kind === "runtime.turn.completed").length, 0);
+        await until("terminal failed attempt", async () => (await snapshot()).attempt.state === "failed", timeout);
+        assert.equal((await snapshot()).attempt.state, "failed");
+      } else {
+        assert.equal(reply.length, 1, "one exact synthetic reply");
+        assert.ok((state.productConversation?.items ?? []).some((item) => item.kind === "assistant-message" && item.body === text), "reply rendered in the product conversation");
+      }
     }
     return state;
   };
@@ -193,7 +306,7 @@ async function smoke() {
     await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
     await until("desktop Runtime controls visible", async () => {
       const current = await viewport();
-      return current.width === desktopViewport.width && current.railDisplay !== "none" && current.runtimeSummary?.width > 0;
+      return current.width === desktopViewport.width && current.navDisplay !== "none" && current.runtimePicker?.width > 0;
     });
     const actualViewport = await viewport();
     (report.viewportStarts ??= []).push({ initial: initialViewport, actual: actualViewport });
@@ -239,177 +352,304 @@ async function smoke() {
 
   try {
     await start();
+    // --- First-run boundary: a draft exists, nothing durable does. ----------
     const empty = await snapshot();
     assert.equal(empty.preview, false);
-    assert.deepEqual(counts(), { projects: 0, campaigns: 0, tasks: 0, attempts: 0, commands: 0, outbox: 0 });
+    assert.deepEqual(counts(), zeroCounts());
     assert.equal(empty.attempt.id, "attempt-unassigned");
-    const emptyState = await read("({composer: Boolean(document.querySelector('textarea[aria-label=\"Message composer\"]')), cta: Boolean(Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().startsWith('Start a goal')))})");
-    assert.equal(emptyState.composer, false, "no goal means no composer in the DOM at all");
-    assert.equal(emptyState.cta, true, "empty state owns the start-goal CTA");
-    await screen("01-first-run");
-    marker("empty ordinary product projection and no automatic input", { counts: counts() });
+    const emptyState = await read("(() => ({ draft: Boolean(document.querySelector('.draft-composer-form')), workspace: Boolean(document.querySelector('#draft-workspace')), message: Boolean(document.querySelector('#draft-message')), picker: Boolean(document.querySelector('.draft-runtime-picker button[aria-label=\"Select Runtime\"]')), sendDisabled: document.querySelector('.draft-composer-form button[type=\"submit\"]')?.disabled ?? null, navEmpty: document.body.innerText.includes('No goals yet') }))()");
+    assert.equal(emptyState.draft, true, "draft-first composer is present before any goal");
+    assert.equal(emptyState.workspace, true, "draft workspace field present");
+    assert.equal(emptyState.message, true, "draft message field present");
+    assert.equal(emptyState.sendDisabled, true, "draft Send disabled until workspace+Runtime+message are ready");
+    assert.equal(emptyState.navEmpty, true, "navigation shows no goals yet");
+    await screen("01-empty-draft");
+    marker("ui-cdp+db/empty-draft-zero-durable-rows", { draftControls: emptyState, counts: counts(), superseded: "old no-composer/no-goal assertion" });
 
-    await click("button[aria-label='New goal']");
-    await until("first goal form opened by user", () => read("Boolean(document.querySelector('#project-folder'))"));
-    await fill("#project-folder", resolve(scratch, "does-not-exist"));
-    await fill("#campaign-goal", "Keep this failed form");
-    await click(".first-run-dialog button[type='submit']");
-    await until("invalid workspace refusal", () => read("Boolean(document.querySelector('.first-run-dialog [role=alert]'))"));
-    assert.equal(await read("document.querySelector('#campaign-goal').value"), "Keep this failed form");
-    assert.equal(counts().projects, 0);
-    marker("failed first-use form preserves input and leaves no project");
-
-    const first = await create(workspaceA, `RC ${report.mode} Campaign A`, true);
-    assert.equal(counts().commands, 0);
-    assert.equal(counts().attempts, 0);
-    await screen("02-created-no-runtime");
-    marker("workspace selection creates only Campaign and task", { campaignId: first.activeCampaignId, taskId: first.activeTask.id });
-
+    // --- Synthetic firewall BEFORE any row exists: a native first-send must
+    // --- refuse before campaign/task/attempt/input and start no process.
     if (!normal) {
+      const refused = [];
       for (const provider of ["codex", "claude", "grok"]) {
-        const denied = await command("select_runtime", { provider, campaignId: first.activeCampaignId, taskId: first.activeTask.id });
+        const denied = await command("start_conversation", { workspaceRoot: workspaceA, provider, message: `RC ${provider} refused native first-send` });
         assert.equal(denied.goalportRejected, true);
-        assert.match(denied.error, /test profile permits only.*Scenario Runtime/i);
-        const explicit = await command("select_runtime", { provider, campaignId: first.activeCampaignId, taskId: first.activeTask.id, executable: resolve(scratch, "never-start.exe") });
-        assert.equal(explicit.goalportRejected, true);
-        assert.match(explicit.error, /test profile permits only.*Scenario Runtime/i);
+        assert.match(denied.error, /test profile permits only the in-process Scenario Runtime/i);
+        refused.push({ provider, error: denied.error });
       }
-      assert.equal(counts().attempts, 0);
+      assert.deepEqual(counts(), zeroCounts());
       assertNoNativeChildren();
-      marker("synthetic-only native admission firewall", { attemptedProviders: ["codex", "claude", "grok"], nativeChildren: 0, attempts: 0 });
+      marker("api/synthetic-start-conversation-firewall-before-any-rows", { refused, counts: counts(), nativeChildren: 0 });
     }
-    await choose("Scenario Runtime");
-    await until("Scenario selection", async () => (await snapshot()).attempt.provider === "scenario" && (await uiAttempt()) !== "attempt-unassigned");
-    const selected = await snapshot();
-    const firstAttempt = selected.attempt.id;
+
+    // --- Invalid workspace refusal preserves the draft and writes nothing. --
+    await fill("#draft-workspace", resolve(scratch, "does-not-exist"));
+    await pickRuntime("Scenario Runtime", "draft");
+    await fill("#draft-message", "Keep this failed draft");
+    await click(".draft-composer-form button[type='submit']");
+    await until("invalid workspace refusal", () => read("Boolean(document.querySelector('.draft-composer-form .dialog-note[role=\"alert\"]'))"));
+    assert.equal(await read("document.querySelector('#draft-message').value"), "Keep this failed draft");
+    assert.equal(await read("document.querySelector('#draft-workspace').value"), resolve(scratch, "does-not-exist"));
+    const draftRefusal = {
+      visible: await read("document.querySelector('.draft-composer-form .dialog-note[role=\"alert\"]').innerText"),
+      technical: await read("document.querySelector('.draft-composer-form .dialog-note[role=\"alert\"] .technical-details-pre')?.textContent ?? null")
+    };
+    assert.match(draftRefusal.technical ?? "", /workspaceRoot must name an existing directory/);
+    assert.deepEqual(counts(), zeroCounts());
+    await screen("02-invalid-workspace-refusal");
+    marker("ui-cdp+db/invalid-workspace-refusal-preserves-draft", { refusal: draftRefusal, counts: counts() });
+
+    // --- FIRST-SEND: one command creates exactly one conversation. ---------
+    const goalA = `RC ${report.mode} Campaign A first goal`;
+    await fill("#draft-workspace", workspaceA);
+    await fill("#draft-message", goalA);
+    await click(".draft-composer-form button[type='submit']");
+    await until(`conversation ${goalA} created by first send`, async () => {
+      if (await read("Boolean(document.querySelector('#draft-message'))")) return false;
+      const state = await snapshot();
+      return state.activeCampaignId !== "" && (state.productConversation?.items ?? []).some((item) => item.kind === "user-message" && item.body === goalA);
+    });
+    const first = await snapshot();
+    const afterFirst = counts();
+    assert.equal(afterFirst.projects, 1, "one project");
+    assert.equal(afterFirst.campaigns, 1, "one campaign");
+    assert.equal(afterFirst.tasks, 1, "one root task");
+    assert.equal(afterFirst.attempts, 1, "one attempt");
+    assert.equal(afterFirst.conversation_requests, 1, "one orchestration request");
+    assert.equal(first.attempt.provider, "scenario");
+    assert.equal(normalize(first.project.workspaceRoot), normalize(workspaceA));
+    const requestA = dbRows("SELECT request_id,campaign_id,task_id,attempt_id,phase FROM conversation_requests")[0];
+    assert.equal(requestA.phase, "succeeded");
+    assert.equal(requestA.campaign_id, first.activeCampaignId);
+    assert.equal(requestA.task_id, first.activeTask.id);
+    assert.equal(requestA.attempt_id, first.attempt.id);
+    const firstAttempt = first.attempt.id;
+    const rowsA = events(firstAttempt);
+    assert.equal(rowsA.filter((event) => event.kind === "message.user" && event.payload?.text === goalA).length, 1, "reserved first message recorded exactly once");
+    assert.equal(rowsA.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === goalA).length, 1, "one synthetic reply to the first message");
+    assert.equal((await read("document.querySelectorAll('.campaign-item').length")), 1, "one goal in navigation");
+    await screen("03-first-send-created");
+    marker("ui-cdp+db/first-send-creates-one-conversation-atomically", { campaignId: first.activeCampaignId, taskId: first.activeTask.id, attemptId: firstAttempt, conversationRequest: requestA, counts: afterFirst, superseded: "old create-then-select two-step assertions" });
+
+    // --- Same-binding reselect is idempotent (no second attempt). ----------
     const beforeReselect = counts();
-    await choose("Scenario Runtime");
-    await sleep(200);
+    await pickRuntime("Scenario Runtime");
+    await until("Scenario selection reused", async () => {
+      const state = await snapshot();
+      return state.attempt.id === firstAttempt && state.attempt.provider === "scenario" && (await uiAttempt()) === firstAttempt;
+    });
+    await sleep(300);
     assert.equal((await snapshot()).attempt.id, firstAttempt);
     assert.equal(counts().attempts, beforeReselect.attempts);
-    marker("first Runtime selection and same-binding reselect", { attemptId: firstAttempt });
+    marker("ui-cdp/same-binding-reselect-keeps-attempt", { attemptId: firstAttempt });
 
-    // Existing-binding conflict is safe even in normal mode; the native search
-    // path is empty, and synthetic mode adds the Core-level firewall.
-    await choose("Codex");
-    await until("visible binding conflict", async () => /Core refused:.*different Runtime binding/s.test(await body()));
+    // --- Runtime conflict through the inline picker: existing binding kept. -
+    await pickRuntime("Codex");
+    await until("visible binding conflict notice", () => read("Boolean(document.querySelector('.status-banners .banner-notice'))"));
+    const conflict = await notice();
+    assert.match(conflict.sentence, /GoalPort could not complete that action\./);
+    assert.match(conflict.technical ?? "", /already bound to a different Runtime binding/);
+    await openNoticeDetails();
+    assert.match(await body(), /already bound to a different Runtime binding/);
     assert.equal((await snapshot()).attempt.id, firstAttempt);
     assert.equal(counts().attempts, beforeReselect.attempts);
-    await screen("03-runtime-conflict");
-    await choose("Scenario Runtime");
-    await until("successful reselect clears refusal", async () => !(await body()).includes("Core refused:"));
-    marker("provider conflict retains existing Runtime and later reselect clears error");
+    await screen("04-runtime-conflict");
+    await pickRuntime("Scenario Runtime");
+    await until("successful reselect clears refusal", () => read("Boolean(!document.querySelector('.status-banners .banner-notice'))"));
+    marker("ui-cdp/provider-conflict-retains-runtime-and-reselect-clears-error", { conflict, attemptId: firstAttempt, attempts: counts().attempts });
 
+    // --- Quiet success: exact Unicode message/reply once, draft cleared. ---
     const messageA = `RC ${report.mode} exact message · 中文 "quotes"\nsecond line <&>`;
+    const beforeQuiet = counts();
     await send(messageA);
-    await screen("04-message-fidelity");
-    marker("exact multiline Unicode message and reply delivered once", { attemptId: firstAttempt, commands: counts().commands });
+    assert.equal(counts().commands, beforeQuiet.commands + 1, "one send command for the quiet send");
+    assert.equal(await read("Boolean(document.querySelector('.status-banners .banner-notice'))"), false, "quiet success raises no banner");
+    await screen("05-message-fidelity");
+    marker("ui-cdp+db/quiet-exact-unicode-message-once", { attemptId: firstAttempt, commands: counts().commands, superseded: "old Message-recorded-for-task banner wait" });
+
     if (normal) {
       const started = Date.now();
       await send("RC-MARKER-FORCE-FAIL RC-MARKER-HOLD RC-MARKER-TURN-FAIL normal literal");
       assert.ok(Date.now() - started < 7000, "normal HOLD marker must be inert");
-      marker("normal profile failure/hold markers are ordinary text", { elapsedMs: Date.now() - started });
+      marker("ui-cdp/normal-failure-hold-markers-are-ordinary-text", { elapsedMs: Date.now() - started });
     } else {
+      // Failed send keeps the draft; the exact refusal is visible and durable.
       await send("RC-MARKER-FORCE-FAIL isolated failure", { fail: true });
+      const failedNotice = await notice();
+      assert.match(failedNotice.technical ?? "", /RC-MARKER-FORCE-FAIL/);
+      await openNoticeDetails();
       assert.match(await body(), /RC-MARKER-FORCE-FAIL/);
-      assert.ok(dbRows("SELECT * FROM commands WHERE attempt_id=? AND state='Failed'", firstAttempt).length > 0 || dbRows("SELECT * FROM commands WHERE attempt_id=? AND state='FAILED'", firstAttempt).length > 0);
-      await screen("05-failed-send-retained");
+      const failRows = events(firstAttempt);
+      assert.ok(failRows.filter((event) => event.kind === "runtime.send.failed" && String(event.payload?.error).includes("RC-MARKER-FORCE-FAIL")).length >= 1, "durable failure reason recorded");
+      assert.ok(dbRows("SELECT * FROM commands WHERE attempt_id=? AND state IN ('Failed','FAILED')", firstAttempt).length > 0);
+      assert.equal((await snapshot()).attempt.id, firstAttempt, "failed send keeps the same attempt");
+      await screen("06-failed-send-retained");
       await send("RC successful manual continuation after failure");
       assert.equal((await snapshot()).attempt.id, firstAttempt);
-      marker("failed send keeps input; next explicit send succeeds on same Attempt");
+      marker("ui-cdp+db/failed-send-keeps-input-next-explicit-send-succeeds", { refusal: failedNotice, attemptId: firstAttempt });
     }
 
-    const second = await create(workspaceB, `RC ${report.mode} Campaign B`);
+    // --- Independent second goal, including its own first message. ---------
+    const goalB = `RC ${report.mode} Campaign B first goal`;
+    const second = await startGoal(workspaceB, goalB);
     assert.notEqual(second.activeCampaignId, first.activeCampaignId);
     assert.notEqual(second.activeTask.id, first.activeTask.id);
-    await choose("Scenario Runtime");
-    await until("second Scenario choice", async () => (await snapshot()).attempt.provider === "scenario" && (await snapshot()).attempt.id !== firstAttempt);
-    const secondAttempt = (await snapshot()).attempt.id;
-    marker("independent Campaign selects its own Runtime", { campaignId: second.activeCampaignId, taskId: second.activeTask.id, attemptId: secondAttempt });
+    assert.notEqual(second.attempt.id, firstAttempt);
+    const secondAttempt = second.attempt.id;
+    assert.equal(events(secondAttempt).filter((event) => event.kind === "message.user" && event.payload?.text === goalB).length, 1, "independent goal carries its own initial message");
+    assert.equal(events(firstAttempt).filter((event) => event.kind === "message.user" && event.payload?.text === goalB).length, 0);
+    marker("ui-cdp+db/independent-campaign-own-runtime-and-first-message", { campaignId: second.activeCampaignId, taskId: second.activeTask.id, attemptId: secondAttempt });
 
     if (!normal) {
+      // Terminal rollover through the UI as implemented (picker), plus the
+      // change-runtime native admission firewall on the terminal attempt.
       await send("RC-MARKER-TURN-FAIL isolated terminal Attempt", { turnFailure: true });
-      const terminal = (await snapshot()).attempt.id;
-      assert.equal(terminal, secondAttempt);
-      marker("isolated Scenario produces a true failed Attempt", { terminal, events: events(terminal).map((event) => event.kind) });
-      // Open both actual Runtime sections, then issue two real button click
-      // events in one renderer task so neither response can update the view.
-      await openInspector();
-      for (const name of ["Scenario Runtime", "Codex"]) {
-        const summary = await read(`Array.from(document.querySelectorAll('.runtime-row summary')).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.textContent.trim()`);
-        const open = await read(`Array.from(document.querySelectorAll('.runtime-row summary')).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(name)})?.parentElement.open`);
-        if (!open) await click(".runtime-row summary", summary);
+      const bTerminal = (await snapshot()).attempt.id;
+      assert.equal(bTerminal, secondAttempt);
+      const beforeFirewall = counts();
+      const firewallRefusals = [];
+      for (const provider of ["codex", "claude", "grok"]) {
+        const denied = await command("select_runtime", { provider, campaignId: second.activeCampaignId, taskId: second.activeTask.id, attemptId: bTerminal });
+        assert.equal(denied.goalportRejected, true);
+        assert.match(denied.error, /test profile permits only the in-process Scenario Runtime/i);
+        const explicit = await command("select_runtime", { provider, campaignId: second.activeCampaignId, taskId: second.activeTask.id, attemptId: bTerminal, executable: resolve(scratch, "never-start.exe") });
+        assert.equal(explicit.goalportRejected, true);
+        assert.match(explicit.error, /test profile permits only the in-process Scenario Runtime/i);
+        firewallRefusals.push({ provider, error: denied.error });
       }
-      await read("window.__goalportCommandTrace = []");
-      await read("(() => { const buttons=Array.from(document.querySelectorAll('.runtime-row button')); const first=buttons.find(b=>b.textContent.trim()==='Select Scenario Runtime'); const second=buttons.find(b=>b.textContent.trim()==='Select Codex'); if(!first||!second||first.disabled||second.disabled) throw Error('race controls unavailable'); first.click(); second.click(); })()");
-      await until("race conflict", async () => /Core refused:.*different Runtime binding/s.test(await body()));
-      const trace = await read("window.__goalportCommandTrace.filter(x=>x.messageType==='select_runtime')");
-      const issued = trace.filter((entry) => entry.phase === "issued");
-      assert.equal(issued.length, 2);
-      assert.deepEqual(issued.map((entry) => entry.provider), ["scenario", "codex"]);
-      assert.ok(issued.every((entry) => entry.attemptId === terminal));
-      assert.deepEqual(trace.slice(0, 2).map((entry) => entry.phase), ["issued", "issued"]);
-      const live = dbRows("SELECT * FROM attempts WHERE task_id=? AND state IN ('Active','AwaitingReview','ACTIVE','AWAITING_REVIEW')", second.activeTask.id);
-      assert.equal(live.length, 1, "only one live replacement");
-      const replacement = (await snapshot()).attempt.id;
-      assert.notEqual(replacement, terminal);
-      assert.equal(live[0].id, replacement);
-      assert.equal(live[0].provider, "scenario");
-      const lineage = events(replacement).filter((entry) => entry.kind === "attempt.created" && entry.payload?.rolledFrom === terminal);
-      assert.equal(lineage.length, 1);
-      assert.equal(dbRows("SELECT * FROM attempts WHERE task_id=?", second.activeTask.id).length, 2);
+      assert.deepEqual(counts(), beforeFirewall, "refused change-runtime admissions write nothing");
       assertNoNativeChildren();
-      await screen("06-terminal-cross-provider-race");
-      marker("terminal cross-provider race has one replacement and exact conflict refusal", { terminal, replacement, trace, nativeChildren: 0 });
-      await choose("Scenario Runtime");
-      await until("race refusal cleared", async () => !(await body()).includes("Core refused:"));
-      await send("RC new Attempt after terminal race");
+      marker("api/select-runtime-native-admission-firewall-on-terminal-attempt", { refusals: firewallRefusals, counts: counts(), nativeChildren: 0, superseded: "old Scenario-only probes against a runtime-less campaign" });
+
+      await pickRuntime("Scenario Runtime");
+      await until("rollover replacement selected", async () => {
+        const state = await snapshot();
+        return state.attempt.id !== bTerminal && state.attempt.provider === "scenario";
+      });
+      const bReplacement = (await snapshot()).attempt.id;
+      assert.equal(events(bReplacement).filter((event) => event.kind === "attempt.created" && event.payload?.rolledFrom === bTerminal).length, 1, "replacement records rolledFrom lineage");
+      assert.equal(dbRows("SELECT COUNT(*) AS n FROM attempts WHERE task_id=?", second.activeTask.id)[0].n, 2, "terminal source plus one replacement");
+      marker("ui-cdp+db/terminal-rollover-via-runtime-picker", { terminal: bTerminal, replacement: bReplacement });
+      await send("RC new Attempt after terminal rollover");
     } else {
       await send("RC independent Campaign B first message");
     }
 
     if (!normal) {
-      const third = await create(workspaceB, "RC synthetic Campaign C");
-      await choose("Scenario Runtime");
-      await until("third Scenario selected", async () => (await snapshot()).attempt.provider === "scenario" && (await snapshot()).activeCampaignId === third.activeCampaignId);
-      const thirdAttempt = (await snapshot()).attempt.id;
-      const campaignButton = async (title) => read(`Array.from(document.querySelectorAll('.campaign-item')).find(e=>e.querySelector('strong')?.textContent===${JSON.stringify(title)})?.textContent.trim()`);
-      await click(".campaign-item", await campaignButton(`RC ${report.mode} Campaign B`));
+      // Third goal; its terminal attempt carries the concurrent cross-provider
+      // race proof. The current picker serializes selections (the list closes
+      // on choose), so the Core race is exercised with two concurrent raw
+      // select_runtime commands, explicitly labelled as an API probe.
+      const goalC = "RC synthetic Campaign C first goal";
+      const third = await startGoal(workspaceB, goalC);
+      const thirdTaskId = third.activeTask.id;
+      await send("RC-MARKER-TURN-FAIL isolated terminal Attempt C", { turnFailure: true });
+      const terminal = (await snapshot()).attempt.id;
+      const race = await read(`(async () => {
+        const request = (provider) => window.goalportCore.command({ protocolVersion: "goalport.ipc.v2", requestId: crypto.randomUUID(), entityVersion: 0, messageType: "select_runtime", payload: { provider, campaignId: ${JSON.stringify(third.activeCampaignId)}, taskId: ${JSON.stringify(thirdTaskId)}, attemptId: ${JSON.stringify(terminal)} } });
+        const scenario = request("scenario");
+        const codex = request("codex");
+        return { scenario: await scenario, codex: await codex };
+      })()`);
+      assert.equal(race.scenario.goalportRejected ?? false, false, "same-provider rollover is admitted");
+      assert.equal(race.scenario.accepted, true);
+      assert.equal(race.codex.goalportRejected, true, "cross-provider race request is refused");
+      assert.match(race.codex.error, /already bound to a different Runtime binding/);
+      const live = dbRows("SELECT * FROM attempts WHERE task_id=? AND state IN ('ACTIVE','AWAITING_REVIEW','Active','AwaitingReview')", thirdTaskId);
+      assert.equal(live.length, 1, "only one live replacement");
+      const replacement = live[0].id;
+      assert.notEqual(replacement, terminal);
+      assert.equal(live[0].provider, "scenario");
+      assert.equal(events(replacement).filter((event) => event.kind === "attempt.created" && event.payload?.rolledFrom === terminal).length, 1, "race replacement records lineage");
+      assert.equal(dbRows("SELECT COUNT(*) AS n FROM attempts WHERE task_id=?", thirdTaskId)[0].n, 2, "terminal source plus exactly one replacement");
+      assertNoNativeChildren();
+      await screen("07-cross-provider-race");
+      marker("api+db/concurrent-cross-provider-race-one-replacement-exact-refusal", {
+        terminal, replacement, scenarioAccepted: race.scenario.accepted === true, codexRefusal: race.codex.error, attemptsForTask: 2, nativeChildren: 0,
+        probe: "two concurrent raw select_runtime commands; the UI picker serializes and cannot issue two selections in one task",
+        superseded: "old two-button one-task UI race"
+      });
+      await until("race replacement visible in UI", async () => (await snapshot()).attempt.id === replacement);
+      await send("RC new Attempt after terminal race");
+
+      // --- Delayed duplicate send, current-goal switch and exact replay. ---
+      const campaignButton = (title) => read(`Array.from(document.querySelectorAll('.campaign-item')).find(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(title)})?.textContent.trim()`);
+      const cAttemptBeforeHold = (await snapshot()).attempt.id;
+      const cBaseline = {
+        counts: counts(),
+        cUserMessages: events(cAttemptBeforeHold).filter((event) => event.kind === "message.user").length
+      };
+      await click(".campaign-item", await campaignButton(goalB));
       await until("return to Campaign B", async () => (await snapshot()).activeCampaignId === second.activeCampaignId);
       const heldTarget = await snapshot();
       const heldText = "RC-MARKER-HOLD delayed message for Campaign B";
-      await fill("textarea[aria-label='Message composer']", heldText);
+      await fill(".composer textarea[aria-label='Message composer']", heldText);
       await read("window.__goalportCommandTrace = []");
-      await click("button[aria-label='Send message']");
-      await read("document.querySelector('button[aria-label=\"Send message\"]').click()");
-      await until("send still pending", () => read("document.querySelector('button[aria-label=\"Send message\"]').textContent.includes('Sending')"));
-      await click(".campaign-item", await campaignButton("RC synthetic Campaign C"));
+      await click(".composer button[aria-label='Send message']");
+      // A duplicate activation while the send is executing must not issue a
+      // second command (disabled primary action + in-flight guard).
+      await read("document.querySelector('.composer button[aria-label=\"Send message\"]').click()");
+      await until("send still pending with one issued command", async () => {
+        const pending = await read(composerProbe);
+        const trace = await read("window.__goalportCommandTrace.filter(x => x.messageType === 'conversation_send')");
+        return pending.disabled === true && trace.filter((entry) => entry.phase === "issued").length === 1;
+      });
+      await click(".campaign-item", await campaignButton(goalC));
       await until("latest Campaign C choice wins", async () => (await snapshot()).activeCampaignId === third.activeCampaignId && (await read("document.querySelector('[data-campaign-id]')?.dataset.campaignId")) === third.activeCampaignId);
       const trace = await read("window.__goalportCommandTrace");
-      const sends = trace.filter((entry) => entry.phase === "issued" && entry.messageType === "send_message");
+      const sends = trace.filter((entry) => entry.phase === "issued" && entry.messageType === "conversation_send");
       assert.equal(sends.length, 1, "duplicate click issues only one send");
       assert.equal(sends[0].campaignId, second.activeCampaignId);
       assert.equal(sends[0].attemptId, heldTarget.attempt.id);
-      const heldEvents = events(heldTarget.attempt.id);
-      assert.equal(heldEvents.filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length, 1);
-      assert.equal(heldEvents.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === heldText).length, 1);
+      await until("held message delivered once to its own conversation", () => {
+        const held = events(heldTarget.attempt.id);
+        return held.filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length === 1
+          && held.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === heldText).length === 1;
+      }, 30000);
+      // Replay of the exact UI command (type, payload, requestId) while another
+      // conversation is displayed is refused fail-closed by the current Core
+      // (the old global duplicate acknowledgement is a superseded contract).
       const beforeReplay = counts();
-      const replay = await command("send_message", { message: heldText, campaignId: second.activeCampaignId, taskId: heldTarget.activeTask.id, attemptId: heldTarget.attempt.id }, sends[0].requestId);
+      const replayRefused = await command("conversation_send", { message: heldText, campaignId: second.activeCampaignId, attemptId: heldTarget.attempt.id }, sends[0].requestId);
+      assert.equal(replayRefused.goalportRejected, true, "replay while another conversation is selected must not re-deliver");
+      assert.match(replayRefused.error, /is not selected by Core/);
+      assert.deepEqual(counts(), beforeReplay, "refused replay writes nothing");
+      // With its own conversation selected again, the identical request is
+      // answered from the recorded outcome: duplicate, nothing re-delivered.
+      await click(".campaign-item", await campaignButton(goalB));
+      await until("Campaign B selected again", async () => (await snapshot()).activeCampaignId === second.activeCampaignId);
+      const replay = await command("conversation_send", { message: heldText, campaignId: second.activeCampaignId, attemptId: heldTarget.attempt.id }, sends[0].requestId);
       assert.equal(replay.accepted, true);
-      assert.equal(replay.duplicate, true);
+      assert.equal(replay.duplicate, true, "exact replay answers the recorded outcome");
       assert.deepEqual(counts(), beforeReplay);
-      const currentDraft = await read("document.querySelector('textarea[aria-label=\"Message composer\"]').value");
-      marker("delayed send and explicit replay retain original target and one delivery", { sourceCampaign: second.activeCampaignId, selectedCampaign: third.activeCampaignId, currentDraft, trace, counts: counts() });
-      assert.equal(currentDraft, "", "already-sent Campaign B input must not appear in Campaign C");
-      assert.equal(events(thirdAttempt).filter((event) => event.kind === "message.user").length, 0);
-      await screen("07-delayed-send-new-campaign");
+      const heldAfterReplay = events(heldTarget.attempt.id);
+      assert.equal(heldAfterReplay.filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length, 1, "still exactly one delivery after replay");
+      assert.equal(heldAfterReplay.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === heldText).length, 1);
+      const currentDraft = await read("document.querySelector('.composer textarea[aria-label=\"Message composer\"]').value");
+      assert.equal(currentDraft, "", "already-sent Campaign B input must not appear in another conversation");
+      // Only the held send may add rows: one command, nothing else durable.
+      const afterDelayed = counts();
+      assert.equal(afterDelayed.commands - cBaseline.counts.commands, 1, "exactly one new command row for the held send");
+      for (const key of ["projects", "campaigns", "tasks", "attempts", "conversation_requests", "conversation_preferences"]) {
+        assert.equal(afterDelayed[key], cBaseline.counts[key], `${key} unchanged by delayed send and replays`);
+      }
+      assert.equal(events(cAttemptBeforeHold).filter((event) => event.kind === "message.user").length, cBaseline.cUserMessages, "Campaign C baseline unchanged");
+      assert.equal(events(cAttemptBeforeHold).filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length, 0);
+      await screen("08-delayed-send-new-campaign");
+      marker("ui-cdp+api+db/delayed-send-goal-switch-and-exact-replay", {
+        sourceCampaign: second.activeCampaignId, selectedCampaign: third.activeCampaignId,
+        issued: sends, replayWhileOtherSelected: { refused: replayRefused.error }, replayAnswer: { accepted: replay.accepted, duplicate: replay.duplicate },
+        counts: afterDelayed, superseded: "old send_message replay acknowledged from any selection"
+      });
+      await click(".campaign-item", await campaignButton(goalC));
+      await until("back to Campaign C", async () => (await snapshot()).activeCampaignId === third.activeCampaignId);
       await send("RC explicit independent Campaign C input");
     }
 
+    // --- Close/reopen: same Core, same selection, same history, no resend. --
     const beforeClose = counts();
     const beforeReopen = await snapshot();
     const oldCorePid = coreIdentity.pid;
-    await screen("07-before-close");
+    await screen("09-before-close");
     await closeWindow();
     await start();
     const reopened = await snapshot();
@@ -418,15 +658,20 @@ async function smoke() {
     assert.equal(reopened.attempt.id, beforeReopen.attempt.id);
     assert.deepEqual(counts(), beforeClose);
     assert.ok(reopened.timeline.some((item) => item.body?.includes("RC ")));
-    await screen("08-reopened");
+    assert.ok((reopened.productConversation?.items ?? []).some((item) => item.body.includes("RC ")), "product conversation survives reopen");
+    await screen("10-reopened");
     await send("RC explicit message after closing and reopening");
-    marker("close/reopen keeps current Core, task and history without resend", { corePid: oldCorePid, countsBefore: beforeClose, countsAfterManualSend: counts() });
+    marker("ui-cdp+db/close-reopen-keeps-core-task-history-without-resend", { corePid: oldCorePid, countsBefore: beforeClose, countsAfterManualSend: counts() });
+
+    // --- Responsive Session details at a narrow desktop width. -------------
     await page.cdp("Emulation.setDeviceMetricsOverride", { width: 1000, height: 800, deviceScaleFactor: 1, mobile: false });
-    await screen("09-narrow-window");
-    report.narrowLayout = { ...(await viewport()), coverage: "at 1000 CSS px the inspector drawer stays reachable (fixed rc.1 gap)" };
+    await until("narrow viewport applied", async () => (await viewport()).width === 1000);
+    await screen("11-narrow-window");
+    report.narrowLayout = { ...(await viewport()), coverage: "at 1000 CSS px the Session details drawer and composer Runtime picker stay reachable" };
     await openInspector();
-    await until("runtime controls reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(document.querySelector('.runtime-row summary')))`));
-    await click("button[aria-label='Close details panel']");
+    await until("runtime change affordance reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(Array.from(document.querySelectorAll('.session-details-actions button')).find(e => e.textContent.trim() === 'Change Runtime')))`));
+    await until("composer runtime picker reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(document.querySelector('.composer-dock .runtime-picker-button')))`));
+    await closeInspector();
     await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
     await until("desktop viewport restored", async () => (await viewport()).width === desktopViewport.width);
     assertNoNativeChildren();
@@ -434,15 +679,31 @@ async function smoke() {
     report.attempts = dbRows("SELECT id,task_id,provider,state FROM attempts ORDER BY rowid");
     report.commands = dbRows("SELECT id,attempt_id,kind,state,payload_hash FROM commands ORDER BY rowid");
     report.events = dbRows("SELECT attempt_id,seq,kind,payload_json FROM events ORDER BY rowid");
+    report.conversationRequests = dbRows("SELECT request_id,campaign_id,task_id,attempt_id,phase,source_attempt_id FROM conversation_requests ORDER BY rowid");
     report.status = "PASS";
   } catch (error) {
     report.status = "FAIL";
-    report.error = sanitizeDiagnostic(error.stack || error.message, [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]);
+    report.error = sanitizeDiagnostic(error.stack || error.message, [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]);
     report.diagnostics = collectFailureDiagnostics({
       stage, child,
       files: { electron: resolve(out, "electron.log"), launcher: resolve(profile, "goalport.sqlite.launcher.log"), core: resolve(profile, "goalport.sqlite.core.log") },
-      privatePaths: [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()]
+      privatePaths: [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]
     });
+    // Bounded read-only startup-failure profile
+    // diagnostics, added to (never replacing) the original failure above.
+    // Each leg records its own unavailability or timeout; collection itself
+    // is additionally guarded so diagnostics can never mask the real error.
+    try {
+      report.diagnostics.startup = await collectStartupDiagnostics({
+        profileDirectory: profile,
+        packageRoot,
+        coreExecutable: resolve(packageRoot, "resources/goalport-core.exe"),
+        privatePaths: [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS],
+        queryBootstrap: page ? () => page.evaluate("window.goalportCore.bootstrapCurrent()", true) : undefined
+      });
+    } catch (startupError) {
+      report.diagnostics.startup = { available: false, error: sanitizeDiagnostic(startupError?.stack || startupError?.message || String(startupError), [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]) };
+    }
     console.error(JSON.stringify({ diagnostics: report.diagnostics }, null, 2));
     if (page) { try { await screen("failure"); } catch {} }
     throw error;
@@ -451,7 +712,7 @@ async function smoke() {
       try { await closeWindow(); } catch { page?.close(); child?.kill(); }
     } else if (child?.exitCode === null) child.kill();
     if (logFd !== undefined) { try { closeSync(logFd); } catch {} }
-    const privatePaths = [scratch, profile, out, process.env.USERPROFILE, process.env.HOME, tmpdir()];
+    const privatePaths = [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS];
     stage = "owned-core-cleanup";
     try {
       report.cleanup.push(await cleanupOwnedCore({
@@ -469,7 +730,7 @@ async function smoke() {
     report.completedAt = new Date().toISOString();
     report.cleanup.push({ path: scratch, action: "retained for local inspection; contains only this smoke's package/profile/workspaces" });
     save();
-    const publicPath = (value) => sanitizeDiagnostic(value, [process.env.USERPROFILE, process.env.HOME, tmpdir()]);
+    const publicPath = (value) => sanitizeDiagnostic(value, WORKSPACE_PRIVATE_PATHS);
     const summary = { status: report.status, mode: report.mode, report: publicPath(resolve(out, "report.json")), scratch: publicPath(scratch) };
     if (report.status !== "PASS") {
       // CI keeps only this bounded, redacted summary; report.json stays local.
@@ -480,6 +741,7 @@ async function smoke() {
       try {
         writeFileSync(resolve(out, "failure-summary.json"), boundedFailureSummary({
           schemaVersion: 1, status: report.status, mode: report.mode, stage: failedStage, error, cleanup, stack: report.error, diagnostics: report.diagnostics,
+          startup: report.diagnostics?.startup,
           steps: report.steps.map(({ name, at }) => ({ name, at })), launcherCreationMode: report.launcherCreationMode,
           version: identity.version, sourceRevision: identity.sourceRevision
         }, privatePaths));

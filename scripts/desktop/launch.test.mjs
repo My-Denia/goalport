@@ -1007,3 +1007,158 @@ test("real entrypoint: a fully-factored compatible inspection still completes a 
   assert.equal(after.mode, "normal");
   assert.equal(after.lastOpenedBy.coreSha256, harness.coreSha256, "the resolved reopen records this build");
 });
+
+// ---- Original startup inspection trace through the real entrypoint ----
+// The trace is exercised through the ACTUAL electron/main.cjs in the vm
+// harness: runTracedCoreProfileCommand wraps the real runCoreProfileCommand,
+// which reaches this harness's execFile stub. The trace is exposed ONLY as
+// the optional `diagnostics` child of the goalport:bootstrap-current result;
+// goalport:bootstrap-state events and the phase/kind contract stay untouched.
+
+const traceRecordKeys = ["target", "status", "startedAt", "endedAt", "elapsedMs", "exitCode", "execError", "malformed", "parseNote", "facts"].sort();
+
+function bootstrapCurrent(harness) {
+  return harness.handlers.get("goalport:bootstrap-current")();
+}
+
+test("real entrypoint: a hung original inspect reports pending in bootstrap-current while phase stays checking", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: () => { /* the inspect never completes: original hang shape */ } });
+  writeProfileMarker(harness.profile.directory, normalMarkerV9(harness.profile));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  await harness.until(() => harness.profileCommands.includes("profile inspect"), "original inspect issued");
+  const queriedAt = Date.now();
+  const state = await bootstrapCurrent(harness);
+  assert.ok(Date.now() - queriedAt < 1000, "bootstrap-current must not wait on the hung inspect");
+  assert.equal(state.phase, "checking");
+  const trace = state.diagnostics.originalProfileInspect;
+  assert.equal(trace.kind, "original-startup-inspect-trace");
+  assert.equal(trace.totalInspections, 1);
+  assert.equal(trace.droppedRecords, 0);
+  const record = trace.records[0];
+  assert.deepEqual(Object.keys(record).sort(), traceRecordKeys, "only selected bounded fields are exposed; no stdout field exists");
+  assert.equal(record.status, "pending");
+  assert.equal(record.target, "own-database");
+  assert.match(record.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.ok(Number.isFinite(record.elapsedMs) && record.elapsedMs >= 0, "a pending record reports its elapsed-so-far");
+  assert.equal(record.endedAt, null);
+  assert.equal(record.exitCode, null);
+  assert.equal(record.execError, null);
+  assert.equal(record.facts, null);
+  assert.equal(record.malformed, null);
+  // The hung bootstrap must not have produced side effects, and the trace
+  // must not mask, advance or replace the still-running startup.
+  assert.deepEqual(harness.spawns, []);
+  assert.equal(harness.pipeProbes, 0);
+  assert.deepEqual(harness.log, []);
+  assert.deepEqual(harness.states.map((entry) => entry.state.phase), ["checking"]);
+  assert.ok(harness.states.every((entry) => entry.state.diagnostics === undefined), "bootstrap-state events stay unchanged");
+});
+
+test("real entrypoint: a completed original inspect exposes selected facts; state events and profile behavior stay unchanged", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: inspectCompatible9, pipeInitiallyUp: true });
+  const dir = harness.profile.directory;
+  const marker = normalMarkerV9(harness.profile);
+  marker.lastOpenedBy = { version: "1.0.0-rc.1", coreSha256: harness.coreSha256, distribution: "release", at: "2026-09-19T00:00:00.000Z" };
+  writeProfileMarker(dir, marker);
+  writeFileSync(resolve(dir, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "compatible reopen completion");
+  const state = await bootstrapCurrent(harness);
+  assert.equal(state.phase, "done");
+  const { diagnostics, ...stateOnly } = state;
+  assert.deepEqual(stateOnly, harness.states[harness.states.length - 1].state, "only an additive diagnostics child differs from the last pushed state");
+  assert.ok(harness.states.every((entry) => entry.state.diagnostics === undefined), "no diagnostics child ever enters bootstrap-state events");
+  const trace = diagnostics.originalProfileInspect;
+  assert.equal(trace.totalInspections, 1);
+  assert.equal(trace.droppedRecords, 0);
+  const record = trace.records[0];
+  assert.deepEqual(Object.keys(record).sort(), traceRecordKeys);
+  assert.equal(record.status, "completed");
+  assert.equal(record.target, "own-database");
+  assert.equal(record.exitCode, 0);
+  assert.equal(record.malformed, false);
+  assert.equal(record.parseNote, null);
+  assert.ok(Number.isFinite(record.elapsedMs) && record.elapsedMs >= 0);
+  assert.match(record.endedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(record.facts, {
+    ok: true, exists: true, openable: true, needsRecovery: false, empty: null,
+    schemaVersion: 9, currentSchemaVersion: 9, quickCheck: "ok", errorReason: null
+  });
+  // The trace wrapper changes no profile behavior: the same single original
+  // inspection runs, no extra Core work happens, no dialogs appear.
+  assert.deepEqual(harness.profileCommands, ["profile inspect"]);
+  assert.deepEqual(harness.spawns, []);
+  assert.deepEqual(harness.dialogs, []);
+});
+
+test("real entrypoint: refused and malformed original inspects record honest exit/parse facts without private paths", async (t) => {
+  const userHome = process.env.USERPROFILE || process.env.HOME || "";
+  // (a) nonzero-exit refusal whose exec error carries a private executable path
+  {
+    let harnessRef = null;
+    const harness = mainEntryHarness(t, {
+      mode: "normal",
+      inspect: (callback) => setImmediate(() => callback(Object.assign(new Error(`profile inspect failed: ${resolve(harnessRef.root, "resources", "goalport-core.exe")} could not run`), { code: 3 }), ""))
+    });
+    harnessRef = harness;
+    writeProfileMarker(harness.profile.directory, normalMarkerV9(harness.profile));
+    writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+    harness.run();
+    const preimage = harness.directorySnapshot();
+    await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+    const record = (await bootstrapCurrent(harness)).diagnostics.originalProfileInspect.records[0];
+    assert.equal(record.status, "completed");
+    assert.equal(record.exitCode, 3);
+    assert.ok(record.execError && record.execError.length <= 200, "exec error is capped");
+    if (userHome) assert.ok(!record.execError.includes(userHome), "exec error is path-redacted");
+    assert.match(record.execError, /<user-profile>/);
+    assert.equal(record.malformed, true, "empty stdout is recorded as malformed, not invented");
+    assert.equal(record.parseNote, "no parsable output line");
+    assert.equal(record.facts, null);
+  }
+  // (b) malformed inspection output
+  {
+    const harness = mainEntryHarness(t, { mode: "normal", inspect: (callback) => setImmediate(() => callback(null, "certainly not json\n")) });
+    writeProfileMarker(harness.profile.directory, normalMarkerV9(harness.profile));
+    writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+    harness.run();
+    const preimage = harness.directorySnapshot();
+    await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+    const record = (await bootstrapCurrent(harness)).diagnostics.originalProfileInspect.records[0];
+    assert.equal(record.status, "completed");
+    assert.equal(record.exitCode, 0);
+    assert.equal(record.malformed, true);
+    assert.match(record.parseNote, /JSON|parsable/);
+    assert.equal(record.facts, null);
+  }
+  // (c) ok:false refusal report: selected facts recorded, stdout extras and private paths dropped
+  {
+    const secret = "TRACE-MAIN-SECRET-field";
+    let harnessRef = null;
+    const harness = mainEntryHarness(t, {
+      mode: "normal",
+      inspect: (callback) => setImmediate(() => callback(null, `${JSON.stringify({
+        schema: "goalport.profile-ops.v1", ok: false, extraField: secret,
+        error: `locked: ${resolve(harnessRef.profile.directory, "goalport.sqlite")}`
+      })}\n`))
+    });
+    harnessRef = harness;
+    writeProfileMarker(harness.profile.directory, normalMarkerV9(harness.profile));
+    writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+    harness.run();
+    const preimage = harness.directorySnapshot();
+    await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+    const record = (await bootstrapCurrent(harness)).diagnostics.originalProfileInspect.records[0];
+    assert.equal(record.status, "completed");
+    assert.equal(record.exitCode, 0);
+    assert.equal(record.malformed, false);
+    assert.equal(record.facts.ok, false);
+    assert.match(record.facts.errorReason, /locked:/);
+    if (userHome) assert.ok(!record.facts.errorReason.includes(userHome), "refusal reason is path-redacted");
+    const serialized = JSON.stringify(record);
+    const rawDb = resolve(harnessRef.profile.directory, "goalport.sqlite");
+    assert.ok(!serialized.includes(secret), "non-selected stdout fields never ride along");
+    assert.ok(!serialized.includes(rawDb) && !serialized.includes(JSON.stringify(rawDb).slice(1, -1)), "the raw private database path does not ride along");
+  }
+});
