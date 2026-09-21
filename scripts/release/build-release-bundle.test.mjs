@@ -53,7 +53,7 @@ async function packageFixture(t, { version = "1.0.0-rc.1", source }) {
   writeFileSync(resolve(root, "GoalPort.exe"), "test-only executable");
   writeFileSync(resolve(root, "LICENSE"), "fixture Electron MIT text\n");
   writeFileSync(resolve(root, "LICENSES.chromium.html"), "<html>fixture chromium notices</html>\n");
-  for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
+  for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", version, main: "main.cjs" }));
   const buildInfo = { schemaVersion: 1, product: "GoalPort", version, channel: "Stable V1 RC", electronVersion: "44.0.0", source, components: Object.fromEntries(COMPONENTS.map((name) => [name, fileHash(resolve(root, "resources", name))])) };
   writeFileSync(resolve(stage, "build-info.json"), JSON.stringify(buildInfo));

@@ -18,6 +18,10 @@ const JOURNAL_FILE = "import-journal.json";
 const BACKUP_DIR = "backups";
 const STAGING_PREFIX = ".import-staging-";
 const KEEP_BACKUPS = 3;
+// Output contract of `goalport-core profile …` (profile_ops.rs). An inspection
+// whose output does not carry this schema cannot be interpreted: treating it
+// as facts would authorize writes on missing facts.
+const PROFILE_OPS_SCHEMA = "goalport.profile-ops.v1";
 
 // ---------- marker ----------
 
@@ -86,8 +90,29 @@ function buildMarkerV2({ profileKey, mode, channel, createdBy, lastOpenedBy, imp
 // `discovery` is {path, marker, inspection} of a foreign-channel profile or
 // null. Returns a structured outcome; no error-string matching anywhere.
 function decideOwnProfile({ markerState, dirContentState, inspection, currentBuild, discovery, journal }) {
+  // Fail closed FIRST: an inspection that itself failed (process error,
+  // nonzero exit, malformed/unreadable output, ok:false) supplies no facts at
+  // all. Nothing downstream — marker write, v1 adoption, backup write-open,
+  // journal-finalizing import-resume, Core launch — may be derived from it.
+  if (!inspection || inspection.failed || inspection.ok === false) {
+    return { kind: "inspection-failed", reason: inspection?.error || "profile inspection failed" };
+  }
   const marker = markerState && !markerState.problem ? markerState : null;
   if (journal && (journal.phase === "finalized" || (journal.phase === "copying" && dirContentState.databasePresent))) {
+    // The journal fast path still requires provable facts about a database
+    // that is present: `profile import` checkpoints its verified copy, so a
+    // present database that is not openable read-only — or whose format is
+    // unknown, legacy or newer — is not resumable data. Refusing here blocks
+    // the marker write finalizeImport would perform.
+    if (dirContentState.databasePresent || inspection.exists) {
+      if (!inspection.exists) return { kind: "inspection-failed", reason: "journal database is not visible to inspection" };
+      if (inspection.openable === false) return { kind: "needs-recovery", reason: inspection.error || "journal database cannot be opened read-only" };
+      if (inspection.schemaVersion == null) return { kind: "unsupported-legacy", foreignTables: inspection.foreignTables };
+      if (inspection.schemaVersion > inspection.currentSchemaVersion) return { kind: "newer-schema", version: inspection.schemaVersion };
+      // The journal fast path must not bypass the integrity fact either:
+      // resuming would finalize the marker over data that failed quick_check.
+      if (inspection.quickCheck && inspection.quickCheck !== "ok") return { kind: "corrupt", reason: inspection.quickCheck };
+    }
     return { kind: "resume-import", journal };
   }
   if (!marker) {
@@ -112,6 +137,13 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
     return marker.markerSchemaVersion === 2 && marker.format?.version == null
       ? { kind: "reopen", needsBackup: false, note: "empty-database" }
       : { kind: "missing-database" };
+  }
+  // A database that exists but cannot be opened read-only (missing WAL
+  // shared memory, unreadable file) has UNKNOWN compatibility — the format
+  // authority (schema_migrations) could not be read. Refuse instead of
+  // reopening, backing up with a write-open, or letting Core open it.
+  if (inspection.openable === false) {
+    return { kind: "needs-recovery", reason: inspection.error || "database cannot be opened read-only for a compatibility check" };
   }
   if (inspection.schemaVersion == null && inspection.openable) {
     return inspection.empty
@@ -147,8 +179,16 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
 function importableDiscovery(discovery, currentBuild) {
   const { marker, inspection } = discovery;
   if (!marker || marker.product !== "GoalPort" || (marker.mode !== "normal")) return false;
-  if (!inspection.exists) return false;
-  if (inspection.schemaVersion == null) return false;
+  // Same fail-closed rule as the own-profile decision: an import offer copies
+  // data into this channel and writes a marker, so it needs PROVEN facts — a
+  // failed inspection, a database never proven openable read-only, an
+  // unreadable format authority or a failed quick_check is not importable
+  // merely because two version numbers compare.
+  if (!inspection || inspection.failed || inspection.ok === false) return false;
+  if (inspection.exists !== true || inspection.openable !== true) return false;
+  if (!isNonnegativeSafeInteger(inspection.schemaVersion)) return false;
+  if (!isNonnegativeSafeInteger(inspection.currentSchemaVersion)) return false;
+  if (inspection.quickCheck !== "ok") return false;
   return inspection.schemaVersion <= inspection.currentSchemaVersion;
 }
 
@@ -156,6 +196,8 @@ function incompatibilityReason(discovery) {
   const { marker, inspection } = discovery;
   if (!marker || marker.product !== "GoalPort") return "not a GoalPort profile";
   if (!inspection.exists) return "database file is missing";
+  if (inspection.failed) return "the source database could not be examined";
+  if (inspection.quickCheck && inspection.quickCheck !== "ok") return "source database failed an integrity check (quick_check)";
   if (inspection.schemaVersion == null && inspection.openable) return "unsupported legacy database format";
   if (inspection.schemaVersion > inspection.currentSchemaVersion) return `data format v${inspection.schemaVersion} is newer than this build (v${inspection.currentSchemaVersion})`;
   if (inspection.needsRecovery) return "database journal needs recovery before it can be read";
@@ -197,6 +239,30 @@ function dirContentState(directory, fsApi = fs) {
 
 // ---------- orchestrating manager ----------
 
+// A schema/data-format version as profile_ops emits it (JSON i64): a
+// nonnegative safe integer. Anything else is not a version fact.
+function isNonnegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+// Required facts of a SUCCESSFUL `profile inspect --quick-check` report of an
+// EXISTING OPENABLE database (profile_ops.rs inspect): `schemaVersion` is
+// null (no schema_migrations table) or the max applied migration,
+// `currentSchemaVersion` is this build's SCHEMA_VERSION, a null schemaVersion
+// comes with the `empty`/`foreignTables` distinction, and `quickCheck` is the
+// PRAGMA result string (we always pass --quick-check). Returns the name of
+// the first missing/malformed fact, or null when the report is interpretable.
+// Without this check a half-fact report reads as compatible: e.g. missing
+// currentSchemaVersion makes the newer-schema comparison `9 > undefined`
+// → false → reopen of data whose format authority was never read.
+function missingOpenableFact(value) {
+  if (!(value.schemaVersion === null || isNonnegativeSafeInteger(value.schemaVersion))) return "schemaVersion";
+  if (!isNonnegativeSafeInteger(value.currentSchemaVersion)) return "currentSchemaVersion";
+  if (value.schemaVersion === null && typeof value.empty !== "boolean") return "empty";
+  if (typeof value.quickCheck !== "string") return "quickCheck";
+  return null;
+}
+
 // Dependencies are injected so the decision+bookkeeping logic runs headless
 // in unit tests: `deps = { fsApi, execCore, now }` where
 // execCore(argsArray) -> {code, stdout} (synchronous, like execFileSync of
@@ -228,17 +294,53 @@ class ProfileManager {
 
   async inspectDatabase(database = this.databasePath()) {
     if (!this.execCore) throw new Error("execCore dependency is required for inspection");
-    const result = await this.execCore(["profile", "inspect", "--db", database, "--quick-check"]);
+    let result;
+    try {
+      result = await this.execCore(["profile", "inspect", "--db", database, "--quick-check"]);
+    } catch (error) {
+      // A thrown exec (missing binary, timeout) is still a FAILED inspection,
+      // never a fact set: report it in the fail-closed envelope.
+      result = { code: -1, stdout: "", error: String(error?.message || error) };
+    }
     let value = null;
     try {
       const line = String(result.stdout || "").split(/\r?\n/).find((candidate) => candidate.trim());
       value = line ? JSON.parse(line) : null;
     } catch { value = null; }
     if (result.code !== 0 || !value || value.ok !== true) {
-      return { exists: this.fsApi.existsSync(database), openable: false, needsRecovery: true,
-        schemaVersion: null, error: value?.error || `core profile inspect exited ${result.code}` };
+      return this.failedInspection(database, value?.error || `core profile inspect exited ${result.code}`);
+    }
+    // Fail closed on an inspection output we cannot interpret (unknown
+    // profile-ops schema or missing fact fields): half-understood output must
+    // not authorize fresh/reopen/adopt/import decisions.
+    if (value.schema !== PROFILE_OPS_SCHEMA || typeof value.exists !== "boolean" ||
+        (value.exists === true && typeof value.openable !== "boolean")) {
+      return this.failedInspection(database, `core profile inspect reported an unreadable output contract (schema ${JSON.stringify(value.schema)})`);
+    }
+    // A successful report of an EXISTING OPENABLE database must additionally
+    // carry the compatibility/integrity facts that shape always carries:
+    // treating a missing currentSchemaVersion or quickCheck as "compatible"
+    // would reopen (or resume an import over, or offer an import of) data
+    // whose format authority or integrity was never actually read.
+    if (value.exists === true && value.openable === true) {
+      const missingFact = missingOpenableFact(value);
+      if (missingFact) {
+        return this.failedInspection(database, `core profile inspect omitted required compatibility/integrity facts for an openable database (${missingFact})`);
+      }
     }
     return value;
+  }
+
+  // The fail-closed inspection envelope: `failed: true` distinguishes "the
+  // inspection itself failed" from a SUCCESSFUL inspection honestly
+  // reporting openable:false (WAL recovery) — decideOwnProfile refuses both,
+  // but with the honest kind and reason.
+  failedInspection(database, error) {
+    return {
+      ok: false, failed: true,
+      exists: this.fsApi.existsSync(database), openable: false, needsRecovery: true,
+      schemaVersion: null, error
+    };
   }
 
   writeMarker(marker) {

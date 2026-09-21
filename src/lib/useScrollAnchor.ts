@@ -1,20 +1,50 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ProductConversationItem } from "../types";
+
+/**
+ * Stable identity of the conversation content the reader can actually see.
+ *
+ * The owner compares this signature between snapshots instead of
+ * `items.length`: a streaming assistant message grows its `body` while the
+ * array length stays the same, and only a visible change may follow the
+ * reader to the bottom or raise the unseen indicator. An identical poll (new
+ * array identity, equal content) yields an equal signature and never
+ * notifies.
+ *
+ * Only fields the normal surface renders participate: id, kind, body, actor
+ * and the rendered commit timestamp. `actions` is never rendered by the
+ * normal UI and `technicalDetails` sits behind a collapsed disclosure, so
+ * changes to either are hidden metadata and must not count as new content.
+ */
+export function visibleConversationSignature(items: readonly ProductConversationItem[] | undefined): string {
+  if (!items || items.length === 0) return "";
+  let signature = String(items.length);
+  for (const item of items) {
+    signature += `\u001e${item.id}\u001f${item.kind}\u001f${item.body}\u001f${item.actor ?? ""}\u001f${item.timestamp ?? ""}`;
+  }
+  return signature;
+}
 
 /**
  * Measure-restore scroll anchoring for the conversation timeline.
  *
- * The container auto-scrolls to the latest event only while the reader is
- * pinned to (near) the bottom. When they have scrolled up, new events leave
- * scrollTop untouched and a jump affordance counts what they have not seen.
- * `resetKey` (e.g. the active campaign) re-pins to the bottom on view switch.
+ * The container auto-scrolls to the latest content only while the reader is
+ * pinned to (near) the bottom. When they have scrolled up, streaming updates
+ * leave scrollTop untouched and a jump affordance counts what they have not
+ * seen. `resetKey` (e.g. the active campaign) re-pins to the bottom on view
+ * switch; the matching `contentSignature` baseline is adopted at the same
+ * moment, so the switched-to view is never announced as new content.
  *
  * CSS overflow-anchor alone is unreliable across full React list re-renders,
  * so the pin state is measured explicitly on every scroll event.
  */
-export function useScrollAnchor(resetKey: string) {
+export function useScrollAnchor(resetKey: string, contentSignature?: string) {
   const ref = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const [unseenCount, setUnseenCount] = useState(0);
+  // What the reader has already been offered, together with the view it
+  // belonged to. Null until the first snapshot after mount.
+  const seenContentRef = useRef<{ resetKey: string; signature: string | undefined } | null>(null);
 
   const measurePinned = useCallback(() => {
     const element = ref.current;
@@ -42,6 +72,9 @@ export function useScrollAnchor(resetKey: string) {
 
   /** Called by the owner whenever new content may have arrived. */
   const notifyContentChanged = useCallback(() => {
+    // pinnedRef reflects the reader's intent measured at the last scroll
+    // event; re-measuring here after the content grew would misread a large
+    // single growth as "scrolled away" and drop the follow.
     if (pinnedRef.current) {
       const element = ref.current;
       if (element) element.scrollTop = element.scrollHeight;
@@ -58,6 +91,26 @@ export function useScrollAnchor(resetKey: string) {
     const element = ref.current;
     if (element) element.scrollTop = element.scrollHeight;
   }, [resetKey]);
+
+  // Streaming watcher: compares the visible-content signature and notifies on
+  // real change. A layout effect runs after the DOM commits but before paint,
+  // so a pinned reader is driven to the new bottom without a flicker at the
+  // stale one, and the unseen indicator appears with the content atomically.
+  useLayoutEffect(() => {
+    const seen = seenContentRef.current;
+    seenContentRef.current = { resetKey, signature: contentSignature };
+    if (seen === null || seen.resetKey !== resetKey) {
+      // First snapshot after mount, or a deliberate view (campaign) switch:
+      // adopt what is on screen as the baseline. This content is not "new" —
+      // the reader navigated to it — and must never raise the indicator.
+      return;
+    }
+    if (seen.signature === contentSignature) {
+      // Identical content (unchanged poll, unrelated re-render): silent.
+      return;
+    }
+    notifyContentChanged();
+  }, [resetKey, contentSignature, notifyContentChanged]);
 
   return { ref, unseenCount, handleScroll, scrollToBottom, notifyContentChanged };
 }

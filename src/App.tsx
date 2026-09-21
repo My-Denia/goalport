@@ -24,7 +24,7 @@ import { BootstrapScreen } from "./dialog/BootstrapScreen";
 import type { BootstrapState } from "./ipc";
 import { conversationTitle, headlineState } from "./lib/display";
 import { useModalFocus } from "./lib/useModalFocus";
-import { useScrollAnchor } from "./lib/useScrollAnchor";
+import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import "./styles.css";
 
 function noticeAfterRuntimeSelect(next: CoreSnapshot, current: ActiveNotice | null): ActiveNotice | null {
@@ -130,15 +130,10 @@ function App() {
   const hasGoal = Boolean(draftCampaignId);
   const draftActive = draftGoal !== null || (!hasGoal && !draftDismissed);
 
-  const anchor = useScrollAnchor(snapshot.activeCampaignId);
-  const lastConversationLengthRef = useRef(product?.items.length ?? 0);
-  useEffect(() => {
-    const length = product?.items.length ?? 0;
-    if (length !== lastConversationLengthRef.current) {
-      lastConversationLengthRef.current = length;
-      anchor.notifyContentChanged();
-    }
-  }, [product?.items.length, anchor]);
+  // Scroll follow/unseen is driven by visible content identity, not item
+  // count: streaming grows one item's body at constant length, and identical
+  // polls must stay silent. See useScrollAnchor for the reset semantics.
+  const anchor = useScrollAnchor(snapshot.activeCampaignId, visibleConversationSignature(product?.items));
 
   function updateVisibleCampaignDraft(value: string) {
     // Selection is authoritative only after Core returns its projection. While a

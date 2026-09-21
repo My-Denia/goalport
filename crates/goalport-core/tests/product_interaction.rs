@@ -1157,6 +1157,177 @@ fn rename_updates_title_durably_without_rewriting_history() {
 }
 
 // ---------------------------------------------------------------------------
+// Rename navigation: the campaigns list resolves its
+// title from the durable preference when present and keeps the legacy root
+// task title fallback otherwise. No history or task rows are rewritten.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rename_updates_campaign_navigation_title_immediately_and_after_reopen() {
+    let workspace = temp_workspace("rename-nav");
+    let root = canonical(&workspace);
+    let path = workspace.join("rename-nav.sqlite");
+    let campaign_id;
+    {
+        let server = CoreServer::new(Store::open(&path).unwrap());
+        let first = view(result(
+            &server,
+            "rename-nav-start-1",
+            "start_conversation",
+            start_payload(&root, "scenario", "the navigation prompt"),
+        ));
+        campaign_id = first["activeCampaignId"].as_str().unwrap().to_owned();
+        // Before any rename the navigation title is the legacy root task title.
+        let before = first["campaigns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|campaign| campaign["id"] == campaign_id.as_str())
+            .expect("started campaign is listed")
+            .clone();
+        assert_eq!(
+            before["title"], before["activeTaskTitle"],
+            "without a preference the navigation title is the root task title"
+        );
+
+        let renamed = view(result(
+            &server,
+            "rename-nav-1",
+            "rename_conversation",
+            json!({ "campaignId": campaign_id, "title": "Navigated conversation" }),
+        ));
+        // Immediately: both the product title and the campaigns entry follow.
+        assert_eq!(
+            renamed["productConversation"]["title"],
+            "Navigated conversation"
+        );
+        let listed = renamed["campaigns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|campaign| campaign["id"] == campaign_id.as_str())
+            .expect("renamed campaign is listed")
+            .clone();
+        assert_eq!(listed["title"], "Navigated conversation");
+    }
+    // Reopen: both titles persist from the durable preference column.
+    let server = CoreServer::new(Store::open(&path).unwrap());
+    let reopened = view(result(&server, "rename-nav-snapshot", "snapshot", json!({})));
+    assert_eq!(reopened["activeCampaignId"].as_str().unwrap(), campaign_id);
+    assert_eq!(
+        reopened["productConversation"]["title"],
+        "Navigated conversation"
+    );
+    let listed = reopened["campaigns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|campaign| campaign["id"] == campaign_id.as_str())
+        .expect("campaign is listed after reopen");
+    assert_eq!(listed["title"], "Navigated conversation");
+}
+
+#[test]
+fn rename_leaves_sibling_campaign_titles_untouched() {
+    let workspace = temp_workspace("rename-sibling");
+    let root = canonical(&workspace);
+    let server = CoreServer::new(Store::memory().unwrap());
+    let first = view(result(
+        &server,
+        "sibling-start-1",
+        "start_conversation",
+        start_payload(&root, "scenario", "the sibling prompt"),
+    ));
+    let first_id = first["activeCampaignId"].as_str().unwrap().to_owned();
+    let second = view(result(
+        &server,
+        "sibling-start-2",
+        "start_conversation",
+        start_payload(&root, "scenario", "the kept prompt"),
+    ));
+    let second_id = second["activeCampaignId"].as_str().unwrap().to_owned();
+    let second_title = second["campaigns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|campaign| campaign["id"] == second_id)
+        .expect("sibling campaign is listed")["title"]
+        .clone();
+
+    // Rename only the older (non-active) campaign.
+    let renamed = view(result(
+        &server,
+        "sibling-rename-1",
+        "rename_conversation",
+        json!({ "campaignId": first_id, "title": "First renamed" }),
+    ));
+    let listed = renamed["campaigns"].as_array().unwrap();
+    let renamed_row = listed
+        .iter()
+        .find(|campaign| campaign["id"] == first_id.as_str())
+        .expect("renamed campaign is listed");
+    let sibling_row = listed
+        .iter()
+        .find(|campaign| campaign["id"] == second_id.as_str())
+        .expect("sibling campaign is listed");
+    assert_eq!(renamed_row["title"], "First renamed");
+    assert_eq!(
+        sibling_row["title"], second_title,
+        "the sibling keeps its own title"
+    );
+    // The active conversation is the sibling; its product title is unchanged.
+    assert_eq!(renamed["activeCampaignId"].as_str().unwrap(), second_id);
+    assert_eq!(renamed["productConversation"]["title"], "the kept prompt");
+}
+
+#[test]
+fn campaign_title_falls_back_to_root_task_without_preference() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Store::memory().unwrap();
+    let project = Project {
+        id: "project-legacy".into(),
+        workspace_root: workspace.to_string_lossy().to_string(),
+    };
+    let campaign = Campaign {
+        id: "campaign-legacy".into(),
+        goal: "legacy goal text".into(),
+        root_task_id: "task-legacy".into(),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    let task = Task {
+        id: "task-legacy".into(),
+        campaign_id: "campaign-legacy".into(),
+        title: "legacy root task title".into(),
+        acceptance: "a".into(),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    store
+        .create_workspace_campaign(
+            &project,
+            &campaign,
+            &task,
+            "policy-legacy",
+            "{}",
+            &CampaignAuthorization::granted(),
+        )
+        .unwrap();
+    let server = CoreServer::new(store);
+    let snapshot = view(result(&server, "legacy-snapshot-1", "snapshot", json!({})));
+    let row = snapshot["campaigns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|campaign| campaign["id"] == "campaign-legacy")
+        .expect("legacy campaign is listed");
+    // No preference row and no first prompt: the root task title is the
+    // navigation title, not the campaign goal.
+    assert_eq!(row["title"], "legacy root task title");
+    assert_eq!(row["activeTaskTitle"], "legacy root task title");
+}
+
+// ---------------------------------------------------------------------------
 // No automatic send on selection/reconnect
 // ---------------------------------------------------------------------------
 

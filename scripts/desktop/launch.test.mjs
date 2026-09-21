@@ -585,7 +585,7 @@ test("the real Electron entrypoint routes Core requests and close choices throug
       assert.equal(file, resolve(resources, "goalport-core.exe"));
       if (args[0] === "profile") {
         const payload = args[1] === "inspect"
-          ? { ok: true, stage: "inspect", exists: true, openable: true, needsRecovery: false,
+          ? { schema: "goalport.profile-ops.v1", ok: true, stage: "inspect", exists: true, openable: true, needsRecovery: false,
               schemaVersion: 8, currentSchemaVersion: 8, quickCheck: "ok",
               counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" } }
           : { ok: true, stage: "backup", quickCheck: "ok", schemaVersion: 8, counts: {} };
@@ -661,4 +661,349 @@ test("the real Electron entrypoint routes Core requests and close choices throug
   const closed = await handlers.get("goalport:confirm-close-choice")({ sender: {} }, { choice: "continue", requestId: "close-1" });
   assert.equal(closed.ok, true, JSON.stringify(closed));
   assert.deepEqual(log, ["peer", "get_startup_receipt", "snapshot", "peer", "get_startup_receipt", "record_close_choice"]);
+});
+
+// ---- Profile safety: fail-closed integration through the real entrypoint ----
+// These exercise the ACTUAL electron/main.cjs in a vm: on refusal, no Core may
+// be spawned (serve/Store::open), no pipe may be probed, no backup/import may
+// run, the IPC start-core route stays gated, and the profile directory bytes
+// stay unchanged. Positive controls prove fresh/reopen synthetic launches and
+// the normal-mode reopen above keep working.
+
+const { EventEmitter: HarnessEventEmitter } = require("node:events");
+const { createHash: HarnessHash } = require("node:crypto");
+const profileOpsLine = (facts) => `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, stage: "inspect", ...facts })}\n`;
+const inspectMissingDb = (callback) => setImmediate(() => callback(null, profileOpsLine({ exists: false, openable: false, schemaVersion: null })));
+const inspectCompatible = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 8, currentSchemaVersion: 8, quickCheck: "ok",
+  counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" }
+})));
+const inspectNewerSchema = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 9, currentSchemaVersion: 8, quickCheck: "ok",
+  counts: {}, latestEpoch: null
+})));
+
+function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, pipeInitiallyUp = false, spawnOpensPipe = false, launcherPresent = false }) {
+  const root = fixture(t);
+  const resources = resolve(root, "resources");
+  mkdirSync(resources, { recursive: true });
+  const coreBytes = "inert Core identity fixture; never a real provider";
+  writeFileSync(resolve(resources, "goalport-core.exe"), coreBytes);
+  if (launcherPresent) writeFileSync(resolve(resources, "goalport-core-launcher.exe"), "inert launcher fixture; never executed");
+  const coreSha256 = HarnessHash("sha256").update(coreBytes).digest("hex");
+  const argv = ["GoalPort.exe", mode === "synthetic" ? "--test-profile" : "--data-dir", resolve(root, "profile")];
+  const profile = resolveProfilePaths({ args: launchArguments(argv), appData: root, channel: "release", coreSha256 });
+  const log = [], spawns = [], profileCommands = [], states = [], exits = [], dialogs = [], destroyed = [];
+  const handlers = new Map();
+  const windows = [];
+  const pipeState = { up: pipeInitiallyUp, probes: 0 };
+  const respond = (request) => {
+    if (request.messageType === "get_startup_receipt") {
+      return { ok: true, requestId: request.requestId, payload: { receipt: { startupState: "READY_COMMITTED", core: { executableSha256: coreSha256, pid: 4242 }, databaseIdentity: profile.database, pipeIdentity: profile.pipe } } };
+    }
+    return { ok: true, requestId: request.requestId, payload: { snapshot: { attempt: { id: "attempt-1", state: "active", provider: "scenario" } } } };
+  };
+  const net = {
+    createConnection: () => {
+      pipeState.probes += 1;
+      const socket = new HarnessEventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => {};
+      socket.end = () => socket.emit("close");
+      socket.write = (frame) => {
+        const request = JSON.parse(frame.subarray(4).toString("utf8"));
+        log.push(request.messageType);
+        setImmediate(() => {
+          const payload = Buffer.from(JSON.stringify(respond(request)));
+          const reply = Buffer.alloc(4 + payload.length);
+          reply.writeUInt32LE(payload.length, 0);
+          payload.copy(reply, 4);
+          socket.emit("data", reply);
+        });
+      };
+      setImmediate(() => (pipeState.up ? socket.emit("connect") : socket.emit("error", new Error("pipe does not exist"))));
+      return socket;
+    }
+  };
+  const childProcess = {
+    spawn: (command, args) => {
+      spawns.push([command, args]);
+      if (spawnOpensPipe) pipeState.up = true;
+      return { once: () => {}, unref: () => {} };
+    },
+    execFile: (file, args, options, callback) => {
+      assert.equal(file, resolve(resources, "goalport-core.exe"), "only the packaged Core identity may be executed");
+      if (args[0] === "profile") {
+        profileCommands.push(args.slice(0, 2).join(" "));
+        if (args[1] === "inspect") { setImmediate(() => inspect(callback)); return; }
+        setImmediate(() => callback(new Error(`unexpected profile command ${args[1]}`), ""));
+        return;
+      }
+      assert.deepEqual(args, ["pipe-peer", "--pipe", profile.pipe]);
+      assert.equal(options.timeout, 5000);
+      log.push("peer");
+      setImmediate(() => callback(null, okPeer(4242), ""));
+    }
+  };
+  class HarnessWindow {
+    constructor() {
+      this.webContents = { send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} };
+      windows.push(this);
+    }
+    static fromWebContents() { return windows[0]; }
+    loadFile() { return Promise.resolve(); }
+    on() {}
+    isDestroyed() { return false; }
+    destroy() { destroyed.push(this); }
+  }
+  const electron = {
+    app: {
+      isPackaged: true, getVersion: () => "1.0.0-rc.1",
+      getPath: (name) => (name === "exe" ? resolve(root, "GoalPort.exe") : root),
+      setPath: () => {}, exit: (code) => exits.push(code), whenReady: () => Promise.resolve(),
+      commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}, quit: () => {}
+    },
+    BrowserWindow: HarnessWindow, ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    Notification: { isSupported: () => false }, shell: {}, dialog: { showErrorBox: (title, message) => dialogs.push(message) }
+  };
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
+  const run = () => main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
+    argv, resourcesPath: resources, env: {}, pid: process.pid, platform: "win32", execPath: process.execPath
+  }, { error: (...values) => dialogs.push(values.join(" ")) });
+  const until = async (condition, label) => {
+    const deadline = Date.now() + 15000;
+    while (!condition()) {
+      assert.ok(Date.now() < deadline, `timed out waiting for ${label}; states=${JSON.stringify(states.map((entry) => entry.state))}; log=${log.join(",")}; spawns=${spawns.length}; commands=${profileCommands.join(",")}; dialogs=${dialogs.join(" | ").slice(0, 400)}`);
+      await new Promise((done) => setTimeout(done, 5));
+    }
+  };
+  const directorySnapshot = () => existsSync(profile.directory)
+    ? readdirSync(profile.directory).sort().map((name) => [name, readFileSync(resolve(profile.directory, name)).toString("latin1")])
+    : null;
+  return {
+    root, profile, run, until, directorySnapshot,
+    get log() { return log; }, get spawns() { return spawns; }, get profileCommands() { return profileCommands; },
+    get states() { return states; }, get exits() { return exits; }, get dialogs() { return dialogs; },
+    get handlers() { return handlers; }, get windows() { return windows; }, get destroyed() { return destroyed; },
+    get pipeProbes() { return pipeState.probes; }, coreSha256
+  };
+}
+
+function assertRefusedWithoutSideEffects(harness, kind) {
+  const errorState = harness.states.map((entry) => entry.state).find((state) => state.phase === "error");
+  assert.ok(errorState, `bootstrap must reach an error refusal; states=${JSON.stringify(harness.states.map((entry) => entry.state))}`);
+  assert.equal(errorState.kind, kind);
+  assert.deepEqual(harness.spawns, [], "no Core process may be spawned (no serve, no Store::open)");
+  assert.equal(harness.pipeProbes, 0, "ensureCore must never be invoked");
+  assert.deepEqual(harness.log, [], "no pipe traffic may occur");
+  assert.deepEqual(harness.profileCommands, ["profile inspect"], "inspection is read-only; no backup write-open, no import");
+  assert.deepEqual(harness.dialogs, [], "no crash dialogs; the refusal is a structured screen");
+}
+
+const normalMarkerFixture = (profile) => ({
+  markerSchemaVersion: 2, product: "GoalPort", identityVersion: 2, profileKey: profile.profileKey, mode: "normal",
+  channel: "release", createdAt: "2026-09-01T00:00:00.000Z",
+  createdBy: { version: "1.0.0-rc.1", coreSha256: "b".repeat(64), distribution: "release" },
+  lastOpenedBy: { version: "1.0.0-rc.1", coreSha256: "b".repeat(64), distribution: "release", at: "2026-09-19T00:00:00.000Z" },
+  importedFrom: null, format: { authority: "schema_migrations", version: 8 }
+});
+const syntheticMarkerFixture = (profile, lastOpenedSha) => ({
+  markerSchemaVersion: 2, product: "GoalPort", identityVersion: 2, profileKey: profile.profileKey, mode: "synthetic-test",
+  channel: null, createdAt: "2026-09-01T00:00:00.000Z",
+  createdBy: { version: "1.0.0-rc.1", coreSha256: lastOpenedSha, distribution: "dev" },
+  lastOpenedBy: { version: "1.0.0-rc.1", coreSha256: lastOpenedSha, distribution: "dev", at: "2026-09-19T00:00:00.000Z" },
+  importedFrom: null, format: { authority: "schema_migrations", version: 8 }
+});
+function writeProfileMarker(directory, marker) {
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(resolve(directory, "goalport-profile.json"), `${JSON.stringify(marker, null, 2)}\n`);
+}
+async function refuseThroughErrorScreen(harness, kind, preimage) {
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "error"), `${kind} error screen`);
+  assertRefusedWithoutSideEffects(harness, kind);
+  assert.deepEqual(harness.directorySnapshot(), preimage, "the refusal must leave the profile directory bytes unchanged");
+  await assert.rejects(harness.handlers.get("goalport:start-core")(), /still preparing/, "the IPC start-core route must stay gated");
+  await harness.handlers.get("goalport:bootstrap-action")({ sender: harness.windows[0].webContents }, { type: "exit" });
+  await harness.until(() => harness.exits.length === 1, "exit after refusal");
+  assert.deepEqual(harness.exits, [0]);
+  assert.equal(harness.destroyed.length, 1);
+}
+
+test("real entrypoint: failed profile inspection refuses before backup write-open, marker writes or Core launch", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: (callback) => setImmediate(() => callback(Object.assign(new Error("inspect crashed"), { code: 3 }), "")) });
+  writeProfileMarker(harness.profile.directory, normalMarkerFixture(harness.profile));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+});
+
+test("real entrypoint: malformed inspection output refuses instead of reopening unknown data", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: (callback) => setImmediate(() => callback(null, "certainly not json\n")) });
+  writeProfileMarker(harness.profile.directory, normalMarkerFixture(harness.profile));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+});
+
+test("real entrypoint: --test-profile cannot target a normal data profile", async (t) => {
+  // The inspection SUCCEEDS and is compatible: the refusal must come from the
+  // marker mode identity check, proving no synthetic shortcut exists.
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectCompatible });
+  writeProfileMarker(harness.profile.directory, normalMarkerFixture(harness.profile));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "identity-mismatch", preimage);
+  const marker = JSON.parse(readFileSync(resolve(harness.profile.directory, "goalport-profile.json"), "utf8"));
+  assert.equal(marker.mode, "normal", "the normal-profile marker must never be rewritten or adopted");
+});
+
+test("real entrypoint: --test-profile refuses a foreign unmarked directory", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectMissingDb });
+  mkdirSync(harness.profile.directory, { recursive: true });
+  writeFileSync(resolve(harness.profile.directory, "notes.txt"), "someone else's files");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "not-a-profile", preimage);
+});
+
+test("real entrypoint: --test-profile refuses a newer database schema before Core launch", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectNewerSchema });
+  writeProfileMarker(harness.profile.directory, syntheticMarkerFixture(harness.profile, "c".repeat(64)));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "newer-format database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "newer-schema", preimage);
+});
+
+test("real entrypoint: a fresh synthetic --test-profile bootstraps its marker and may launch Core", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectMissingDb, spawnOpensPipe: true, launcherPresent: true });
+  assert.equal(harness.directorySnapshot(), null, "the test profile directory starts absent");
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "synthetic bootstrap completion");
+  assert.equal(harness.spawns.length, 1, "the permitted synthetic launch spawns the Core server exactly once");
+  const [command, spawnArgs] = harness.spawns[0];
+  assert.equal(command, resolve(harness.root, "resources", "goalport-core-launcher.exe"));
+  assert.equal(spawnArgs[0], resolve(harness.root, "resources", "goalport-core.exe"));
+  assert.equal(spawnArgs[1], "serve");
+  assert.ok(spawnArgs.includes(harness.profile.database), "serve targets the synthetic profile database");
+  assert.ok(spawnArgs.includes(harness.profile.pipe));
+  assert.deepEqual(harness.profileCommands, ["profile inspect"]);
+  const marker = JSON.parse(readFileSync(resolve(harness.profile.directory, "goalport-profile.json"), "utf8"));
+  assert.equal(marker.product, "GoalPort");
+  assert.equal(marker.mode, "synthetic-test");
+  assert.equal(marker.profileKey, harness.profile.profileKey);
+  assert.equal(marker.lastOpenedBy.coreSha256, harness.coreSha256);
+  assert.deepEqual(harness.dialogs, []);
+  assert.ok(harness.log.includes("peer") && harness.log.includes("get_startup_receipt"), "attachment is verified after the permitted launch");
+});
+
+test("real entrypoint: a compatible synthetic reopen still attaches without any write-open", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectCompatible, pipeInitiallyUp: true });
+  writeProfileMarker(harness.profile.directory, syntheticMarkerFixture(harness.profile, "c".repeat(64)));
+  writeFileSync(resolve(harness.profile.directory, "goalport.sqlite"), "synthetic database bytes");
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "synthetic reopen completion");
+  assert.deepEqual(harness.spawns, [], "an attached Core needs no second launch");
+  assert.deepEqual(harness.profileCommands, ["profile inspect"], "no backup write-open runs for synthetic data");
+  assert.deepEqual(harness.log, ["peer", "get_startup_receipt", "snapshot"]);
+  assert.deepEqual(harness.dialogs, []);
+  const marker = JSON.parse(readFileSync(resolve(harness.profile.directory, "goalport-profile.json"), "utf8"));
+  assert.equal(marker.mode, "synthetic-test", "the synthetic identity is preserved");
+  assert.equal(marker.lastOpenedBy.coreSha256, harness.coreSha256, "the resolved reopen records this build");
+});
+
+// ---- Inspection contract validation through the real entrypoint ----
+// These cases exercise normal-mode startup through the VM harness above.
+//
+// An inspection whose "successful existing openable" output omits required
+// compatibility/integrity facts (currentSchemaVersion, quickCheck) must
+// refuse BEFORE any mutable launch/profile write — no Core spawn
+// (serve/Store::open), no pipe probe, no backup write-open, no import, no
+// marker write — and the profile directory bytes must stay unchanged. The
+// journal-corrupt case proves the resume path can no longer finalize a marker
+// over data that failed quick_check. A positive control proves a
+// fully-factored compatible inspection still completes a normal attach.
+
+// Full real-contract facts for an existing openable compatible schema-9
+// database (same shape as inspectCompatible above, at this build's schema 9).
+const inspectCompatible9 = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 9, currentSchemaVersion: 9, quickCheck: "ok",
+  counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" }
+})));
+// The reviewed repro shape: exists/openable facts present, currentSchemaVersion absent.
+const inspectMissingCurrentSchema = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 9, quickCheck: "ok",
+  counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" }
+})));
+// Integrity fact absent: quickCheck never reported.
+const inspectMissingQuickCheck = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 9, currentSchemaVersion: 9,
+  counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" }
+})));
+// Honest corruption: facts complete, quick_check failed.
+const inspectCorrupt = (callback) => setImmediate(() => callback(null, profileOpsLine({
+  exists: true, openable: true, needsRecovery: false, schemaVersion: 9, currentSchemaVersion: 9, quickCheck: "row 3 missing",
+  counts: { campaigns: 1 }, latestEpoch: { epochId: "e1", priorCore: "ended", state: "ENDED" }
+})));
+// schema-9 fixtures commit marker format version 9 (matching the schema-9 database).
+const normalMarkerV9 = (profile) => ({ ...normalMarkerFixture(profile), format: { authority: "schema_migrations", version: 9 } });
+
+test("real entrypoint: openable inspection missing currentSchemaVersion refuses before any launch/profile write", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: inspectMissingCurrentSchema });
+  const dir = harness.profile.directory;
+  writeProfileMarker(dir, normalMarkerV9(harness.profile));
+  writeFileSync(resolve(dir, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+});
+
+test("real entrypoint: openable inspection missing quickCheck refuses instead of reopening unverified data", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: inspectMissingQuickCheck });
+  const dir = harness.profile.directory;
+  writeProfileMarker(dir, normalMarkerV9(harness.profile));
+  writeFileSync(resolve(dir, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "inspection-failed", preimage);
+});
+
+test("real entrypoint: corrupt journal database refuses before the resume path finalizes a marker", async (t) => {
+  // Crash window: journal finalized, database present, marker not yet written —
+  // and the staged database actually fails quick_check. Pre-fix the fast path
+  // resumed (marker write) without ever consulting quickCheck.
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: inspectCorrupt });
+  const dir = harness.profile.directory;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(resolve(dir, "goalport.sqlite"), "corrupt imported bytes");
+  const journal = { phase: "finalized", source: "C:/d/rc", sourceCreatedBy: null, stagingDir: resolve(harness.root, "staging-x") };
+  writeFileSync(resolve(dir, "import-journal.json"), `${JSON.stringify(journal, null, 2)}\n`);
+  harness.run();
+  const preimage = harness.directorySnapshot();
+  await refuseThroughErrorScreen(harness, "corrupt", preimage);
+  assert.ok(!existsSync(resolve(dir, "goalport-profile.json")), "finalizeImport must never run: no marker over corrupt data");
+});
+
+test("real entrypoint: a fully-factored compatible inspection still completes a normal attach (positive control)", async (t) => {
+  const harness = mainEntryHarness(t, { mode: "normal", inspect: inspectCompatible9, pipeInitiallyUp: true });
+  const dir = harness.profile.directory;
+  const marker = normalMarkerV9(harness.profile);
+  marker.lastOpenedBy = { version: "1.0.0-rc.1", coreSha256: harness.coreSha256, distribution: "release", at: "2026-09-19T00:00:00.000Z" };
+  writeProfileMarker(dir, marker);
+  writeFileSync(resolve(dir, "goalport.sqlite"), "owner-like database bytes");
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "compatible reopen completion");
+  assert.deepEqual(harness.spawns, [], "an attached Core needs no second launch");
+  assert.deepEqual(harness.profileCommands, ["profile inspect"], "no backup write-open may run when lastOpenedBy matches this build");
+  assert.deepEqual(harness.log.slice(0, 3), ["peer", "get_startup_receipt", "snapshot"]);
+  assert.deepEqual(harness.dialogs, []);
+  const after = JSON.parse(readFileSync(resolve(dir, "goalport-profile.json"), "utf8"));
+  assert.equal(after.mode, "normal");
+  assert.equal(after.lastOpenedBy.coreSha256, harness.coreSha256, "the resolved reopen records this build");
 });

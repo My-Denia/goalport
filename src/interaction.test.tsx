@@ -7,9 +7,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import App from "./App";
-import { useScrollAnchor } from "./lib/useScrollAnchor";
+import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
-import { DEMO_SNAPSHOT } from "./types";
+import { DEMO_SNAPSHOT, type ProductConversationItem } from "./types";
 
 afterEach(() => {
   cleanup();
@@ -31,6 +31,31 @@ function mountElectron(snapshot: unknown, command?: (request: CoreCommand) => Pr
 async function openHandoff() {
   fireEvent.click(await screen.findByRole("button", { name: /open details panel/i }));
   fireEvent.click(screen.getByRole("button", { name: /assign next step|handoff/i }));
+}
+
+/**
+ * jsdom applies no layout, so scroll geometry is mocked. The mock records
+ * every programmatic scroll so tests can tell "the app drove the reader to
+ * the bottom" from "the reader's position was left alone".
+ */
+function mockTimelineGeometry(element: HTMLElement) {
+  const geometry = { top: 0, height: 100, scrollH: 100 };
+  const writes: number[] = [];
+  Object.defineProperty(element, "scrollTop", {
+    configurable: true,
+    get: () => geometry.top,
+    set: (value: number) => {
+      writes.push(value);
+      geometry.top = value;
+    }
+  });
+  Object.defineProperty(element, "clientHeight", { configurable: true, get: () => geometry.height });
+  Object.defineProperty(element, "scrollHeight", { configurable: true, get: () => geometry.scrollH });
+  (element as unknown as { scrollTo?: (options: { top: number }) => void }).scrollTo = (options) => {
+    writes.push(options.top);
+    geometry.top = options.top;
+  };
+  return { geometry, writes };
 }
 
 describe("composer keyboard handling", () => {
@@ -405,5 +430,204 @@ describe("scroll anchoring", () => {
     mockGeometry(scroller as HTMLElement, { top: 1100, height: 100, scrollH: 1200 });
     fireEvent.scroll(scroller);
     expect(screen.getByTestId("unseen").textContent).toBe("0");
+  });
+});
+
+describe("streaming conversation scroll", () => {
+  function snapshotWithItems(items: ProductConversationItem[], overrides: Partial<typeof DEMO_SNAPSHOT> = {}) {
+    const product = DEMO_SNAPSHOT.productConversation!;
+    return { ...DEMO_SNAPSHOT, ...overrides, productConversation: { ...product, items } };
+  }
+
+  /** Replaces only the streamed assistant item's body — the item count never changes. */
+  function streamedAssistant(items: ProductConversationItem[], body: string) {
+    return items.map((item) => (item.id === "product-assistant-1" ? { ...item, body } : item));
+  }
+
+  function mountStreamingApp(initialItems: ProductConversationItem[]) {
+    let live = snapshotWithItems(initialItems);
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => live,
+      command: async () => live,
+      startCore: async () => live,
+      openInVsCode: async () => undefined
+    } as never;
+    render(<App />);
+    return { publish: (next: ReturnType<typeof snapshotWithItems>) => { live = next; } };
+  }
+
+  it(
+    "follows same-item streaming while pinned, then flags unseen and preserves position when scrolled away",
+    async () => {
+      const initial = DEMO_SNAPSHOT.productConversation!.items;
+      const { publish } = mountStreamingApp(initial);
+      await screen.findByRole("textbox", { name: /message composer/i });
+      const scroller = document.querySelector(".timeline-scroll") as HTMLElement;
+      const { geometry, writes } = mockTimelineGeometry(scroller);
+      fireEvent.scroll(scroller); // reader parked at the (mocked) bottom
+
+      // The same assistant item grows — the item count never changes.
+      publish(snapshotWithItems(streamedAssistant(initial, "partial answer")));
+      await waitFor(() => expect(screen.getByText("partial answer")).toBeTruthy(), { timeout: 8000 });
+      await waitFor(() => expect(writes).toContain(100), { timeout: 8000 });
+      expect(screen.queryByText(/new message/i)).toBeNull();
+
+      // Reader scrolls away; the very same item keeps streaming.
+      geometry.scrollH = 1200;
+      geometry.top = 260;
+      fireEvent.scroll(scroller);
+      publish(snapshotWithItems(streamedAssistant(initial, "partial answer + streamed tail")));
+      await waitFor(() => expect(screen.getByText(/1 new message/i)).toBeTruthy(), { timeout: 8000 });
+      expect(geometry.top).toBe(260); // scroll position preserved while away
+      expect(writes).toEqual([100]); // and no programmatic scroll happened
+    },
+    30000
+  );
+
+  it(
+    "resets honestly on a campaign switch: the switched-to view is the baseline, not new content",
+    async () => {
+      const initial = DEMO_SNAPSHOT.productConversation!.items;
+      const { publish } = mountStreamingApp(initial);
+      await screen.findByRole("textbox", { name: /message composer/i });
+      const scroller = document.querySelector(".timeline-scroll") as HTMLElement;
+      const { geometry } = mockTimelineGeometry(scroller);
+      fireEvent.scroll(scroller);
+      geometry.scrollH = 1200;
+      geometry.top = 260;
+      fireEvent.scroll(scroller);
+      publish(snapshotWithItems(streamedAssistant(initial, "grown while away")));
+      await waitFor(() => expect(screen.getByText(/1 new message/i)).toBeTruthy(), { timeout: 8000 });
+
+      // Switch to the second campaign with its own conversation.
+      const campaignB = snapshotWithItems(
+        [{ id: "b-assistant-1", kind: "assistant-message", body: "campaign B opening message" }],
+        { activeCampaignId: "campaign-evidence-loop" }
+      );
+      publish(campaignB);
+      await waitFor(() => expect(screen.getByText("campaign B opening message")).toBeTruthy(), { timeout: 8000 });
+
+      // The switch must not count campaign B as unseen: after re-establishing
+      // the away position, the first real growth flags exactly "1 new message"
+      // — never an accumulated count inherited from the switch.
+      geometry.top = 260;
+      fireEvent.scroll(scroller);
+      publish(snapshotWithItems(
+        [{ id: "b-assistant-1", kind: "assistant-message", body: "campaign B opening message + growth" }],
+        { activeCampaignId: "campaign-evidence-loop" }
+      ));
+      await waitFor(() => expect(screen.getByText(/1 new message/i)).toBeTruthy(), { timeout: 8000 });
+      expect(screen.queryByText(/2 new messages/i)).toBeNull();
+    },
+    30000
+  );
+});
+
+describe("scroll anchor visible-content identity (hook contract)", () => {
+  function StreamProbe({ items, resetKey }: { items: ProductConversationItem[]; resetKey: string }) {
+    const anchor = useScrollAnchor(resetKey, visibleConversationSignature(items));
+    return (
+      <div>
+        <div ref={anchor.ref} onScroll={anchor.handleScroll} data-testid="scroll">
+          {items.map((item) => <p key={item.id}>{item.body}</p>)}
+        </div>
+        <button type="button" data-testid="jump" onClick={() => anchor.scrollToBottom(false)} />
+        <span data-testid="unseen">{anchor.unseenCount}</span>
+      </div>
+    );
+  }
+
+  const msg = (id: string, body: string, extra: Partial<ProductConversationItem> = {}): ProductConversationItem =>
+    ({ kind: "assistant-message", id, body, ...extra });
+  const conversation = (assistantBody: string) => [msg("u1", "question"), msg("a1", assistantBody)];
+
+  function renderAwayFromBottom(items: ProductConversationItem[], resetKey = "c1") {
+    const { rerender } = render(<StreamProbe items={items} resetKey={resetKey} />);
+    const scroller = screen.getByTestId("scroll") as HTMLElement;
+    const { geometry, writes } = mockTimelineGeometry(scroller);
+    fireEvent.scroll(scroller); // still pinned at the (mocked) bottom
+    geometry.scrollH = 1200;
+    geometry.top = 260;
+    fireEvent.scroll(scroller); // reader scrolled away
+    return { rerender, geometry, writes, scroller };
+  }
+
+  it("follows same-length streamed growth for a reader pinned at the bottom", () => {
+    const { rerender } = render(<StreamProbe items={conversation("partial")} resetKey="c1" />);
+    const { writes } = mockTimelineGeometry(screen.getByTestId("scroll") as HTMLElement);
+    // Same item id, same item count, only the visible body grows.
+    rerender(<StreamProbe items={conversation("partial + streamed tail")} resetKey="c1" />);
+    expect(writes).toEqual([100]); // driven to the (mocked) bottom before paint
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+  });
+
+  it("counts same-length streamed growth as unseen and preserves the away scroll position", () => {
+    const { rerender, geometry, writes, scroller } = renderAwayFromBottom(conversation("partial"));
+    rerender(<StreamProbe items={conversation("partial + streamed tail")} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("1");
+    expect(geometry.top).toBe(260); // untouched
+    expect(writes).toEqual([]); // no programmatic scroll while away
+    // The jump affordance re-pins and clears the indicator.
+    fireEvent.click(screen.getByTestId("jump"));
+    expect(writes).toEqual([1200]);
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+    void scroller;
+  });
+
+  it("never notifies on an identical snapshot poll, even with fresh array identity", () => {
+    const original = conversation("partial");
+    const { rerender, geometry, writes } = renderAwayFromBottom(original);
+    // Two "polls": same content, brand-new objects — exactly what the 750ms
+    // snapshot loop produces.
+    rerender(<StreamProbe items={conversation("partial")} resetKey="c1" />);
+    rerender(<StreamProbe items={[{ ...original[0] }, { ...original[1] }]} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+    expect(writes).toEqual([]);
+    expect(geometry.top).toBe(260);
+  });
+
+  it("stays silent for hidden metadata changes but notifies when visible content changes", () => {
+    const { rerender, writes } = renderAwayFromBottom(conversation("partial"));
+    // `technicalDetails` renders behind a collapsed disclosure and `actions`
+    // is not rendered by the normal surface at all: not new visible content.
+    rerender(<StreamProbe items={[
+      msg("u1", "question"),
+      msg("a1", "partial", { technicalDetails: "raw trace changed", actions: ["retry"] })
+    ]} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+    expect(writes).toEqual([]);
+    // The visible body growing is real content: it counts.
+    rerender(<StreamProbe items={[
+      msg("u1", "question"),
+      msg("a1", "partial + streamed tail", { technicalDetails: "raw trace changed", actions: ["retry"] })
+    ]} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("1");
+  });
+
+  it("adopts a campaign switch as the baseline silently, then counts only later growth", () => {
+    const { rerender, geometry } = renderAwayFromBottom(conversation("partial"));
+    rerender(<StreamProbe items={conversation("partial + streamed tail")} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("1");
+
+    // Switch view: different resetKey and different content — this is the
+    // reader's own navigation, never an unseen-content event.
+    rerender(<StreamProbe items={[msg("b1", "campaign B opening")]} resetKey="c2" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+    // Identical re-poll of the new view stays silent (baseline adopted).
+    rerender(<StreamProbe items={[msg("b1", "campaign B opening")]} resetKey="c2" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("0");
+
+    // Away again (the switch re-pinned the reader), then real growth: exactly one.
+    geometry.top = 260;
+    fireEvent.scroll(screen.getByTestId("scroll"));
+    rerender(<StreamProbe items={[msg("b1", "campaign B opening + growth")]} resetKey="c2" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("1");
+  });
+
+  it("still counts appended items (length change) as unseen while away", () => {
+    const { rerender } = renderAwayFromBottom(conversation("partial"));
+    rerender(<StreamProbe items={[...conversation("partial"), msg("a2", "a whole new message")]} resetKey="c1" />);
+    expect(screen.getByTestId("unseen").textContent).toBe("1");
   });
 });

@@ -508,6 +508,8 @@ const BOOTSTRAP_ERROR_SCREENS = {
   "missing-database": { canChooseDir: true, headline: "This data profile record exists but its database is missing." },
   "not-a-profile": { canChooseDir: true, headline: "This data directory is not an empty or existing GoalPort profile." },
   "identity-mismatch": { canChooseDir: true, headline: "This data directory belongs to a different profile identity." },
+  "inspection-failed": { canChooseDir: true, headline: "This data profile could not be examined." },
+  "needs-recovery": { canChooseDir: true, headline: "This data profile's database cannot be verified without recovery." },
   "readonly-dir": { canChooseDir: true, headline: "The data directory cannot be written." },
   "disk-full": { canChooseDir: true, headline: "There is not enough disk space to continue." },
   "import-failed": { canChooseDir: true, headline: "Importing the existing data did not complete." },
@@ -621,6 +623,31 @@ async function runProfileBootstrap() {
 async function bootstrapExitOnError(kind, error) {
   const disposition = await bootstrapErrorScreen(kind, error?.message || error);
   return disposition === "exit" ? "exit" : "exit";
+}
+// Synthetic (--test-profile) bootstrap: the same fail-closed decisions as
+// normal data, minus channel behaviors (discovery/import/v1 adoption) that
+// never apply to an explicit per-test directory. Only a genuinely fresh
+// directory or a compatible synthetic reopen may continue; every other
+// outcome refuses BEFORE any marker write, backup write-open or Core launch.
+// Synthetic data is disposable, so a compatible reopen skips the consistency
+// backup — no write-open ever happens on this path.
+async function runSyntheticProfileBootstrap() {
+  pushBootstrap({ phase: "checking" });
+  let outcome;
+  try {
+    outcome = await profileManager.resolve();
+  } catch (error) {
+    return await bootstrapExitOnError(classifyFsError(error), error);
+  }
+  switch (outcome.kind) {
+    case "fresh":
+      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return "continue";
+    case "reopen":
+      return "continue";
+    default:
+      return await bootstrapExitOnError(outcome.kind, outcome.reason || outcome.kind);
+  }
 }
 // The Core spawn itself can still lose an ownership race with a Core that
 // became live between inspection and spawn: classify structurally, never by
@@ -873,9 +900,22 @@ async function createWindow() {
     if (!(await startCoreWithCoordination())) { quitFromBootstrap(); return; }
     try { profileManager.recordOpen(null); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
     pushBootstrap({ phase: "done" });
+  } else if (profileManager && profile) {
+    // Synthetic test profiles (--test-profile) pass the SAME ProfileManager
+    // validation before any Core launch: marker product/mode/path identity,
+    // then database compatibility through the read-only inspection. There is
+    // no synthetic profileReady shortcut anymore — a damaged, foreign, newer
+    // or unmarked directory refuses without spawning Core, and only a fresh
+    // or compatible-reopen bootstrap reaches ensureCore.
+    const disposition = await runSyntheticProfileBootstrap();
+    if (disposition !== "continue") { quitFromBootstrap(); return; }
+    profileReady = true;
+    await ensureCore();
+    try { profileManager.recordOpen(null); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    pushBootstrap({ phase: "done" });
   } else {
-    // Synthetic test profiles and legacy isolated tooling keep the direct
-    // contract: no discovery, no import, first user is the marker.
+    // Legacy isolated tooling (no profile; env-bound contract asserted
+    // pre-ready in assertIsolatedLaunch) keeps the direct path.
     profileReady = true;
     await ensureCore();
   }

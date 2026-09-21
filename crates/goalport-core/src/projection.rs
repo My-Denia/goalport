@@ -4718,9 +4718,18 @@ fn campaign_to_ui(
     let tasks = store
         .tasks_for_campaign(&campaign.id)
         .map_err(store_message)?;
-    let title = tasks
-        .first()
-        .map(|task| task.title.clone())
+    // Navigation title: the durable rename preference wins when present; the
+    // root task title stays the fallback for conversations that predate
+    // preferences. Nothing is rewritten to compute it. Store read failures
+    // propagate instead of silently degrading to the fallback title.
+    let renamed = store
+        .conversation_preference(&campaign.id)
+        .map_err(store_message)?
+        .and_then(|row| row.title)
+        .map(|title| title.trim().to_owned())
+        .filter(|title| !title.is_empty());
+    let title = renamed
+        .or_else(|| tasks.first().map(|task| task.title.clone()))
         .unwrap_or_else(|| campaign.goal.clone());
     Ok(UiCampaign {
         id: campaign.id.clone(),
