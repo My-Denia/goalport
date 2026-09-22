@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { browserStateContainedIn, durableStorageEntryAllowed } from "./storage-boundary.mjs";
 import vm from "node:vm";
 const require = createRequire(import.meta.url);
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
@@ -1387,4 +1388,48 @@ test("real entrypoint: a profile-less legacy isolated run receives bootstrap don
   assert.ok(log.includes("snapshot"), "the Core attach serves snapshots as usual");
   const userData = setPathCalls.filter(([name]) => name === "userData");
   assert.deepEqual(userData, [["userData", resolve(dirname(db), "electron-userData")]], "isolated userData stays the run-owned electron-userData directory");
+});
+
+// ---- Regression pin: the smoke driver's storage-boundary judgements are
+// EXECUTED here against real file layouts. The 76ea6cd CI failure
+// (ReferenceError: relative is not defined inside the smoke's
+// storage-boundary stage) escaped every local check because the driver is a
+// top-level script that node --check/--help/unit suites never actually run
+// past argument parsing. The judgements now live in an importable module and
+// these tests drive the exact containment branch the packaged smoke uses.
+
+test("smoke storage-boundary: browser containment judged from the canonical owner root on a real layout", (t) => {
+  const root = fixture(t);
+  // Normal shape: the browser namespace inside the relocated app-data root.
+  const appDataRoot = resolve(root, "appdata-root");
+  const normalBrowser = resolve(appDataRoot, "GoalPort", "electron", "a".repeat(20));
+  mkdirSync(normalBrowser, { recursive: true });
+  assert.equal(browserStateContainedIn({ ownerRoot: appDataRoot, directory: normalBrowser }), true, "normal browser state is inside the app-data root");
+  // Synthetic shape: the owner is the CANONICAL durable parent the path model
+  // derived the browser namespace from, and the browser directory really
+  // exists under it.
+  const synthetic = resolveProfilePaths({ appData: appDataRoot, coreSha256: hash, args: { "--test-profile": resolve(root, "scratch", "profile") } });
+  mkdirSync(synthetic.browserStateDirectory, { recursive: true });
+  const canonicalOwner = realpathSync.native(dirname(synthetic.durableDirectory));
+  assert.equal(browserStateContainedIn({ ownerRoot: canonicalOwner, directory: synthetic.browserStateDirectory }), true, "synthetic browser state is inside the canonical scratch root");
+  assert.equal(browserStateContainedIn({ ownerRoot: canonicalOwner, directory: synthetic.durableDirectory }), true, "the synthetic durable root itself is inside the same scratch");
+  // Refusals: outside the owner, and the owner directory itself.
+  const outside = resolve(root, "elsewhere", "electron", "b".repeat(20));
+  mkdirSync(outside, { recursive: true });
+  assert.equal(browserStateContainedIn({ ownerRoot: canonicalOwner, directory: outside }), false, "a browser root outside the owner is refused");
+  assert.equal(browserStateContainedIn({ ownerRoot: canonicalOwner, directory: canonicalOwner }), false, "the owner directory itself is not containment");
+  // An alternate 8.3-style spelling of the owner must not change the verdict.
+  assert.equal(browserStateContainedIn({ ownerRoot: dirname(synthetic.durableDirectory), directory: synthetic.browserStateDirectory }), true, "the literal (non-canonical) owner spelling gives the same verdict");
+});
+
+test("smoke storage-boundary: the durable allowlist accepts exactly the durable contract entries", () => {
+  for (const allowed of [
+    "goalport-profile.json", "goalport.sqlite", "goalport.sqlite-wal", "goalport.sqlite-shm",
+    "goalport.sqlite.launcher.log", "goalport.sqlite.core.log", "goalport.sqlite.launch-ready",
+    "import-journal.json", "backups", ".import-staging-2026-09-22T00-00-00-000Z"
+  ]) assert.equal(durableStorageEntryAllowed(allowed), true, allowed);
+  for (const refused of [
+    "Cache", "Code Cache", "GPUCache", "Local State", "Preferences", "Network", "blob_storage",
+    "DevToolsActivePort", "DIPS", "DIPS-wal", "window-state.json", "SomeEntirelyNewBrowserStateFile", "userfile.txt"
+  ]) assert.equal(durableStorageEntryAllowed(refused), false, refused);
 });

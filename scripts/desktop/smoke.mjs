@@ -11,6 +11,7 @@ import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
 import { boundedFailureSummary, collectFailureDiagnostics, collectStartupDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
+import { browserStateContainedIn, durableStorageEntryAllowed } from "./storage-boundary.mjs";
 import { connectedUiExpression } from "./connect-probe.mjs";
 import { clickPointFor } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
@@ -429,11 +430,8 @@ async function smoke() {
     // root (normal) or the test-owned scratch (synthetic), and the real
     // %APPDATA% GoalPort folder is untouched.
     stage = "storage-boundary";
-    const durableAllowed = (name) => name === "goalport-profile.json" || name === "goalport.sqlite" || name === "goalport.sqlite-wal" || name === "goalport.sqlite-shm"
-      || name === "goalport.sqlite.launcher.log" || name === "goalport.sqlite.core.log" || name === "goalport.sqlite.launch-ready"
-      || name === "import-journal.json" || name === "backups" || name.startsWith(".import-staging-");
     const durableNames = readdirSync(profile).sort();
-    const durableUnexpected = durableNames.filter((name) => !durableAllowed(name));
+    const durableUnexpected = durableNames.filter((name) => !durableStorageEntryAllowed(name));
     assert.deepEqual(durableUnexpected, [], `durable profile root must contain only durable storage-contract entries; unexpected: ${JSON.stringify(durableUnexpected)}`);
     assert.notEqual(normalize(profile), normalize(browserStateDirectory), "durable and browser-state roots must be distinct paths");
     const browserNames = readdirSync(browserStateDirectory).sort();
@@ -445,10 +443,9 @@ async function smoke() {
     // literal prefix compare fails on the runner even though the browser root
     // is exactly where the model puts it.
     const browserOwnerRoot = normal ? appDataRoot : dirname(launchPaths.durableDirectory);
-    const browserRel = relative(browserOwnerRoot, browserStateDirectory);
     assert.ok(
-      browserRel !== "" && !browserRel.startsWith("..") && !isAbsolute(browserRel),
-      `${normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"} (owner=${browserOwnerRoot}, browser=${browserStateDirectory}, relative=${browserRel})`
+      browserStateContainedIn({ ownerRoot: browserOwnerRoot, directory: browserStateDirectory }),
+      `${normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"} (owner=${browserOwnerRoot}, browser=${browserStateDirectory})`
     );
     const realGoalPortPost = realGoalPortEntries();
     assert.deepEqual(realGoalPortPost, realGoalPortPre, "the real %APPDATA% GoalPort folder must be untouched by this smoke");
