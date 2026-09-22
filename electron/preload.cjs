@@ -16,11 +16,10 @@ function appDocumentKey(href) {
   if (url.username || url.password) return null;
   const host = url.hostname.toLowerCase();
   if (host && host !== "localhost") return null;
-  url.hostname = "";
-  url.hash = "";
-  const drive = url.pathname.match(/^\/([A-Za-z])(:.*)$/);
-  if (drive) url.pathname = `/${drive[1].toLowerCase()}${drive[2].toLowerCase()}`;
-  return url.href;
+  let pathname = url.pathname;
+  const drive = pathname.match(/^\/([A-Za-z])(:.*)$/);
+  if (drive) pathname = `/${drive[1].toLowerCase()}${drive[2].toLowerCase()}`;
+  return `file://${pathname}${url.search}`;
 }
 const expectedHrefs = process.argv
   .filter((arg) => arg.startsWith("--goalport-app-document="))

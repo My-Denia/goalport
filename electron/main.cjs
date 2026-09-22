@@ -1075,11 +1075,19 @@ async function createWindow() {
     const loaded = mainWindow.webContents.getURL();
     if (!isAppDocument(loaded, appDocumentUrl)) {
       let hostClass = "malformed";
+      let queryDiff = 0;
+      let pathLowerEqual = 0;
+      let lenDelta = 0;
       try {
-        const host = new URL(loaded).hostname.toLowerCase();
+        const actual = new URL(loaded);
+        const expected = new URL(appDocumentUrl);
+        const host = actual.hostname.toLowerCase();
         hostClass = host ? (host === "localhost" ? "localhost" : "other") : "empty";
+        queryDiff = actual.search === expected.search ? 0 : 1;
+        pathLowerEqual = actual.pathname.toLowerCase() === expected.pathname.toLowerCase() ? 1 : 0;
+        lenDelta = actual.pathname.length - expected.pathname.length;
       } catch { /* malformed stays */ }
-      console.error(`goalport-document-mismatch hostClass=${hostClass}`);
+      console.error(`goalport-document-mismatch hostClass=${hostClass} queryDiff=${queryDiff} pathLowerEqual=${pathLowerEqual} lenDelta=${lenDelta}`);
     }
   } catch {
     console.error("goalport-document-mismatch hostClass=malformed");
