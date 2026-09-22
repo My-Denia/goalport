@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 const require = createRequire(import.meta.url);
-const { externalHttpUrl, createTrustedIpcHandler, protectRenderer } = require("../../electron/security-policy.cjs");
+const { externalHttpUrl, createTrustedIpcHandler, protectRenderer, isAppDocument } = require("../../electron/security-policy.cjs");
 const appUrl = "file:///goalport/dist/index.html";
 
 function fixture() {
@@ -74,17 +74,31 @@ test("renderer main/subframe navigation, redirects and webviews are denied befor
   assert.ok(main.indexOf("protectRenderer(mainWindow.webContents") < main.indexOf("await mainWindow.loadFile"));
 });
 
+test("one Windows app file matches across drive-letter case and rejects a different file", () => {
+  assert.equal(isAppDocument("file:///c:/GoalPort/dist/index.html", "file:///C:/goalport/dist/index.html"), true);
+  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html#anchor", "file:///c:/goalport/dist/index.html"), true);
+  assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", "file:///C:/GoalPort/dist/index.html"), false);
+  assert.equal(isAppDocument("file:///goalport/dist/Index.html", "file:///goalport/dist/index.html"), false);
+});
+
 test("preload exposes bridge only to exact main app document, never external/subframe", () => {
   const code = readFileSync(new URL("../../electron/preload.cjs", import.meta.url), "utf8");
-  for (const [url, main, argument, trusted] of [
+  const policy = readFileSync(new URL("../../electron/security-policy.cjs", import.meta.url), "utf8");
+  const key = (source) => source.slice(source.indexOf("function appDocumentKey(href) {"), source.indexOf("\n}", source.indexOf("function appDocumentKey(href) {")) + 2);
+  assert.equal(key(code).replace(/\r\n/g, "\n"), key(policy).replace(/\r\n/g, "\n"));
+  for (const [url, main, argument, trusted, expected] of [
     [appUrl, true, true, true], [appUrl + "#anchor", true, true, true],
     [appUrl, false, true, false], ["https://evil.example/", true, true, false],
-    ["file:///other.html", true, true, false], [appUrl, true, false, false]
+    ["file:///other.html", true, true, false], [appUrl, true, false, false],
+    ["file:///c:/goalport/dist/index.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/goalport/dist/other.html", true, true, false, "file:///C:/GoalPort/dist/index.html"]
   ]) {
     const exposed = [];
-    vm.runInNewContext(code, { URL, location: { href: url },
-      process: { isMainFrame: main, argv: argument ? [`--goalport-app-document=${encodeURIComponent(appUrl)}`] : [] },
+    const logs = [];
+    vm.runInNewContext(code, { URL, location: { href: url }, console: { error: (line) => logs.push(line) },
+      process: { isMainFrame: main, argv: argument ? [`--goalport-app-document=${encodeURIComponent(expected || appUrl)}`] : [] },
       require: () => ({ contextBridge: { exposeInMainWorld: (name) => exposed.push(name) }, ipcRenderer: {} }) });
     assert.equal(exposed.includes("goalportCore"), trusted, `${url}/${main}/${argument}`);
+    assert.equal(logs.length, trusted ? 0 : 1, logs.join(" "));
   }
 });

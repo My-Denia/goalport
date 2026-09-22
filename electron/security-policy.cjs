@@ -1,12 +1,22 @@
 // The local main renderer is the only principal allowed to use the bridge.
 // Runtime text, subframes, popups and other WebContents are not principals.
+// Same file, not a string-identical URL. Windows Chromium and Node disagree on
+// drive-letter case for one path; POSIX paths stay case-sensitive. Kept in
+// lockstep with the copy in preload.cjs (sandbox cannot require this file).
+function appDocumentKey(href) {
+  const url = new URL(href);
+  if (url.protocol !== "file:") return null;
+  url.hash = "";
+  const pathname = decodeURIComponent(url.pathname);
+  const drive = pathname.match(/^\/([A-Za-z]):(\/.*)?$/);
+  if (!drive) return url.href;
+  return `file:///${drive[1].toLowerCase()}:${(drive[2] || "/").toLowerCase()}`;
+}
+
 function isAppDocument(value, appUrl) {
   try {
-    const actual = new URL(value);
-    const expected = new URL(appUrl);
-    actual.hash = "";
-    expected.hash = "";
-    return expected.protocol === "file:" && actual.href === expected.href;
+    const actual = appDocumentKey(value);
+    return actual !== null && actual === appDocumentKey(appUrl);
   } catch { return false; }
 }
 

@@ -3,14 +3,34 @@ const requestId = () => `desktop-snapshot-${Date.now()}-${Math.random().toString
 
 // Defense in depth: even an accidentally reused preload exposes nothing in a
 // popup/subframe or any document other than the main process's exact app file.
-const expectedArgument = process.argv.find((arg) => arg.startsWith("--goalport-app-document="));
+// Same file, not a string-identical URL. Windows Chromium and Node disagree on
+// drive-letter case for one path; POSIX paths stay case-sensitive. Kept in
+// lockstep with appDocumentKey in security-policy.cjs (sandbox cannot require it).
+function appDocumentKey(href) {
+  const url = new URL(href);
+  if (url.protocol !== "file:") return null;
+  url.hash = "";
+  const pathname = decodeURIComponent(url.pathname);
+  const drive = pathname.match(/^\/([A-Za-z]):(\/.*)?$/);
+  if (!drive) return url.href;
+  return `file:///${drive[1].toLowerCase()}:${(drive[2] || "/").toLowerCase()}`;
+}
+const expectedHrefs = process.argv
+  .filter((arg) => arg.startsWith("--goalport-app-document="))
+  .map((arg) => { try { return decodeURIComponent(arg.slice("--goalport-app-document=".length)); } catch { return ""; } })
+  .filter(Boolean);
 let trustedDocument = false;
+let gate = "no-argument";
 try {
-  const expected = new URL(decodeURIComponent(expectedArgument?.slice("--goalport-app-document=".length) || ""));
-  const actual = new URL(globalThis.location.href);
-  actual.hash = "";
-  trustedDocument = process.isMainFrame === true && expected.protocol === "file:" && actual.href === expected.href;
-} catch { /* Missing or malformed identity fails closed. */ }
+  if (process.isMainFrame !== true) gate = "not-main-frame";
+  else if (expectedHrefs.length === 0) gate = "no-argument";
+  else {
+    const actual = appDocumentKey(globalThis.location.href);
+    trustedDocument = actual !== null && expectedHrefs.some((href) => appDocumentKey(href) === actual);
+    gate = trustedDocument ? "ok" : "href-mismatch";
+  }
+} catch { gate = "malformed"; trustedDocument = false; }
+if (!trustedDocument) console.error(`goalport-preload-gate:${gate}`);
 
 if (trustedDocument) {
 contextBridge.exposeInMainWorld("__GOALPORT_ELECTRON__", true);
