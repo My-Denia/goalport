@@ -6,7 +6,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
-const { createTrustedIpcHandler, protectRenderer } = require("./security-policy.cjs");
+const { createTrustedIpcHandler, protectRenderer, isAppDocument } = require("./security-policy.cjs");
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
@@ -1071,6 +1071,19 @@ async function createWindow() {
   mainWindow.on("resize", rememberWindowState);
   mainWindow.on("move", rememberWindowState);
   await mainWindow.loadFile(path.join(appRoot, "dist", "index.html"));
+  try {
+    const loaded = mainWindow.webContents.getURL();
+    if (!isAppDocument(loaded, appDocumentUrl)) {
+      let hostClass = "malformed";
+      try {
+        const host = new URL(loaded).hostname.toLowerCase();
+        hostClass = host ? (host === "localhost" ? "localhost" : "other") : "empty";
+      } catch { /* malformed stays */ }
+      console.error(`goalport-document-mismatch hostClass=${hostClass}`);
+    }
+  } catch {
+    console.error("goalport-document-mismatch hostClass=malformed");
+  }
   if (isolatedRequired() && mainWindow && !mainWindow.isDestroyed()) {
     await mainWindow.webContents.executeJavaScript("window.__GOALPORT_ISOLATED=1");
   }

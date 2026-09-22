@@ -10,7 +10,10 @@
 function appDocumentKey(href) {
   const url = new URL(href);
   if (url.protocol !== "file:") return null;
-  if (url.username || url.password || url.hostname) return null;
+  if (url.username || url.password) return null;
+  const host = url.hostname.toLowerCase();
+  if (host && host !== "localhost") return null;
+  url.hostname = "";
   url.hash = "";
   const drive = url.pathname.match(/^\/([A-Za-z])(:.*)$/);
   if (drive) url.pathname = `/${drive[1].toLowerCase()}${drive[2].toLowerCase()}`;
@@ -72,4 +75,4 @@ function protectRenderer(contents, appUrl, openExternal) {
   return { appUrl };
 }
 
-module.exports = { isAppDocument, externalHttpUrl, requireMainWindowSender, createTrustedIpcHandler, protectRenderer };
+module.exports = { appDocumentKey, isAppDocument, externalHttpUrl, requireMainWindowSender, createTrustedIpcHandler, protectRenderer };
