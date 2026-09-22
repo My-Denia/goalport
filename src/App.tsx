@@ -127,15 +127,19 @@ function App() {
   useEffect(() => {
     const api = window.goalportCore;
     if (!api?.onBootstrapState) return undefined;
+    let active = true;
+    let eventReceived = false;
     void api.bootstrapCurrent?.().then((state) => {
-      setBootstrap((current) => current ?? state);
-      if (state?.phase === "done") setCoreReady(true);
+      if (!active || eventReceived) return;
+      setBootstrap(state?.phase === "done" ? null : state);
+      setCoreReady(state?.phase === "done");
     });
     const unsubscribe = api.onBootstrapState((state) => {
+      eventReceived = true;
       setBootstrap(state?.phase === "done" ? null : state);
-      if (state?.phase === "done") setCoreReady(true);
+      setCoreReady(state?.phase === "done");
     });
-    return unsubscribe;
+    return () => { active = false; unsubscribe(); };
   }, []);
 
   const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);

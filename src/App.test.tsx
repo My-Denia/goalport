@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { type CoreCommand } from "./ipc";
@@ -52,7 +52,7 @@ const SEND_TYPE = "conversation_send";
 // cycles, so the zero-call assertions cannot pass on an unscheduled timer.
 const settlePastCycles = () => new Promise((done) => setTimeout(done, 1700));
 
-function mountGatedElectron(snapshot: unknown) {
+function mountGatedElectron(snapshot: unknown, current: () => Promise<unknown> = async () => ({ phase: "checking" })) {
   const snapshotMock = vi.fn(async () => snapshot);
   const startCore = vi.fn(async () => snapshot);
   let pushState: ((state: unknown) => void) | null = null;
@@ -62,7 +62,7 @@ function mountGatedElectron(snapshot: unknown) {
     command: async () => snapshot,
     startCore,
     openInVsCode: async () => undefined,
-    bootstrapCurrent: async () => ({ phase: "checking" }),
+    bootstrapCurrent: current,
     onBootstrapState: (callback: (state: unknown) => void) => {
       pushState = callback;
       return () => { pushState = null; };
@@ -117,6 +117,31 @@ describe("bootstrap gating of Core polling", () => {
     expect(gated.startCore).not.toHaveBeenCalled();
     const dialog = await screen.findByRole("dialog", { name: /goalport data profile/i });
     expect(within(dialog).getByText(/not an empty or existing GoalPort profile/i)).toBeTruthy();
+  });
+
+  it.each(["checking", "error"])("stops polling when done transitions back to %s", async (phase) => {
+    const gated = mountGatedElectron({ ...DEMO_SNAPSHOT, preview: false });
+    gated.push({ phase: "done" });
+    await waitFor(() => expect(gated.snapshotMock.mock.calls.length).toBeGreaterThan(0));
+    await act(async () => gated.push({ phase, headline: "Profile is unavailable", kind: "inspection-failed" }));
+    if (phase === "error") await screen.findByRole("dialog");
+    const calls = gated.snapshotMock.mock.calls.length;
+    await settlePastCycles();
+    expect(gated.snapshotMock).toHaveBeenCalledTimes(calls);
+    expect(gated.startCore).not.toHaveBeenCalled();
+  });
+
+  it("a delayed current done cannot override a newer bootstrap error", async () => {
+    let finishCurrent!: (value: unknown) => void;
+    const current = new Promise<unknown>((done) => { finishCurrent = done; });
+    const gated = mountGatedElectron({ ...DEMO_SNAPSHOT, preview: false }, () => current);
+    gated.push({ phase: "error", headline: "Newer refusal", kind: "inspection-failed" });
+    await screen.findByText("Newer refusal");
+    finishCurrent({ phase: "done" });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    expect(gated.startCore).not.toHaveBeenCalled();
+    expect(screen.getByText("Newer refusal")).toBeTruthy();
   });
 
   it("an electron mount without a bootstrap channel is ready immediately and polls at once", async () => {
