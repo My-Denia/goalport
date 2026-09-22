@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { argsFor, fileHash } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
@@ -442,13 +442,9 @@ async function smoke() {
     assert.equal(physicalBoundary.disjoint, true, "durable and browser roots must not physically overlap");
     const browserNames = readdirSync(browserStateDirectory).sort();
     assert.ok(browserNames.length > 0, "browser-state namespace exists and is non-empty");
-    // Containment is judged against the SAME root the central path model
-    // derived the browser namespace from. For a synthetic profile that is the
-    // CANONICAL durable parent (realpathSync.native expands 8.3 aliases such
-    // as the GitHub runner's RUNNER~1 TEMP), never the literal spelling: a
-    // literal prefix compare fails on the runner even though the browser root
-    // is exactly where the model puts it.
-    const browserOwnerRoot = normal ? appDataRoot : dirname(launchPaths.durableDirectory);
+    // Both normal and synthetic ownership come from the same physical path
+    // model. Never reconstruct a raw normal root or a synthetic parent here.
+    const browserOwnerRoot = launchPaths.browserStateOwnerDirectory;
     assert.ok(
       browserStateContainedIn({ ownerRoot: browserOwnerRoot, directory: browserStateDirectory }),
       `${normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"} (owner=${browserOwnerRoot}, browser=${browserStateDirectory})`

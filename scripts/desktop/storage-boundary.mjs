@@ -4,7 +4,7 @@
 // durable-allowlist decisions are EXECUTED by unit tests against real file
 // layouts — a missing import or broken judgement must fail in `pnpm
 // test:desktop`, not only on a packaged CI runner.
-import { isAbsolute, relative } from "node:path";
+import launchConfig from "../../electron/launch-config.cjs";
 
 // The durable profile root may carry ONLY GoalPort-owned durable
 // storage-contract entries: the identity marker, the SQLite database and its
@@ -28,12 +28,10 @@ export function durableStorageEntryAllowed(name) {
 }
 
 // True when `directory` is strictly INSIDE `ownerRoot` (never equal to it,
-// never escaping upwards, never on another drive). Containment is judged
-// against the SAME root the central path model derived the browser namespace
-// from: for a synthetic profile that is the CANONICAL durable parent
-// (realpathSync.native expands 8.3 aliases such as the GitHub runner's
-// RUNNER~1 TEMP), never the literal spelling.
+// never escaping upwards, never on another drive). Reuse the central physical
+// path comparison so a caller's 8.3 spelling or a junction cannot disguise
+// containment. The caller supplies the path model's browser owner root.
 export function browserStateContainedIn({ ownerRoot, directory }) {
-  const rel = relative(ownerRoot, directory);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  const relation = launchConfig.storagePathRelationship(ownerRoot, directory);
+  return relation.browserInsideDurable && !relation.samePath;
 }

@@ -38,6 +38,7 @@ test("storage boundary refuses explicit ancestors and real junction overlap or o
   mkdirSync(outside);
   symlinkSync(outside, redirected, "junction");
   assert.throws(() => resolveProfilePaths(settings(home, { "--data-dir": durable })), /escapes/);
+  assert.equal(browserStateContainedIn({ ownerRoot: home, directory: redirected }), false, "smoke rejects a lexical child junction escaping its physical owner");
   assert.deepEqual(readdirSync(outside), []);
   assert.equal(storagePathRelationship(durable, durable).samePath, true);
   assert.equal(storagePathRelationship(resolve(durable, "child"), durable).durableInsideBrowser, true);
@@ -380,6 +381,8 @@ test("Windows aliases share identity even for an absent database descendant", { 
   const normal = resolveProfilePaths({ appData: shortAppData, coreSha256: hash, args: { "--data-dir": appData } });
   assert.equal(normal.browserStateDirectory, resolve(realpathSync.native(alias), shortAppData.slice(resolve(alias).length + 1), "GoalPort", "electron", normal.profileKey));
   assert.notEqual(normal.browserStateDirectory, resolve(shortAppData, "GoalPort", "electron", normal.profileKey), "literal short-name expectation reproduces the CI60 assertion bug");
+  assert.equal(browserStateContainedIn({ ownerRoot: shortAppData, directory: normal.browserStateDirectory }), true, "normal smoke accepts an 8.3 app-data owner and canonical browser path (CI61)");
+  assert.equal(browserStateContainedIn({ ownerRoot: normal.browserStateOwnerDirectory, directory: normal.browserStateDirectory }), true);
   assert.equal(existsSync(shortAppData), false, "pure alias check never creates app-data");
   // Synthetic browser-state containment is derived from the CANONICAL durable
   // parent, never from the literal spelling. On a machine whose temp root is
