@@ -6,12 +6,36 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import { browserStateContainedIn, durableStorageEntryAllowed } from "./storage-boundary.mjs";
 import vm from "node:vm";
+import { pathToFileURL } from "node:url";
+function securityContents(extra = {}) {
+  const frame = { processId: 1, routingId: 1, detached: false, url: pathToFileURL(resolve("dist/index.html")).href };
+  return { mainFrame: frame, getURL: () => frame.url, isDestroyed: () => false, on: () => {}, setWindowOpenHandler: () => {}, ...extra };
+}
+const trustedEvent = (win) => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
 const require = createRequire(import.meta.url);
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, storagePathRelationship, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
 const otherHash = "b".repeat(64);
+
+test("transport preserves reserved rejection and does not confuse a history page with snapshot", async () => {
+  const snapshots = [];
+  const deps = { ensureCore: () => assert.fail("no automatic retry"), delay: () => assert.fail("no automatic retry"), onResult: (value) => snapshots.push(value) };
+  const rejection = { requestId: "intent", accepted: false, snapshot: { activeCampaignId: "reserved" },
+    rejection: { deliveryState: "FAILED", nativeDispatchState: "NOT_STARTED", retryMode: "SAME_REQUEST", reservation: { campaignId: "reserved" } } };
+  const result = await invokeCoreRequest({ requestId: "intent", messageType: "start_conversation" },
+    { ...deps, exchange: async () => ({ requestId: "intent", ok: false, error: "admission refused", payload: rejection }) });
+  assert.equal(result.goalportRejected, true);
+  assert.deepEqual(result.rejection, rejection.rejection);
+  assert.deepEqual(snapshots, [rejection.snapshot]);
+  const page = { requestId: "history", accepted: true, historyPage: { ownerId: "reserved", conversationItems: [], pageInfo: {} } };
+  assert.deepEqual(await invokeCoreRequest({ requestId: "history", messageType: "history_page" },
+    { ...deps, exchange: async () => ({ requestId: "history", ok: true, payload: page }) }), page);
+  assert.equal(snapshots.length, 1, "history result must not replace attempt/hold cache");
+  await assert.rejects(invokeCoreRequest({ requestId: "intent", messageType: "start_conversation" },
+    { ...deps, exchange: async () => ({ requestId: "intent", ok: false, payload: { ...rejection, requestId: "foreign" } }) }), /identity/);
+});
 function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), "goalport-launch-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -789,7 +813,7 @@ test("the real Electron entrypoint routes Core requests and close choices throug
   };
   const windows = [], handlers = new Map(), dialogs = [];
   class FakeWindow {
-    constructor() { this.webContents = { send: () => {}, executeJavaScript: async () => {} }; windows.push(this); }
+    constructor() { this.webContents = securityContents({ send: () => {}, executeJavaScript: async () => {} }); windows.push(this); }
     static fromWebContents() { return windows[0]; }
     loadFile() { return Promise.resolve(); }
     on() {}
@@ -828,26 +852,26 @@ test("the real Electron entrypoint routes Core requests and close choices throug
 
   const request = (messageType, requestId) => ({ protocolVersion: "goalport.ipc.v2", requestId, entityVersion: 0, messageType, payload: {} });
   log.length = 0;
-  await handlers.get("goalport:core-command")(null, request("send_message", "send-1"));
+  await handlers.get("goalport:core-command")(trustedEvent(windows[0]), request("send_message", "send-1"));
   assert.deepEqual(log, ["peer", "get_startup_receipt", "send_message"]);
 
   log.length = 0;
-  await handlers.get("goalport:core-snapshot")(null, request("snapshot", "poll-1"));
+  await handlers.get("goalport:core-snapshot")(trustedEvent(windows[0]), request("snapshot", "poll-1"));
   assert.deepEqual(log, ["snapshot"], "a snapshot poll with no prior failure is not re-verified");
 
   log.length = 0;
   failSnapshot = true;
-  await handlers.get("goalport:core-snapshot")(null, request("snapshot", "poll-2"));
+  await handlers.get("goalport:core-snapshot")(trustedEvent(windows[0]), request("snapshot", "poll-2"));
   assert.deepEqual(log, ["snapshot", "peer", "get_startup_receipt", "snapshot"], "a failed snapshot re-verifies before its retry");
 
   log.length = 0;
   peerPid = 9999;
-  await assert.rejects(handlers.get("goalport:core-command")(null, request("safe_stop", "stop-1")), /could not be verified/);
+  await assert.rejects(handlers.get("goalport:core-command")(trustedEvent(windows[0]), request("safe_stop", "stop-1")), /could not be verified/);
   assert.deepEqual(log, ["peer", "get_startup_receipt"], "a server whose PID is not the receipt Core receives no mutation");
   peerPid = 4242;
 
   log.length = 0;
-  const closed = await handlers.get("goalport:confirm-close-choice")({ sender: {} }, { choice: "continue", requestId: "close-1" });
+  const closed = await handlers.get("goalport:confirm-close-choice")(trustedEvent(windows[0]), { choice: "continue", requestId: "close-1" });
   assert.equal(closed.ok, true, JSON.stringify(closed));
   assert.deepEqual(log, ["peer", "get_startup_receipt", "snapshot", "peer", "get_startup_receipt", "record_close_choice"]);
 });
@@ -872,7 +896,72 @@ const inspectNewerSchema = (callback) => setImmediate(() => callback(null, profi
   counts: {}, latestEpoch: null
 })));
 
-function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, pipeInitiallyUp = false, spawnOpensPipe = false, launcherPresent = false, unpackagedOverrides = false }) {
+test("real entrypoint: recovery consent is bound, unknown actions never mean fresh, and exit preserves staged import", async (t) => {
+  for (const choice of ["accept", "stale", "exit", "fresh"]) {
+    const effects = [];
+    const journal = { operationId: "recovery-op", proofToken: "proof" };
+    class RecoveryManager {
+      async resolve() { return { kind: "import-recovery-offer", discovery: { path: "known-source", inspection: { counts: { campaigns: 1 } } }, journal,
+        recovery: { recoveryDisposition: "POSITIVELY_IDENTIFIED_RECOVERABLE", recoveryMethod: "DETACHED_WAL_COPY_PROBE_V1", recoveryProofToken: "proof", operationId: "recovery-op", sourceMutationOnAccept: "NONE" } }; }
+      async acceptRecovery(received, action) {
+        effects.push(["consent", received, action]);
+        if (action.operationId !== "recovery-op" || action.recoveryProofToken !== "proof") throw new Error("stale recovery consent");
+      }
+      declineRecovery(received) { assert.equal(received, journal); effects.push(["decline"]); }
+      beginFresh() { effects.push(["fresh"]); }
+      async recordOpenedDatabase() { effects.push(["opened"]); }
+    }
+    const harness = mainEntryHarness(t, { mode: "normal", pipeInitiallyUp: true, profileManagerClass: RecoveryManager });
+    harness.run();
+    await harness.until(() => harness.states.some((entry) => entry.state.phase === "import-offer"), "recovery offer");
+    const state = (await bootstrapCurrent(harness));
+    assert.equal(state.facts.recoveryDisposition, "POSITIVELY_IDENTIFIED_RECOVERABLE");
+    const act = (payload) => harness.handlers.get("goalport:bootstrap-action")(trustedEvent(harness.windows[0]), payload);
+    await act({ type: "unrecognized" });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(effects, []);
+    assert.equal(harness.pipeProbes, 0);
+    await act(choice === "accept" || choice === "stale" ? { type: "import-accept", operationId: "recovery-op", recoveryProofToken: choice === "accept" ? "proof" : "wrong" } : { type: choice });
+    if (choice === "exit") {
+      await harness.until(() => harness.exits.length > 0, "recovery exit");
+      assert.deepEqual(effects, []);
+    } else if (choice === "stale") {
+      await harness.until(() => harness.states.some((entry) => entry.state.phase === "error"), "stale consent refusal");
+      assert.deepEqual(effects.map((effect) => effect[0]), ["consent"]);
+      assert.equal(harness.pipeProbes, 0);
+      await act({ type: "exit" });
+    } else {
+      await harness.until(() => harness.states.some((entry) => entry.state.phase === "done"), "accepted recovery or explicit fresh");
+      assert.deepEqual(effects.map((effect) => effect[0]), choice === "accept" ? ["consent", "opened"] : ["decline", "fresh", "opened"]);
+    }
+  }
+});
+
+test("real entrypoint: capacity acknowledgement cannot clear held/active close responsibility", async (t) => {
+  class ReadyManager {
+    async resolve() { return { kind: "reopen", needsBackup: false }; }
+    async recordOpenedDatabase() {}
+  }
+  const projection = { bounds: { projectionUnavailable: true }, attempt: { id: "attempt-1", state: "completed", provider: "scenario" } };
+  const harness = mainEntryHarness(t, { mode: "normal", pipeInitiallyUp: true, profileManagerClass: ReadyManager, snapshotValue: projection });
+  harness.run();
+  await harness.until(() => harness.log.includes("snapshot"), "capacity acknowledgement cached");
+  await new Promise((resolve) => setImmediate(resolve));
+  const event = trustedEvent(harness.windows[0]);
+  const close = await harness.handlers.get("goalport:request-close")(event);
+  assert.equal(close.prompted, true);
+  assert.equal(harness.destroyed.length, 0);
+  const choice = await harness.handlers.get("goalport:confirm-close-choice")(event, { choice: "continue", requestId: "close-capacity" });
+  assert.equal(choice.ok, false);
+  assert.match(choice.error, /projection is unavailable/);
+  assert.equal(harness.log.includes("record_close_choice"), false);
+  projection.bounds.projectionUnavailable = false;
+  const recovered = await harness.handlers.get("goalport:request-close")(event);
+  assert.equal(recovered.allowQuitLatch, true);
+  assert.equal(harness.destroyed.length, 1);
+});
+
+function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, pipeInitiallyUp = false, spawnOpensPipe = false, launcherPresent = false, unpackagedOverrides = false, profileManagerClass = null, snapshotValue = null }) {
   const root = fixture(t);
   const resources = resolve(root, "resources");
   mkdirSync(resources, { recursive: true });
@@ -901,7 +990,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
     if (request.messageType === "get_startup_receipt") {
       return { ok: true, requestId: request.requestId, payload: { receipt: { startupState: "READY_COMMITTED", core: { executableSha256: coreSha256, pid: 4242 }, databaseIdentity: profile.database, pipeIdentity: profile.pipe } } };
     }
-    return { ok: true, requestId: request.requestId, payload: { snapshot: { attempt: { id: "attempt-1", state: "active", provider: "scenario" } } } };
+    return { ok: true, requestId: request.requestId, payload: { snapshot: snapshotValue ?? { attempt: { id: "attempt-1", state: "active", provider: "scenario" } } } };
   };
   const net = {
     createConnection: () => {
@@ -947,7 +1036,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
   };
   class HarnessWindow {
     constructor() {
-      this.webContents = { send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} };
+      this.webContents = securityContents({ send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} });
       windows.push(this);
     }
     static fromWebContents() { return windows[0]; }
@@ -969,7 +1058,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
   const mainFile = resolve("electron/main.cjs");
   const mainRequire = createRequire(mainFile);
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
-  const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
+  const fakeRequire = (name) => name === "./profile-manager.cjs" && profileManagerClass ? { ProfileManager: profileManagerClass } : name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
   const run = () => main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
     argv, resourcesPath: resources, env: launchEnv, pid: process.pid, platform: "win32", execPath: process.execPath
   }, { error: (...values) => dialogs.push(values.join(" ")) });
@@ -1025,8 +1114,8 @@ async function refuseThroughErrorScreen(harness, kind, preimage) {
   await harness.until(() => harness.states.some((entry) => entry.state.phase === "error"), `${kind} error screen`);
   assertRefusedWithoutSideEffects(harness, kind);
   assert.deepEqual(harness.directorySnapshot(), preimage, "the refusal must leave the profile directory bytes unchanged");
-  await assert.rejects(harness.handlers.get("goalport:start-core")(), /still preparing/, "the IPC start-core route must stay gated");
-  await harness.handlers.get("goalport:bootstrap-action")({ sender: harness.windows[0].webContents }, { type: "exit" });
+  await assert.rejects(harness.handlers.get("goalport:start-core")(trustedEvent(harness.windows[0])), /still preparing/, "the IPC start-core route must stay gated");
+  await harness.handlers.get("goalport:bootstrap-action")(trustedEvent(harness.windows[0]), { type: "exit" });
   await harness.until(() => harness.exits.length === 1, "exit after refusal");
   assert.deepEqual(harness.exits, [0]);
   assert.equal(harness.destroyed.length, 1);
@@ -1250,7 +1339,7 @@ test("real entrypoint: a fully-factored compatible inspection still completes a 
 const traceRecordKeys = ["target", "purpose", "status", "startedAt", "endedAt", "elapsedMs", "exitCode", "execError", "malformed", "parseNote", "facts"].sort();
 
 function bootstrapCurrent(harness) {
-  return harness.handlers.get("goalport:bootstrap-current")();
+  return harness.handlers.get("goalport:bootstrap-current")(trustedEvent(harness.windows[0]));
 }
 
 test("real entrypoint: a hung original inspect reports pending in bootstrap-current while phase stays checking", async (t) => {
@@ -1325,12 +1414,16 @@ test("real entrypoint: a completed original inspect exposes selected facts; stat
 
 test("real entrypoint: refused and malformed original inspects record honest exit/parse facts without private paths", async (t) => {
   const userHome = process.env.USERPROFILE || process.env.HOME || "";
+  // Synthetic private paths exercise the same contract on either host; the
+  // actual disposable /tmp fixture is not itself a private home.
+  const privateExecutable = "/home/fixture-private/resources/goalport-core.exe";
+  const privateDatabase = "/home/fixture-private/profile/goalport.sqlite";
   // (a) nonzero-exit refusal whose exec error carries a private executable path
   {
     let harnessRef = null;
     const harness = mainEntryHarness(t, {
       mode: "normal",
-      inspect: (callback) => setImmediate(() => callback(Object.assign(new Error(`profile inspect failed: ${resolve(harnessRef.root, "resources", "goalport-core.exe")} could not run`), { code: 3 }), ""))
+      inspect: (callback) => setImmediate(() => callback(Object.assign(new Error(`profile inspect failed: ${privateExecutable} could not run`), { code: 3 }), ""))
     });
     harnessRef = harness;
     writeProfileMarker(harness.profile.directory, normalMarkerV9(harness.profile));
@@ -1371,7 +1464,7 @@ test("real entrypoint: refused and malformed original inspects record honest exi
       mode: "normal",
       inspect: (callback) => setImmediate(() => callback(null, `${JSON.stringify({
         schema: "goalport.profile-ops.v1", ok: false, extraField: secret,
-        error: `locked: ${resolve(harnessRef.profile.directory, "goalport.sqlite")}`
+        error: `locked: ${privateDatabase}`
       })}\n`))
     });
     harnessRef = harness;
@@ -1388,7 +1481,7 @@ test("real entrypoint: refused and malformed original inspects record honest exi
     assert.match(record.facts.errorReason, /locked:/);
     if (userHome) assert.ok(!record.facts.errorReason.includes(userHome), "refusal reason is path-redacted");
     const serialized = JSON.stringify(record);
-    const rawDb = resolve(harnessRef.profile.directory, "goalport.sqlite");
+    const rawDb = privateDatabase;
     assert.ok(!serialized.includes(secret), "non-selected stdout fields never ride along");
     assert.ok(!serialized.includes(rawDb) && !serialized.includes(JSON.stringify(rawDb).slice(1, -1)), "the raw private database path does not ride along");
   }
@@ -1444,7 +1537,7 @@ test("real entrypoint: a profile-less legacy isolated run receives bootstrap don
   };
   class IsolatedWindow {
     constructor() {
-      this.webContents = { send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} };
+      this.webContents = securityContents({ send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} });
       windows.push(this);
     }
     static fromWebContents() { return windows[0]; }
@@ -1484,7 +1577,7 @@ test("real entrypoint: a profile-less legacy isolated run receives bootstrap don
     await new Promise((done) => setTimeout(done, 5));
   }
   assert.ok(states.some((entry) => entry.state.phase === "done"), "the profile-less branch pushes the bootstrap done signal");
-  const current = await handlers.get("goalport:bootstrap-current")();
+  const current = await handlers.get("goalport:bootstrap-current")(trustedEvent(windows[0]));
   assert.equal(current.phase, "done", "bootstrap-current answers done, not a permanent checking");
   assert.equal(current.diagnostics, undefined, "the profile-less branch has no profile-inspect diagnostics child");
   assert.ok(log.includes("snapshot"), "the Core attach serves snapshots as usual");

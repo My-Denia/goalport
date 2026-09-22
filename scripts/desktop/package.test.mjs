@@ -64,7 +64,7 @@ async function fixture(t) {
   for (const name of COMPONENTS) writeFileSync(resolve(root, "resources", name), `test-only ${name}`);
   writeFileSync(resolve(root, "GoalPort.exe"), "test-only executable");
   writeFileSync(resolve(root, "icudtl.dat"), "test-only runtime data");
-  for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
+  for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", version: "1.0.0-rc.1", main: "main.cjs" }));
   const files = [{ path: "package.json", sha256: "a".repeat(64) }];
   const source = { revision: "b".repeat(40), dirty: true, files, treeSha256: sha256(files.map(({ path, sha256: hash }) => `${path}\0${hash}\n`).join("")) };

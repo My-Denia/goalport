@@ -20,7 +20,7 @@
 
 use goalport_core::{
     Project, PromptRequest, RuntimeManager, SessionRequest,
-    domain::{AttemptState, Campaign, CommandState, Event, Task, WorkStatus},
+    domain::{Attempt, AttemptState, Campaign, CommandState, Event, Task, WorkStatus},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     process_identity::{ProcessObservation, observe_process},
     product_receipts::{begin_startup_epoch, complete_startup_epoch},
@@ -155,7 +155,10 @@ fn seed_core_epoch(store: &Store, workspace: &Path, nonce: &str) {
         env::set_var("GOALPORT_ELECTRON_SHA256", "aa");
         env::set_var("GOALPORT_LAUNCHER_PID", "20");
         env::set_var("GOALPORT_LAUNCHER_CREATED_MS", "1100");
-        env::set_var("GOALPORT_LAUNCHER_EXE", r"C:\pkg\goalport-core-launcher.exe");
+        env::set_var(
+            "GOALPORT_LAUNCHER_EXE",
+            r"C:\pkg\goalport-core-launcher.exe",
+        );
         env::set_var("GOALPORT_LAUNCHER_SHA256", "bb");
         env::set_var("GOALPORT_LAUNCHER_PARENT_PID", "10");
         env::set_var("GOALPORT_LAUNCH_REQUESTED_AT", "2026-09-02T00:00:00.000Z");
@@ -278,6 +281,30 @@ fn wait_for(path: &Path, bound: Duration) -> bool {
     path.exists()
 }
 
+fn wait_for_event_count(
+    server: &CoreServer,
+    attempt: &str,
+    kind: &str,
+    expected: usize,
+) -> Vec<(String, Option<Value>)> {
+    let started = Instant::now();
+    loop {
+        let _ = snapshot(
+            server,
+            &format!("wait-{kind}-{}", started.elapsed().as_millis()),
+        );
+        let current = events(server, attempt);
+        if records_of(&current, kind).len() >= expected {
+            return current;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "event {kind} did not reach count {expected}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Fixture instances (per-pid files)
 // ---------------------------------------------------------------------------------------------
@@ -294,7 +321,10 @@ fn instances(workspace: &Path) -> Vec<Instance> {
     for entry in fs::read_dir(workspace).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if name.starts_with(".fake-codex-app-server.") && name.ends_with(".json") && name != ".fake-codex-app-server.json" {
+        if name.starts_with(".fake-codex-app-server.")
+            && name.ends_with(".json")
+            && name != ".fake-codex-app-server.json"
+        {
             let json: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             found.push(Instance {
                 pid: u32::try_from(json["pid"].as_u64().expect("pid recorded")).unwrap(),
@@ -343,12 +373,19 @@ fn stop_fixtures(workspace: &Path, pids: &[u32]) {
     fs::write(workspace.join(".fake-codex-stop.marker"), "stop").unwrap();
     for pid in pids {
         assert!(
-            wait_for(&workspace.join(format!(".fake-codex-exited.{pid}.marker")), Duration::from_secs(10)),
+            wait_for(
+                &workspace.join(format!(".fake-codex-exited.{pid}.marker")),
+                Duration::from_secs(10)
+            ),
             "fixture pid {pid} must end on the stop marker (no leaked node process)"
         );
     }
     let first = exit_reason(workspace, pids[0]);
-    assert_eq!(first.as_deref(), Some("stop_marker"), "fixture 1 ended on the stop marker, not the watchdog");
+    assert_eq!(
+        first.as_deref(),
+        Some("stop_marker"),
+        "fixture 1 ended on the stop marker, not the watchdog"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -364,8 +401,7 @@ fn sha256_of(path: &Path) -> String {
     format!("{}:{:x}", bytes.len(), digest)
 }
 
-const CANDIDATE: &str =
-    r"npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe";
+const CANDIDATE: &str = r"npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe";
 
 /// The `%APPDATA%` tree `resolve_native_executable("codex")` searches, holding a byte copy of the
 /// node.exe fixture 1 ran on, named codex.exe. Installing it sets `APPDATA` in-process (caller
@@ -401,10 +437,24 @@ impl FakeAppData {
 
     /// Must hold immediately before every restart entry: the resolution can only find the copy.
     fn assert_armed(&self) {
-        assert_eq!(env::var_os("APPDATA").as_deref(), Some(self.root.as_os_str()), "APPDATA must point at the scratch tree");
-        assert!(self.exe.is_file(), "the synthetic codex.exe must exist at the first candidate path");
-        assert!(under_scratch(&self.exe), "the synthetic codex.exe must lie under the scratch root");
-        assert_eq!(sha256_of(&self.exe), self.digest, "the synthetic codex.exe must be the node.exe copy");
+        assert_eq!(
+            env::var_os("APPDATA").as_deref(),
+            Some(self.root.as_os_str()),
+            "APPDATA must point at the scratch tree"
+        );
+        assert!(
+            self.exe.is_file(),
+            "the synthetic codex.exe must exist at the first candidate path"
+        );
+        assert!(
+            under_scratch(&self.exe),
+            "the synthetic codex.exe must lie under the scratch root"
+        );
+        assert_eq!(
+            sha256_of(&self.exe),
+            self.digest,
+            "the synthetic codex.exe must be the node.exe copy"
+        );
     }
 
     /// Must hold right after every restart entry: the instance that started is the synthetic one.
@@ -415,7 +465,9 @@ impl FakeAppData {
             instance.exec_path
         );
         assert_eq!(
-            canonical(&instance.exec_path).to_string_lossy().to_ascii_lowercase(),
+            canonical(&instance.exec_path)
+                .to_string_lossy()
+                .to_ascii_lowercase(),
             canonical(&self.exe).to_string_lossy().to_ascii_lowercase(),
             "the restart entry resolved the synthetic codex.exe"
         );
@@ -439,16 +491,148 @@ fn write_loader(workspace: &Path) {
     let module = fixture_module().canonicalize().unwrap();
     let url = format!(
         "file:///{}",
-        module.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/")
+        module
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
     );
-    fs::write(workspace.join("app-server"), format!("import(\"{url}\");\n")).unwrap();
+    fs::write(
+        workspace.join("app-server"),
+        format!("import(\"{url}\");\n"),
+    )
+    .unwrap();
+}
+
+/// A per-test APPDATA binding whose first Codex candidate starts as an invalid
+/// executable (proven pre-dispatch admission failure) and can then be replaced
+/// with the local node.exe fixture for an explicit same-ID retry.
+struct MutableFakeAppData {
+    previous: Option<std::ffi::OsString>,
+    root: PathBuf,
+    exe: PathBuf,
+}
+
+impl MutableFakeAppData {
+    fn failed(label: &str) -> Self {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = scratch_root().join(format!("appdata-retry-{label}-{nonce}"));
+        let exe = root.join(CANDIDATE);
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"not a Windows executable").unwrap();
+        let previous = env::var_os("APPDATA");
+        unsafe { env::set_var("APPDATA", &root) };
+        Self {
+            previous,
+            root,
+            exe,
+        }
+    }
+
+    fn arm_node(&self, node: &Path) {
+        fs::copy(node, &self.exe).expect("node.exe should replace the failed candidate");
+        assert!(under_scratch(&self.exe));
+        assert_eq!(sha256_of(&self.exe), sha256_of(node));
+    }
+}
+
+impl Drop for MutableFakeAppData {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => env::set_var("APPDATA", value),
+                None => env::remove_var("APPDATA"),
+            }
+        }
+        assert_eq!(env::var_os("APPDATA"), self.previous);
+        assert!(self.root.starts_with(scratch_root()));
+    }
+}
+
+fn resolve_node() -> PathBuf {
+    let output = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("Node is required by the desktop test suite");
+    assert!(output.status.success(), "node process.execPath failed");
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    assert!(path.is_file(), "node executable was not resolved: {path:?}");
+    path
+}
+
+fn write_pr14_counting_loader(workspace: &Path, reject_turn_start: bool) {
+    let module = workspace.join("pr14-counting-fixture.mjs");
+    let script = r#"import {createInterface} from 'node:readline';
+import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+import {resolve} from 'node:path';
+const root=process.cwd();
+const stop=resolve(root,'.fake-codex-stop.marker');
+const receipts=resolve(root,'.pr14-turn-start-receipts.jsonl');
+const reject=__REJECT__;
+const started={argv:process.argv.slice(2),cwd:root,ppid:process.ppid,pid:process.pid,execPath:process.execPath,scenario:reject?'turn_error':'success'};
+writeFileSync(resolve(root,'.fake-codex-app-server.json'),JSON.stringify(started));
+writeFileSync(resolve(root,`.fake-codex-app-server.${process.pid}.json`),JSON.stringify(started));
+function send(value){process.stdout.write(JSON.stringify(value)+'\n');}
+function exit(reason){const value=JSON.stringify({reason,pid:process.pid});writeFileSync(resolve(root,'.fake-codex-exited.marker'),value);writeFileSync(resolve(root,`.fake-codex-exited.${process.pid}.marker`),value);process.exit(0)}
+setInterval(()=>{if(existsSync(stop))exit('stop_marker')},25);
+setTimeout(()=>exit('watchdog'),30000);
+createInterface({input:process.stdin}).on('line',(line)=>{
+  let message; try{message=JSON.parse(line)}catch{return}
+  if(message.method==='initialize'){send({id:message.id,result:{}});return}
+  if(message.method==='thread/start'){send({id:message.id,result:{thread:{id:'pr14-thread'}}});return}
+  if(message.method==='turn/start'){
+    appendFileSync(receipts,JSON.stringify({id:message.id,clientUserMessageId:message.params?.clientUserMessageId})+'\n');
+    if(reject){
+      send({id:message.id+100,error:{code:-32000,message:'foreign error'}});
+      send({id:message.id,error:{code:-32001,message:'sanitized turn rejection'}});
+      send({id:message.id,error:{code:-32001,message:'duplicate rejection'}});
+    }else{
+      const text=(message.params?.input||[]).map(item=>typeof item?.text==='string'?item.text:'').join('');
+      send({id:message.id,result:{turn:{id:'pr14-turn'}}});
+      send({method:'item/agentMessage/delta',params:{threadId:'pr14-thread',turnId:'pr14-turn',delta:`echo:${text}`}});
+      send({method:'turn/completed',params:{threadId:'pr14-thread',turnId:'pr14-turn'}});
+    }
+  }
+});
+"#
+    .replace("__REJECT__", if reject_turn_start { "true" } else { "false" });
+    fs::write(&module, script).unwrap();
+    let url = format!(
+        "file:///{}",
+        module
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+    );
+    fs::write(
+        workspace.join("app-server"),
+        format!("import(\"{url}\");\n"),
+    )
+    .unwrap();
+}
+
+fn pr14_turn_receipts(workspace: &Path) -> Vec<Value> {
+    fs::read_to_string(workspace.join(".pr14-turn-start-receipts.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 /// The a4 shape of increment 4: an admission that fails at `session_events` (no Core epoch), row
 /// Active, registration kept, fixture 1 alive. Returns the attempt id and fixture 1.
 fn kept_failure(server: &CoreServer, case: &Case) -> (String, Instance) {
     let attempt = default_attempt(&case.task, "codex");
-    let error = error_of(&select_codex(server, "first-admission", case, Some(&fixture())));
+    let error = error_of(&select_codex(
+        server,
+        "first-admission",
+        case,
+        Some(&fixture()),
+    ));
     assert!(
         error.contains("runtime admission failed during session_events") && error.contains("kept"),
         "the a4 shape must be produced by the product: {error}"
@@ -456,7 +640,10 @@ fn kept_failure(server: &CoreServer, case: &Case) -> (String, Instance) {
     let first = new_instance(&case.workspace, &[]);
     assert!(is_live(first.pid));
     let store = server.processor().store();
-    assert_eq!(store.get_attempt(&attempt).unwrap().state, AttemptState::Active);
+    assert_eq!(
+        store.get_attempt(&attempt).unwrap().state,
+        AttemptState::Active
+    );
     (attempt, first)
 }
 
@@ -492,7 +679,11 @@ fn restart_after_kept_failure(case_name: &str, scenario: &str) -> (Case, Restart
     drop(server1); // the "Core restart": the in-memory registration is gone
 
     let server = CoreServer::new(store.clone());
-    seed_core_epoch(server.processor().store(), &case.workspace, &format!("{case_name}-restart"));
+    seed_core_epoch(
+        server.processor().store(),
+        &case.workspace,
+        &format!("{case_name}-restart"),
+    );
     let appdata = FakeAppData::install(&first.exec_path);
     appdata.assert_armed();
     (
@@ -520,14 +711,21 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "g1-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "g1-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
     assert!(is_live(second.pid));
     let after_resume = events(server, &r.attempt);
     assert!(
-        records_of(&after_resume, "runtime.session.resumed").iter().any(|p| p["resumed"] == true),
+        records_of(&after_resume, "runtime.session.resumed")
+            .iter()
+            .any(|p| p["resumed"] == true),
         "{after_resume:?}"
     );
 
@@ -541,14 +739,29 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
     );
     assert_eq!(selected_attempt(server, "g1-view"), r.attempt);
 
-    let established: Vec<Value> = records_of(&after_resume, ESTABLISHED_KIND).into_iter().cloned().collect();
+    let established: Vec<Value> = records_of(&after_resume, ESTABLISHED_KIND)
+        .into_iter()
+        .cloned()
+        .collect();
     assert_eq!(established.len(), 1, "{after_resume:?}");
     assert_eq!(established[0]["entry"], "resume_native_session");
-    let kept_identity = r.kept_before["registration_identity"].as_str().expect("the kept record names its registration");
-    let new_identity = established[0]["registration_identity"].as_str().expect("the established record names its registration");
+    let kept_identity = r.kept_before["registration_identity"]
+        .as_str()
+        .expect("the kept record names its registration");
+    let new_identity = established[0]["registration_identity"]
+        .as_str()
+        .expect("the established record names its registration");
     assert_ne!(kept_identity, new_identity);
-    assert_eq!(kept_record(server, &r.attempt), r.kept_before, "old records are never rewritten");
-    assert_eq!(events(server, &r.attempt), after_resume, "a reuse writes nothing");
+    assert_eq!(
+        kept_record(server, &r.attempt),
+        r.kept_before,
+        "old records are never rewritten"
+    );
+    assert_eq!(
+        events(server, &r.attempt),
+        after_resume,
+        "a reuse writes nothing"
+    );
     assert!(is_live(second.pid), "nothing may kill the resumed process");
 
     // Boundary (3) at path level: the re-established registration bypasses no revocation. A
@@ -567,7 +780,10 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         "the authorization refusal must precede the reuse, not be bypassed by it: {denied}"
     );
     assert!(is_live(second.pid), "a refusal kills nothing");
-    assert!(r.began.elapsed() < WATCHDOG, "the case must finish inside fixture 1's watchdog");
+    assert!(
+        r.began.elapsed() < WATCHDOG,
+        "the case must finish inside fixture 1's watchdog"
+    );
 
     stop_fixtures(&case.workspace, &[r.first.pid, second.pid]);
 }
@@ -584,17 +800,33 @@ fn g2_restart_then_rejected_resume_is_still_refused() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "g2-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "g2-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
-    assert_eq!(resumed["ok"], true, "the command records the rejection and returns ok: {resumed}");
-    assert!(is_live(second.pid), "the process the rejected resume started is alive");
+    assert_eq!(
+        resumed["ok"], true,
+        "the command records the rejection and returns ok: {resumed}"
+    );
+    assert!(
+        is_live(second.pid),
+        "the process the rejected resume started is alive"
+    );
     let after_resume = events(server, &r.attempt);
     assert!(
-        records_of(&after_resume, "runtime.session.resumed").iter().any(|p| p["resumed"] == false),
+        records_of(&after_resume, "runtime.session.resumed")
+            .iter()
+            .any(|p| p["resumed"] == false),
         "{after_resume:?}"
     );
-    assert!(records_of(&after_resume, ESTABLISHED_KIND).is_empty(), "a failed recovery establishes nothing");
+    assert!(
+        records_of(&after_resume, ESTABLISHED_KIND).is_empty(),
+        "a failed recovery establishes nothing"
+    );
 
     r.appdata.assert_armed();
     let refused = error_of(&select_codex(server, "g2-select", &case, None));
@@ -602,7 +834,11 @@ fn g2_restart_then_rejected_resume_is_still_refused() {
         refused.contains(NOT_RECORDED) && refused.contains(NOT_RETRIED),
         "a re-registration whose recovery failed is not handed back: {refused}"
     );
-    assert_eq!(events(server, &r.attempt), after_resume, "the refusal writes nothing");
+    assert_eq!(
+        events(server, &r.attempt),
+        after_resume,
+        "the refusal writes nothing"
+    );
     assert_eq!(kept_record(server, &r.attempt), r.kept_before);
     assert!(is_live(second.pid), "nothing may kill the kept process");
     assert!(r.began.elapsed() < WATCHDOG);
@@ -650,7 +886,12 @@ fn g3_a_foreign_success_record_does_not_lift_the_refusal_across_a_restart() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "g3-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "g3-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
@@ -663,7 +904,11 @@ fn g3_a_foreign_success_record_does_not_lift_the_refusal_across_a_restart() {
         refused.contains(NOT_RECORDED) && refused.contains(NOT_RETRIED),
         "a success record for another registration exempts nothing: {refused}"
     );
-    assert_eq!(events(server, &r.attempt), before_select, "the refusal writes nothing");
+    assert_eq!(
+        events(server, &r.attempt),
+        before_select,
+        "the refusal writes nothing"
+    );
     assert_eq!(kept_record(server, &r.attempt), r.kept_before);
     assert!(is_live(second.pid));
     assert!(r.began.elapsed() < WATCHDOG);
@@ -681,7 +926,12 @@ fn g3b_same_lifetime_a_foreign_success_record_does_not_lift_the_failed_registrat
     let kept = kept_record(&server, &attempt);
     append_constructed_established(&server, &attempt, "constructed-other:1");
 
-    let refused = error_of(&select_codex(&server, "g3b-select", &case, Some(&fixture())));
+    let refused = error_of(&select_codex(
+        &server,
+        "g3b-select",
+        &case,
+        Some(&fixture()),
+    ));
     assert!(
         refused.contains(NOT_COMPLETE) && refused.contains(NOT_RETRIED),
         "the registration that failed stays refused: {refused}"
@@ -704,9 +954,18 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
 
     // send_message requires the attempt to be Core-selected: select_project clears the selection
     // and the snapshot selects the task's latest attempt.
-    let project = call(server, "g4-project", "select_project", json!({ "projectId": case.project }));
+    let project = call(
+        server,
+        "g4-project",
+        "select_project",
+        json!({ "projectId": case.project }),
+    );
     assert_eq!(project["ok"], true, "{project}");
-    assert_eq!(selected_attempt(server, "g4-snapshot"), r.attempt, "the snapshot selects the case attempt");
+    assert_eq!(
+        selected_attempt(server, "g4-snapshot"),
+        r.attempt,
+        "the snapshot selects the case attempt"
+    );
 
     r.appdata.assert_armed();
     let sent = call(
@@ -727,7 +986,10 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
         selected["ok"], true,
         "a registration re-established through the send path must not be refused by the old kept record: {selected}"
     );
-    let established: Vec<Value> = records_of(&after_send, ESTABLISHED_KIND).into_iter().cloned().collect();
+    let established: Vec<Value> = records_of(&after_send, ESTABLISHED_KIND)
+        .into_iter()
+        .cloned()
+        .collect();
     assert_eq!(established.len(), 1, "{after_send:?}");
     assert_eq!(established[0]["entry"], "send_message");
     assert_ne!(
@@ -755,16 +1017,30 @@ fn g5_restart_then_resume_delivers_events_through_poll_events() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "g5-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "g5-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
     let after_resume = events(server, &r.attempt);
-    assert_eq!(records_of(&after_resume, ESTABLISHED_KIND).len(), 1, "{after_resume:?}");
+    assert_eq!(
+        records_of(&after_resume, ESTABLISHED_KIND).len(),
+        1,
+        "{after_resume:?}"
+    );
 
     // Use the resumed registration: select it (send_message requires the Core selection) and
     // submit a correlatable input. The fixture echoes the input back as an agent message.
-    let project = call(server, "g5-project", "select_project", json!({ "projectId": case.project }));
+    let project = call(
+        server,
+        "g5-project",
+        "select_project",
+        json!({ "projectId": case.project }),
+    );
     assert_eq!(project["ok"], true, "{project}");
     assert_eq!(selected_attempt(server, "g5-snapshot"), r.attempt);
     let marker = format!("g5-input-{}", second.pid);
@@ -775,17 +1051,28 @@ fn g5_restart_then_resume_delivers_events_through_poll_events() {
         json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": marker }),
     );
     assert_eq!(sent["ok"], true, "{sent}");
-    assert_eq!(instances(&case.workspace).len(), 2, "sending after a resume launches nothing");
+    assert_eq!(
+        instances(&case.workspace).len(),
+        2,
+        "sending after a resume launches nothing"
+    );
 
     // The reply must arrive through the real consumption path: each snapshot flushes
     // poll_events into the store. Bounded wait for the echoed delta tied to this Attempt.
     let started = Instant::now();
     let (delta, completed) = loop {
-        let _ = snapshot(server, &format!("g5-poll-{}", started.elapsed().as_millis()));
+        let _ = snapshot(
+            server,
+            &format!("g5-poll-{}", started.elapsed().as_millis()),
+        );
         let all = events(server, &r.attempt);
         let delta = records_of(&all, "runtime.reply.delta")
             .into_iter()
-            .find(|payload| payload["text"].as_str().is_some_and(|text| text.contains(&marker)))
+            .find(|payload| {
+                payload["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(&marker))
+            })
             .cloned();
         let completed = !records_of(&all, "runtime.turn.completed").is_empty();
         if delta.is_some() && completed {
@@ -800,7 +1087,11 @@ fn g5_restart_then_resume_delivers_events_through_poll_events() {
     };
     assert!(delta.is_some() && completed);
     assert!(is_live(second.pid), "nothing may kill the resumed process");
-    assert_eq!(kept_record(server, &r.attempt), r.kept_before, "old records are never rewritten");
+    assert_eq!(
+        kept_record(server, &r.attempt),
+        r.kept_before,
+        "old records are never rewritten"
+    );
     assert!(r.began.elapsed() < WATCHDOG);
 
     stop_fixtures(&case.workspace, &[r.first.pid, second.pid]);
@@ -818,18 +1109,31 @@ fn m1_registration_identities_are_unique_per_registration_and_per_manager() {
     let mut first = RuntimeManager::new();
     let mut second = RuntimeManager::new();
     assert!(first.registration_identity("nobody").is_none());
-    first.select_runtime("a", "scenario", None, "v", &workspace).unwrap();
-    first.select_runtime("b", "scenario", None, "v", &workspace).unwrap();
-    second.select_runtime("a", "scenario", None, "v", &workspace).unwrap();
+    first
+        .select_runtime("a", "scenario", None, "v", &workspace)
+        .unwrap();
+    first
+        .select_runtime("b", "scenario", None, "v", &workspace)
+        .unwrap();
+    second
+        .select_runtime("a", "scenario", None, "v", &workspace)
+        .unwrap();
     let a1 = first.registration_identity("a").unwrap();
     let b1 = first.registration_identity("b").unwrap();
     let a2 = second.registration_identity("a").unwrap();
     assert_ne!(a1, b1, "two registrations of one manager differ");
-    assert_ne!(a1, a2, "the same seq on two managers built back-to-back differs");
+    assert_ne!(
+        a1, a2,
+        "the same seq on two managers built back-to-back differs"
+    );
     assert!(a1.ends_with(":1") && b1.ends_with(":2") && a2.ends_with(":1"));
     let _ = first.registration_live("a");
     let _ = first.confirm_process_identity("a");
-    assert_eq!(first.registration_identity("a").unwrap(), a1, "stable across observations");
+    assert_eq!(
+        first.registration_identity("a").unwrap(),
+        a1,
+        "stable across observations"
+    );
 }
 
 // =================================================================================================
@@ -868,7 +1172,8 @@ fn resolve_python() -> Option<PathBuf> {
         }
     }
     if let Some(home) = env::var_os("USERPROFILE") {
-        candidates.push(PathBuf::from(&home).join(r"AppData\Local\Python\pythoncore-3.14-64\python.exe"));
+        candidates
+            .push(PathBuf::from(&home).join(r"AppData\Local\Python\pythoncore-3.14-64\python.exe"));
     }
     for candidate in candidates {
         if !candidate.is_file() {
@@ -931,7 +1236,9 @@ impl FakeCodexPython {
             let path = entry.unwrap().path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 let lower = name.to_ascii_lowercase();
-                if lower.ends_with(".dll") && (lower.starts_with("python") || lower.starts_with("vcruntime")) {
+                if lower.ends_with(".dll")
+                    && (lower.starts_with("python") || lower.starts_with("vcruntime"))
+                {
                     fs::copy(&path, bin.join(name)).unwrap();
                 }
             }
@@ -943,15 +1250,40 @@ impl FakeCodexPython {
             env::set_var("APPDATA", &root);
             env::set_var("PYTHONHOME", &home);
         }
-        Self { previous_appdata, previous_home, root, home, exe, digest }
+        Self {
+            previous_appdata,
+            previous_home,
+            root,
+            home,
+            exe,
+            digest,
+        }
     }
 
     fn assert_armed(&self) {
-        assert_eq!(env::var_os("APPDATA").as_deref(), Some(self.root.as_os_str()), "APPDATA must point at the scratch tree");
-        assert_eq!(env::var_os("PYTHONHOME").as_deref(), Some(self.home.as_os_str()), "PYTHONHOME must point at the real interpreter");
-        assert!(self.exe.is_file(), "the synthetic codex.exe must exist at the first candidate path");
-        assert!(under_scratch(&self.exe), "the synthetic codex.exe must lie under the scratch root");
-        assert_eq!(sha256_of(&self.exe), self.digest, "the synthetic codex.exe must be the python.exe copy");
+        assert_eq!(
+            env::var_os("APPDATA").as_deref(),
+            Some(self.root.as_os_str()),
+            "APPDATA must point at the scratch tree"
+        );
+        assert_eq!(
+            env::var_os("PYTHONHOME").as_deref(),
+            Some(self.home.as_os_str()),
+            "PYTHONHOME must point at the real interpreter"
+        );
+        assert!(
+            self.exe.is_file(),
+            "the synthetic codex.exe must exist at the first candidate path"
+        );
+        assert!(
+            under_scratch(&self.exe),
+            "the synthetic codex.exe must lie under the scratch root"
+        );
+        assert_eq!(
+            sha256_of(&self.exe),
+            self.digest,
+            "the synthetic codex.exe must be the python.exe copy"
+        );
     }
 
     fn assert_synthetic(&self, instance: &Instance) {
@@ -961,7 +1293,9 @@ impl FakeCodexPython {
             instance.exec_path
         );
         assert_eq!(
-            canonical(&instance.exec_path).to_string_lossy().to_ascii_lowercase(),
+            canonical(&instance.exec_path)
+                .to_string_lossy()
+                .to_ascii_lowercase(),
             canonical(&self.exe).to_string_lossy().to_ascii_lowercase(),
             "the restart entry resolved the synthetic codex.exe"
         );
@@ -980,8 +1314,16 @@ impl Drop for FakeCodexPython {
                 None => env::remove_var("PYTHONHOME"),
             }
         }
-        assert_eq!(env::var_os("APPDATA"), self.previous_appdata, "APPDATA restored");
-        assert_eq!(env::var_os("PYTHONHOME"), self.previous_home, "PYTHONHOME restored");
+        assert_eq!(
+            env::var_os("APPDATA"),
+            self.previous_appdata,
+            "APPDATA restored"
+        );
+        assert_eq!(
+            env::var_os("PYTHONHOME"),
+            self.previous_home,
+            "PYTHONHOME restored"
+        );
     }
 }
 
@@ -1004,8 +1346,14 @@ fn turns(workspace: &Path, pid: u32) -> u64 {
 /// reaches Core.)
 fn write_python_cmd(workspace: &Path, python: &Path) -> PathBuf {
     let module = fixture_module_py().canonicalize().unwrap();
-    let module = module.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-    let py = python.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let module = module
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    let py = python
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
     let shim = workspace.join("codex-python.cmd");
     fs::write(&shim, format!("@echo off\r\n\"{py}\" \"{module}\" %*\r\n")).unwrap();
     shim
@@ -1024,7 +1372,15 @@ fn kept_failure_python(server: &CoreServer, case: &Case, python: &Path) -> (Stri
     );
     let first = new_instance(&case.workspace, &[]);
     assert!(is_live(first.pid));
-    assert_eq!(server.processor().store().get_attempt(&attempt).unwrap().state, AttemptState::Active);
+    assert_eq!(
+        server
+            .processor()
+            .store()
+            .get_attempt(&attempt)
+            .unwrap()
+            .state,
+        AttemptState::Active
+    );
     (attempt, first)
 }
 
@@ -1039,7 +1395,11 @@ struct RestartedPython {
 
 /// Server 1 (python fixture, held directly) produces the kept failure, is dropped, and server 2
 /// comes up over the same store with the case's only epoch and the python guard armed.
-fn restart_after_kept_failure_python(case_name: &str, scenario: &str, python: &Path) -> (Case, RestartedPython) {
+fn restart_after_kept_failure_python(
+    case_name: &str,
+    scenario: &str,
+    python: &Path,
+) -> (Case, RestartedPython) {
     let began = Instant::now();
     let store = Store::memory().unwrap();
     let server1 = CoreServer::new(store.clone());
@@ -1047,7 +1407,9 @@ fn restart_after_kept_failure_python(case_name: &str, scenario: &str, python: &P
     write_python_loader(&case.workspace);
     let (attempt, first) = kept_failure_python(&server1, &case, python);
     assert_eq!(
-        canonical(&first.exec_path).to_string_lossy().to_ascii_lowercase(),
+        canonical(&first.exec_path)
+            .to_string_lossy()
+            .to_ascii_lowercase(),
         canonical(python).to_string_lossy().to_ascii_lowercase(),
         "fixture 1 must run the resolved python so the guard copies it"
     );
@@ -1055,10 +1417,24 @@ fn restart_after_kept_failure_python(case_name: &str, scenario: &str, python: &P
     drop(server1);
 
     let server = CoreServer::new(store.clone());
-    seed_core_epoch(server.processor().store(), &case.workspace, &format!("{case_name}-restart"));
+    seed_core_epoch(
+        server.processor().store(),
+        &case.workspace,
+        &format!("{case_name}-restart"),
+    );
     let appdata = FakeCodexPython::install(&first.exec_path);
     appdata.assert_armed();
-    (case, RestartedPython { server, appdata, attempt, first, kept_before, began })
+    (
+        case,
+        RestartedPython {
+            server,
+            appdata,
+            attempt,
+            first,
+            kept_before,
+            began,
+        },
+    )
 }
 
 fn transport_of<'a>(events: &'a [(String, Option<Value>)], kind: &str) -> Option<&'a Value> {
@@ -1088,23 +1464,46 @@ fn h1_creation_stream_closed_before_response_is_kept_and_recorded() {
     );
     assert!(error.contains("closed before a response"), "{error}");
     let first = new_instance(&case.workspace, &[]);
-    assert!(is_live(first.pid), "the process must be alive with its stdout closed");
+    assert!(
+        is_live(first.pid),
+        "the process must be alive with its stdout closed"
+    );
 
     let recorded = events(&server, &attempt);
-    let record = records_of(&recorded, FAILED_KIND).into_iter().next_back().cloned().expect("a failure record");
+    let record = records_of(&recorded, FAILED_KIND)
+        .into_iter()
+        .next_back()
+        .cloned()
+        .expect("a failure record");
     assert_eq!(record["stage"], "create_session", "{record}");
     assert_eq!(record["registration"], "kept", "{record}");
     assert_eq!(record["process"], "started-or-unconfirmed", "{record}");
-    assert_eq!(record["transport"]["closed"], true, "the failure record names the observed closure: {record}");
+    assert_eq!(
+        record["transport"]["closed"], true,
+        "the failure record names the observed closure: {record}"
+    );
     assert_eq!(record["transport"]["reason"], "eof", "{record}");
-    assert!(records_of(&recorded, "runtime.transport.closed").is_empty(), "a pre-establishment closure writes no separate transport record");
+    assert!(
+        records_of(&recorded, "runtime.transport.closed").is_empty(),
+        "a pre-establishment closure writes no separate transport record"
+    );
 
     let again = error_of(&select_codex(&server, "h1-again", &case, Some(&python)));
-    assert!(again.contains(NEVER_ESTABLISHED) && again.contains(NOT_RETRIED), "a Queued kept row is refused as never-established: {again}");
+    assert!(
+        again.contains(NEVER_ESTABLISHED) && again.contains(NOT_RETRIED),
+        "a Queued kept row is refused as never-established: {again}"
+    );
     assert_eq!(turns(&case.workspace, first.pid), 0);
-    assert_eq!(instances(&case.workspace).len(), 1, "nothing new was launched");
+    assert_eq!(
+        instances(&case.workspace).len(),
+        1,
+        "nothing new was launched"
+    );
     assert!(is_live(first.pid));
-    assert!(record["pid"].as_u64().is_some() && record["pid"].as_u64().unwrap() == u64::from(first.pid), "{record}");
+    assert!(
+        record["pid"].as_u64().is_some() && record["pid"].as_u64().unwrap() == u64::from(first.pid),
+        "{record}"
+    );
 
     stop_fixtures(&case.workspace, &[first.pid]);
 }
@@ -1127,14 +1526,28 @@ fn h2_creation_stream_closed_after_session_degrades_the_registration() {
     let attempt = default_attempt(&case.task, "codex");
 
     let admitted = select_codex(&server, "h2-select", &case, Some(&python));
-    assert_eq!(admitted["ok"], true, "the session is established before the stream closes: {admitted}");
+    assert_eq!(
+        admitted["ok"], true,
+        "the session is established before the stream closes: {admitted}"
+    );
     let first = new_instance(&case.workspace, &[]);
-    assert_eq!(server.processor().store().get_attempt(&attempt).unwrap().state, AttemptState::Active);
+    assert_eq!(
+        server
+            .processor()
+            .store()
+            .get_attempt(&attempt)
+            .unwrap()
+            .state,
+        AttemptState::Active
+    );
 
     // The closure reaches the store through the real consumption path (snapshot -> flush_runtime_events).
     let started = Instant::now();
     loop {
-        let _ = snapshot(&server, &format!("h2-poll-{}", started.elapsed().as_millis()));
+        let _ = snapshot(
+            &server,
+            &format!("h2-poll-{}", started.elapsed().as_millis()),
+        );
         let closed = transport_of(&events(&server, &attempt), "runtime.transport.closed").cloned();
         if let Some(record) = closed {
             assert_eq!(record["reason"], "eof", "{record}");
@@ -1143,23 +1556,48 @@ fn h2_creation_stream_closed_after_session_degrades_the_registration() {
             assert_eq!(record["killed"], false, "{record}");
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "the closed transport must be recorded through the snapshot drain");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the closed transport must be recorded through the snapshot drain"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let sent = call(&server, "h2-send", "send_message", json!({ "attemptId": attempt, "campaignId": case.campaign, "message": "after close" }));
-    assert_eq!(sent["ok"], false, "a closed-transport registration refuses the send: {sent}");
-    assert!(error_of(&sent).contains("output stream is closed") && error_of(&sent).contains("not sent"), "{sent}");
+    let sent = call(
+        &server,
+        "h2-send",
+        "send_message",
+        json!({ "attemptId": attempt, "campaignId": case.campaign, "message": "after close" }),
+    );
+    assert_eq!(
+        sent["ok"], false,
+        "a closed-transport registration refuses the send: {sent}"
+    );
+    assert!(
+        error_of(&sent).contains("output stream is closed") && error_of(&sent).contains("not sent"),
+        "{sent}"
+    );
     let after_send = events(&server, &attempt);
     let failed: Vec<&Value> = records_of(&after_send, "runtime.send.failed");
     assert_eq!(failed.len(), 1, "exactly one send.failed: {after_send:?}");
     assert_eq!(failed[0]["retry"], false, "{}", failed[0]);
     assert_eq!(failed[0]["deliveryState"], "FAILED", "{}", failed[0]);
-    assert_eq!(records_of(&after_send, "message.user").len(), 1, "the user input is recorded once");
-    assert_eq!(turns(&case.workspace, first.pid), 0, "nothing was sent to the fixture");
+    assert_eq!(
+        records_of(&after_send, "message.user").len(),
+        1,
+        "the user input is recorded once"
+    );
+    assert_eq!(
+        turns(&case.workspace, first.pid),
+        0,
+        "nothing was sent to the fixture"
+    );
 
     let again = error_of(&select_codex(&server, "h2-again", &case, Some(&python)));
-    assert!(again.contains("output stream is closed"), "the reuse refusal names the closed stream: {again}");
+    assert!(
+        again.contains("output stream is closed"),
+        "the reuse refusal names the closed stream: {again}"
+    );
     assert!(is_live(first.pid), "the process is never killed");
     assert_eq!(instances(&case.workspace).len(), 1);
 
@@ -1177,25 +1615,54 @@ fn h3a_resume_stream_closed_before_answer_is_unsupported_and_recorded() {
         eprintln!("SKIP h3a: no python interpreter resolved");
         return;
     };
-    let (case, r) = restart_after_kept_failure_python("h3a", "stdout_closed_before_resume", &python);
+    let (case, r) =
+        restart_after_kept_failure_python("h3a", "stdout_closed_before_resume", &python);
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "h3a-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "h3a-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
-    assert_eq!(resumed["ok"], true, "the command records the failure and returns ok: {resumed}");
+    assert_eq!(
+        resumed["ok"], true,
+        "the command records the failure and returns ok: {resumed}"
+    );
     let after = events(server, &r.attempt);
-    let resumed_rec = records_of(&after, "runtime.session.resumed").into_iter().next_back().cloned().expect("a resumed record");
+    let resumed_rec = records_of(&after, "runtime.session.resumed")
+        .into_iter()
+        .next_back()
+        .cloned()
+        .expect("a resumed record");
     assert_eq!(resumed_rec["resumed"], false, "{resumed_rec}");
-    assert_eq!(resumed_rec["transport"], "eof", "the resumed-false record names the observed closure: {resumed_rec}");
-    assert!(records_of(&after, ESTABLISHED_KIND).is_empty(), "a failed resume writes no established record");
-    assert!(records_of(&after, "runtime.transport.closed").is_empty(), "a pre-establishment closure writes no separate transport record");
+    assert_eq!(
+        resumed_rec["transport"], "eof",
+        "the resumed-false record names the observed closure: {resumed_rec}"
+    );
+    assert!(
+        records_of(&after, ESTABLISHED_KIND).is_empty(),
+        "a failed resume writes no established record"
+    );
+    assert!(
+        records_of(&after, "runtime.transport.closed").is_empty(),
+        "a pre-establishment closure writes no separate transport record"
+    );
 
     r.appdata.assert_armed();
     let again = error_of(&select_codex(server, "h3a-again", &case, None));
-    assert!(again.contains(NOT_RECORDED) && again.contains(NOT_RETRIED), "no established record: {again}");
-    assert_eq!(kept_record(server, &r.attempt), r.kept_before, "old records are never rewritten");
+    assert!(
+        again.contains(NOT_RECORDED) && again.contains(NOT_RETRIED),
+        "no established record: {again}"
+    );
+    assert_eq!(
+        kept_record(server, &r.attempt),
+        r.kept_before,
+        "old records are never rewritten"
+    );
     assert!(is_live(second.pid));
     assert!(r.began.elapsed() < WATCHDOG);
 
@@ -1217,33 +1684,75 @@ fn h3b_resume_stream_closed_after_answer_degrades_the_registration() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "h3b-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "h3b-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
     let after_resume = events(server, &r.attempt);
-    assert_eq!(records_of(&after_resume, ESTABLISHED_KIND).len(), 1, "resume established the registration: {after_resume:?}");
+    assert_eq!(
+        records_of(&after_resume, ESTABLISHED_KIND).len(),
+        1,
+        "resume established the registration: {after_resume:?}"
+    );
 
     let started = Instant::now();
     loop {
-        let _ = snapshot(server, &format!("h3b-poll-{}", started.elapsed().as_millis()));
+        let _ = snapshot(
+            server,
+            &format!("h3b-poll-{}", started.elapsed().as_millis()),
+        );
         if transport_of(&events(server, &r.attempt), "runtime.transport.closed").is_some() {
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "the closed transport must be recorded");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the closed transport must be recorded"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(records_of(&events(server, &r.attempt), ESTABLISHED_KIND).len(), 1, "the established record is never deleted");
+    assert_eq!(
+        records_of(&events(server, &r.attempt), ESTABLISHED_KIND).len(),
+        1,
+        "the established record is never deleted"
+    );
 
-    let project = call(server, "h3b-project", "select_project", json!({ "projectId": case.project }));
+    let project = call(
+        server,
+        "h3b-project",
+        "select_project",
+        json!({ "projectId": case.project }),
+    );
     assert_eq!(project["ok"], true, "{project}");
     assert_eq!(selected_attempt(server, "h3b-snapshot"), r.attempt);
-    let sent = call(server, "h3b-send", "send_message", json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "after close" }));
-    assert_eq!(sent["ok"], false, "the send is refused on the closed transport: {sent}");
-    assert!(error_of(&sent).contains("output stream is closed"), "{sent}");
+    let sent = call(
+        server,
+        "h3b-send",
+        "send_message",
+        json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "after close" }),
+    );
+    assert_eq!(
+        sent["ok"], false,
+        "the send is refused on the closed transport: {sent}"
+    );
+    assert!(
+        error_of(&sent).contains("output stream is closed"),
+        "{sent}"
+    );
     let after_send = events(server, &r.attempt);
-    assert!(records_of(&after_send, "runtime.reply.delta").is_empty(), "no reply is delivered");
-    assert_eq!(turns(&case.workspace, second.pid), 0, "nothing was sent to fixture 2");
+    assert!(
+        records_of(&after_send, "runtime.reply.delta").is_empty(),
+        "no reply is delivered"
+    );
+    assert_eq!(
+        turns(&case.workspace, second.pid),
+        0,
+        "nothing was sent to fixture 2"
+    );
 
     r.appdata.assert_armed();
     let again = error_of(&select_codex(server, "h3b-again", &case, None));
@@ -1270,37 +1779,93 @@ fn h4_resume_oversized_frame_fails_the_turn_and_degrades() {
     let server = &r.server;
 
     r.appdata.assert_armed();
-    let resumed = call(server, "h4-resume", "resume_native_session", json!({ "attemptId": r.attempt }));
+    let resumed = call(
+        server,
+        "h4-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
 
-    let project = call(server, "h4-project", "select_project", json!({ "projectId": case.project }));
+    let project = call(
+        server,
+        "h4-project",
+        "select_project",
+        json!({ "projectId": case.project }),
+    );
     assert_eq!(project["ok"], true, "{project}");
     assert_eq!(selected_attempt(server, "h4-snapshot"), r.attempt);
     let marker = format!("h4-input-{}", second.pid);
-    let sent = call(server, "h4-send", "send_message", json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": marker }));
-    assert_eq!(sent["ok"], true, "the send is accepted before the oversized frame is read: {sent}");
+    let sent = call(
+        server,
+        "h4-send",
+        "send_message",
+        json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": marker }),
+    );
+    assert_eq!(
+        sent["ok"], true,
+        "the send is accepted before the oversized frame is read: {sent}"
+    );
 
     let started = Instant::now();
     loop {
-        let _ = snapshot(server, &format!("h4-poll-{}", started.elapsed().as_millis()));
+        let _ = snapshot(
+            server,
+            &format!("h4-poll-{}", started.elapsed().as_millis()),
+        );
         let all = events(server, &r.attempt);
-        if let Some(failed) = records_of(&all, "runtime.turn.failed").into_iter().next_back() {
-            assert!(failed["text"].as_str().unwrap_or_default().contains("oversized-frame"), "{failed}");
-            let closed = transport_of(&all, "runtime.transport.closed").cloned().expect("a transport record");
+        if let Some(failed) = records_of(&all, "runtime.turn.failed")
+            .into_iter()
+            .next_back()
+        {
+            assert!(
+                failed["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("oversized-frame"),
+                "{failed}"
+            );
+            let closed = transport_of(&all, "runtime.transport.closed")
+                .cloned()
+                .expect("a transport record");
             assert_eq!(closed["reason"], "oversized-frame", "{closed}");
             assert_eq!(closed["turnFailed"], true, "{closed}");
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "the oversized frame must fail the turn, not break silently");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the oversized frame must fail the turn, not break silently"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
     let all = events(server, &r.attempt);
-    assert!(records_of(&all, "runtime.reply.delta").iter().all(|d| !d["text"].as_str().unwrap_or_default().contains(&marker)), "no reply carries the marker");
-    assert!(records_of(&all, "runtime.turn.completed").is_empty(), "the turn did not complete");
-    assert_eq!(server.processor().store().get_attempt(&r.attempt).unwrap().state, AttemptState::Failed, "the turn failure is terminal");
-    assert_eq!(turns(&case.workspace, second.pid), 1, "the input was sent once and never re-sent");
+    assert!(
+        records_of(&all, "runtime.reply.delta")
+            .iter()
+            .all(|d| !d["text"].as_str().unwrap_or_default().contains(&marker)),
+        "no reply carries the marker"
+    );
+    assert!(
+        records_of(&all, "runtime.turn.completed").is_empty(),
+        "the turn did not complete"
+    );
+    assert_eq!(
+        server
+            .processor()
+            .store()
+            .get_attempt(&r.attempt)
+            .unwrap()
+            .state,
+        AttemptState::Failed,
+        "the turn failure is terminal"
+    );
+    assert_eq!(
+        turns(&case.workspace, second.pid),
+        1,
+        "the input was sent once and never re-sent"
+    );
     assert!(is_live(second.pid));
     assert_eq!(kept_record(server, &r.attempt), r.kept_before);
     assert!(r.began.elapsed() < WATCHDOG);
@@ -1319,11 +1884,36 @@ fn m2_transport_state_reports_registration_state() {
     let workspace = directory.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
     let mut manager = RuntimeManager::new();
-    assert!(manager.transport_state("nobody").is_none(), "unregistered has no transport state");
-    manager.select_runtime("codex-attempt", "codex", Some(PathBuf::from(r"C:\nonexistent\codex.exe")), "0.0.0", &workspace).unwrap();
-    assert!(matches!(manager.transport_state("codex-attempt"), Some(TransportState::NotStarted)), "a registered, never-started codex is NotStarted");
-    manager.select_runtime("scenario-attempt", "scenario", None, "v", &workspace).unwrap();
-    assert!(matches!(manager.transport_state("scenario-attempt"), Some(TransportState::NotApplicable)), "a scenario adapter is NotApplicable");
+    assert!(
+        manager.transport_state("nobody").is_none(),
+        "unregistered has no transport state"
+    );
+    manager
+        .select_runtime(
+            "codex-attempt",
+            "codex",
+            Some(PathBuf::from(r"C:\nonexistent\codex.exe")),
+            "0.0.0",
+            &workspace,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            manager.transport_state("codex-attempt"),
+            Some(TransportState::NotStarted)
+        ),
+        "a registered, never-started codex is NotStarted"
+    );
+    manager
+        .select_runtime("scenario-attempt", "scenario", None, "v", &workspace)
+        .unwrap();
+    assert!(
+        matches!(
+            manager.transport_state("scenario-attempt"),
+            Some(TransportState::NotApplicable)
+        ),
+        "a scenario adapter is NotApplicable"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1337,13 +1927,31 @@ fn m3_adapter_refuses_send_on_closed_transport_without_exit() {
         eprintln!("SKIP m3: no python interpreter resolved");
         return;
     };
-    let workspace = scratch_root().join(format!("i6-m3-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let workspace = scratch_root().join(format!(
+        "i6-m3-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     fs::create_dir_all(&workspace).unwrap();
-    fs::write(workspace.join(".fake-codex-scenario"), "stdout_closed_after_thread_start").unwrap();
+    fs::write(
+        workspace.join(".fake-codex-scenario"),
+        "stdout_closed_after_thread_start",
+    )
+    .unwrap();
     write_python_loader(&workspace);
     let mut manager = RuntimeManager::new();
     let attempt = "m3-attempt";
-    manager.select_runtime(attempt, "codex", Some(python.clone()), "0.152.0", &workspace).unwrap();
+    manager
+        .select_runtime(
+            attempt,
+            "codex",
+            Some(python.clone()),
+            "0.152.0",
+            &workspace,
+        )
+        .unwrap();
     manager
         .create_session(
             attempt,
@@ -1361,18 +1969,47 @@ fn m3_adapter_refuses_send_on_closed_transport_without_exit() {
     let started = Instant::now();
     loop {
         let _ = manager.poll_events(attempt);
-        if matches!(manager.transport_state(attempt), Some(TransportState::Closed { .. })) {
+        if matches!(
+            manager.transport_state(attempt),
+            Some(TransportState::Closed { .. })
+        ) {
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "the reader must observe the closure");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the reader must observe the closure"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(manager.registration_live(attempt), Some(false), "a closed transport is not live even with a running child");
+    assert_eq!(
+        manager.registration_live(attempt),
+        Some(false),
+        "a closed transport is not live even with a running child"
+    );
     assert!(is_live(first.pid), "the child is still running");
-    assert!(matches!(manager.confirm_process_identity(attempt), Some(ProcessConfirmation::Confirmed { .. })), "a closed stream is not an exit");
-    let send = manager.send_prompt(attempt, &PromptRequest { attempt_id: attempt.into(), text: "x".into(), idempotency_key: "m3-1".into() });
-    assert!(send.is_err(), "the adapter refuses the send on a closed transport");
-    assert!(send.unwrap_err().to_string().contains("not sent"), "the input is not sent");
+    assert!(
+        matches!(
+            manager.confirm_process_identity(attempt),
+            Some(ProcessConfirmation::Confirmed { .. })
+        ),
+        "a closed stream is not an exit"
+    );
+    let send = manager.send_prompt(
+        attempt,
+        &PromptRequest {
+            attempt_id: attempt.into(),
+            text: "x".into(),
+            idempotency_key: "m3-1".into(),
+        },
+    );
+    assert!(
+        send.is_err(),
+        "the adapter refuses the send on a closed transport"
+    );
+    assert!(
+        send.unwrap_err().to_string().contains("not sent"),
+        "the input is not sent"
+    );
 
     stop_fixtures(&workspace, &[first.pid]);
 }
@@ -1393,7 +2030,10 @@ fn m4_core_dropping_its_transport_degrades_without_killing() {
     };
     let workspace = scratch_root().join(format!(
         "i6-m4-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&workspace).unwrap();
     fs::write(workspace.join(".fake-codex-scenario"), "linger").unwrap();
@@ -1401,7 +2041,13 @@ fn m4_core_dropping_its_transport_degrades_without_killing() {
     let mut manager = RuntimeManager::new();
     let attempt = "m4-attempt";
     manager
-        .select_runtime(attempt, "codex", Some(python.clone()), "0.152.0", &workspace)
+        .select_runtime(
+            attempt,
+            "codex",
+            Some(python.clone()),
+            "0.152.0",
+            &workspace,
+        )
         .unwrap();
     manager
         .create_session(
@@ -1416,15 +2062,27 @@ fn m4_core_dropping_its_transport_degrades_without_killing() {
         )
         .expect("the session is established against a healthy fixture");
     let first = new_instance(&workspace, &[]);
-    assert!(matches!(manager.transport_state(attempt), Some(TransportState::Open)), "open before the drop");
-    assert_eq!(manager.registration_live(attempt), Some(true), "usable before the drop");
+    assert!(
+        matches!(manager.transport_state(attempt), Some(TransportState::Open)),
+        "open before the drop"
+    );
+    assert_eq!(
+        manager.registration_live(attempt),
+        Some(true),
+        "usable before the drop"
+    );
 
     // The product path `close_adapter_transport` takes: Core drops its own pipes, keeps the child.
-    manager.drop_adapter_transport(attempt).expect("Core drops its own side of the transport");
+    manager
+        .drop_adapter_transport(attempt)
+        .expect("Core drops its own side of the transport");
 
     match manager.transport_state(attempt) {
         Some(TransportState::Closed { reason }) => {
-            assert_eq!(reason, "transport-dropped", "the reason distinguishes Core's own drop from a provider close");
+            assert_eq!(
+                reason, "transport-dropped",
+                "the reason distinguishes Core's own drop from a provider close"
+            );
         }
         other => panic!("a dropped transport must read Closed, got {other:?}"),
     }
@@ -1433,17 +2091,33 @@ fn m4_core_dropping_its_transport_degrades_without_killing() {
         Some(false),
         "Core discarded the only receiver, so the registration is not usable even though the child runs"
     );
-    assert!(is_live(first.pid), "dropping Core's pipes never touches the child");
     assert!(
-        matches!(manager.confirm_process_identity(attempt), Some(ProcessConfirmation::Confirmed { .. })),
+        is_live(first.pid),
+        "dropping Core's pipes never touches the child"
+    );
+    assert!(
+        matches!(
+            manager.confirm_process_identity(attempt),
+            Some(ProcessConfirmation::Confirmed { .. })
+        ),
         "a dropped transport is not a process exit"
     );
     let send = manager.send_prompt(
         attempt,
-        &PromptRequest { attempt_id: attempt.into(), text: "x".into(), idempotency_key: "m4-1".into() },
+        &PromptRequest {
+            attempt_id: attempt.into(),
+            text: "x".into(),
+            idempotency_key: "m4-1".into(),
+        },
     );
-    assert!(send.is_err(), "the adapter refuses a send once Core dropped the transport");
-    assert!(send.unwrap_err().to_string().contains("not sent"), "the input is not sent");
+    assert!(
+        send.is_err(),
+        "the adapter refuses a send once Core dropped the transport"
+    );
+    assert!(
+        send.unwrap_err().to_string().contains("not sent"),
+        "the input is not sent"
+    );
 
     stop_fixtures(&workspace, &[first.pid]);
 }
@@ -1474,7 +2148,10 @@ fn select_scenario(server: &CoreServer, id: &str, case: &Case) -> String {
         "select_runtime",
         json!({ "projectId": case.project, "campaignId": case.campaign, "taskId": case.task, "provider": "scenario" }),
     );
-    assert_eq!(selected["ok"], true, "scenario admission must succeed: {selected}");
+    assert_eq!(
+        selected["ok"], true,
+        "scenario admission must succeed: {selected}"
+    );
     let attempt = selected["payload"]["snapshot"]["attempt"]["id"]
         .as_str()
         .unwrap_or_default()
@@ -1505,14 +2182,32 @@ fn user_messages(events: &[(String, Option<Value>)]) -> usize {
 
 /// The refusal a replayed non-success request must carry: both tokens, the clause, the closing
 /// statement — and no `duplicate` flag, which rides the `Ok` path only.
-fn assert_replay_refusal(response: &Value, request_id: &str, state: &str, delivery: &str, clause: &str) {
+fn assert_replay_refusal(
+    response: &Value,
+    request_id: &str,
+    state: &str,
+    delivery: &str,
+    clause: &str,
+) {
     let error = error_of(response);
-    assert!(error.starts_with(&format!("replayed request {request_id} ")), "{error}");
-    assert!(error.contains(&format!("[state={state}]")), "state token: {error}");
-    assert!(error.contains(&format!("[delivery={delivery}]")), "delivery token: {error}");
+    assert!(
+        error.starts_with(&format!("replayed request {request_id} ")),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("[state={state}]")),
+        "state token: {error}"
+    );
+    assert!(
+        error.contains(&format!("[delivery={delivery}]")),
+        "delivery token: {error}"
+    );
     assert!(error.contains(clause), "clause {clause:?}: {error}");
     assert!(error.ends_with(NOT_SENT_AGAIN), "{error}");
-    assert!(response["payload"].get("duplicate").is_none(), "no duplicate flag on a refusal: {response}");
+    assert!(
+        response["payload"].get("duplicate").is_none(),
+        "no duplicate flag on a refusal: {response}"
+    );
 }
 
 /// LABELLED CONSTRUCTED: the row `send_message` would record for (request, attempt, message),
@@ -1529,12 +2224,20 @@ fn constructed_row(
     let command = send_message_command(request_id, attempt, message).unwrap();
     let store = server.processor().store();
     let recorded = store.record_command(&command.command).unwrap();
-    assert_eq!(recorded.state, CommandState::Pending, "constructed rows start Pending");
+    assert_eq!(
+        recorded.state,
+        CommandState::Pending,
+        "constructed rows start Pending"
+    );
     for state in chain {
-        store.update_command_state(&command.command.id, *state).unwrap();
+        store
+            .update_command_state(&command.command.id, *state)
+            .unwrap();
     }
     if let Some((state, result)) = finish {
-        store.finish_command(&command.command.id, state, &result).unwrap();
+        store
+            .finish_command(&command.command.id, state, &result)
+            .unwrap();
     }
     command.command.id
 }
@@ -1553,18 +2256,34 @@ fn r1_succeeded_send_replays_as_duplicate_success_without_delivery() {
     drain(&server, "r1");
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 1);
-    assert!(baseline.len() > 1, "the scenario Runtime replied to the first send: {baseline:?}");
+    assert!(
+        baseline.len() > 1,
+        "the scenario Runtime replied to the first send: {baseline:?}"
+    );
 
     let again = send(&server, "r1-send", &case, &attempt, "first input");
     assert_eq!(again["ok"], true, "{again}");
     assert_eq!(again["payload"]["duplicate"], true, "{again}");
     drain(&server, "r1-after");
-    assert_eq!(events(&server, &attempt), baseline, "a replay writes nothing and delivers nothing");
+    assert_eq!(
+        events(&server, &attempt),
+        baseline,
+        "a replay writes nothing and delivers nothing"
+    );
     // The success path records the delivery it observed (the adapter reported the input accepted).
-    let row_id = send_message_command("r1-send", &attempt, "first input").unwrap().command.id;
+    let row_id = send_message_command("r1-send", &attempt, "first input")
+        .unwrap()
+        .command
+        .id;
     let store = server.processor().store();
-    assert_eq!(store.get_command(&row_id).unwrap().state, CommandState::Succeeded);
-    let recorded = store.command_result(&row_id).unwrap().expect("the success row carries its result");
+    assert_eq!(
+        store.get_command(&row_id).unwrap().state,
+        CommandState::Succeeded
+    );
+    let recorded = store
+        .command_result(&row_id)
+        .unwrap()
+        .expect("the success row carries its result");
     assert_eq!(recorded["deliveryState"], "DELIVERED", "{recorded}");
     assert_eq!(recorded["requestId"], "r1-send", "{recorded}");
     i7_marker("r1", "completed");
@@ -1578,17 +2297,32 @@ fn r1b_succeeded_send_still_replays_as_success_after_the_attempt_became_terminal
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r1b", "linger");
     let attempt = select_scenario(&server, "r1b-select", &case);
-    assert_eq!(send(&server, "r1b-send", &case, &attempt, "first input")["ok"], true);
+    assert_eq!(
+        send(&server, "r1b-send", &case, &attempt, "first input")["ok"],
+        true
+    );
     drain(&server, "r1b");
-    let cancelled = call(&server, "r1b-cancel", "cancel", json!({ "attemptId": attempt }));
+    let cancelled = call(
+        &server,
+        "r1b-cancel",
+        "cancel",
+        json!({ "attemptId": attempt }),
+    );
     assert_eq!(cancelled["ok"], true, "{cancelled}");
     let row = server.processor().store().get_attempt(&attempt).unwrap();
-    assert!(row.state.is_terminal(), "the hostile step made the attempt terminal: {:?}", row.state);
+    assert!(
+        row.state.is_terminal(),
+        "the hostile step made the attempt terminal: {:?}",
+        row.state
+    );
     drain(&server, "r1b-hostile");
     let baseline = events(&server, &attempt);
 
     let again = send(&server, "r1b-send", &case, &attempt, "first input");
-    assert_eq!(again["ok"], true, "a recorded success is reported, not the terminality refusal: {again}");
+    assert_eq!(
+        again["ok"], true,
+        "a recorded success is reported, not the terminality refusal: {again}"
+    );
     assert_eq!(again["payload"]["duplicate"], true, "{again}");
     drain(&server, "r1b-after");
     let after = events(&server, &attempt);
@@ -1620,9 +2354,18 @@ fn r1py_replay_of_a_delivered_send_adds_no_fixture_turn() {
 
     let sent = send(&server, "r1py-send", &case, &attempt, "deliver once");
     assert_eq!(sent["ok"], true, "{sent}");
-    let turns_file = case.workspace.join(format!(".fake-codex-turns.{}.json", first.pid));
-    assert!(wait_for(&turns_file, Duration::from_secs(10)), "the fixture recorded the turn");
-    assert_eq!(turns(&case.workspace, first.pid), 1, "exactly one turn delivered");
+    let turns_file = case
+        .workspace
+        .join(format!(".fake-codex-turns.{}.json", first.pid));
+    assert!(
+        wait_for(&turns_file, Duration::from_secs(10)),
+        "the fixture recorded the turn"
+    );
+    assert_eq!(
+        turns(&case.workspace, first.pid),
+        1,
+        "exactly one turn delivered"
+    );
     drain(&server, "r1py");
     let baseline = events(&server, &attempt);
 
@@ -1630,7 +2373,11 @@ fn r1py_replay_of_a_delivered_send_adds_no_fixture_turn() {
     assert_eq!(again["ok"], true, "{again}");
     assert_eq!(again["payload"]["duplicate"], true, "{again}");
     std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(turns(&case.workspace, first.pid), 1, "the replay added no turn");
+    assert_eq!(
+        turns(&case.workspace, first.pid),
+        1,
+        "the replay added no turn"
+    );
     drain(&server, "r1py-after");
     assert_eq!(events(&server, &attempt), baseline);
     stop_fixtures(&case.workspace, &[first.pid]);
@@ -1659,28 +2406,47 @@ fn r2_failed_send_on_closed_transport_replays_as_the_recorded_failure() {
     let first = new_instance(&case.workspace, &[]);
     let started = Instant::now();
     loop {
-        let _ = snapshot(&server, &format!("r2-poll-{}", started.elapsed().as_millis()));
+        let _ = snapshot(
+            &server,
+            &format!("r2-poll-{}", started.elapsed().as_millis()),
+        );
         if transport_of(&events(&server, &attempt), "runtime.transport.closed").is_some() {
             break;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "the closed transport must be recorded");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the closed transport must be recorded"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 
     let sent = send(&server, "r2-send", &case, &attempt, "after close");
     let first_error = error_of(&sent);
-    assert!(first_error.contains("output stream is closed"), "{first_error}");
+    assert!(
+        first_error.contains("output stream is closed"),
+        "{first_error}"
+    );
     drain(&server, "r2");
     let baseline = events(&server, &attempt);
     assert_eq!(records_of(&baseline, "runtime.send.failed").len(), 1);
     assert_eq!(turns(&case.workspace, first.pid), 0);
 
     let again = send(&server, "r2-send", &case, &attempt, "after close");
-    assert_replay_refusal(&again, "r2-send", "FAILED", "FAILED", "output stream is closed");
+    assert_replay_refusal(
+        &again,
+        "r2-send",
+        "FAILED",
+        "FAILED",
+        "output stream is closed",
+    );
     drain(&server, "r2-after");
     let after = events(&server, &attempt);
     assert_eq!(after, baseline, "the replay wrote no event");
-    assert_eq!(records_of(&after, "runtime.send.failed").len(), 1, "no second failure record");
+    assert_eq!(
+        records_of(&after, "runtime.send.failed").len(),
+        1,
+        "no second failure record"
+    );
     assert_eq!(turns(&case.workspace, first.pid), 0, "nothing delivered");
     assert!(is_live(first.pid), "the process is never killed");
     stop_fixtures(&case.workspace, &[first.pid]);
@@ -1695,11 +2461,24 @@ fn r3_unknown_command_without_result_replays_as_unknown_not_failed() {
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r3", "linger");
     let attempt = select_scenario(&server, "r3-select", &case);
-    constructed_row(&server, "r3-send", &attempt, "uncertain", &[CommandState::Executing, CommandState::Unknown], None);
+    constructed_row(
+        &server,
+        "r3-send",
+        &attempt,
+        "uncertain",
+        &[CommandState::Executing, CommandState::Unknown],
+        None,
+    );
     let baseline = events(&server, &attempt);
 
     let again = send(&server, "r3-send", &case, &attempt, "uncertain");
-    assert_replay_refusal(&again, "r3-send", "UNKNOWN", "UNKNOWN", "reason not recorded");
+    assert_replay_refusal(
+        &again,
+        "r3-send",
+        "UNKNOWN",
+        "UNKNOWN",
+        "reason not recorded",
+    );
     assert!(!error_of(&again).contains("[state=FAILED]"));
     drain(&server, "r3-after");
     assert_eq!(events(&server, &attempt), baseline);
@@ -1714,7 +2493,14 @@ fn r4_executing_command_replays_as_in_progress_and_is_not_delivered_again() {
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r4", "linger");
     let attempt = select_scenario(&server, "r4-select", &case);
-    constructed_row(&server, "r4-send", &attempt, "in flight", &[CommandState::Executing], None);
+    constructed_row(
+        &server,
+        "r4-send",
+        &attempt,
+        "in flight",
+        &[CommandState::Executing],
+        None,
+    );
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 0);
 
@@ -1724,10 +2510,23 @@ fn r4_executing_command_replays_as_in_progress_and_is_not_delivered_again() {
     // delivery closure (Executing -> Executing is written without a transition check), and the
     // attributable red is the `message.user` it appends.
     let after = events(&server, &attempt);
-    assert_eq!(user_messages(&after), 0, "the replay must not deliver (message.user appended): {after:?}");
+    assert_eq!(
+        user_messages(&after),
+        0,
+        "the replay must not deliver (message.user appended): {after:?}"
+    );
     assert_eq!(after, baseline);
-    assert_replay_refusal(&again, "r4-send", "EXECUTING", "UNKNOWN", "still in progress");
-    assert!(!error_of(&again).contains("[state=FAILED]") && !error_of(&again).contains("[state=UNKNOWN]"));
+    assert_replay_refusal(
+        &again,
+        "r4-send",
+        "EXECUTING",
+        "UNKNOWN",
+        "still in progress",
+    );
+    assert!(
+        !error_of(&again).contains("[state=FAILED]")
+            && !error_of(&again).contains("[state=UNKNOWN]")
+    );
     i7_marker("r4", "completed (constructed row)");
 }
 
@@ -1739,14 +2538,31 @@ fn r5_failed_command_without_result_replays_as_failure_with_unknown_delivery() {
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r5", "linger");
     let attempt = select_scenario(&server, "r5-select", &case);
-    constructed_row(&server, "r5-send", &attempt, "lost reason", &[CommandState::Executing, CommandState::Failed], None);
+    constructed_row(
+        &server,
+        "r5-send",
+        &attempt,
+        "lost reason",
+        &[CommandState::Executing, CommandState::Failed],
+        None,
+    );
     let baseline = events(&server, &attempt);
 
     let again = send(&server, "r5-send", &case, &attempt, "lost reason");
-    assert_replay_refusal(&again, "r5-send", "FAILED", "UNKNOWN", "reason not recorded");
+    assert_replay_refusal(
+        &again,
+        "r5-send",
+        "FAILED",
+        "UNKNOWN",
+        "reason not recorded",
+    );
     drain(&server, "r5-after");
     let after = events(&server, &attempt);
-    assert_eq!(user_messages(&after), 0, "no message.user appended by the replay");
+    assert_eq!(
+        user_messages(&after),
+        0,
+        "no message.user appended by the replay"
+    );
     assert_eq!(after, baseline);
     i7_marker("r5", "completed (constructed row)");
 }
@@ -1765,12 +2581,21 @@ fn r6_failed_command_with_unknown_delivery_replays_with_unknown_delivery() {
         &attempt,
         "maybe written",
         &[CommandState::Executing],
-        Some((CommandState::Failed, json!({ "requestId": "r6-send", "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" }))),
+        Some((
+            CommandState::Failed,
+            json!({ "requestId": "r6-send", "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" }),
+        )),
     );
     let baseline = events(&server, &attempt);
 
     let again = send(&server, "r6-send", &case, &attempt, "maybe written");
-    assert_replay_refusal(&again, "r6-send", "FAILED", "UNKNOWN", "write failed; delivery unknown");
+    assert_replay_refusal(
+        &again,
+        "r6-send",
+        "FAILED",
+        "UNKNOWN",
+        "write failed; delivery unknown",
+    );
     assert!(!error_of(&again).contains("[delivery=FAILED]"), "{again}");
     drain(&server, "r6-after");
     assert_eq!(events(&server, &attempt), baseline);
@@ -1791,12 +2616,21 @@ fn r7_failed_command_after_delivery_replays_as_failed_but_delivered() {
         &attempt,
         "delivered then failed",
         &[CommandState::Executing],
-        Some((CommandState::Failed, json!({ "requestId": "r7-send", "deliveryState": "DELIVERED", "error": "recovery persistence failed" }))),
+        Some((
+            CommandState::Failed,
+            json!({ "requestId": "r7-send", "deliveryState": "DELIVERED", "error": "recovery persistence failed" }),
+        )),
     );
     let baseline = events(&server, &attempt);
 
     let again = send(&server, "r7-send", &case, &attempt, "delivered then failed");
-    assert_replay_refusal(&again, "r7-send", "FAILED", "DELIVERED", "recovery persistence failed");
+    assert_replay_refusal(
+        &again,
+        "r7-send",
+        "FAILED",
+        "DELIVERED",
+        "recovery persistence failed",
+    );
     drain(&server, "r7-after");
     assert_eq!(events(&server, &attempt), baseline);
     i7_marker("r7", "completed (constructed row)");
@@ -1810,16 +2644,26 @@ fn r8_same_request_id_with_different_content_is_a_conflict_not_a_replay() {
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r8", "linger");
     let attempt = select_scenario(&server, "r8-select", &case);
-    assert_eq!(send(&server, "r8-send", &case, &attempt, "first")["ok"], true);
+    assert_eq!(
+        send(&server, "r8-send", &case, &attempt, "first")["ok"],
+        true
+    );
     drain(&server, "r8");
     let baseline = events(&server, &attempt);
 
     let conflict = send(&server, "r8-send", &case, &attempt, "changed");
     let error = error_of(&conflict);
     assert!(error.contains("different content"), "{error}");
-    assert!(!error.starts_with("replayed request"), "a conflict is not answered as a replay: {error}");
+    assert!(
+        !error.starts_with("replayed request"),
+        "a conflict is not answered as a replay: {error}"
+    );
     drain(&server, "r8-after");
-    assert_eq!(events(&server, &attempt), baseline, "nothing delivered for the conflicting content");
+    assert_eq!(
+        events(&server, &attempt),
+        baseline,
+        "nothing delivered for the conflicting content"
+    );
     i7_marker("r8", "completed");
 }
 
@@ -1838,29 +2682,63 @@ fn r9_recorded_results_answer_replays_across_a_core_restart() {
         &attempt,
         "before restart",
         &[CommandState::Executing],
-        Some((CommandState::Failed, json!({ "requestId": "r9-failed", "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" }))),
+        Some((
+            CommandState::Failed,
+            json!({ "requestId": "r9-failed", "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" }),
+        )),
     );
-    constructed_row(&server1, "r9-executing", &attempt, "mid flight", &[CommandState::Executing], None);
+    constructed_row(
+        &server1,
+        "r9-executing",
+        &attempt,
+        "mid flight",
+        &[CommandState::Executing],
+        None,
+    );
     drop(server1);
 
     let server2 = CoreServer::new(store.clone());
     let reconciled = server2.processor().reconcile_after_restart().unwrap();
-    assert_eq!(reconciled, 1, "the executing row is marked UNKNOWN by the restart reconcile");
+    assert_eq!(
+        reconciled, 1,
+        "the executing row is marked UNKNOWN by the restart reconcile"
+    );
     // A fresh UiController starts with no selection. Restore it the way increment 5's g4 does
     // after a restart: select_project clears the selection and the snapshot selects the case
     // task's latest attempt. (select_runtime would be refused here: an Active row with no
     // registration and no recovery row hits insert_attempt's IdempotencyConflict.) Asserted
     // before replaying, so a selection-gate refusal can never masquerade as this case's outcome.
-    let project = call(&server2, "r9-project", "select_project", json!({ "projectId": case.project }));
+    let project = call(
+        &server2,
+        "r9-project",
+        "select_project",
+        json!({ "projectId": case.project }),
+    );
     assert_eq!(project["ok"], true, "{project}");
-    assert_eq!(selected_attempt(&server2, "r9-snapshot"), attempt, "the snapshot selects the case attempt");
+    assert_eq!(
+        selected_attempt(&server2, "r9-snapshot"),
+        attempt,
+        "the snapshot selects the case attempt"
+    );
     drain(&server2, "r9-reselect");
     let baseline = events(&server2, &attempt);
 
     let failed = send(&server2, "r9-failed", &case, &attempt, "before restart");
-    assert_replay_refusal(&failed, "r9-failed", "FAILED", "UNKNOWN", "write failed; delivery unknown");
+    assert_replay_refusal(
+        &failed,
+        "r9-failed",
+        "FAILED",
+        "UNKNOWN",
+        "write failed; delivery unknown",
+    );
     let interrupted = send(&server2, "r9-executing", &case, &attempt, "mid flight");
-    assert_replay_refusal(&interrupted, "r9-executing", "UNKNOWN", "UNKNOWN", "reason not recorded");
+    assert_replay_refusal(
+        &interrupted,
+        "r9-executing",
+        "UNKNOWN",
+        "UNKNOWN",
+        "reason not recorded",
+    );
     drain(&server2, "r9-after");
     let after = events(&server2, &attempt);
     assert_eq!(user_messages(&after), 0, "no delivery after the restart");
@@ -1877,7 +2755,10 @@ fn r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing(
     let server = CoreServer::new(Store::memory().unwrap());
     let case = case_project(&server, "r10", "linger");
     let old_attempt = select_scenario(&server, "r10-select", &case);
-    assert_eq!(send(&server, "r10-send", &case, &old_attempt, "before handoff")["ok"], true);
+    assert_eq!(
+        send(&server, "r10-send", &case, &old_attempt, "before handoff")["ok"],
+        true
+    );
     drain(&server, "r10");
     let handoff_payload = json!({
         "oldAttemptId": old_attempt,
@@ -1888,16 +2769,26 @@ fn r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing(
     });
     let first = call(&server, "r10-handoff", "handoff", handoff_payload.clone());
     assert_eq!(first["ok"], true, "{first}");
-    let new_attempt = first["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap_or_default().to_string();
+    let new_attempt = first["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(new_attempt.starts_with("attempt-handoff-"), "{new_attempt}");
     drain(&server, "r10-first");
     let old_baseline = events(&server, &old_attempt);
     let new_baseline = events(&server, &new_attempt);
-    assert_eq!(user_messages(&new_baseline), 1, "the derived instruction was sent once: {new_baseline:?}");
+    assert_eq!(
+        user_messages(&new_baseline),
+        1,
+        "the derived instruction was sent once: {new_baseline:?}"
+    );
 
     let again = call(&server, "r10-handoff", "handoff", handoff_payload);
     let error = error_of(&again);
-    assert!(!error.starts_with("replayed request"), "the repeat is refused before its derived send: {error}");
+    assert!(
+        !error.starts_with("replayed request"),
+        "the repeat is refused before its derived send: {error}"
+    );
     drain(&server, "r10-again");
     assert_eq!(events(&server, &old_attempt), old_baseline);
     let new_after = events(&server, &new_attempt);
@@ -1925,7 +2816,10 @@ fn r11_exec_transport_rejection_replays_as_the_recorded_failure_without_a_second
     let script = case.workspace.join("codex-exec-reject.cmd");
     fs::write(
         &script,
-        format!("@echo off\r\necho invoked>>\"{}\"\r\nexit /b 1\r\n", invocations.display()),
+        format!(
+            "@echo off\r\necho invoked>>\"{}\"\r\nexit /b 1\r\n",
+            invocations.display()
+        ),
     )
     .unwrap();
     // The exec transport is chosen at select time from this process-wide variable: held under
@@ -1934,7 +2828,10 @@ fn r11_exec_transport_rejection_replays_as_the_recorded_failure_without_a_second
     let _transport = ExecTransport::install();
     let attempt = default_attempt(&case.task, "codex");
     let admitted = select_codex(&server, "r11-select", &case, Some(&script));
-    assert_eq!(admitted["ok"], true, "the exec transport registers without a process: {admitted}");
+    assert_eq!(
+        admitted["ok"], true,
+        "the exec transport registers without a process: {admitted}"
+    );
 
     // Plain ASCII input: the text travels as a batch-file argument, and a rejected escaping would
     // divert the send into the generic-retry path instead of the post-`sent` failure below.
@@ -1946,24 +2843,52 @@ fn r11_exec_transport_rejection_replays_as_the_recorded_failure_without_a_second
     // binding (runtime_manager.rs:1050; projection.rs:3601-3608). So the FIRST send fails at
     // persist_agent_event (:2162) — one of the failure points that recorded nothing before this
     // increment — with the delivery already known: the Runtime did not accept the input.
-    assert!(first_error.contains("no canonical Runtime binding"), "{first_error}");
+    assert!(
+        first_error.contains("no canonical Runtime binding"),
+        "{first_error}"
+    );
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
-    assert_eq!(lines.lines().count(), 1, "the first send ran the executable once: {lines:?}");
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "the first send ran the executable once: {lines:?}"
+    );
     // The TurnFailed envelope was never persisted, so the attempt is NOT terminal: pre-fix the
     // replay below passes every gate and is answered by the blind Ok(true).
     let row = server.processor().store().get_attempt(&attempt).unwrap();
-    assert!(!row.state.is_terminal(), "the unpersisted failure event leaves the attempt live: {:?}", row.state);
+    assert!(
+        !row.state.is_terminal(),
+        "the unpersisted failure event leaves the attempt live: {:?}",
+        row.state
+    );
     drain(&server, "r11");
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 1);
-    assert_eq!(records_of(&baseline, "runtime.turn.failed").len(), 0, "the exec event was refused, not journaled");
+    assert_eq!(
+        records_of(&baseline, "runtime.turn.failed").len(),
+        0,
+        "the exec event was refused, not journaled"
+    );
 
     let again = send(&server, "r11-send", &case, &attempt, "reject me");
-    assert_replay_refusal(&again, "r11-send", "FAILED", "FAILED", "no canonical Runtime binding");
-    assert!(error_of(&again).contains(&first_error), "the replay carries the recorded reason verbatim");
+    assert_replay_refusal(
+        &again,
+        "r11-send",
+        "FAILED",
+        "FAILED",
+        "no canonical Runtime binding",
+    );
+    assert!(
+        error_of(&again).contains(&first_error),
+        "the replay carries the recorded reason verbatim"
+    );
     drain(&server, "r11-after");
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
-    assert_eq!(lines.lines().count(), 1, "the replay ran no process: {lines:?}");
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "the replay ran no process: {lines:?}"
+    );
     let after = events(&server, &attempt);
     assert_eq!(user_messages(&after), 1);
     assert_eq!(after, baseline);
@@ -1976,7 +2901,10 @@ struct ExecTransport;
 
 impl ExecTransport {
     fn install() -> Self {
-        assert!(env::var_os("GOALPORT_CODEX_TRANSPORT").is_none(), "the transport variable must not already be set");
+        assert!(
+            env::var_os("GOALPORT_CODEX_TRANSPORT").is_none(),
+            "the transport variable must not already be set"
+        );
         unsafe { env::set_var("GOALPORT_CODEX_TRANSPORT", "exec") };
         Self
     }
@@ -1985,7 +2913,10 @@ impl ExecTransport {
 impl Drop for ExecTransport {
     fn drop(&mut self) {
         unsafe { env::remove_var("GOALPORT_CODEX_TRANSPORT") };
-        assert!(env::var_os("GOALPORT_CODEX_TRANSPORT").is_none(), "the transport variable is removed");
+        assert!(
+            env::var_os("GOALPORT_CODEX_TRANSPORT").is_none(),
+            "the transport variable is removed"
+        );
     }
 }
 
@@ -2003,23 +2934,40 @@ fn r12_distinct_request_ids_sharing_a_command_identity_are_refused_not_replayed(
     let first_id = format!("r12-collide-{}", "x".repeat(40));
     let second_id = format!("{first_id}-second");
     assert_eq!(
-        send_message_command(&first_id, &attempt, "same text").unwrap().command,
-        send_message_command(&second_id, &attempt, "same text").unwrap().command,
+        send_message_command(&first_id, &attempt, "same text")
+            .unwrap()
+            .command,
+        send_message_command(&second_id, &attempt, "same text")
+            .unwrap()
+            .command,
         "the two ids share one command identity (48-character truncation)"
     );
-    assert_eq!(send(&server, &first_id, &case, &attempt, "same text")["ok"], true);
+    assert_eq!(
+        send(&server, &first_id, &case, &attempt, "same text")["ok"],
+        true
+    );
     drain(&server, "r12");
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 1);
 
     let again = send(&server, &second_id, &case, &attempt, "same text");
     let error = error_of(&again);
-    assert!(error.contains(&format!("collides with the recorded request {first_id}")), "{error}");
-    assert!(!error.starts_with("replayed request"), "a collision is not a replay: {error}");
+    assert!(
+        error.contains(&format!("collides with the recorded request {first_id}")),
+        "{error}"
+    );
+    assert!(
+        !error.starts_with("replayed request"),
+        "a collision is not a replay: {error}"
+    );
     assert!(again["payload"].get("duplicate").is_none(), "{again}");
     drain(&server, "r12-after");
     let after = events(&server, &attempt);
-    assert_eq!(user_messages(&after), 1, "nothing delivered for the colliding request");
+    assert_eq!(
+        user_messages(&after),
+        1,
+        "nothing delivered for the colliding request"
+    );
     assert_eq!(after, baseline);
     i7_marker("r12", "completed");
 }
@@ -2058,7 +3006,10 @@ fn r13_malformed_native_answer_sends_once_and_stays_unknown() {
 
     let first = send(&server, "r13-send", &case, &attempt, "maybe delivered");
     let first_error = error_of(&first);
-    assert!(first_error.contains("json error"), "the send fails on the malformed native answer: {first_error}");
+    assert!(
+        first_error.contains("json error"),
+        "the send fails on the malformed native answer: {first_error}"
+    );
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
     assert_eq!(
         lines.lines().count(),
@@ -2066,28 +3017,66 @@ fn r13_malformed_native_answer_sends_once_and_stays_unknown() {
         "the failed send ran the executable exactly once - no automatic retry: {lines:?}"
     );
     // The marker line carries the process's arguments: the prompt text reached the one process.
-    assert!(lines.lines().all(|line| line.contains("maybe delivered")), "the input reached the process: {lines:?}");
+    assert!(
+        lines.lines().all(|line| line.contains("maybe delivered")),
+        "the input reached the process: {lines:?}"
+    );
     let row = server.processor().store().get_attempt(&attempt).unwrap();
-    assert!(!row.state.is_terminal(), "the parse failure fakes no terminal native state: {:?}", row.state);
+    assert!(
+        !row.state.is_terminal(),
+        "the parse failure fakes no terminal native state: {:?}",
+        row.state
+    );
     drain(&server, "r13");
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 1);
     let failures: Vec<&Value> = records_of(&baseline, "runtime.send.failed");
-    assert_eq!(failures.len(), 1, "the failure is recorded exactly once: {baseline:?}");
-    assert_eq!(failures[0]["retry"], false, "no automatic retry is advertised: {baseline:?}");
-    assert_eq!(failures[0]["deliveryState"], "UNKNOWN", "the unconfirmed delivery is fail-closed UNKNOWN: {baseline:?}");
-    let row_id = send_message_command("r13-send", &attempt, "maybe delivered").unwrap().command.id;
-    let recorded = server.processor().store().command_result(&row_id).unwrap().expect("the failure row carries its result");
-    assert_eq!(recorded["deliveryState"], "UNKNOWN", "the failed command keeps its UNKNOWN delivery: {recorded}");
+    assert_eq!(
+        failures.len(),
+        1,
+        "the failure is recorded exactly once: {baseline:?}"
+    );
+    assert_eq!(
+        failures[0]["retry"], false,
+        "no automatic retry is advertised: {baseline:?}"
+    );
+    assert_eq!(
+        failures[0]["deliveryState"], "UNKNOWN",
+        "the unconfirmed delivery is fail-closed UNKNOWN: {baseline:?}"
+    );
+    let row_id = send_message_command("r13-send", &attempt, "maybe delivered")
+        .unwrap()
+        .command
+        .id;
+    let recorded = server
+        .processor()
+        .store()
+        .command_result(&row_id)
+        .unwrap()
+        .expect("the failure row carries its result");
+    assert_eq!(
+        recorded["deliveryState"], "UNKNOWN",
+        "the failed command keeps its UNKNOWN delivery: {recorded}"
+    );
 
     let again = send(&server, "r13-send", &case, &attempt, "maybe delivered");
     assert_replay_refusal(&again, "r13-send", "FAILED", "UNKNOWN", &first_error);
-    assert!(error_of(&again).contains(&first_error), "the replay carries the recorded reason verbatim");
+    assert!(
+        error_of(&again).contains(&first_error),
+        "the replay carries the recorded reason verbatim"
+    );
     drain(&server, "r13-after");
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
-    assert_eq!(lines.lines().count(), 1, "the replay ran no process (count stays 1): {lines:?}");
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "the replay ran no process (count stays 1): {lines:?}"
+    );
     assert_eq!(events(&server, &attempt), baseline);
-    i7_marker("r13", "completed (codex exec transport, one invocation, no retry)");
+    i7_marker(
+        "r13",
+        "completed (codex exec transport, one invocation, no retry)",
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2105,28 +3094,60 @@ fn r14_pending_row_refuses_a_colliding_id_and_still_executes_its_own_request() {
     let original_id = format!("r14-pending-{}", "y".repeat(40));
     let colliding_id = format!("{original_id}-other");
     let command = send_message_command(&original_id, &attempt, "pending input").unwrap();
-    assert_eq!(command.command, send_message_command(&colliding_id, &attempt, "pending input").unwrap().command);
+    assert_eq!(
+        command.command,
+        send_message_command(&colliding_id, &attempt, "pending input")
+            .unwrap()
+            .command
+    );
     let store = server.processor().store();
-    let recorded = store.record_command_for_request(&command.command, &original_id).unwrap();
-    assert_eq!(recorded.state, CommandState::Pending, "constructed: the row rests Pending");
+    let recorded = store
+        .record_command_for_request(&command.command, &original_id)
+        .unwrap();
+    assert_eq!(
+        recorded.state,
+        CommandState::Pending,
+        "constructed: the row rests Pending"
+    );
     let baseline = events(&server, &attempt);
     assert_eq!(user_messages(&baseline), 0);
 
     let collided = send(&server, &colliding_id, &case, &attempt, "pending input");
     let error = error_of(&collided);
-    assert!(error.contains(&format!("collides with the recorded request {original_id}")), "{error}");
+    assert!(
+        error.contains(&format!("collides with the recorded request {original_id}")),
+        "{error}"
+    );
     drain(&server, "r14-collide");
     let after_collision = events(&server, &attempt);
-    assert_eq!(user_messages(&after_collision), 0, "the colliding request delivered nothing");
+    assert_eq!(
+        user_messages(&after_collision),
+        0,
+        "the colliding request delivered nothing"
+    );
     assert_eq!(after_collision, baseline);
-    assert_eq!(store.get_command(&command.command.id).unwrap().state, CommandState::Pending, "the row is untouched");
+    assert_eq!(
+        store.get_command(&command.command.id).unwrap().state,
+        CommandState::Pending,
+        "the row is untouched"
+    );
 
     let own = send(&server, &original_id, &case, &attempt, "pending input");
-    assert_eq!(own["ok"], true, "the original request executes normally: {own}");
+    assert_eq!(
+        own["ok"], true,
+        "the original request executes normally: {own}"
+    );
     assert_eq!(own["payload"]["duplicate"], false, "{own}");
     drain(&server, "r14-own");
-    assert_eq!(user_messages(&events(&server, &attempt)), 1, "delivered exactly once");
-    assert_eq!(store.get_command(&command.command.id).unwrap().state, CommandState::Succeeded);
+    assert_eq!(
+        user_messages(&events(&server, &attempt)),
+        1,
+        "delivered exactly once"
+    );
+    assert_eq!(
+        store.get_command(&command.command.id).unwrap().state,
+        CommandState::Succeeded
+    );
     let result = store.command_result(&command.command.id).unwrap().unwrap();
     assert_eq!(result["requestId"], original_id, "{result}");
     assert_eq!(result["deliveryState"], "DELIVERED", "{result}");
@@ -2162,7 +3183,332 @@ fn n1_reuse_for_another_task_is_refused_and_the_selection_is_kept() {
     );
     let error = error_of(&refused);
     assert!(error.contains("registered for another task"), "{error}");
-    assert_eq!(selected_attempt(&server, "n1t-snapshot"), attempt, "the selection is untouched");
-    assert_eq!(send(&server, "n1t-send", &case, &attempt, "still usable")["ok"], true, "the kept registration still works");
+    assert_eq!(
+        selected_attempt(&server, "n1t-snapshot"),
+        attempt,
+        "the selection is untouched"
+    );
+    assert_eq!(
+        send(&server, "n1t-send", &case, &attempt, "still usable")["ok"],
+        true,
+        "the kept registration still works"
+    );
     i7_marker("n1t", "completed");
+}
+
+// ---------------------------------------------------------------------------------------------
+// PR14 review-debt closure: conversation reservations may re-arm only after a
+// proven pre-dispatch admission failure. These cases drive the real connected
+// protocol and a local fake app-server; the store-only CAS unit is not treated
+// as dispatch evidence.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
+    let _lock = lock();
+    assert_env_pinned();
+    let node = resolve_node();
+    let appdata = MutableFakeAppData::failed("first-send");
+    let store = Store::memory().unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let workspace = scratch_root().join(format!("pr14-first-send-{nonce}"));
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join(".fake-codex-scenario"), "linger").unwrap();
+    write_pr14_counting_loader(&workspace, false);
+    seed_core_epoch(&store, &workspace, "pr14-first-send");
+    let payload = json!({
+        "workspaceRoot": workspace,
+        "provider": "codex",
+        "message": "dispatch exactly once"
+    });
+
+    let first_server = CoreServer::new(store.clone());
+    let first = call(
+        &first_server,
+        "pr14-first-send-request",
+        "start_conversation",
+        payload.clone(),
+    );
+    let first_error = error_of(&first);
+    assert!(first_error.contains("withdrawn"), "{first_error}");
+    let reservation = &first["payload"]["rejection"]["reservation"];
+    assert_eq!(first["payload"]["rejection"]["retryMode"], "SAME_REQUEST");
+    assert_eq!(reservation["kind"], "first-send");
+    assert_eq!(reservation["messageReserved"], true);
+    let attempt = reservation["attemptId"].as_str().unwrap().to_string();
+    assert_eq!(store.counts().unwrap().commands, 0);
+    assert_eq!(
+        records_of(&events(&first_server, &attempt), "message.user").len(),
+        1
+    );
+    drop(first_server);
+
+    appdata.arm_node(&node);
+    let second_server = CoreServer::new(store.clone());
+    let retried = call(
+        &second_server,
+        "pr14-first-send-request",
+        "start_conversation",
+        payload.clone(),
+    );
+    assert_eq!(retried["ok"], true, "{retried}");
+    assert_eq!(retried["payload"]["duplicate"], false);
+    let instance = new_instance(&workspace, &[]);
+    let delivered = wait_for_event_count(&second_server, &attempt, "runtime.reply.delta", 1);
+    assert_eq!(records_of(&delivered, "runtime.reply.delta").len(), 1);
+    let receipts = pr14_turn_receipts(&workspace);
+    assert_eq!(
+        receipts.len(),
+        1,
+        "one provider turn/start receipt: {receipts:?}"
+    );
+    assert_eq!(
+        receipts[0]["clientUserMessageId"],
+        "pr14-first-send-request"
+    );
+    assert_eq!(
+        records_of(&events(&second_server, &attempt), "message.user").len(),
+        1
+    );
+    let settled = store
+        .conversation_request("pr14-first-send-request")
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled.phase, "succeeded");
+    assert_eq!(
+        settled
+            .result
+            .as_ref()
+            .and_then(|value| value.get("attempts"))
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    let replay = call(
+        &second_server,
+        "pr14-first-send-request",
+        "start_conversation",
+        payload,
+    );
+    assert_eq!(replay["ok"], true);
+    assert_eq!(replay["payload"]["duplicate"], true);
+    drain(&second_server, "pr14-first-send-replay");
+    assert_eq!(
+        records_of(&events(&second_server, &attempt), "runtime.reply.delta").len(),
+        1
+    );
+    assert_eq!(pr14_turn_receipts(&workspace).len(), 1);
+    stop_fixtures(&workspace, &[instance.pid]);
+}
+
+#[test]
+fn pr14_stop_successor_same_id_rearms_and_keeps_one_successor_message_and_dispatch() {
+    let _lock = lock();
+    assert_env_pinned();
+    let node = resolve_node();
+    let appdata = MutableFakeAppData::failed("stop-successor");
+    let store = Store::memory().unwrap();
+    let first_server = CoreServer::new(store.clone());
+    let case = case_project(&first_server, "pr14-stop-successor", "linger");
+    write_pr14_counting_loader(&case.workspace, false);
+    seed_core_epoch(&store, &case.workspace, "pr14-stop-successor");
+    let source = "attempt-pr14-stop-source";
+    store
+        .insert_attempt(&Attempt::new(source, &case.task, "codex", "codex-cap-v1"))
+        .unwrap();
+    store
+        .append_event_with_state(
+            &Event {
+                id: "pr14-stop-source-active".into(),
+                attempt_id: source.into(),
+                seq: 1,
+                kind: "attempt.active".into(),
+                payload_ref: None,
+            },
+            Some(AttemptState::Active),
+            Some(&json!({"reason":"fixture active"})),
+        )
+        .unwrap();
+    store
+        .append_event_with_state(
+            &Event {
+                id: "pr14-stop-source-cancelled".into(),
+                attempt_id: source.into(),
+                seq: 2,
+                kind: "attempt.cancelled".into(),
+                payload_ref: None,
+            },
+            Some(AttemptState::Cancelled),
+            Some(&json!({"confirmed":true,"reason":"fixture confirmed Stop"})),
+        )
+        .unwrap();
+    store
+        .set_conversation_provider(&case.campaign, "codex")
+        .unwrap();
+    let payload = json!({
+        "campaignId": case.campaign,
+        "attemptId": source,
+        "message": "continue once"
+    });
+    let first = call(
+        &first_server,
+        "pr14-stop-successor-request",
+        "conversation_send",
+        payload.clone(),
+    );
+    let first_error = error_of(&first);
+    assert!(first_error.contains("withdrawn"), "{first_error}");
+    let reservation = &first["payload"]["rejection"]["reservation"];
+    assert_eq!(reservation["kind"], "stop-successor");
+    assert_eq!(reservation["sourceAttemptId"], source);
+    assert_eq!(reservation["messageReserved"], false);
+    assert_eq!(first["payload"]["rejection"]["retryMode"], "SAME_REQUEST");
+    let successor = reservation["attemptId"].as_str().unwrap().to_string();
+    assert_eq!(store.counts().unwrap().attempts, 2);
+    assert_eq!(
+        records_of(&events(&first_server, &successor), "message.user").len(),
+        0
+    );
+    drop(first_server);
+
+    appdata.arm_node(&node);
+    let second_server = CoreServer::new(store.clone());
+    let retried = call(
+        &second_server,
+        "pr14-stop-successor-request",
+        "conversation_send",
+        payload.clone(),
+    );
+    assert_eq!(retried["ok"], true, "{retried}");
+    let instance = new_instance(&case.workspace, &[]);
+    let delivered = wait_for_event_count(&second_server, &successor, "runtime.reply.delta", 1);
+    assert_eq!(records_of(&delivered, "runtime.reply.delta").len(), 1);
+    let receipts = pr14_turn_receipts(&case.workspace);
+    assert_eq!(
+        receipts.len(),
+        1,
+        "one provider turn/start receipt: {receipts:?}"
+    );
+    assert_eq!(
+        receipts[0]["clientUserMessageId"],
+        "pr14-stop-successor-request"
+    );
+    assert_eq!(store.counts().unwrap().attempts, 2);
+    assert_eq!(
+        store.get_attempt(source).unwrap().state,
+        AttemptState::Cancelled
+    );
+    assert_eq!(
+        records_of(&events(&second_server, &successor), "message.user").len(),
+        1
+    );
+    let replay = call(
+        &second_server,
+        "pr14-stop-successor-request",
+        "conversation_send",
+        payload,
+    );
+    assert_eq!(replay["ok"], true);
+    assert_eq!(replay["payload"]["duplicate"], true);
+    drain(&second_server, "pr14-stop-successor-replay");
+    assert_eq!(
+        records_of(&events(&second_server, &successor), "runtime.reply.delta").len(),
+        1
+    );
+    assert_eq!(pr14_turn_receipts(&case.workspace).len(), 1);
+    stop_fixtures(&case.workspace, &[instance.pid]);
+}
+
+#[test]
+fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
+    let _lock = lock();
+    assert_env_pinned();
+    let node = resolve_node();
+    let appdata = MutableFakeAppData::failed("turn-error");
+    appdata.arm_node(&node);
+    let store = Store::memory().unwrap();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let workspace = scratch_root().join(format!("pr14-turn-error-{nonce}"));
+    fs::create_dir_all(&workspace).unwrap();
+    write_pr14_counting_loader(&workspace, true);
+    seed_core_epoch(&store, &workspace, "pr14-turn-error");
+    let server = CoreServer::new(store.clone());
+    let started = call(
+        &server,
+        "pr14-turn-error-request",
+        "start_conversation",
+        json!({
+            "workspaceRoot": workspace,
+            "provider": "codex",
+            "message": "reject this native turn"
+        }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+    let instance = new_instance(&workspace, &[]);
+    let attempt = started["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let began = Instant::now();
+    let final_snapshot = loop {
+        let view = snapshot(
+            &server,
+            &format!("pr14-turn-error-poll-{}", began.elapsed().as_millis()),
+        );
+        let current_events = events(&server, &attempt);
+        let failures = records_of(&current_events, "runtime.turn.failed");
+        if failures.len() == 1 {
+            break view;
+        }
+        assert!(began.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let durable = events(&server, &attempt);
+    let failures = records_of(&durable, "runtime.turn.failed");
+    assert_eq!(
+        failures.len(),
+        1,
+        "matching, foreign and duplicate responses: {durable:?}"
+    );
+    assert_eq!(failures[0]["status"], "failed");
+    assert!(failures[0]["turnStartRequestId"].is_number());
+    assert!(failures[0]["nativeTurnId"].is_null());
+    assert!(
+        final_snapshot["productConversation"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "actionable-error")
+    );
+    let receipts = pr14_turn_receipts(&workspace);
+    assert_eq!(
+        receipts.len(),
+        1,
+        "one rejected turn/start reached provider"
+    );
+    assert_eq!(
+        receipts[0]["clientUserMessageId"],
+        "pr14-turn-error-request"
+    );
+    stop_fixtures(&workspace, &[instance.pid]);
+    drop(server);
+    let reopened = CoreServer::new(store.clone());
+    let reopened_view = snapshot(&reopened, "pr14-turn-error-reopen");
+    assert_eq!(
+        records_of(&events(&reopened, &attempt), "runtime.turn.failed").len(),
+        1
+    );
+    assert!(
+        reopened_view["productConversation"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "actionable-error")
+    );
 }

@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
+const { pathToFileURL } = require("node:url");
+const { createTrustedIpcHandler, protectRenderer } = require("./security-policy.cjs");
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
@@ -224,6 +226,8 @@ const PIPE_NAME = configuredPipeName.startsWith("\\\\.\\pipe\\")
   : `\\\\.\\pipe\\${configuredPipeName}`;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 let mainWindow;
+const appDocumentUrl = pathToFileURL(path.join(appRoot, "dist", "index.html")).href;
+const handleTrusted = createTrustedIpcHandler(ipcMain, () => mainWindow, appDocumentUrl);
 if (process.env.GOALPORT_ALLOW_MULTI_INSTANCE !== "1") {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
@@ -242,6 +246,7 @@ let coreLaunchPromise;
 let allowQuitAfterCloseChoice = false;
 let closePromptOpen = false;
 let lastAttemptActive = false;
+let lastProjectionUnavailable = false;
 let lastAttemptId = "";
 let lastAttemptProvider = "";
 let lastStopResponsibilityHeld = false;
@@ -638,7 +643,11 @@ function importFacts(discovery) {
     counts: discovery?.inspection?.counts ?? null,
     schemaVersion: discovery?.inspection?.schemaVersion ?? null,
     bytes: discovery?.inspection?.bytes ?? null,
-    needsRecovery: Boolean(discovery?.inspection?.needsRecovery),
+    recoveryDisposition: "NOT_REQUIRED",
+    recoveryMethod: null,
+    recoveryProofToken: null,
+    operationId: null,
+    sourceMutationOnAccept: "NONE",
     liveSource: discovery?.inspection?.latestEpoch?.priorCore === "live-exact"
   };
 }
@@ -727,22 +736,35 @@ async function runProfileBootstrap() {
       } catch (error) { return await bootstrapExitOnError("internal-error", error); }
       return outcome;
     }
-    case "import-offer": {
-      const facts = importFacts(outcome.discovery);
+    case "import-offer":
+    case "import-recovery-offer": {
+      const recovery = outcome.kind === "import-recovery-offer";
+      const facts = { ...importFacts(outcome.discovery), ...(recovery ? outcome.recovery : {}) };
       pushBootstrap({ phase: "import-offer", facts });
-      const action = await waitForBootstrapAction();
-      if (action?.type === "import-accept") {
-        pushBootstrap({ phase: "importing", facts });
-        try {
-          await profileManager.runImport(outcome.discovery, { allowSourceRecovery: Boolean(facts.needsRecovery) });
-        } catch (error) {
-          return await bootstrapExitOnError("import-failed", error);
+      while (true) {
+        const action = await waitForBootstrapAction();
+        if (action?.type === "exit") return "exit";
+        if (action?.type === "import-accept") {
+          pushBootstrap({ phase: "importing", facts });
+          try {
+            if (recovery) await profileManager.acceptRecovery(outcome.journal, {
+              operationId: action.operationId, recoveryProofToken: action.recoveryProofToken
+            });
+            else await profileManager.runImport(outcome.discovery);
+          } catch (error) {
+            return await bootstrapExitOnError("import-failed", error);
+          }
+          return outcome;
         }
+        if (action?.type !== "fresh") continue;
+        // Only an explicit decline can abandon an owned recovery probe. A
+        // malformed action, exit or stale consent must never fall into fresh.
+        try {
+          if (recovery) await profileManager.declineRecovery(outcome.journal);
+          profileManager.beginFresh();
+        } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
         return outcome;
       }
-      // Decline is an explicit choice recorded as a fresh profile.
-      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-      return outcome;
     }
     case "import-incompatible": {
       pushBootstrap({ phase: "import-incompatible", facts: importFacts(outcome.discovery), reason: outcome.reason });
@@ -899,6 +921,8 @@ function closeAttemptTarget(active, selectedId, held, heldId) {
 }
 
 function cacheAttempt(snapshot) {
+  lastProjectionUnavailable = snapshot?.bounds?.projectionUnavailable === true || snapshot?.bounds?.projection_unavailable === true;
+  if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");
   lastAttemptActive = state === "active" || state === "ACTIVE";
   lastAttemptId = String(snapshot?.attempt?.id || lastAttemptId || "");
@@ -1034,9 +1058,11 @@ async function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      additionalArguments: [`--goalport-app-document=${encodeURIComponent(appDocumentUrl)}`]
     }
   });
+  protectRenderer(mainWindow.webContents, appDocumentUrl, (url) => shell.openExternal(url));
   if (state.maximized) mainWindow.maximize();
   const rememberWindowState = () => saveWindowState({
     statePath: path.join(app.getPath("userData"), STATE_FILE),
@@ -1051,7 +1077,7 @@ async function createWindow() {
   mainWindow.on("close", (event) => {
     saveWindowState({ statePath: path.join(app.getPath("userData"), STATE_FILE), win: mainWindow });
     if (allowQuitAfterCloseChoice) return;
-    if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
+    if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) return;
     event.preventDefault();
     promptRendererCloseChoice();
   });
@@ -1097,7 +1123,7 @@ async function createWindow() {
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle("goalport:app-info", () => ({
+  handleTrusted("goalport:app-info", () => ({
     version: appVersion,
     channel: profile?.testMode ? "Synthetic test" : (launchChannel === "release" || !launchChannel ? "Stable V1 RC" : channelLabel(launchChannel)),
     distribution: app.isPackaged ? (launchChannel || "release") : "dev",
@@ -1109,7 +1135,7 @@ app.whenReady().then(() => {
     dataPath: profile?.durableDirectory ?? app.getPath("userData"),
     browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData")
   }));
-  ipcMain.handle("goalport:bootstrap-current", () => {
+  handleTrusted("goalport:bootstrap-current", () => {
     // An additive optional diagnostics child exposes
     // the bounded original-inspect trace. The bootstrap state itself — every
     // phase/kind and every goalport:bootstrap-state notification — is returned
@@ -1121,10 +1147,7 @@ app.whenReady().then(() => {
       return lastBootstrapState;
     }
   });
-  ipcMain.handle("goalport:bootstrap-action", (event, payload) => {
-    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
-      return { ok: false, error: "window-mismatch" };
-    }
+  handleTrusted("goalport:bootstrap-action", (event, payload) => {
     if (bootstrapWaiter) {
       const resolve = bootstrapWaiter;
       bootstrapWaiter = null;
@@ -1132,38 +1155,39 @@ app.whenReady().then(() => {
     }
     return { ok: true };
   });
-  ipcMain.handle("goalport:choose-workspace", async () => {
+  handleTrusted("goalport:choose-workspace", async () => {
     const choice = await dialog.showOpenDialog(mainWindow, { title: "Choose a project workspace", properties: ["openDirectory"] });
     return choice.canceled ? null : choice.filePaths[0] || null;
   });
-  ipcMain.handle("goalport:core-snapshot", (_, request) => invokeCore(request));
-  ipcMain.handle("goalport:core-command", (_, request) => invokeCore(request));
-  ipcMain.handle("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
-  ipcMain.handle("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
-  ipcMain.handle("goalport:request-close", async () => {
+  handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
+  handleTrusted("goalport:core-command", (_, request) => invokeCore(request));
+  handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
+  handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
+  handleTrusted("goalport:request-close", async () => {
     if (allowQuitAfterCloseChoice) {
       await quitAfterCloseChoice();
       return { ok: true, allowQuitLatch: true };
     }
     await refreshAttemptCache();
-    if (!lastAttemptActive && !lastStopResponsibilityHeld) {
+    if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) {
       await quitAfterCloseChoice();
       return { ok: true, allowQuitLatch: true, prompted: false };
     }
     promptRendererCloseChoice();
     return { ok: true, prompted: true, allowQuitLatch: false };
   });
-  ipcMain.handle("goalport:confirm-close-choice", async (event, rawPayload) => {
+  handleTrusted("goalport:confirm-close-choice", async (event, rawPayload) => {
     const parsed = normalizeClosePayload(rawPayload);
     const selected = parsed.choice;
     const requestId = parsed.requestId;
-    const senderWindow = BrowserWindow.fromWebContents(event.sender);
     const identity = electronIdentity();
     const mainReceivedAtUtc = isoNow();
-    if (!senderWindow || senderWindow.isDestroyed() || senderWindow !== mainWindow) {
-      return { ok: false, requestId, choice: selected, allowQuitLatch: false, coreAcknowledged: false, error: "window-mismatch" };
-    }
     await refreshAttemptCache();
+    if (lastProjectionUnavailable) {
+      const error = "Core acknowledged the operation, but its current control projection is unavailable. Reconnect before changing close responsibility.";
+      notifyCloseChoiceFailed({ requestId, error });
+      return { ok: false, requestId, choice: selected, allowQuitLatch: false, coreAcknowledged: false, error };
+    }
     const closeAttemptId = closeAttemptTarget(lastAttemptActive, lastAttemptId, lastStopResponsibilityHeld, lastHeldAttemptId);
     if (selected === "continue") {
       if ((!lastAttemptActive && !lastStopResponsibilityHeld) || !closeAttemptId) {
@@ -1243,7 +1267,7 @@ app.whenReady().then(() => {
       return { ok: false, requestId, choice: "stop", allowQuitLatch: false, coreAcknowledged: false, error: message };
     }
   });
-  ipcMain.handle("goalport:dismiss-close-choice", () => {
+  handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };
   });
@@ -1252,13 +1276,13 @@ app.whenReady().then(() => {
 
 app.on("before-quit", (event) => {
   if (allowQuitAfterCloseChoice) return;
-  if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
+  if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) return;
   event.preventDefault();
   promptRendererCloseChoice();
 });
 
 app.on("window-all-closed", () => {
-  if (allowQuitAfterCloseChoice || (!lastAttemptActive && !lastStopResponsibilityHeld)) {
+  if (allowQuitAfterCloseChoice || (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable)) {
     if (process.platform !== "darwin") app.quit();
   }
 });

@@ -37,7 +37,7 @@ export function verifyPackage(directory) {
   for (const name of COMPONENTS) {
     if (fileHash(resolve(root, "resources", name)) !== manifest.components[name]) throw new Error(`Embedded component mismatch: ${name}`);
   }
-  for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "dist/index.html"]) {
+  for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "dist/index.html"]) {
     if (!asar.extractFile(archive, name).length) throw new Error(`Missing app content: ${name}`);
   }
   return { status: "PASS", version: manifest.version, channel: manifest.channel, sourceRevision: manifest.source.revision, sourceDirty: manifest.source.dirty, sourceTreeSha256: digest, artifacts: manifest.artifacts };

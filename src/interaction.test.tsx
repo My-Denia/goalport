@@ -151,6 +151,11 @@ describe("markdown rendering stays inert", () => {
       "before <script>window.__pwned=1</script> after",
       "<img src=x onerror=\"window.__pwned=1\">",
       "[click](javascript:window.__pwned=1)",
+      "[file](file:///private/data)",
+      "[data](data:text/html,hello)",
+      "[shell](shell:run)",
+      "[custom](goalport:command)",
+      "[credential](https://user:secret@evil.example/)",
       "```html\n<iframe src=\"javascript:window.__pwned=1\"></iframe>\n```"
     ].join("\n\n");
     const snapshot = {
@@ -187,6 +192,8 @@ describe("markdown rendering stays inert", () => {
     const link = screen.getByText("docs");
     expect(link.tagName).toBe("A");
     expect(link.getAttribute("href")).toBe("https://example.com/a");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer noopener");
     expect(screen.getByText(/fn main/).closest("pre")).toBeTruthy();
     const copy = screen.getByRole("button", { name: /copy code/i });
     expect(copy).toBeTruthy();

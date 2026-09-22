@@ -6,7 +6,8 @@ import { resolve } from "node:path";
 import test from "node:test";
 import {
   parseMarkerText, buildMarkerV2, decideOwnProfile, importableDiscovery, incompatibilityReason,
-  backupsToPrune, dirContentState, ProfileManager, ELECTRON_SESSION_ARTIFACTS, isElectronArtifact
+  backupsToPrune, dirContentState, ProfileManager, ELECTRON_SESSION_ARTIFACTS, isElectronArtifact,
+  JOURNAL_SCHEMA, RECOVERY_DISPOSITION, RECOVERY_METHOD, recoveryProbeCandidate
 } from "../../electron/profile-manager.cjs";
 import { resolveProfilePaths } from "../../electron/launch-config.cjs";
 
@@ -32,6 +33,22 @@ function fixture(t) {
   const root = mkdtempSync(resolve(tmpdir(), "goalport-profile-mgr-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
+}
+
+function mockProof({ operationId, markerSha256, provenanceSha256, method = "SQLITE_ONLINE_BACKUP_V1", schemaVersion = 8 }) {
+  return {
+    schema: "goalport.import-proof.v1",
+    operationId,
+    method,
+    sourceMutation: "NONE",
+    sourceBindingSha256: "c".repeat(64),
+    sourceSnapshotToken: "d".repeat(64),
+    sourceMarkerSha256: markerSha256,
+    provenanceSha256,
+    recoveryProofToken: "e".repeat(64),
+    stagedDatabase: { sha256: "f".repeat(64), bytes: 23, schemaVersion, quickCheck: "ok", counts: { campaigns: 2 }, countsSha256: "1".repeat(64) },
+    markedEpoch: "e1"
+  };
 }
 
 test("marker parsing: v1 is provenance, v2 is structured, junk is a problem", () => {
@@ -205,16 +222,25 @@ test("decision matrix: import incompatibility reasons and journal resume", () =>
     markerState: null, dirContentState: { emptyish: false, databasePresent: false }, inspection: { exists: false },
     currentBuild, discovery: null, journal: { phase: "finalized", source: "s", stagingDir: "d" }
   }).kind, "missing-database");
-  // Journal copying WITHOUT the database in place is not a resume (re-offer)
+  // A legacy copying journal without a promoted database has no bound proof;
+  // it blocks fresh classification.
   assert.equal(decideOwnProfile({
     markerState: null, dirContentState: { emptyish: true, databasePresent: false }, inspection: { exists: false },
     currentBuild, discovery: null, journal: { phase: "copying", source: "s", stagingDir: "d" }
-  }).kind, "fresh");
+  }).kind, "import-failed");
 });
 
 test("backup rotation never prunes the newest and staging content is not profile content", (t) => {
-  assert.deepEqual(backupsToPrune(["a", "b", "c"]), []);
-  assert.deepEqual(backupsToPrune(["a", "b", "c", "d", "e"]), ["a", "b"]);
+  const names = [
+    "goalport-2026-09-20T00-00-00-000Z.sqlite",
+    "goalport-2026-09-21T00-00-00-000Z-1234abcd-1111-2222-3333-123456789abc.sqlite",
+    "goalport-2026-09-22T00-00-00-000Z-2234abcd-1111-2222-3333-123456789abc.sqlite",
+    "goalport-2026-09-23T00-00-00-000Z-3234abcd-1111-2222-3333-123456789abc.sqlite",
+    "goalport-2026-09-24T00-00-00-000Z-4234abcd-1111-2222-3333-123456789abc.sqlite",
+    ".goalport-2026-09-25T00-00-00-000Z.partial",
+    "unrelated.sqlite"
+  ];
+  assert.deepEqual(backupsToPrune(names), names.slice(0, 2));
   const root = fixture(t);
   mkdirSync(root, { recursive: true });
   writeFileSync(resolve(root, "goalport.sqlite"), "db");
@@ -399,12 +425,21 @@ test("ProfileManager: runImport stages, journals, and writes the marker last", a
         if (args[1] === "inspect") return { code: 0, stdout: `${JSON.stringify(inspect8())}\n` };
         if (args[1] === "import") {
           const staging = args[args.indexOf("--staging-dir") + 1];
+          const operationId = args[args.indexOf("--operation-id") + 1];
+          const markerSha256 = args[args.indexOf("--source-marker-sha256") + 1];
+          const provenanceSha256 = args[args.indexOf("--provenance-sha256") + 1];
           mkdirSync(staging, { recursive: true });
           writeFileSync(resolve(staging, "goalport.sqlite"), "imported database bytes");
+          const proof = mockProof({ operationId, markerSha256, provenanceSha256 });
+          writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
           order.push("db-in-staging");
-          return { code: 0, stdout: `${JSON.stringify({ ok: true, stage: "import", markedEpoch: "e1" })}\n` };
+          return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, stage: "import", proof })}\n` };
         }
-        return { code: 0, stdout: `${JSON.stringify({ ok: true, quickCheck: "ok" })}\n` };
+        if (args[1] === "verify-staging") {
+          const proofToken = args[args.indexOf("--expected-proof-token") + 1];
+          return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, stage: "verify-staging", verified: true, recoveryProofToken: proofToken })}\n` };
+        }
+        return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, quickCheck: "ok" })}\n` };
       },
       log: (line) => order.push(line)
     }
@@ -426,6 +461,7 @@ test("ProfileManager: a failed import discards staging and re-offers; a finalize
   const root = fixture(t);
   const source = resolve(root, "rc");
   mkdirSync(source, { recursive: true });
+  writeFileSync(resolve(source, "goalport-profile.json"), markerV1());
   writeFileSync(resolve(source, "goalport.sqlite"), "source database bytes");
   const dir = resolve(root, "dev");
   const failing = new ProfileManager({
@@ -913,4 +949,285 @@ test("positive controls: genuine inspection shapes keep their honest decisions",
   assert.equal((await unopenable.resolve()).kind, "needs-recovery");
   assert.deepEqual(c2, ["inspect"]);
   assert.ok(!existsSync(resolve(unopenableRoot, "dev", "backups")), "no write-open backup may appear on a needs-recovery refusal");
+});
+
+const recoveryInspection = () => ({
+  schema: "goalport.profile-ops.v1", ok: true, stage: "inspect",
+  exists: true, openable: false, needsRecovery: true, schemaVersion: null,
+  walBytes: 8192, shmPresent: false,
+  access: { disposition: "RECOVERY_PROBE_REQUIRED", reason: "WAL_PRESENT_SHM_MISSING" }
+});
+
+test("recovery offer requires a bound detached-copy proof and exact current consent", async (t) => {
+  const root = fixture(t);
+  const rc = resolve(root, "GoalPort", "rc");
+  const dev = resolve(root, "GoalPort", "dev");
+  mkdirSync(rc, { recursive: true });
+  writeFileSync(resolve(rc, "goalport-profile.json"), markerV1());
+  writeFileSync(resolve(rc, "goalport.sqlite"), "source-main");
+  writeFileSync(resolve(rc, "goalport.sqlite-wal"), "source-wal");
+  const sourcePreimage = [readFileSync(resolve(rc, "goalport.sqlite")), readFileSync(resolve(rc, "goalport.sqlite-wal"))];
+  const calls = [];
+  const manager = new ProfileManager({
+    directory: dev, appData: root, build: currentBuild,
+    deps: { execCore: async (args) => {
+      calls.push(args[1]);
+      if (args[1] === "inspect") {
+        const database = args[args.indexOf("--db") + 1];
+        return { code: 0, stdout: `${JSON.stringify(database.startsWith(rc) ? recoveryInspection() : inspect8({ exists: false, openable: false, schemaVersion: null }))}\n` };
+      }
+      if (args[1] === "recovery-probe") {
+        const staging = args[args.indexOf("--staging-dir") + 1];
+        const operationId = args[args.indexOf("--operation-id") + 1];
+        const markerSha256 = args[args.indexOf("--source-marker-sha256") + 1];
+        const provenanceSha256 = args[args.indexOf("--provenance-sha256") + 1];
+        writeFileSync(resolve(staging, "goalport.sqlite"), "verified recovered copy");
+        const proof = mockProof({ operationId, markerSha256, provenanceSha256, method: RECOVERY_METHOD });
+        writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+        return { code: 0, stdout: `${JSON.stringify({
+          schema: "goalport.profile-ops.v1", ok: true, stage: "recovery-probe",
+          recoveryDisposition: RECOVERY_DISPOSITION, recoveryMethod: RECOVERY_METHOD, sourceMutation: "NONE",
+          sourceBindingSha256: proof.sourceBindingSha256, sourceSnapshotToken: proof.sourceSnapshotToken,
+          recoveryProofToken: proof.recoveryProofToken, stagedDatabase: proof.stagedDatabase
+        })}\n` };
+      }
+      if (args[1] === "verify-staging") {
+        const proofToken = args[args.indexOf("--expected-proof-token") + 1];
+        return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, verified: true, recoveryProofToken: proofToken })}\n` };
+      }
+      if (args[1] === "verify-source") {
+        return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, sourceMutation: "NONE" })}\n` };
+      }
+      throw new Error(`unexpected ${args.join(" ")}`);
+    } }
+  });
+  const outcome = await manager.resolve();
+  assert.equal(outcome.kind, "import-recovery-offer");
+  assert.equal(outcome.recovery.recoveryDisposition, RECOVERY_DISPOSITION);
+  assert.equal(outcome.recovery.sourceMutationOnAccept, "NONE");
+  assert.equal(existsSync(resolve(rc, "goalport.sqlite-shm")), false, "Electron never writes source SHM");
+  assert.deepEqual(readFileSync(resolve(rc, "goalport.sqlite")), sourcePreimage[0]);
+  assert.deepEqual(readFileSync(resolve(rc, "goalport.sqlite-wal")), sourcePreimage[1]);
+
+  await assert.rejects(
+    manager.acceptRecovery(outcome.journal, { operationId: outcome.recovery.operationId, recoveryProofToken: "0".repeat(64) }),
+    /does not match/
+  );
+  assert.equal(manager.readJournal().phase, "AWAITING_RECOVERY_CONSENT", "wrong token persists no consent");
+  assert.equal(existsSync(resolve(dev, "goalport.sqlite")), false);
+
+  const markerText = readFileSync(resolve(rc, "goalport-profile.json"), "utf8");
+  writeFileSync(resolve(rc, "goalport-profile.json"), `${markerText} `);
+  await assert.rejects(
+    manager.acceptRecovery(outcome.journal, {
+      operationId: outcome.recovery.operationId,
+      recoveryProofToken: outcome.recovery.recoveryProofToken
+    }),
+    /source marker changed/
+  );
+  assert.equal(manager.readJournal().consent, null, "changed source persists no consent");
+  writeFileSync(resolve(rc, "goalport-profile.json"), markerText);
+
+  const marker = await manager.acceptRecovery(outcome.journal, {
+    operationId: outcome.recovery.operationId,
+    recoveryProofToken: outcome.recovery.recoveryProofToken
+  });
+  assert.equal(marker.format.version, 8);
+  assert.equal(marker.importedFrom.createdBy.coreSha256, otherHash, "recovery keeps source build provenance");
+  assert.equal(marker.importedFrom.verification.method, RECOVERY_METHOD);
+  assert.equal(marker.importedFrom.verification.sourceMutation, "NONE");
+  assert.equal(marker.importedFrom.verification.proofToken, outcome.recovery.recoveryProofToken);
+  assert.equal(readFileSync(resolve(dev, "goalport.sqlite"), "utf8"), "verified recovered copy");
+  assert.equal(existsSync(resolve(dev, "import-journal.json")), false);
+  assert.equal(calls.filter((entry) => entry === "verify-source").length, 1, "source is reverified only for valid consent");
+});
+
+test("generic unopenable discovery is never recovery-eligible", () => {
+  const discovery = { path: "C:/source", marker: parseMarkerText(markerV1()), inspection: inspectUnopenable() };
+  assert.equal(recoveryProbeCandidate(discovery), false);
+  assert.equal(recoveryProbeCandidate({ ...discovery, inspection: recoveryInspection() }), true);
+});
+
+test("explicit recovery decline cleans only the owned probe before fresh init", async (t) => {
+  const root = fixture(t), dir = resolve(root, "dev"), staging = resolve(dir, ".import-staging-decline");
+  mkdirSync(staging, { recursive: true });
+  writeFileSync(resolve(staging, "goalport.sqlite"), "copy");
+  const journal = {
+    schema: JOURNAL_SCHEMA, operationId: "decline-operation", mode: "DETACHED_WAL_RECOVERY",
+    phase: "AWAITING_RECOVERY_CONSENT", source: { directory: resolve(root, "source"), markerSha256: "a".repeat(64), bindingSha256: "c".repeat(64), snapshotToken: "d".repeat(64) },
+    stagingDir: staging, proofToken: "e".repeat(64), provenanceSha256: "b".repeat(64), consent: null
+  };
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(resolve(dir, "import-journal.json"), JSON.stringify(journal));
+  const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild, deps: { execCore: async () => { throw new Error("unused"); } } });
+  manager.declineRecovery(journal);
+  assert.equal(existsSync(staging), false);
+  assert.equal(existsSync(manager.journalPath()), false);
+  manager.beginFresh();
+  assert.equal(existsSync(manager.markerPath()), true);
+});
+
+test("COPYING crash resumes only a matching bound proof; arbitrary SQLite never becomes fresh", async (t) => {
+  const root = fixture(t), dir = resolve(root, "dev"), staging = resolve(dir, ".import-staging-crash");
+  mkdirSync(staging, { recursive: true });
+  writeFileSync(resolve(staging, "goalport.sqlite"), "verified staged bytes");
+  const journal = {
+    schema: JOURNAL_SCHEMA, operationId: "copying-operation", mode: "ORDINARY_COPY", phase: "COPYING",
+    source: { directory: resolve(root, "source"), markerSha256: "a".repeat(64), bindingSha256: null, snapshotToken: null },
+    sourceCreatedBy: null, stagingDir: staging, proofToken: null, provenanceSha256: "b".repeat(64),
+    consent: { kind: "ORDINARY_IMPORT", acceptedAt: "2026-09-22T00:00:00.000Z", operationId: "copying-operation" }
+  };
+  const proof = mockProof({ operationId: journal.operationId, markerSha256: journal.source.markerSha256, provenanceSha256: journal.provenanceSha256 });
+  writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+  writeFileSync(resolve(dir, "import-journal.json"), JSON.stringify(journal));
+  const manager = new ProfileManager({
+    directory: dir, appData: root, build: currentBuild,
+    deps: { execCore: async (args) => ({ code: 0, stdout: `${JSON.stringify({
+      schema: "goalport.profile-ops.v1", ok: true, verified: true,
+      recoveryProofToken: args[args.indexOf("--expected-proof-token") + 1]
+    })}\n` }) }
+  });
+  const outcome = await manager.resolve();
+  assert.equal(outcome.kind, "resume-import");
+  assert.equal(outcome.journal.phase, "PROMOTED");
+  manager.finalizeImport(outcome.journal);
+  assert.equal(readFileSync(resolve(dir, "goalport.sqlite"), "utf8"), "verified staged bytes");
+
+  const badRoot = fixture(t), badDir = resolve(badRoot, "dev"), badStaging = resolve(badDir, ".import-staging-arbitrary");
+  mkdirSync(badStaging, { recursive: true });
+  writeFileSync(resolve(badStaging, "goalport.sqlite"), "healthy-looking but unbound");
+  writeFileSync(resolve(badDir, "import-journal.json"), JSON.stringify({ ...journal, stagingDir: badStaging }));
+  const refusing = new ProfileManager({ directory: badDir, appData: badRoot, build: currentBuild, deps: { execCore: async () => { throw new Error("must not reach Core without proof"); } } });
+  assert.equal((await refusing.resolve()).kind, "import-failed");
+  assert.equal(existsSync(resolve(badDir, "goalport-profile.json")), false);
+  assert.equal(existsSync(resolve(badDir, "import-journal.json")), true, "bad proof state is preserved, not freshened");
+});
+
+test("hardlink-before-journal crash heals only the same proof-bound file; foreign destination refuses", async (t) => {
+  const makeCase = (label) => {
+    const root = fixture(t), dir = resolve(root, label), staging = resolve(dir, `.import-staging-${label}`);
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(resolve(staging, "goalport.sqlite"), `verified-${label}`);
+    const journal = {
+      schema: JOURNAL_SCHEMA, operationId: `${label}-operation`, mode: "ORDINARY_COPY", phase: "STAGED_VERIFIED",
+      source: { directory: resolve(root, "source"), markerSha256: "a".repeat(64), bindingSha256: "c".repeat(64), snapshotToken: "d".repeat(64) },
+      sourceCreatedBy: null, stagingDir: staging, proofToken: "e".repeat(64), provenanceSha256: "b".repeat(64), verifiedSchemaVersion: 8,
+      consent: { kind: "ORDINARY_IMPORT", acceptedAt: "2026-09-22T00:00:00.000Z", operationId: `${label}-operation`, proofToken: "e".repeat(64) }
+    };
+    const proof = mockProof({ operationId: journal.operationId, markerSha256: journal.source.markerSha256, provenanceSha256: journal.provenanceSha256 });
+    writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+    writeFileSync(resolve(dir, "import-journal.json"), JSON.stringify(journal));
+    const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild,
+      deps: { execCore: async (args) => ({ code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, verified: true, recoveryProofToken: args[args.indexOf("--expected-proof-token") + 1] })}\n` }) } });
+    return { root, dir, staging, journal, manager };
+  };
+
+  const crashed = makeCase("hardlink-crash");
+  const realWriteJournal = crashed.manager.writeJournal.bind(crashed.manager);
+  crashed.manager.writeJournal = (journal) => {
+    if (journal.phase === "PROMOTED") throw new Error("injected journal publish failure");
+    return realWriteJournal(journal);
+  };
+  assert.throws(() => crashed.manager.promoteStaged(crashed.journal), /injected/);
+  assert.equal(existsSync(resolve(crashed.dir, "goalport.sqlite")), true, "hard link crossed before journal failure");
+  assert.equal(JSON.parse(readFileSync(resolve(crashed.dir, "import-journal.json"), "utf8")).phase, "STAGED_VERIFIED");
+  const healed = new ProfileManager({ directory: crashed.dir, appData: crashed.root, build: currentBuild,
+    deps: crashed.manager.execCore ? { execCore: crashed.manager.execCore } : {} });
+  const resumed = await healed.resolve();
+  assert.equal(resumed.kind, "resume-import");
+  assert.equal(resumed.journal.phase, "PROMOTED");
+  healed.finalizeImport(resumed.journal);
+
+  const foreign = makeCase("foreign-root");
+  writeFileSync(resolve(foreign.dir, "goalport.sqlite"), "unrelated destination");
+  const refused = await foreign.manager.resolve();
+  assert.equal(refused.kind, "import-failed");
+  assert.match(refused.reason, /not the proof-bound staged file/);
+  assert.equal(readFileSync(resolve(foreign.dir, "goalport.sqlite"), "utf8"), "unrelated destination");
+  assert.equal(existsSync(resolve(foreign.dir, "import-journal.json")), true);
+});
+
+test("PROMOTED without exact consent and replaced staging symlink both fail closed", async (t) => {
+  const root = fixture(t), dir = resolve(root, "promoted"), staging = resolve(dir, ".import-staging-promoted");
+  mkdirSync(staging, { recursive: true });
+  writeFileSync(resolve(staging, "goalport.sqlite"), "verified-promoted");
+  const journal = {
+    schema: JOURNAL_SCHEMA, operationId: "promoted-operation", mode: "ORDINARY_COPY", phase: "STAGED_VERIFIED",
+    source: { directory: resolve(root, "source"), markerSha256: "a".repeat(64), bindingSha256: "c".repeat(64), snapshotToken: "d".repeat(64) },
+    stagingDir: staging, proofToken: "e".repeat(64), provenanceSha256: "b".repeat(64), verifiedSchemaVersion: 8,
+    consent: { kind: "ORDINARY_IMPORT", operationId: "promoted-operation", proofToken: "e".repeat(64) }
+  };
+  const proof = mockProof({ operationId: journal.operationId, markerSha256: journal.source.markerSha256, provenanceSha256: journal.provenanceSha256 });
+  writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+  writeFileSync(resolve(dir, "import-journal.json"), JSON.stringify(journal));
+  const execCore = async (args) => ({ code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, verified: true, recoveryProofToken: args[args.indexOf("--expected-proof-token") + 1] })}\n` });
+  const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild, deps: { execCore } });
+  manager.promoteStaged(journal);
+  journal.consent = null;
+  manager.writeJournal(journal);
+  assert.equal((await manager.resolve()).kind, "import-failed", "PROMOTED requires exact durable consent");
+
+  const linkRoot = fixture(t), linkDir = resolve(linkRoot, "profile"), outside = resolve(linkRoot, "outside");
+  mkdirSync(linkDir, { recursive: true }); mkdirSync(outside);
+  writeFileSync(resolve(outside, "goalport.sqlite"), "outside sentinel");
+  writeFileSync(resolve(outside, "import-proof.json"), JSON.stringify(proof));
+  const redirected = resolve(linkDir, ".import-staging-replaced");
+  symlinkSync(outside, redirected, "junction");
+  const linkJournal = { ...journal, phase: "STAGED_VERIFIED", consent: { kind: "ORDINARY_IMPORT", operationId: journal.operationId, proofToken: journal.proofToken }, stagingDir: redirected };
+  writeFileSync(resolve(linkDir, "import-journal.json"), JSON.stringify(linkJournal));
+  const linkManager = new ProfileManager({ directory: linkDir, appData: linkRoot, build: currentBuild, deps: { execCore } });
+  assert.equal((await linkManager.resolve()).kind, "import-failed");
+  assert.equal(readFileSync(resolve(outside, "goalport.sqlite"), "utf8"), "outside sentinel");
+  assert.equal(existsSync(resolve(linkDir, "goalport.sqlite")), false);
+});
+
+test("nonzero/lost import response preserves valid proof, while replaced staging is never cleanup authority", async (t) => {
+  const root = fixture(t), source = resolve(root, "source"), dir = resolve(root, "dev");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(resolve(source, "goalport-profile.json"), markerV1());
+  writeFileSync(resolve(source, "goalport.sqlite"), "source");
+  const execCore = async (args) => {
+    if (args[1] === "import") {
+      const staging = args[args.indexOf("--staging-dir") + 1];
+      const proof = mockProof({
+        operationId: args[args.indexOf("--operation-id") + 1],
+        markerSha256: args[args.indexOf("--source-marker-sha256") + 1],
+        provenanceSha256: args[args.indexOf("--provenance-sha256") + 1]
+      });
+      writeFileSync(resolve(staging, "goalport.sqlite"), "verified despite lost response");
+      writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+      return { code: 3, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: false, error: "response lost" })}\n` };
+    }
+    const proofToken = args[args.indexOf("--expected-proof-token") + 1];
+    return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, verified: true, recoveryProofToken: proofToken })}\n` };
+  };
+  const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild, deps: { execCore } });
+  const discovery = { path: source, marker: parseMarkerText(markerV1()), inspection: inspect8() };
+  await assert.rejects(manager.runImport(discovery), /journal preserved for resume/);
+  const persisted = manager.readJournal();
+  assert.equal(persisted.phase, "COPYING");
+  assert.equal(existsSync(persisted.stagingDir), true);
+  const resumed = await manager.resolve();
+  assert.equal(resumed.kind, "resume-import");
+  manager.finalizeImport(resumed.journal);
+  assert.equal(readFileSync(resolve(dir, "goalport.sqlite"), "utf8"), "verified despite lost response");
+
+  const unsafeRoot = fixture(t), unsafeSource = resolve(unsafeRoot, "source"), unsafeDir = resolve(unsafeRoot, "dev"), outside = resolve(unsafeRoot, "outside");
+  mkdirSync(unsafeSource, { recursive: true }); mkdirSync(outside);
+  writeFileSync(resolve(unsafeSource, "goalport-profile.json"), markerV1());
+  writeFileSync(resolve(unsafeSource, "goalport.sqlite"), "source");
+  writeFileSync(resolve(outside, "sentinel.txt"), "keep");
+  const unsafeManager = new ProfileManager({ directory: unsafeDir, appData: unsafeRoot, build: currentBuild, deps: { execCore: async (args) => {
+    if (args[1] !== "import") throw new Error("unexpected");
+    const staging = args[args.indexOf("--staging-dir") + 1];
+    rmSync(staging, { recursive: true, force: true });
+    symlinkSync(outside, staging, "junction");
+    return { code: 3, stdout: `${JSON.stringify({ ok: false, error: "failed" })}\n` };
+  } } });
+  await assert.rejects(
+    unsafeManager.runImport({ path: unsafeSource, marker: parseMarkerText(markerV1()), inspection: inspect8() }),
+    /staging/
+  );
+  assert.equal(readFileSync(resolve(outside, "sentinel.txt"), "utf8"), "keep");
+  assert.equal(existsSync(resolve(unsafeDir, "import-journal.json")), true, "unsafe journal is retained for refusal");
 });

@@ -11,7 +11,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { canonicalPath, normalizedPath } = require("./launch-config.cjs");
 
 const MARKER_FILE = "goalport-profile.json";
@@ -19,10 +19,29 @@ const JOURNAL_FILE = "import-journal.json";
 const BACKUP_DIR = "backups";
 const STAGING_PREFIX = ".import-staging-";
 const KEEP_BACKUPS = 3;
+const JOURNAL_SCHEMA = "goalport.import-journal.v2";
+const PROOF_SCHEMA = "goalport.import-proof.v1";
+const PROOF_FILE = "import-proof.json";
+const RECOVERY_DISPOSITION = "POSITIVELY_IDENTIFIED_RECOVERABLE";
+const RECOVERY_METHOD = "DETACHED_WAL_COPY_PROBE_V1";
 // Output contract of `goalport-core profile …` (profile_ops.rs). An inspection
 // whose output does not carry this schema cannot be interpreted: treating it
 // as facts would authorize writes on missing facts.
 const PROFILE_OPS_SCHEMA = "goalport.profile-ops.v1";
+
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+function parseCoreResult(result, operation) {
+  let value = null;
+  try {
+    const line = String(result?.stdout || "").split(/\r?\n/).find((candidate) => candidate.trim());
+    value = line ? JSON.parse(line) : null;
+  } catch { value = null; }
+  if (result?.code !== 0 || !value || value.ok !== true || value.schema !== PROFILE_OPS_SCHEMA) {
+    throw new Error(`${operation} failed: ${value?.error || result?.error || result?.code || "invalid Core output"}`);
+  }
+  return value;
+}
 
 // ---------- marker ----------
 
@@ -101,6 +120,9 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   // journal-finalizing import-resume, Core launch — may be derived from it.
   if (!inspection || inspection.failed || inspection.ok === false) {
     return { kind: "inspection-failed", reason: inspection?.error || "profile inspection failed" };
+  }
+  if (journal?.phase === "copying" && !dirContentState.databasePresent) {
+    return { kind: "import-failed", reason: "Legacy copying journal has no bound staged proof; refusing fresh classification" };
   }
   const marker = markerState && !markerState.problem ? markerState : null;
   if (journal && (journal.phase === "finalized" || (journal.phase === "copying" && dirContentState.databasePresent))) {
@@ -213,10 +235,23 @@ function incompatibilityReason(discovery) {
   return "database could not be inspected";
 }
 
-// Oldest-first pruning; the newest backup is never a prune candidate.
+// Only names that Core can have published after full verification consume a
+// retention slot. Partials and arbitrary .sqlite files are never candidates.
+const FINAL_BACKUP_NAME = /^goalport-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\.sqlite$/;
 function backupsToPrune(names, keep = KEEP_BACKUPS) {
-  const sorted = [...names].sort(); // timestamp names sort chronologically
+  const sorted = [...names].filter((name) => FINAL_BACKUP_NAME.test(name)).sort();
   return sorted.length <= keep ? [] : sorted.slice(0, sorted.length - keep);
+}
+
+function recoveryProbeCandidate(discovery) {
+  const { marker, inspection } = discovery || {};
+  return Boolean(
+    marker && marker.product === "GoalPort" && marker.mode === "normal" &&
+    inspection && inspection.ok === true && inspection.exists === true &&
+    inspection.openable === false && inspection.access?.disposition === "RECOVERY_PROBE_REQUIRED" &&
+    inspection.access?.reason === "WAL_PRESENT_SHM_MISSING" &&
+    Number.isSafeInteger(inspection.walBytes) && inspection.walBytes > 0 && inspection.shmPresent === false
+  );
 }
 
 // LEGACY-CONTAMINATED-ROOT COMPATIBILITY LAYER — not a mechanism of fresh
@@ -394,6 +429,112 @@ class ProfileManager {
     try { return JSON.parse(raw); } catch { return { phase: "corrupt", raw: String(raw).slice(0, 200) }; }
   }
 
+  writeJournal(journal) {
+    const target = this.journalPath();
+    const temp = `${target}.tmp-${randomUUID().slice(0, 8)}`;
+    this.fsApi.mkdirSync(this.directory, { recursive: true });
+    let descriptor = null;
+    try {
+      this.fsApi.writeFileSync(temp, `${JSON.stringify(journal, null, 2)}\n`, { flag: "wx" });
+      if (typeof this.fsApi.openSync === "function" && typeof this.fsApi.fsyncSync === "function") {
+        descriptor = this.fsApi.openSync(temp, "r+");
+        this.fsApi.fsyncSync(descriptor);
+      }
+      if (descriptor !== null && typeof this.fsApi.closeSync === "function") this.fsApi.closeSync(descriptor);
+      descriptor = null;
+      this.fsApi.renameSync(temp, target);
+      // Best-effort directory durability. Windows may reject opening a
+      // directory handle through Node; the atomic rename remains authoritative.
+      if (typeof this.fsApi.openSync === "function" && typeof this.fsApi.fsyncSync === "function") {
+        try {
+          const directoryDescriptor = this.fsApi.openSync(this.directory, "r");
+          try { this.fsApi.fsyncSync(directoryDescriptor); } finally { this.fsApi.closeSync(directoryDescriptor); }
+        } catch { /* unsupported directory fsync */ }
+      }
+    } catch (error) {
+      if (descriptor !== null && typeof this.fsApi.closeSync === "function") {
+        try { this.fsApi.closeSync(descriptor); } catch { /* best effort */ }
+      }
+      try { this.fsApi.rmSync(temp, { force: true }); } catch { /* exact temp only */ }
+      throw error;
+    }
+    return journal;
+  }
+
+  readStagingProof(journal) {
+    this.assertOwnedStaging(journal);
+    for (const leaf of [PROOF_FILE, "goalport.sqlite"]) {
+      const candidate = path.join(journal.stagingDir, leaf);
+      let stat;
+      try { stat = this.fsApi.lstatSync(candidate); }
+      catch (error) { throw new Error(`Import staging ${leaf} is unavailable: ${error.message}`); }
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Import staging ${leaf} must be a regular non-redirected file`);
+    }
+    let proof;
+    try { proof = JSON.parse(this.fsApi.readFileSync(path.join(journal.stagingDir, PROOF_FILE), "utf8")); }
+    catch (error) { throw new Error(`Import staging proof is unavailable or invalid: ${error.message}`); }
+    if (!proof || proof.schema !== PROOF_SCHEMA || typeof proof.recoveryProofToken !== "string" ||
+        proof.operationId !== journal.operationId ||
+        (typeof journal.source?.bindingSha256 === "string" && proof.sourceBindingSha256 !== journal.source.bindingSha256)) {
+      throw new Error("Import staging proof does not match this journal operation and source");
+    }
+    return proof;
+  }
+
+  async verifyStaging(journal) {
+    const proof = this.readStagingProof(journal);
+    const result = await this.execCore([
+      "profile", "verify-staging", "--staging-dir", journal.stagingDir,
+      "--expected-operation-id", journal.operationId,
+      "--expected-proof-token", proof.recoveryProofToken,
+      "--expected-source-binding-sha256", journal.source.bindingSha256
+    ]);
+    const verified = parseCoreResult(result, "profile verify-staging");
+    if (verified.verified !== true || verified.recoveryProofToken !== proof.recoveryProofToken) {
+      throw new Error("Core did not verify the staged import proof");
+    }
+    return verified;
+  }
+
+  promotedMatchesStaging(journal) {
+    this.assertOwnedStaging(journal);
+    const staged = path.join(journal.stagingDir, "goalport.sqlite");
+    const destination = this.databasePath();
+    for (const candidate of [staged, destination]) {
+      const leaf = this.fsApi.lstatSync(candidate);
+      if (leaf.isSymbolicLink() || !leaf.isFile()) return false;
+    }
+    const stagedStat = this.fsApi.statSync(staged, { bigint: true });
+    const destinationStat = this.fsApi.statSync(destination, { bigint: true });
+    return stagedStat.dev === destinationStat.dev && stagedStat.ino !== 0n && stagedStat.ino === destinationStat.ino;
+  }
+
+  hasMatchingConsent(journal) {
+    const consent = journal?.consent;
+    if (!consent || consent.operationId !== journal.operationId || consent.proofToken !== journal.proofToken) return false;
+    return consent.kind === "ORDINARY_IMPORT" || consent.kind === "DETACHED_WAL_RECOVERY";
+  }
+
+  promoteStaged(journal) {
+    this.assertOwnedStaging(journal);
+    const staged = path.join(journal.stagingDir, "goalport.sqlite");
+    const destination = this.databasePath();
+    if (this.fsApi.existsSync(destination)) {
+      if (!this.promotedMatchesStaging(journal)) {
+        throw new Error("Refusing to overwrite or adopt an existing profile database that is not the proof-bound staged file");
+      }
+      journal.phase = "PROMOTED";
+      this.writeJournal(journal);
+      return journal;
+    }
+    // Same-filesystem hard-link publication is atomic and no-clobber. Keep the
+    // staging link until marker finalization so crash recovery can re-verify it.
+    this.fsApi.linkSync(staged, destination);
+    journal.phase = "PROMOTED";
+    this.writeJournal(journal);
+    return journal;
+  }
+
   assertOwnedStaging(journal) {
     const staging = journal?.stagingDir;
     const refused = () => { throw new Error("Import journal staging must be a direct, non-redirected .import-staging-* directory inside this profile"); };
@@ -422,18 +563,163 @@ class ProfileManager {
     if (!this.fsApi.existsSync(database)) return null;
     this.fsApi.mkdirSync(this.backupsDir(), { recursive: true });
     const stamp = this.now().toISOString().replace(/[:.]/g, "-");
-    const out = path.join(this.backupsDir(), `goalport-${stamp}.sqlite`);
+    const out = path.join(this.backupsDir(), `goalport-${stamp}-${randomUUID()}.sqlite`);
     const result = await this.execCore(["profile", "backup", "--db", database, "--out", out, "--allow-write-open"]);
-    if (result.code !== 0) throw new Error(`profile backup failed: ${result.stdout || result.code}`);
-    const names = this.fsApi.readdirSync(this.backupsDir()).filter((name) => name.endsWith(".sqlite"));
+    const report = parseCoreResult(result, "profile backup");
+    if (report.published !== true) throw new Error("profile backup did not publish a verified final file");
+    const names = this.fsApi.readdirSync(this.backupsDir());
     for (const stale of backupsToPrune(names)) {
       try { this.fsApi.rmSync(path.join(this.backupsDir(), stale), { force: true }); } catch { /* pruning is best-effort */ }
     }
     return out;
   }
 
+  bindJournalFromProof(journal) {
+    const proof = this.readStagingProof(journal);
+    if (proof.sourceMarkerSha256 !== journal.source?.markerSha256 || proof.provenanceSha256 !== journal.provenanceSha256) {
+      throw new Error("Import proof source marker or provenance does not match the journal");
+    }
+    journal.source.bindingSha256 = proof.sourceBindingSha256;
+    journal.source.snapshotToken = proof.sourceSnapshotToken;
+    journal.proofToken = proof.recoveryProofToken;
+    journal.verifiedSchemaVersion = proof.stagedDatabase?.schemaVersion;
+    return proof;
+  }
+
+  recoveryOffer(journal, discovery = null) {
+    return {
+      kind: "import-recovery-offer",
+      discovery: discovery || {
+        path: journal.source.directory,
+        marker: journal.source.marker ?? null,
+        inspection: { exists: true, openable: false, access: { disposition: "RECOVERY_PROBE_REQUIRED" } }
+      },
+      journal,
+      recovery: {
+        recoveryDisposition: RECOVERY_DISPOSITION,
+        recoveryMethod: RECOVERY_METHOD,
+        recoveryProofToken: journal.proofToken,
+        operationId: journal.operationId,
+        sourceMutationOnAccept: "NONE"
+      }
+    };
+  }
+
+  async resumeV2Journal(journal) {
+    try { this.assertOwnedStaging(journal); }
+    catch (error) { return { kind: "import-failed", reason: error.message }; }
+    try {
+      switch (journal.phase) {
+        case "PROBING": {
+          this.bindJournalFromProof(journal);
+          await this.verifyStaging(journal);
+          journal.phase = "AWAITING_RECOVERY_CONSENT";
+          this.writeJournal(journal);
+          return this.recoveryOffer(journal);
+        }
+        case "AWAITING_RECOVERY_CONSENT":
+          this.bindJournalFromProof(journal);
+          await this.verifyStaging(journal);
+          return this.recoveryOffer(journal);
+        case "COPYING":
+          this.bindJournalFromProof(journal);
+          await this.verifyStaging(journal);
+          if (!journal.consent || journal.consent.kind !== "ORDINARY_IMPORT" || journal.consent.operationId !== journal.operationId) {
+            return { kind: "import-failed", reason: "Ordinary import staging has no durable import consent" };
+          }
+          journal.consent.proofToken = journal.proofToken;
+          journal.phase = "STAGED_VERIFIED";
+          this.writeJournal(journal);
+          this.promoteStaged(journal);
+          return { kind: "resume-import", journal, formatVersion: journal.verifiedSchemaVersion ?? null };
+        case "STAGED_VERIFIED":
+          this.bindJournalFromProof(journal);
+          await this.verifyStaging(journal);
+          if (!this.hasMatchingConsent(journal)) {
+            return { kind: "import-failed", reason: "Verified recovery staging has no matching durable consent" };
+          }
+          this.promoteStaged(journal);
+          return { kind: "resume-import", journal, formatVersion: journal.verifiedSchemaVersion ?? null };
+        case "PROMOTED":
+          this.bindJournalFromProof(journal);
+          await this.verifyStaging(journal);
+          if (!this.hasMatchingConsent(journal)) {
+            return { kind: "import-failed", reason: "Promoted import journal has no matching durable consent" };
+          }
+          if (!this.fsApi.existsSync(this.databasePath()) || !this.promotedMatchesStaging(journal)) {
+            return { kind: "import-failed", reason: "Promoted profile database does not match the proof-bound staged file" };
+          }
+          return { kind: "resume-import", journal, formatVersion: journal.verifiedSchemaVersion ?? null };
+        default:
+          return { kind: "import-failed", reason: `Unknown import journal phase ${JSON.stringify(journal.phase)}` };
+      }
+    } catch (error) {
+      return { kind: "import-failed", reason: error.message };
+    }
+  }
+
+  async prepareRecoveryOffer(discovery) {
+    if (!recoveryProbeCandidate(discovery)) {
+      return { kind: "import-incompatible", discovery, reason: incompatibilityReason(discovery, this.build) };
+    }
+    const operationId = randomUUID();
+    const stagingDir = path.join(this.directory, `${STAGING_PREFIX}${operationId}`);
+    this.assertOwnedStaging({ stagingDir });
+    this.fsApi.mkdirSync(stagingDir, { recursive: true });
+    this.assertOwnedStaging({ stagingDir });
+    const markerBytes = this.fsApi.readFileSync(path.join(discovery.path, MARKER_FILE));
+    const provenance = { source: { path: discovery.path, createdBy: discovery.marker?.createdBy ?? null } };
+    const provenanceText = JSON.stringify(provenance);
+    const journal = {
+      schema: JOURNAL_SCHEMA,
+      operationId,
+      mode: "DETACHED_WAL_RECOVERY",
+      phase: "PROBING",
+      source: {
+        directory: discovery.path,
+        marker: discovery.marker,
+        markerSha256: sha256(markerBytes),
+        bindingSha256: null,
+        snapshotToken: null
+      },
+      stagingDir,
+      proofToken: null,
+      provenanceSha256: sha256(provenanceText),
+      consent: null
+    };
+    this.writeJournal(journal);
+    let result;
+    try {
+      result = await this.execCore([
+        "profile", "recovery-probe", "--source-db", path.join(discovery.path, "goalport.sqlite"),
+        "--staging-dir", stagingDir, "--operation-id", operationId,
+        "--source-marker-sha256", journal.source.markerSha256,
+        "--provenance-sha256", journal.provenanceSha256
+      ]);
+      const report = parseCoreResult(result, "profile recovery-probe");
+      if (report.recoveryDisposition !== RECOVERY_DISPOSITION || report.recoveryMethod !== RECOVERY_METHOD || report.sourceMutation !== "NONE") {
+        throw new Error("Core did not return a positively identified detached recovery proof");
+      }
+      journal.source.bindingSha256 = report.sourceBindingSha256;
+      journal.source.snapshotToken = report.sourceSnapshotToken;
+      journal.proofToken = report.recoveryProofToken;
+      journal.verifiedSchemaVersion = report.stagedDatabase?.schemaVersion ?? null;
+      journal.phase = "AWAITING_RECOVERY_CONSENT";
+      this.writeJournal(journal);
+      await this.verifyStaging(journal);
+      return this.recoveryOffer(journal, discovery);
+    } catch (error) {
+      return { kind: "import-failed", reason: error.message, journal };
+    }
+  }
+
   async resolve() {
     const journal = this.readJournal();
+    if (journal?.phase === "corrupt") return { kind: "import-failed", reason: "Import journal is corrupt and was preserved" };
+    if (journal?.schema === JOURNAL_SCHEMA) return await this.resumeV2Journal(journal);
+    if (journal && !["copying", "finalized"].includes(journal.phase)) {
+      return { kind: "import-failed", reason: "Import journal has an unrecognized schema or phase and was preserved" };
+    }
     const content = dirContentState(this.directory, this.fsApi);
     const markerState = this.readMarker();
     const inspection = await this.inspectDatabase();
@@ -442,6 +728,9 @@ class ProfileManager {
     // deliberate location choice and never scans other homes for data.
     if (this.build.channel && !markerState && content.emptyish && journal?.phase !== "finalized") {
       discovery = await this.discoverForeignProfiles();
+    }
+    if (!markerState && content.emptyish && discovery && recoveryProbeCandidate(discovery)) {
+      return await this.prepareRecoveryOffer(discovery);
     }
     const outcome = decideOwnProfile({
       markerState,
@@ -454,6 +743,9 @@ class ProfileManager {
     if (outcome.kind === "resume-import") {
       try { this.assertOwnedStaging(journal); }
       catch (error) { return { kind: "import-failed", reason: error.message }; }
+    }
+    if (journal?.phase === "copying" && !content.databasePresent) {
+      return { kind: "import-failed", reason: "Legacy copying journal has no bound proof and cannot be promoted or treated as fresh" };
     }
     return outcome;
   }
@@ -486,49 +778,144 @@ class ProfileManager {
   }
 
   async runImport(source, { allowSourceRecovery, provenance } = {}) {
-    const stagingDir = path.join(this.directory, `${STAGING_PREFIX}${this.now().toISOString().replace(/[:.]/g, "-")}`);
+    if (allowSourceRecovery) {
+      throw new Error("Generic allowSourceRecovery is not recovery authority; use the detached recovery proof and acceptRecovery");
+    }
+    const operationId = randomUUID();
+    const stagingDir = path.join(this.directory, `${STAGING_PREFIX}${operationId}`);
     this.assertOwnedStaging({ stagingDir });
     this.fsApi.mkdirSync(stagingDir, { recursive: true });
     this.assertOwnedStaging({ stagingDir });
+    const markerBytes = this.fsApi.readFileSync(path.join(source.path, MARKER_FILE));
+    const provenanceValue = provenance || { source: { path: source.path } };
+    const provenanceText = JSON.stringify(provenanceValue);
     const journal = {
-      phase: "copying",
-      source: source.path,
+      schema: JOURNAL_SCHEMA,
+      operationId,
+      mode: "ORDINARY_COPY",
+      phase: "COPYING",
+      source: {
+        directory: source.path,
+        marker: source.marker,
+        markerSha256: sha256(markerBytes),
+        bindingSha256: null,
+        snapshotToken: null
+      },
       sourceCreatedBy: source.marker?.createdBy ?? null,
       stagingDir,
-      allowSourceRecovery: Boolean(allowSourceRecovery),
-      consentedAt: this.now().toISOString()
+      proofToken: null,
+      provenanceSha256: sha256(provenanceText),
+      consent: { kind: "ORDINARY_IMPORT", acceptedAt: this.now().toISOString(), operationId }
     };
-    this.fsApi.writeFileSync(this.journalPath(), `${JSON.stringify(journal, null, 2)}\n`, { flag: "w" });
+    this.writeJournal(journal);
     const args = ["profile", "import", "--source-db", path.join(source.path, "goalport.sqlite"),
-      "--staging-dir", stagingDir, "--provenance", JSON.stringify(provenance || { source: { path: source.path } })];
-    if (allowSourceRecovery) args.push("--allow-source-recovery");
-    const result = await this.execCore(args);
+      "--staging-dir", stagingDir, "--provenance", provenanceText,
+      "--operation-id", operationId, "--source-marker-sha256", journal.source.markerSha256,
+      "--provenance-sha256", journal.provenanceSha256];
+    let result;
+    try { result = await this.execCore(args); }
+    catch (error) { throw new Error(`profile import execution became ambiguous; journal preserved: ${error.message}`); }
+    // Core execution cannot redefine cleanup ownership. Re-check the physical
+    // staging leaf immediately after the external call and before any rm/link.
     this.assertOwnedStaging(journal);
     if (result.code !== 0) {
-      // Copying failed: source is untouched; discard staging and re-offer.
+      // A process can lose its result after Core durably writes a valid proof.
+      // Preserve such staging for deterministic resume; only a definite
+      // failure without a valid proof is discarded.
+      try {
+        this.bindJournalFromProof(journal);
+        await this.verifyStaging(journal);
+        throw new Error("profile import returned failure after writing a verified staging proof; journal preserved for resume");
+      } catch (proofError) {
+        if (/journal preserved for resume/.test(proofError.message)) throw proofError;
+      }
       this.fsApi.rmSync(stagingDir, { recursive: true, force: true });
       this.fsApi.rmSync(this.journalPath(), { force: true });
       throw new Error(`profile import failed: ${result.stdout || result.code}`);
     }
-    this.fsApi.renameSync(path.join(stagingDir, "goalport.sqlite"), this.databasePath());
-    journal.phase = "finalized";
-    this.fsApi.writeFileSync(this.journalPath(), `${JSON.stringify(journal, null, 2)}\n`, { flag: "w" });
+    try { parseCoreResult(result, "profile import"); }
+    catch (outputError) {
+      try {
+        this.bindJournalFromProof(journal);
+        await this.verifyStaging(journal);
+        throw new Error(`profile import response was invalid after verified staging; journal preserved for resume: ${outputError.message}`);
+      } catch (proofError) {
+        if (/journal preserved for resume/.test(proofError.message)) throw proofError;
+        throw outputError;
+      }
+    }
+    this.bindJournalFromProof(journal);
+    await this.verifyStaging(journal);
+    journal.phase = "STAGED_VERIFIED";
+    journal.consent.proofToken = journal.proofToken;
+    this.writeJournal(journal);
+    this.promoteStaged(journal);
     return this.finalizeImport(journal);
+  }
+
+  async acceptRecovery(journal, { operationId, recoveryProofToken } = {}) {
+    if (!journal || journal.schema !== JOURNAL_SCHEMA || journal.phase !== "AWAITING_RECOVERY_CONSENT") {
+      throw new Error("Recovery consent is not attached to the current pending offer");
+    }
+    if (operationId !== journal.operationId || recoveryProofToken !== journal.proofToken) {
+      throw new Error("Recovery consent does not match the current operation and proof token");
+    }
+    this.assertOwnedStaging(journal);
+    const currentMarker = this.fsApi.readFileSync(path.join(journal.source.directory, MARKER_FILE));
+    if (sha256(currentMarker) !== journal.source.markerSha256) {
+      throw new Error("Recovery source marker changed after the offer was prepared");
+    }
+    const sourceVerification = await this.execCore([
+      "profile", "verify-source", "--source-db", path.join(journal.source.directory, "goalport.sqlite"),
+      "--expected-source-snapshot-token", journal.source.snapshotToken
+    ]);
+    parseCoreResult(sourceVerification, "profile verify-source");
+    await this.verifyStaging(journal);
+    journal.consent = {
+      kind: "DETACHED_WAL_RECOVERY",
+      acceptedAt: this.now().toISOString(),
+      operationId,
+      proofToken: recoveryProofToken
+    };
+    journal.phase = "STAGED_VERIFIED";
+    this.writeJournal(journal);
+    this.promoteStaged(journal);
+    return this.finalizeImport(journal);
+  }
+
+  declineRecovery(journal) {
+    if (!journal || journal.schema !== JOURNAL_SCHEMA || journal.phase !== "AWAITING_RECOVERY_CONSENT" || journal.consent) {
+      throw new Error("Only the current unconsented recovery offer may be declined");
+    }
+    this.assertOwnedStaging(journal);
+    this.fsApi.rmSync(journal.stagingDir, { recursive: true, force: true });
+    this.fsApi.rmSync(this.journalPath(), { force: true });
   }
 
   finalizeImport(journal) {
     this.assertOwnedStaging(journal);
+    if (journal.schema === JOURNAL_SCHEMA && journal.phase !== "PROMOTED") {
+      throw new Error("Versioned import journal is not promoted and cannot be finalized");
+    }
+    const v2 = journal.schema === JOURNAL_SCHEMA;
+    const sourceDirectory = v2 ? journal.source.directory : journal.source;
     const marker = buildMarkerV2({
       profileKey: this.build.profileKey,
       mode: this.build.mode,
       channel: this.build.channel,
       createdBy: { version: this.build.version, coreSha256: this.build.coreSha256, distribution: this.build.distribution },
       importedFrom: {
-        path: journal.source,
-        createdBy: journal.sourceCreatedBy,
-        importedAt: this.now().toISOString()
+        path: sourceDirectory,
+        createdBy: v2 ? journal.source?.marker?.createdBy ?? journal.sourceCreatedBy ?? null : journal.sourceCreatedBy,
+        importedAt: this.now().toISOString(),
+        verification: v2 ? {
+          operationId: journal.operationId,
+          proofToken: journal.proofToken,
+          method: journal.mode === "DETACHED_WAL_RECOVERY" ? RECOVERY_METHOD : "SQLITE_ONLINE_BACKUP_V1",
+          sourceMutation: "NONE"
+        } : undefined
       },
-      formatVersion: null
+      formatVersion: v2 ? journal.verifiedSchemaVersion ?? null : null
     });
     this.writeMarker(marker);
     this.fsApi.rmSync(this.journalPath(), { force: true });
@@ -536,7 +923,7 @@ class ProfileManager {
     if (journal.stagingDir && this.fsApi.existsSync(journal.stagingDir)) {
       this.fsApi.rmSync(journal.stagingDir, { recursive: true, force: true });
     }
-    this.log(`import finalized from ${journal.source} (staging root ${stagingRoot})`);
+    this.log(`import finalized from ${sourceDirectory} (staging root ${stagingRoot})`);
     return marker;
   }
 
@@ -575,8 +962,9 @@ class ProfileManager {
 }
 
 module.exports = {
-  MARKER_FILE, JOURNAL_FILE, BACKUP_DIR, STAGING_PREFIX, KEEP_BACKUPS,
-  parseMarkerText, buildMarkerV2, decideOwnProfile, importableDiscovery, incompatibilityReason,
+  MARKER_FILE, JOURNAL_FILE, BACKUP_DIR, STAGING_PREFIX, KEEP_BACKUPS, JOURNAL_SCHEMA,
+  RECOVERY_DISPOSITION, RECOVERY_METHOD,
+  parseMarkerText, buildMarkerV2, decideOwnProfile, importableDiscovery, recoveryProbeCandidate, incompatibilityReason,
   backupsToPrune, dirContentState, ProfileManager,
   // Exported ONLY so tests can prove a dynamically generated Chromium-style
   // filename is NOT recognized by the frozen legacy set (anti-self-certification

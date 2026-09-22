@@ -44,6 +44,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12); toolchain pinned via `with:` below
         with:
           toolchain: 1.96.1
@@ -56,12 +59,10 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           cargo test -p goalport-core --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch
+          cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch --test product_interaction --test review_debt_core --test conversation_paging --test profile_ops_recovery
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($case in @('r1_succeeded_send_replays_as_duplicate_success_without_delivery', 'r1b_succeeded_send_still_replays_as_success_after_the_attempt_became_terminal', 'r10_repeated_handoff_is_refused_before_its_derived_send_and_delivers_nothing', 'n1_reuse_for_another_task_is_refused_and_the_selection_is_kept')) {
-            cargo test --locked -p goalport-core --test registration_generation $case -- --exact
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          cargo test --locked -p goalport-core --test registration_generation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p goalport-core-launcher -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Placeholder Core binaries for Tauri resource check
@@ -95,6 +96,8 @@ jobs:
           toolchain: 1.96.1
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:desktop
+      - name: Electron trust boundary with real WebContents
+        run: node scripts/desktop/security-live.mjs --out artifacts/electron-rc/ci-security-live
       - name: Fetch locked Rust dependencies for release checks
         run: cargo fetch --locked --target x86_64-pc-windows-msvc
       - run: pnpm test:release

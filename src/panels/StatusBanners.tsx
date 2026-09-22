@@ -1,4 +1,4 @@
-import type { CoreSnapshot } from "../types";
+import { HISTORY_WINDOW_ADVANCED_NOTICE, type CoreSnapshot } from "../types";
 
 export interface ActiveNotice {
   /** One user-actionable sentence. No guessed cause. */
@@ -24,9 +24,32 @@ export function StatusBanners({ snapshot, activeNotice, onDismissNotice, onRecon
   const hold = snapshot.stopResponsibility;
   const disconnected = snapshot.connection === "disconnected";
   const reconnecting = snapshot.connection === "reconnecting" || snapshot.connection === "degraded";
+  const capacityLimited = snapshot.bounds?.projectionUnavailable === true;
+  const historyWindowAdvanced = snapshot.notices.includes(HISTORY_WINDOW_ADVANCED_NOTICE);
 
   return (
     <div className="status-banners">
+      {capacityLimited ? (
+        <div className="banner banner-warn" role="status">
+          <span className="banner-glyph" aria-hidden="true">⚠</span>
+          <div>
+            <strong>Conversation controls are temporarily unavailable</strong>
+            <span>Core acknowledged the current state, but the full control projection exceeded capacity. Existing work is not an empty profile; reconnect before starting or approving new work.</span>
+          </div>
+          <button className="button button-small button-outline" type="button" aria-label="Reconnect Core" onClick={onReconnect}>
+            Reconnect
+          </button>
+        </div>
+      ) : null}
+      {historyWindowAdvanced ? (
+        <div className="banner banner-warn" role="status">
+          <span className="banner-glyph" aria-hidden="true">↥</span>
+          <div>
+            <strong>Conversation history window advanced</strong>
+            <span>Core has newer messages beyond the loaded range. The recent view was refreshed; use Load earlier to retrieve the missing history from the current boundary.</span>
+          </div>
+        </div>
+      ) : null}
       {hold ? (
         <div className={`banner banner-held${hold.blocksCurrentWorkspace === false ? " banner-related" : ""}`} role="status">
           <span className="banner-glyph" aria-hidden="true">■</span>

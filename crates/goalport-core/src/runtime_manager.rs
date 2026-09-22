@@ -563,10 +563,14 @@ impl RuntimeManager {
     /// exec adapters have none.
     pub fn transport_state(&self, attempt_id: &str) -> Option<TransportState> {
         Some(match self.attempts.get(attempt_id)? {
-            ManagedRuntime::Scenario(_) | ManagedRuntime::CodexExec(_) => TransportState::NotApplicable,
+            ManagedRuntime::Scenario(_) | ManagedRuntime::CodexExec(_) => {
+                TransportState::NotApplicable
+            }
             ManagedRuntime::Codex(process) => {
                 if process.transport.ended() {
-                    TransportState::Closed { reason: process.transport.reason_str() }
+                    TransportState::Closed {
+                        reason: process.transport.reason_str(),
+                    }
                 } else if process.child.is_none() {
                     TransportState::NotStarted
                 } else {
@@ -577,7 +581,9 @@ impl RuntimeManager {
             // `live_pid` (None once closed); their behaviour and records are untouched.
             ManagedRuntime::Grok(process) => {
                 if process.stream_ended() {
-                    TransportState::Closed { reason: "stream-closed" }
+                    TransportState::Closed {
+                        reason: "stream-closed",
+                    }
                 } else if process.live_pid().is_some() {
                     TransportState::Open
                 } else {
@@ -586,7 +592,9 @@ impl RuntimeManager {
             }
             ManagedRuntime::Claude(process) => {
                 if process.stream_ended() {
-                    TransportState::Closed { reason: "stream-closed" }
+                    TransportState::Closed {
+                        reason: "stream-closed",
+                    }
                 } else if process.live_pid().is_some() {
                     TransportState::Open
                 } else {
@@ -772,7 +780,8 @@ impl RuntimeManager {
         }
         self.ensure_provider_allowed(&provider)?;
         let version = version.into();
-        let binding = Self::intended_binding(&provider, executable, version.clone(), workspace_root)?;
+        let binding =
+            Self::intended_binding(&provider, executable, version.clone(), workspace_root)?;
         let executable = binding.executable.clone();
         let runtime = match provider.as_str() {
             "scenario" => ManagedRuntime::Scenario(Box::new(
@@ -926,8 +935,12 @@ impl RuntimeManager {
 
     /// Capture the exact active Claude input before Core durably records Stop.
     pub fn claude_turn_binding(&self, attempt_id: &str) -> Option<Value> {
-        let ManagedRuntime::Claude(process) = self.attempts.get(attempt_id)? else { return None; };
-        if !process.turn_in_flight { return None; }
+        let ManagedRuntime::Claude(process) = self.attempts.get(attempt_id)? else {
+            return None;
+        };
+        if !process.turn_in_flight {
+            return None;
+        }
         Some(json!({
             "input_uuid": process.input_uuid.as_ref()?,
             "session_id": process.session_id.as_ref()?,
@@ -936,11 +949,15 @@ impl RuntimeManager {
         }))
     }
 
-    pub fn interrupt_with_operation(&mut self, attempt_id: &str, operation_id: &str)
-        -> Result<crate::adapters::CancelResult, AdapterError>
-    {
+    pub fn interrupt_with_operation(
+        &mut self,
+        attempt_id: &str,
+        operation_id: &str,
+    ) -> Result<crate::adapters::CancelResult, AdapterError> {
         if operation_id.trim().is_empty() {
-            return Err(AdapterError::InvalidRequest("Stop operation id is required".into()));
+            return Err(AdapterError::InvalidRequest(
+                "Stop operation id is required".into(),
+            ));
         }
         if let Some(ManagedRuntime::Claude(process)) = self.attempts.get_mut(attempt_id) {
             if process.pending_stop.is_none() {
@@ -1297,6 +1314,12 @@ struct PermissionCommand {
     /// request can answer it `cancelled` and resume reading. Without this the
     /// cancelled stopReason could never be observed (critic finding F1).
     cancel: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexStartFailure {
+    request_id: u64,
+    detail: String,
 }
 
 impl CodexProcess {
@@ -1663,11 +1686,9 @@ impl CodexProcess {
                             .take()
                             .map(|turn_id| format!("codex-turn:{turn_id}"))
                             .or_else(|| {
-                                self.pending_start_request_id
-                                    .take()
-                                    .map(|request_id| {
-                                        format!("codex-turn-start-request:{request_id}")
-                                    })
+                                self.pending_start_request_id.take().map(|request_id| {
+                                    format!("codex-turn-start-request:{request_id}")
+                                })
                             });
                         if let Some(turn_reference) = turn_reference {
                             self.closure_failed_turn = true;
@@ -1698,25 +1719,68 @@ impl CodexProcess {
                     break;
                 }
             };
-            self.observe_native_message(&value);
+            if let Some(failure) = self.observe_native_message(&value) {
+                self.sequence += 1;
+                events.push(AgentEventEnvelope {
+                    event_id: format!("codex-event-{}", self.sequence),
+                    campaign_id: self.campaign_id.clone(),
+                    task_id: self.task_id.clone().unwrap_or_default(),
+                    attempt_id: attempt_id.to_owned(),
+                    process_epoch_id: self
+                        .process_binding
+                        .as_ref()
+                        .map(|binding| binding.process_epoch.clone())
+                        .unwrap_or_default(),
+                    sequence: self.sequence,
+                    occurred_at: now(),
+                    received_at: now(),
+                    provider_event_reference: Some(format!(
+                        "codex-turn-start-request:{}",
+                        failure.request_id
+                    )),
+                    event_type: AgentEventType::TurnFailed,
+                    payload: json!({
+                        "status": "failed",
+                        "text": "Codex rejected the turn start request",
+                        "turnStartRequestId": failure.request_id,
+                        "error": failure.detail,
+                        "nativeTurnId": Value::Null
+                    }),
+                });
+                // The matching JSON-RPC error is represented by the correlated
+                // TurnFailed above. Do not also persist it as an unknown raw
+                // provider event: one rejected start produces one terminal fact.
+                continue;
+            }
             let method = value
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("notification");
-            let terminal = matches!(classify_codex_method(method, &value),
-                AgentEventType::TurnCompleted | AgentEventType::TurnFailed | AgentEventType::Cancelled);
+            let terminal = matches!(
+                classify_codex_method(method, &value),
+                AgentEventType::TurnCompleted
+                    | AgentEventType::TurnFailed
+                    | AgentEventType::Cancelled
+            );
             // Never let an old/foreign terminal finish the current turn or
             // transition its durable Attempt. Preserve unmatched frames as raw evidence.
             let params = value.get("params");
-            let terminal_turn = params.and_then(|p| p.get("turnId")
-                .or_else(|| p.get("turn").and_then(|t| t.get("id"))))
+            let terminal_turn = params
+                .and_then(|p| {
+                    p.get("turnId")
+                        .or_else(|| p.get("turn").and_then(|t| t.get("id")))
+                })
                 .and_then(Value::as_str);
-            let terminal_thread = params.and_then(|p| p.get("threadId")).and_then(Value::as_str);
+            let terminal_thread = params
+                .and_then(|p| p.get("threadId"))
+                .and_then(Value::as_str);
             let terminal_matches = terminal_turn.is_some()
                 && terminal_turn == self.native_turn_id.as_deref()
                 && terminal_thread == self.thread_id.as_deref();
             if let Some(mut event) = self.native_event(attempt_id, method, &value) {
-                if terminal && !terminal_matches { event.event_type = AgentEventType::Unknown; }
+                if terminal && !terminal_matches {
+                    event.event_type = AgentEventType::Unknown;
+                }
                 self.sequence += 1;
                 let mut event = event;
                 event.sequence = self.sequence;
@@ -1744,19 +1808,24 @@ impl CodexProcess {
     /// - anything else — a response for another request, an unsolicited frame,
     ///   a notification for another thread — is ignored, and nothing can set a
     ///   native turn once the facts are clear (after a terminal or a closure).
-    fn observe_native_message(&mut self, value: &Value) {
+    fn observe_native_message(&mut self, value: &Value) -> Option<CodexStartFailure> {
         let pending = match self.pending_start_request_id {
             Some(pending) => pending,
-            None => return,
+            None => return None,
         };
         if let Some(response_id) = value.get("id").and_then(Value::as_u64) {
             if response_id != pending || value.get("method").is_some() {
-                return;
+                return None;
             }
-            if value.get("error").is_some() {
+            if let Some(error) = value.get("error") {
                 // An error response answers the start: the turn was not created.
+                // Return a bounded, correlated failure so poll_events can make
+                // the rejection durable before the pending fact is forgotten.
                 self.pending_start_request_id = None;
-                return;
+                return Some(CodexStartFailure {
+                    request_id: pending,
+                    detail: bounded_codex_error(error),
+                });
             }
             if let Some(turn_id) = value
                 .get("result")
@@ -1768,29 +1837,34 @@ impl CodexProcess {
                 self.native_turn_id = Some(turn_id.to_owned());
                 self.pending_start_request_id = None;
             }
-            return;
+            return None;
         }
         // Only a start notification can acknowledge a pending request.
         // Deltas and terminal frames may belong to a previous turn.
         if value.get("method").and_then(Value::as_str) != Some("turn/started") {
-            return;
+            return None;
         }
         let bound_thread = value
             .get("params")
             .and_then(|params| params.get("threadId"))
             .and_then(Value::as_str);
         if bound_thread.is_none() || bound_thread != self.thread_id.as_deref() {
-            return;
+            return None;
         }
         if let Some(turn_id) = value
             .get("params")
-            .and_then(|params| params.get("turnId").or_else(|| params.get("turn").and_then(|turn| turn.get("id"))))
+            .and_then(|params| {
+                params
+                    .get("turnId")
+                    .or_else(|| params.get("turn").and_then(|turn| turn.get("id")))
+            })
             .and_then(Value::as_str)
             .filter(|id| !id.trim().is_empty())
         {
             self.native_turn_id = Some(turn_id.to_owned());
             self.pending_start_request_id = None;
         }
+        None
     }
 
     fn start_reader(&mut self) -> Result<(), AdapterError> {
@@ -2452,11 +2526,7 @@ impl GrokAcpProcess {
     /// only sent when the agent itself advertised it.  A miss is recorded as
     /// `native-default`, never silently.
     fn enable_native_permissions(&mut self, session_id: &str) -> Result<(), AdapterError> {
-        if std::env::var("GOALPORT_GROK_PERMISSIONS")
-            .ok()
-            .as_deref()
-            == Some("native")
-        {
+        if std::env::var("GOALPORT_GROK_PERMISSIONS").ok().as_deref() == Some("native") {
             self.native_permission_prompts = "native-default".into();
             debug_runtime(
                 "grok permission prompts left at the Runtime default (GOALPORT_GROK_PERMISSIONS=native)",
@@ -2561,8 +2631,7 @@ impl GrokAcpProcess {
         // prompt is refused outright: no queueing, no overwrite (critic finding F2).
         if self.turn_request_id.is_some() {
             return Err(AdapterError::InvalidRequest(
-                "a Grok turn is already in flight; wait for it to finish or use Safe stop"
-                    .into(),
+                "a Grok turn is already in flight; wait for it to finish or use Safe stop".into(),
             ));
         }
         // No permission of a finished turn may still be considered pending when a new turn
@@ -2902,14 +2971,13 @@ impl GrokAcpProcess {
                     .unwrap_or("native-tool");
                 // ACP leaves `status` optional on the first frame; the observed
                 // value is used when the Runtime supplies one.
-                let status = update
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or(if kind == "tool_call" {
+                let status = update.get("status").and_then(Value::as_str).unwrap_or(
+                    if kind == "tool_call" {
                         "started"
                     } else {
                         "updated"
-                    });
+                    },
+                );
                 let tool_kind = update
                     .get("kind")
                     .and_then(Value::as_str)
@@ -2919,9 +2987,9 @@ impl GrokAcpProcess {
                             .and_then(Value::as_str)
                     })
                     .unwrap_or("unknown");
-                let reference = update.get("toolCallId").map(|id| {
-                    format!("grok-ref:{}", sha256_hex(bounded_scalar(id).as_bytes()))
-                });
+                let reference = update
+                    .get("toolCallId")
+                    .map(|id| format!("grok-ref:{}", sha256_hex(bounded_scalar(id).as_bytes())));
                 self.sequence += 1;
                 self.envelope(
                     attempt_id,
@@ -3184,10 +3252,7 @@ impl GrokAcpProcess {
                     };
                     let (outcome, option_kind, option_id) = match chosen {
                         Some(option) => {
-                            let option_id = option
-                                .get("optionId")
-                                .cloned()
-                                .unwrap_or(Value::Null);
+                            let option_id = option.get("optionId").cloned().unwrap_or(Value::Null);
                             (
                                 json!({ "outcome": "selected", "optionId": option_id }),
                                 wanted.to_owned(),
@@ -3431,7 +3496,6 @@ impl Drop for GrokAcpProcess {
         let _ = self.close();
     }
 }
-
 
 /// A bounded native Codex fallback for environments where a detached Core
 /// cannot keep the app-server stdio child attached. It still calls the
@@ -3830,7 +3894,9 @@ impl ClaudeStreamProcess {
         }
         if brokered_claude_launch() {
             return Err(AdapterError::Unsupported(
-                "Rejected Claude broker route is unavailable in the native Stop product candidate".into()));
+                "Rejected Claude broker route is unavailable in the native Stop product candidate"
+                    .into(),
+            ));
         }
         let argv = ClaudeCliAdapter::spawn_argv(&self.executable, &self.workspace_root, None);
         // The native flags are never rewritten. Under the fixture indirection
@@ -3867,7 +3933,10 @@ impl ClaudeStreamProcess {
                     claude_exe: program,
                     args: flags,
                     cwd: self.workspace_root.clone(),
-                    env_remove: CLAUDE_ENV_REMOVED.iter().map(|key| (*key).to_owned()).collect(),
+                    env_remove: CLAUDE_ENV_REMOVED
+                        .iter()
+                        .map(|key| (*key).to_owned())
+                        .collect(),
                 })
                 .map_err(|error| {
                     AdapterError::Connection(format!(
@@ -3961,7 +4030,11 @@ impl ClaudeStreamProcess {
         self.attempt_id = Some(request.attempt_id.clone());
         self.campaign_id = request.campaign_id.clone();
         self.task_id = Some(request.task_id.clone());
-        if request.resume_session.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+        if request
+            .resume_session
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
             return Err(AdapterError::Unsupported(
                 "Claude native --resume is not verified on this adapter path; start a new Attempt or Handoff"
                     .into(),
@@ -4003,30 +4076,43 @@ impl ClaudeStreamProcess {
         }
         #[cfg(debug_assertions)]
         if self.executable.file_name().and_then(|x| x.to_str()) == Some("fake-claude-cli.cmd")
-            && self.workspace_root.join(".fake-claude-send-error-after-write").is_file()
+            && self
+                .workspace_root
+                .join(".fake-claude-send-error-after-write")
+                .is_file()
         {
             use std::io::Write;
-            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true)
-                .open(self.workspace_root.join(".fake-claude-send-attempts")) {
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.workspace_root.join(".fake-claude-send-attempts"))
+            {
                 let _ = writeln!(file, "attempt");
             }
         }
         if self.turn_in_flight {
             return Err(AdapterError::InvalidRequest(
-                "a Claude turn is already in flight; wait for it to finish or use Safe stop"
-                    .into(),
+                "a Claude turn is already in flight; wait for it to finish or use Safe stop".into(),
             ));
         }
         if self.pending_stop.is_some() {
             return Err(AdapterError::InvalidRequest(
-                "Claude residual execution is unconfirmed; write responsibility remains held".into(),
+                "Claude residual execution is unconfirmed; write responsibility remains held"
+                    .into(),
             ));
         }
         // A newer turn is newer ownership: an unresolved Stop from the previous
         // turn can no longer be signalled or confirmed, so it fails closed here
         // rather than silently disappearing.
-        let attempt_id = self.attempt_id.clone().unwrap_or_else(|| request.attempt_id.clone());
-        let superseded = if self.pending_stop.as_ref().is_some_and(ClaudeStopRequest::unresolved) {
+        let attempt_id = self
+            .attempt_id
+            .clone()
+            .unwrap_or_else(|| request.attempt_id.clone());
+        let superseded = if self
+            .pending_stop
+            .as_ref()
+            .is_some_and(ClaudeStopRequest::unresolved)
+        {
             self.resolve_stop(
                 &attempt_id,
                 ClaudeStopDisposition::Unknown,
@@ -4039,11 +4125,27 @@ impl ClaudeStreamProcess {
         self.turn_epoch += 1;
         // UUIDv8: a Core-defined identifier bound to process/Attempt/input key/epoch.
         // It is transmitted explicitly; returned identities are never guessed.
-        let digest = sha256_hex(format!("{}|{}|{}|{}",
-            self.process_binding.as_ref().map(|b| b.process_epoch.as_str()).unwrap_or(""),
-            attempt_id, request.idempotency_key, self.turn_epoch).as_bytes());
-        self.input_uuid = Some(format!("{}-{}-8{}-a{}-{}", &digest[0..8], &digest[8..12],
-            &digest[13..16], &digest[17..20], &digest[20..32]));
+        let digest = sha256_hex(
+            format!(
+                "{}|{}|{}|{}",
+                self.process_binding
+                    .as_ref()
+                    .map(|b| b.process_epoch.as_str())
+                    .unwrap_or(""),
+                attempt_id,
+                request.idempotency_key,
+                self.turn_epoch
+            )
+            .as_bytes(),
+        );
+        self.input_uuid = Some(format!(
+            "{}-{}-8{}-a{}-{}",
+            &digest[0..8],
+            &digest[8..12],
+            &digest[13..16],
+            &digest[17..20],
+            &digest[20..32]
+        ));
         self.input_result_seen = false;
         self.stop_operation_id = None;
         self.fail_open = false;
@@ -4069,9 +4171,14 @@ impl ClaudeStreamProcess {
         // This code is absent from the release product and cannot target native Claude.
         #[cfg(debug_assertions)]
         if self.executable.file_name().and_then(|x| x.to_str()) == Some("fake-claude-cli.cmd")
-            && self.workspace_root.join(".fake-claude-send-error-after-write").is_file()
+            && self
+                .workspace_root
+                .join(".fake-claude-send-error-after-write")
+                .is_file()
         {
-            return Err(AdapterError::Connection("synthetic delivery error after accepted input write".into()));
+            return Err(AdapterError::Connection(
+                "synthetic delivery error after accepted input write".into(),
+            ));
         }
         self.sequence += 1;
         let started = self
@@ -4256,31 +4363,65 @@ impl ClaudeStreamProcess {
     fn take_mapped(&mut self, attempt_id: &str, value: &Value) -> Vec<AgentEventEnvelope> {
         let mut retained = Vec::new();
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
-        if matches!(kind, "assistant" | "user" | "stream_event" | "result" | "command_lifecycle"
-            | "task_started" | "task_progress" | "task_notification" | "rate_limit_event")
-            || (kind == "control_request" && value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool"))
-            || (kind == "control_response" && self.pending_interrupt_request_id.as_deref()
-                == claude_control_response_id(value).as_deref())
-            || (kind == "system" && matches!(value.get("subtype").and_then(Value::as_str),
-                Some("status" | "task_started" | "task_progress" | "task_notification" | "command_lifecycle")))
+        if matches!(
+            kind,
+            "assistant"
+                | "user"
+                | "stream_event"
+                | "result"
+                | "command_lifecycle"
+                | "task_started"
+                | "task_progress"
+                | "task_notification"
+                | "rate_limit_event"
+        ) || (kind == "control_request"
+            && value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool"))
+            || (kind == "control_response"
+                && self.pending_interrupt_request_id.as_deref()
+                    == claude_control_response_id(value).as_deref())
+            || (kind == "system"
+                && matches!(
+                    value.get("subtype").and_then(Value::as_str),
+                    Some(
+                        "status"
+                            | "task_started"
+                            | "task_progress"
+                            | "task_notification"
+                            | "command_lifecycle"
+                    )
+                ))
         {
             let received = value.get("_goalport_received_ns").and_then(Value::as_u64);
             let delivery = self.receive_clock.elapsed().as_nanos() as u64;
             let buffer_class = match (self.pending_stop.as_ref(), received) {
-                (Some(stop), Some(at)) if at < stop.requested_ns => "received_before_stop_delivered_after",
+                (Some(stop), Some(at)) if at < stop.requested_ns => {
+                    "received_before_stop_delivered_after"
+                }
                 (Some(_), _) => "first_received_after_stop_generation_unknown",
                 _ => "no_stop_at_delivery",
             };
             self.sequence += 1;
-            if let Some(event) = self.envelope(attempt_id, AgentEventType::Unknown, json!({
-                "claude_native_frame": value, "frame_received_ns": received,
-                "frame_delivered_ns": delivery, "buffer_class": buffer_class,
-                "generation_time": "unknown", "effect_evidence": false,
-                "text": format!("Claude {kind} protocol evidence; generation time unknown")
-            }), None) { retained.push(event); }
+            if let Some(event) = self.envelope(
+                attempt_id,
+                AgentEventType::Unknown,
+                json!({
+                    "claude_native_frame": value, "frame_received_ns": received,
+                    "frame_delivered_ns": delivery, "buffer_class": buffer_class,
+                    "generation_time": "unknown", "effect_evidence": false,
+                    "text": format!("Claude {kind} protocol evidence; generation time unknown")
+                }),
+                None,
+            ) {
+                retained.push(event);
+            }
         }
         let mapped = self.map_frame(attempt_id, value);
-        if kind == "assistant" && self.pending_stop.as_ref().is_some_and(|s| s.terminal_emitted) {
+        if kind == "assistant"
+            && self
+                .pending_stop
+                .as_ref()
+                .is_some_and(|s| s.terminal_emitted)
+        {
             if let Some(message) = self.flush_assistant_text(attempt_id) {
                 self.pending_out.push(message);
             }
@@ -4327,7 +4468,10 @@ impl ClaudeStreamProcess {
     }
 
     fn map_frame(&mut self, attempt_id: &str, value: &Value) -> Option<AgentEventEnvelope> {
-        let frame_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        let frame_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if frame_type == "stream_event" {
             return None;
         }
@@ -4476,7 +4620,10 @@ impl ClaudeStreamProcess {
             }
             self.turn_in_flight = false;
             self.pending_permissions.clear();
-            let is_error = value.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+            let is_error = value
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let stop_reason = value
                 .get("stop_reason")
                 .and_then(Value::as_str)
@@ -4605,12 +4752,12 @@ impl ClaudeStreamProcess {
                 let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                 if claude_mutating_tool(name) && !id.is_empty() {
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
-                    self.mutating_tools
-                        .entry(id.to_owned())
-                        .or_insert_with(|| MutatingToolRecord {
+                    self.mutating_tools.entry(id.to_owned()).or_insert_with(|| {
+                        MutatingToolRecord {
                             decision: MutatingToolDecision::Pending,
                             snapshot: snapshot_tool_path(&self.workspace_root, &input),
-                        });
+                        }
+                    });
                 }
                 self.sequence += 1;
                 return self.envelope(
@@ -4857,14 +5004,17 @@ impl ClaudeStreamProcess {
             "request": request
         })) {
             Ok(()) => {
-                if let Some(stop) = self.pending_stop.as_mut() { stop.send_succeeded = true; }
+                if let Some(stop) = self.pending_stop.as_mut() {
+                    stop.send_succeeded = true;
+                }
                 Ok(crate::adapters::CancelResult {
-                requested: true,
-                confirmed: false,
-                reason: Some(format!(
-                    "interrupt control_request sent request_id={interrupt_id}; receipt wait skipped under UI mutex (bound {CLAUDE_INTERRUPT_RECEIPT_WAIT_MS} ms); A latched later only with matching receipt and confirming result"
-                )),
-            })},
+                    requested: true,
+                    confirmed: false,
+                    reason: Some(format!(
+                        "interrupt control_request sent request_id={interrupt_id}; receipt wait skipped under UI mutex (bound {CLAUDE_INTERRUPT_RECEIPT_WAIT_MS} ms); A latched later only with matching receipt and confirming result"
+                    )),
+                })
+            }
             Err(error) => {
                 // Sending failed. Preserve the pending evidence and responsibility;
                 // the confirmation deadline never sends a process signal.
@@ -4890,7 +5040,10 @@ impl ClaudeStreamProcess {
     fn new_stop_request(&self, request_id: &str) -> ClaudeStopRequest {
         let mut stop = ClaudeStopRequest {
             request_id: request_id.to_owned(),
-            operation_id: self.stop_operation_id.clone().unwrap_or_else(|| request_id.to_owned()),
+            operation_id: self
+                .stop_operation_id
+                .clone()
+                .unwrap_or_else(|| request_id.to_owned()),
             input_uuid: self.input_uuid.clone(),
             requested_ns: self.receive_clock.elapsed().as_nanos() as u64,
             send_succeeded: false,
@@ -4960,7 +5113,9 @@ impl ClaudeStreamProcess {
                 .executable_sha256
                 .eq_ignore_ascii_case(&stop.executable_sha256)
         {
-            return Some("the managed Claude process binding changed after Stop was requested".into());
+            return Some(
+                "the managed Claude process binding changed after Stop was requested".into(),
+            );
         }
         None
     }
@@ -5048,12 +5203,18 @@ impl ClaudeStreamProcess {
         let Some(stop) = self.pending_stop.as_ref() else {
             return events;
         };
-        let reason_text = stop.reason.clone().unwrap_or_else(|| "no reason recorded".into());
+        let reason_text = stop
+            .reason
+            .clone()
+            .unwrap_or_else(|| "no reason recorded".into());
         let stop_reason = stop
             .result_stop_reason
             .clone()
             .map_or(Value::Null, Value::String);
-        let result_subtype = stop.result_subtype.clone().map_or(Value::Null, Value::String);
+        let result_subtype = stop
+            .result_subtype
+            .clone()
+            .map_or(Value::Null, Value::String);
         let (event_type, mut payload) = match disposition {
             ClaudeStopDisposition::NativeTurnCancel => (
                 AgentEventType::Cancelled,
@@ -5084,7 +5245,14 @@ impl ClaudeStreamProcess {
             object.insert("session_id".into(), json!(stop.session_id));
             object.insert("turn_epoch".into(), json!(stop.turn_epoch));
             object.insert("process_epoch".into(), json!(stop.process_epoch));
-            object.insert("native_turn_state".into(), json!(if disposition == ClaudeStopDisposition::NativeTurnCancel { "interrupted" } else { "unconfirmed" }));
+            object.insert(
+                "native_turn_state".into(),
+                json!(if disposition == ClaudeStopDisposition::NativeTurnCancel {
+                    "interrupted"
+                } else {
+                    "unconfirmed"
+                }),
+            );
             object.insert("residual_execution_state".into(), json!("unknown"));
             object.insert("write_responsibility".into(), json!("held"));
             object.insert("safe_process_stop".into(), json!(false));
@@ -5119,11 +5287,18 @@ impl ClaudeStreamProcess {
     /// Order matters: every fail-closed branch is checked before the one branch
     /// that can conclude B.
     fn drive_pending_stop(&mut self, attempt_id: &str) -> Vec<AgentEventEnvelope> {
-        let Some(stop) = self.pending_stop.as_ref() else { return Vec::new(); };
-        if !stop.unresolved() { return Vec::new(); }
+        let Some(stop) = self.pending_stop.as_ref() else {
+            return Vec::new();
+        };
+        if !stop.unresolved() {
+            return Vec::new();
+        }
         if stop.attempt_id != attempt_id {
-            return self.resolve_stop(attempt_id, ClaudeStopDisposition::Unknown,
-                Some("Stop was polled under a foreign Attempt".into()));
+            return self.resolve_stop(
+                attempt_id,
+                ClaudeStopDisposition::Unknown,
+                Some("Stop was polled under a foreign Attempt".into()),
+            );
         }
         if let Some(reason) = self.stop_ownership_mismatch() {
             return self.resolve_stop(attempt_id, ClaudeStopDisposition::Unknown, Some(reason));
@@ -5135,7 +5310,8 @@ impl ClaudeStreamProcess {
         }
         let stop = self.pending_stop.as_ref().expect("pending Stop");
         if stop.disposition != ClaudeStopDisposition::Pending
-            || self.stream_closed || self.child_ended.load(Ordering::SeqCst)
+            || self.stream_closed
+            || self.child_ended.load(Ordering::SeqCst)
             || stop.requested_at.elapsed() >= Duration::from_millis(CLAUDE_SIGINT_FALLBACK_MS)
         {
             return self.resolve_stop(attempt_id, ClaudeStopDisposition::Unknown,
@@ -5145,8 +5321,12 @@ impl ClaudeStreamProcess {
     }
 
     fn result_matches_input(&self, value: &Value) -> bool {
-        let Some(input) = self.input_uuid.as_deref() else { return false; };
-        let Some(session) = self.session_id.as_deref() else { return false; };
+        let Some(input) = self.input_uuid.as_deref() else {
+            return false;
+        };
+        let Some(session) = self.session_id.as_deref() else {
+            return false;
+        };
         let origin_ok = match value.get("origin") {
             None | Some(Value::Null) => true,
             Some(origin) => origin.get("kind").and_then(Value::as_str) == Some("human"),
@@ -5155,24 +5335,43 @@ impl ClaudeStreamProcess {
             && value.get("user_message_uuid").and_then(Value::as_str) == Some(input)
             && value.get("user_message_uuids") == Some(&json!([input]))
             && value.get("session_id").and_then(Value::as_str) == Some(session)
-            && value.get("uuid").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+            && value
+                .get("uuid")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
             && origin_ok
     }
 
     fn try_confirm_native_stop(&mut self, attempt_id: &str) -> Option<AgentEventEnvelope> {
         let stop = self.pending_stop.as_ref()?;
-        if stop.terminal_emitted || stop.attempt_id != attempt_id
-            || stop.input_uuid.is_none() || stop.input_uuid != self.input_uuid
-            || self.stop_ownership_mismatch().is_some() || self.process_binding.is_none()
-            || !stop.send_succeeded || !self.interrupt_receipt_matched
-            || self.used_sigint || stop.signal_attempted { return None; }
+        if stop.terminal_emitted
+            || stop.attempt_id != attempt_id
+            || stop.input_uuid.is_none()
+            || stop.input_uuid != self.input_uuid
+            || self.stop_ownership_mismatch().is_some()
+            || self.process_binding.is_none()
+            || !stop.send_succeeded
+            || !self.interrupt_receipt_matched
+            || self.used_sigint
+            || stop.signal_attempted
+        {
+            return None;
+        }
         let result = stop.raw_result.as_ref()?;
         let receipt = stop.raw_receipt.as_ref()?;
         if !self.result_matches_input(result)
             || !claude_result_confirms_interrupt(result, "")
-            || result.get("_goalport_received_ns").and_then(Value::as_u64)? < stop.requested_ns
-            || receipt.get("_goalport_received_ns").and_then(Value::as_u64)? < stop.requested_ns
-        { return None; }
+            || result
+                .get("_goalport_received_ns")
+                .and_then(Value::as_u64)?
+                < stop.requested_ns
+            || receipt
+                .get("_goalport_received_ns")
+                .and_then(Value::as_u64)?
+                < stop.requested_ns
+        {
+            return None;
+        }
         self.emit_stop_terminal(attempt_id, ClaudeStopDisposition::NativeTurnCancel,
             Some("Exact input/session result and native interrupt receipt match the durable Stop operation; residual effects remain unconfirmed".into()))
     }
@@ -5224,7 +5423,9 @@ impl ClaudeStreamProcess {
             return;
         }
         if let Some(stop) = self.pending_stop.as_mut() {
-            if stop.raw_receipt.is_none() { stop.raw_receipt = Some(value.clone()); }
+            if stop.raw_receipt.is_none() {
+                stop.raw_receipt = Some(value.clone());
+            }
         }
         self.interrupt_receipt_matched = true;
         if let Some(queued) = value
@@ -5354,33 +5555,36 @@ impl ClaudeStreamProcess {
         let (event_tx, event_rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("goalport-claude-reader".into())
-            .spawn(move || loop {
-                let mut line = String::new();
-                match stdout.read_line(&mut line) {
-                    Ok(0) => {
-                        child_ended.store(true, Ordering::SeqCst);
-                        let _ = event_tx.send(NativeMessage::Closed);
+            .spawn(move || {
+                loop {
+                    let mut line = String::new();
+                    match stdout.read_line(&mut line) {
+                        Ok(0) => {
+                            child_ended.store(true, Ordering::SeqCst);
+                            let _ = event_tx.send(NativeMessage::Closed);
+                            break;
+                        }
+                        Ok(size) if size > MAX_NATIVE_LINE_BYTES => {
+                            child_ended.store(true, Ordering::SeqCst);
+                            let _ = event_tx.send(NativeMessage::Closed);
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            child_ended.store(true, Ordering::SeqCst);
+                            let _ = event_tx.send(NativeMessage::Closed);
+                            break;
+                        }
+                    }
+                    let Ok(mut value) = serde_json::from_str::<Value>(line.trim_end()) else {
+                        continue;
+                    };
+                    value["_goalport_received_ns"] =
+                        json!(receive_clock.elapsed().as_nanos() as u64);
+                    value["_goalport_received_at"] = json!(now());
+                    if event_tx.send(NativeMessage::Json(value)).is_err() {
                         break;
                     }
-                    Ok(size) if size > MAX_NATIVE_LINE_BYTES => {
-                        child_ended.store(true, Ordering::SeqCst);
-                        let _ = event_tx.send(NativeMessage::Closed);
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
-                        child_ended.store(true, Ordering::SeqCst);
-                        let _ = event_tx.send(NativeMessage::Closed);
-                        break;
-                    }
-                }
-                let Ok(mut value) = serde_json::from_str::<Value>(line.trim_end()) else {
-                    continue;
-                };
-                value["_goalport_received_ns"] = json!(receive_clock.elapsed().as_nanos() as u64);
-                value["_goalport_received_at"] = json!(now());
-                if event_tx.send(NativeMessage::Json(value)).is_err() {
-                    break;
                 }
             })
             .map_err(|error| {
@@ -5504,9 +5708,10 @@ fn claude_control_response_id(value: &Value) -> Option<String> {
 
 fn claude_result_confirms_interrupt(value: &Value, _stop_reason: &str) -> bool {
     // This is only the terminal shape predicate, NOT cancellation proof.
-    matches!(value.get("terminal_reason").and_then(Value::as_str),
-        Some("aborted_tools" | "aborted_streaming"))
-        && value.get("subtype").and_then(Value::as_str) == Some("error_during_execution")
+    matches!(
+        value.get("terminal_reason").and_then(Value::as_str),
+        Some("aborted_tools" | "aborted_streaming")
+    ) && value.get("subtype").and_then(Value::as_str) == Some("error_during_execution")
         && value.get("is_error").and_then(Value::as_bool) == Some(true)
         && value.get("permission_denials") == Some(&json!([]))
         && value.get("api_error_status").is_none_or(Value::is_null)
@@ -5608,11 +5813,20 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             .map(bounded_scalar)
             .unwrap_or_else(|| "native-permission".into());
         let command = params.get("command").and_then(|value| {
-            value.as_str().map(str::to_owned).or_else(|| value.as_array().map(|parts|
-                parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")))
+            value.as_str().map(str::to_owned).or_else(|| {
+                value.as_array().map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            })
         });
         let action = command;
-        return Some(json!({ "request_id": request_id, "kind": "native-permission", "text": action.map(|text| bounded_text(&text)) }));
+        return Some(
+            json!({ "request_id": request_id, "kind": "native-permission", "text": action.map(|text| bounded_text(&text)) }),
+        );
     }
     if lower.contains("error") || value.get("error").is_some() {
         return Some(json!({ "status": "failed", "error": "native Runtime error" }));
@@ -5734,6 +5948,28 @@ fn extract_provider_request_id(value: &Value) -> Option<String> {
         Value::Array(values) => values.iter().find_map(extract_provider_request_id),
         _ => None,
     }
+}
+
+fn bounded_codex_error(error: &Value) -> String {
+    let code = error
+        .get("code")
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("turn start rejected")
+        .chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\t') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(2048)
+        .collect::<String>();
+    format!("code={code}; message={message}")
 }
 
 fn classify_codex_method(method: &str, value: &Value) -> AgentEventType {
@@ -6015,7 +6251,9 @@ mod tests {
             resume_session: None,
         };
         for error in [
-            manager.create_session("attempt-firewall", &session).unwrap_err(),
+            manager
+                .create_session("attempt-firewall", &session)
+                .unwrap_err(),
             manager
                 .resume_session("attempt-firewall", "native-session")
                 .unwrap_err(),
@@ -6194,7 +6432,10 @@ mod tests {
         assert_not_a_and_not_b(&payload);
         assert_eq!(payload["stop_attempt"]["signal_attempted"], json!(false));
         assert!(
-            payload["text"].as_str().unwrap_or_default().contains("newer Claude turn"),
+            payload["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("newer Claude turn"),
             "{payload}"
         );
     }
@@ -6270,51 +6511,109 @@ mod tests {
 
     #[test]
     fn native_abort_requires_every_correlation_and_cause_predicate() {
-        for key in ["uuid", "user_message_uuid", "user_message_uuids", "session_id",
-            "terminal_reason", "subtype", "is_error", "permission_denials", "_goalport_received_ns"] {
-            let mut p = claude_with_bound_stop(); bind_native_abort(&mut p);
-            p.pending_stop.as_mut().unwrap().raw_result.as_mut().unwrap().as_object_mut().unwrap().remove(key);
-            assert!(p.try_confirm_native_stop("attempt-stop").is_none(), "missing {key}");
+        for key in [
+            "uuid",
+            "user_message_uuid",
+            "user_message_uuids",
+            "session_id",
+            "terminal_reason",
+            "subtype",
+            "is_error",
+            "permission_denials",
+            "_goalport_received_ns",
+        ] {
+            let mut p = claude_with_bound_stop();
+            bind_native_abort(&mut p);
+            p.pending_stop
+                .as_mut()
+                .unwrap()
+                .raw_result
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            assert!(
+                p.try_confirm_native_stop("attempt-stop").is_none(),
+                "missing {key}"
+            );
         }
         for (key, bad) in [
-            ("user_message_uuid", json!("foreign")), ("user_message_uuids", json!(["foreign"])),
-            ("session_id",json!("foreign")), ("origin",json!({"kind":"background_task"})),
-            ("terminal_reason",json!("completed")), ("terminal_reason",json!("api_error")),
-            ("permission_denials",json!([{"tool_use_id":"denial"}])), ("api_error_status",json!(404))
+            ("user_message_uuid", json!("foreign")),
+            ("user_message_uuids", json!(["foreign"])),
+            ("session_id", json!("foreign")),
+            ("origin", json!({"kind":"background_task"})),
+            ("terminal_reason", json!("completed")),
+            ("terminal_reason", json!("api_error")),
+            ("permission_denials", json!([{"tool_use_id":"denial"}])),
+            ("api_error_status", json!(404)),
         ] {
-            let mut p = claude_with_bound_stop(); bind_native_abort(&mut p);
-            p.pending_stop.as_mut().unwrap().raw_result.as_mut().unwrap()[key] = bad;
-            assert!(p.try_confirm_native_stop("attempt-stop").is_none(), "bad {key}");
+            let mut p = claude_with_bound_stop();
+            bind_native_abort(&mut p);
+            p.pending_stop
+                .as_mut()
+                .unwrap()
+                .raw_result
+                .as_mut()
+                .unwrap()[key] = bad;
+            assert!(
+                p.try_confirm_native_stop("attempt-stop").is_none(),
+                "bad {key}"
+            );
         }
         for origin in [Value::Null, json!({"kind":"human"})] {
-            let mut p = claude_with_bound_stop(); bind_native_abort(&mut p);
-            p.pending_stop.as_mut().unwrap().raw_result.as_mut().unwrap()["origin"] = origin;
+            let mut p = claude_with_bound_stop();
+            bind_native_abort(&mut p);
+            p.pending_stop
+                .as_mut()
+                .unwrap()
+                .raw_result
+                .as_mut()
+                .unwrap()["origin"] = origin;
             assert!(p.try_confirm_native_stop("attempt-stop").is_some());
-            assert!(p.try_confirm_native_stop("attempt-stop").is_none(), "duplicate must not resolve twice");
+            assert!(
+                p.try_confirm_native_stop("attempt-stop").is_none(),
+                "duplicate must not resolve twice"
+            );
         }
-        let mut p = claude_with_bound_stop(); bind_native_abort(&mut p);
-        p.pending_stop.as_mut().unwrap().requested_ns=10;
-        assert!(p.try_confirm_native_stop("attempt-stop").is_none(), "buffered old result is not Stop cause");
-        let mut p = claude_with_bound_stop(); bind_native_abort(&mut p);
-        p.pending_stop.as_mut().unwrap().send_succeeded=false;
+        let mut p = claude_with_bound_stop();
+        bind_native_abort(&mut p);
+        p.pending_stop.as_mut().unwrap().requested_ns = 10;
+        assert!(
+            p.try_confirm_native_stop("attempt-stop").is_none(),
+            "buffered old result is not Stop cause"
+        );
+        let mut p = claude_with_bound_stop();
+        bind_native_abort(&mut p);
+        p.pending_stop.as_mut().unwrap().send_succeeded = false;
         assert!(p.try_confirm_native_stop("attempt-stop").is_none());
     }
 
     #[test]
     fn buffered_frame_is_retained_without_claiming_post_stop_generation() {
-        let mut p=claude_with_bound_stop();
-        p.pending_stop.as_mut().unwrap().requested_ns=10;
-        let value=json!({"type":"stream_event","uuid":"buffered-1","_goalport_received_ns":5,
+        let mut p = claude_with_bound_stop();
+        p.pending_stop.as_mut().unwrap().requested_ns = 10;
+        let value = json!({"type":"stream_event","uuid":"buffered-1","_goalport_received_ns":5,
             "event":{"type":"content_block_delta","delta":{"text":"buffered"}}});
-        let events=p.take_mapped("attempt-stop",&value);
-        assert_eq!(events[0].payload["claude_native_frame"],value);
-        assert_eq!(events[0].payload["buffer_class"],"received_before_stop_delivered_after");
-        assert_eq!(events[0].payload["effect_evidence"],false);
-        let lifecycle=json!({"type":"command_lifecycle","command_uuid":"bound-command","state":"cancelled","_goalport_received_ns":15});
-        let events=p.take_mapped("attempt-stop",&lifecycle);
-        assert_eq!(events[0].payload["claude_native_frame"],lifecycle);
-        assert_eq!(events[0].payload["buffer_class"],"first_received_after_stop_generation_unknown");
-        assert!(!events.iter().any(|e|e.event_type==AgentEventType::Cancelled));
+        let events = p.take_mapped("attempt-stop", &value);
+        assert_eq!(events[0].payload["claude_native_frame"], value);
+        assert_eq!(
+            events[0].payload["buffer_class"],
+            "received_before_stop_delivered_after"
+        );
+        assert_eq!(events[0].payload["effect_evidence"], false);
+        let lifecycle = json!({"type":"command_lifecycle","command_uuid":"bound-command","state":"cancelled","_goalport_received_ns":15});
+        let events = p.take_mapped("attempt-stop", &lifecycle);
+        assert_eq!(events[0].payload["claude_native_frame"], lifecycle);
+        assert_eq!(
+            events[0].payload["buffer_class"],
+            "first_received_after_stop_generation_unknown"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event_type == AgentEventType::Cancelled)
+        );
     }
 
     #[test]
@@ -6342,7 +6641,8 @@ mod tests {
         assert_eq!(payload["stopKind"], json!("unverified"), "{payload}");
         assert_not_a_and_not_b(&payload);
         assert!(
-            payload["write_responsibility"] == "held" && payload["residual_execution_state"] == "unknown",
+            payload["write_responsibility"] == "held"
+                && payload["residual_execution_state"] == "unknown",
             "{payload}"
         );
     }
@@ -6356,12 +6656,22 @@ mod tests {
         let mut process = claude_with_bound_stop();
         process.note_post_stop_activity("assistant", &tool_use);
         assert!(
-            !process.pending_stop.as_ref().expect("stop").post_stop_activity,
+            !process
+                .pending_stop
+                .as_ref()
+                .expect("stop")
+                .post_stop_activity,
             "activity before the signal is just the turn still running"
         );
         process.pending_stop.as_mut().expect("stop").signal_sent = true;
         process.note_post_stop_activity("assistant", &tool_use);
-        assert!(process.pending_stop.as_ref().expect("stop").post_stop_activity);
+        assert!(
+            process
+                .pending_stop
+                .as_ref()
+                .expect("stop")
+                .post_stop_activity
+        );
     }
 
     #[test]
@@ -6441,12 +6751,12 @@ mod codex_turn_fact_tests {
         process
     }
 
-    fn feed(process: &mut CodexProcess, value: Value) {
+    fn feed(process: &mut CodexProcess, value: Value) -> Vec<AgentEventEnvelope> {
         let (tx, rx) = mpsc::channel();
         tx.send(NativeMessage::Json(value)).unwrap();
         drop(tx);
         process.event_rx = Some(rx);
-        let _ = process.poll_events("attempt-turn").unwrap();
+        process.poll_events("attempt-turn").unwrap()
     }
 
     #[test]
@@ -6547,10 +6857,21 @@ mod codex_turn_fact_tests {
     fn error_response_clears_the_pending_start() {
         let mut process = process_with_thread();
         process.pending_start_request_id = Some(7);
-        feed(&mut process, json!({ "id": 7, "error": { "code": -1, "message": "no" } }));
+        let events = feed(
+            &mut process,
+            json!({ "id": 7, "error": { "code": -1, "message": "no" } }),
+        );
         assert_eq!(process.pending_start_request_id, None);
         assert_eq!(process.native_turn_id, None);
         assert!(!process.turn_in_flight());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentEventType::TurnFailed);
+        assert_eq!(
+            events[0].provider_event_reference.as_deref(),
+            Some("codex-turn-start-request:7")
+        );
+        assert_eq!(events[0].payload["turnStartRequestId"], 7);
+        assert!(events[0].payload["nativeTurnId"].is_null());
     }
 
     #[test]

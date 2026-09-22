@@ -20,7 +20,10 @@ new empty profile or a `--data-dir` incantation.
    an explicit, backed-up upgrade of an explicit `--data-dir`.
 2. **Data format compatibility**. Single authority: the `schema_migrations`
    table, inspected by `goalport-core profile inspect` through a READ-ONLY
-   connection (never a migrating open). Compatible ⇔ openable and
+   connection (never a migrating open). A nonempty WAL with no SHM is not
+   opened by SQLite during inspection because SQLite may create SHM even for
+   a read-only database handle; it is reported only as a detached-probe
+   candidate. Compatible ⇔ openable and
    `max(version) <= SCHEMA_VERSION`. Newer formats are refused honestly.
    `marker.schema*` and `PRAGMA user_version` are not compatibility authorities.
 3. **Current instance identity** (unchanged in strength). Startup receipts,
@@ -106,8 +109,13 @@ verified consistency Backup-API snapshot before the first open by a new build
 (rotation keeps 3, never prunes the newest, checkpointed to a single file);
 discovered foreign-channel profile (rc) → one-time import offer with real
 facts (source path, created-by, content counts, live-source disclosure) →
-verified copy into the channel's own directory with a crash-safe journal
-(copying → finalized → marker-last); live prior Core of another build →
+verified copy into the channel's own directory with a crash-safe, proof-bound
+journal. A WAL/SHM recovery candidate is first copied as a stable main+WAL
+family into owned staging; SQLite recovers and verifies only that detached
+copy. The source is never write-opened. The user explicitly accepts promotion
+of the verified copy (`PROBING → AWAITING_RECOVERY_CONSENT → STAGED_VERIFIED →
+PROMOTED → marker-last`). Ordinary imports use `COPYING → STAGED_VERIFIED →
+PROMOTED → marker-last`; live prior Core of another build →
 coordination screen (retry / show folder / exit; never kills, never preempts);
 same-build live Core → normal attach (continue-background resume); newer
 schema / legacy surface / corrupt marker / missing database → distinct error
@@ -115,13 +123,32 @@ screens that preserve the data and offer an explicit fresh-directory choice.
 
 ## Storage operations (`goalport-core profile …`)
 
-- `inspect --db P [--quick-check]` — read-only facts incl. epoch liveness.
+- `inspect --db P [--quick-check]` — read-only facts incl. epoch liveness and
+  additive `access.disposition`. `needsRecovery` remains diagnostic and grants
+  no recovery or import authority.
 - `backup --db P --out Q [--allow-write-open]` — Online Backup API copy,
-  verified (quick_check + schema version + row-count parity), checkpointed.
-- `import --source-db P --staging-dir D [--allow-source-recovery]` — verified
-  copy + `IMPORTED_SNAPSHOT` epoch marking + provenance; source untouched.
+  verified (quick_check + schema version + row-count parity), checkpointed,
+  synced under a non-`.sqlite` partial name, then atomically published without
+  overwrite. A filesystem without supported same-volume no-clobber publication
+  fails the backup without replacing an existing file. Only strict finalized
+  names consume retention slots.
+- `import --source-db P --staging-dir D` — ordinary verified Online Backup copy
+  + bound `import-proof.json` + `IMPORTED_SNAPSHOT` epoch marking. The former
+  `--allow-source-recovery` flag is refused; it cannot authorize a write-open.
+- `recovery-probe --source-db P --staging-dir D ...` — stable hash/copy of a
+  main+WAL family, recovery and verification of only the copy, and an opaque
+  proof token. Success alone yields `POSITIVELY_IDENTIFIED_RECOVERABLE` with
+  method `DETACHED_WAL_COPY_PROBE_V1` and source mutation `NONE`.
+- `verify-source` rechecks the exact source snapshot before consent;
+  `verify-staging` binds operation, source/provenance, proof and staged bytes.
 
-Import journal finalization checks the staging path before writing the marker
+Import journal v2 transitions are atomic temp-write + sync + rename. A pending,
+corrupt or unrecognized journal always blocks fresh classification. A
+`COPYING` staged database is resumable only with a matching Core-written proof;
+a merely openable or quick-checking SQLite file is insufficient. Durable
+recovery consent binds the current operation and proof token. An explicit
+decline removes only the owned probe before fresh initialization; Exit retains
+the offer. Import journal finalization checks the staging path before writing the marker
 or deleting anything: it must be a direct `.import-staging-*` child of this
 durable root and cannot be a redirected directory. Invalid recovery records are
 retained with an import refusal, rather than used as cleanup authority.

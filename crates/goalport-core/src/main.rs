@@ -112,13 +112,17 @@ fn serve(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// `profile inspect|backup|import …`: startup-continuity storage operations.
+/// `profile inspect|backup|import|recovery-probe|verify-source|verify-staging …`:
+/// startup-continuity storage operations.
 /// Never migrates a database. Output contract: exactly one JSON line on
 /// stdout; success exits 0, failure exits 3 with `{ok:false, stage, error}`.
 fn profile(args: &[String]) -> ExitCode {
     use goalport_core::profile_ops;
     let Some(command) = args.first().map(String::as_str) else {
-        println!("{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"usage\",\"error\":\"profile requires inspect|backup|import\"}}", profile_ops::PROFILE_OPS_SCHEMA);
+        println!(
+            "{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"usage\",\"error\":\"profile requires inspect|backup|import|recovery-probe|verify-source|verify-staging\"}}",
+            profile_ops::PROFILE_OPS_SCHEMA
+        );
         return ExitCode::from(profile_ops::PROFILE_OPS_FAILURE_EXIT);
     };
     let flags = |name: &str| -> Option<String> {
@@ -148,16 +152,72 @@ fn profile(args: &[String]) -> ExitCode {
                 let provenance = option(args, "--provenance")
                     .and_then(|raw| serde_json::from_str(&raw).ok())
                     .unwrap_or(serde_json::json!(null));
-                profile_ops::import(
-                    &PathBuf::from(source),
-                    &PathBuf::from(staging),
-                    &provenance,
-                    flags("--allow-source-recovery").is_some(),
-                )
+                if flags("--allow-source-recovery").is_some() {
+                    profile_ops::import(&PathBuf::from(source), &PathBuf::from(staging), &provenance, true)
+                } else {
+                    match (
+                        option(args, "--operation-id"),
+                        option(args, "--source-marker-sha256"),
+                        option(args, "--provenance-sha256"),
+                    ) {
+                        (Some(operation_id), Some(marker), Some(provenance_sha)) => profile_ops::import_bound(
+                            &PathBuf::from(source),
+                            &PathBuf::from(staging),
+                            &provenance,
+                            &operation_id,
+                            &marker,
+                            &provenance_sha,
+                        ),
+                        (None, None, None) => profile_ops::import(
+                            &PathBuf::from(source),
+                            &PathBuf::from(staging),
+                            &provenance,
+                            false,
+                        ),
+                        _ => Err("bound profile import requires --operation-id, --source-marker-sha256 and --provenance-sha256 together".into()),
+                    }
+                }
             }
             _ => Err("profile import requires --source-db and --staging-dir".into()),
         },
-        unknown => Err(format!("unknown profile subcommand {unknown}; use inspect|backup|import")),
+        "recovery-probe" => match (
+            option(args, "--source-db"),
+            option(args, "--staging-dir"),
+            option(args, "--operation-id"),
+            option(args, "--source-marker-sha256"),
+            option(args, "--provenance-sha256"),
+        ) {
+            (Some(source), Some(staging), Some(operation_id), Some(marker), Some(provenance)) => profile_ops::recovery_probe(
+                &PathBuf::from(source),
+                &PathBuf::from(staging),
+                &operation_id,
+                &marker,
+                &provenance,
+            ),
+            _ => Err("profile recovery-probe requires --source-db, --staging-dir, --operation-id, --source-marker-sha256 and --provenance-sha256".into()),
+        },
+        "verify-source" => match (
+            option(args, "--source-db"),
+            option(args, "--expected-source-snapshot-token"),
+        ) {
+            (Some(source), Some(token)) => profile_ops::verify_source(&PathBuf::from(source), &token),
+            _ => Err("profile verify-source requires --source-db and --expected-source-snapshot-token".into()),
+        },
+        "verify-staging" => match (
+            option(args, "--staging-dir"),
+            option(args, "--expected-operation-id"),
+            option(args, "--expected-proof-token"),
+            option(args, "--expected-source-binding-sha256"),
+        ) {
+            (Some(staging), Some(operation_id), Some(proof), Some(binding)) => profile_ops::verify_staging(
+                &PathBuf::from(staging),
+                &operation_id,
+                &proof,
+                &binding,
+            ),
+            _ => Err("profile verify-staging requires --staging-dir, --expected-operation-id, --expected-proof-token and --expected-source-binding-sha256".into()),
+        },
+        unknown => Err(format!("unknown profile subcommand {unknown}; use inspect|backup|import|recovery-probe|verify-source|verify-staging")),
     };
     match result {
         Ok(mut value) => {

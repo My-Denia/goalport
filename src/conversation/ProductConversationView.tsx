@@ -144,14 +144,47 @@ function renderItems(items: ProductConversationItem[]) {
   return nodes;
 }
 
-interface ProductConversationViewProps {
-  product: ProductConversation;
+/** Join adjacent bounded fragments after pages are merged, without changing their stored IDs. */
+export function coalesceVisibleFragments(items: ProductConversationItem[]): ProductConversationItem[] {
+  const visible: ProductConversationItem[] = [];
+  for (const item of items) {
+    const logicalId = item.logicalItemId;
+    const previous = visible.at(-1);
+    const fragmentCoverageIsContinuous = previous
+      ? (!previous.continuesAfter && !item.continuesBefore)
+        || item.fragmentIndex === (previous.fragmentIndex ?? 0) + 1
+      : false;
+    if (logicalId && previous?.logicalItemId === logicalId && previous.kind === item.kind
+      && fragmentCoverageIsContinuous) {
+      visible[visible.length - 1] = {
+        ...previous,
+        body: previous.body + item.body,
+        continuesAfter: item.continuesAfter,
+        technicalDetails: item.technicalDetails ?? previous.technicalDetails
+      };
+    } else {
+      visible.push({ ...item });
+    }
+  }
+  return visible;
 }
 
-export function ProductConversationView({ product }: ProductConversationViewProps) {
-  const nodes = useMemo(() => renderItems(product.items), [product.items]);
+interface ProductConversationViewProps {
+  product: ProductConversation;
+  loadingEarlier?: boolean;
+  onLoadEarlier?: () => void;
+}
+
+export function ProductConversationView({ product, loadingEarlier = false, onLoadEarlier }: ProductConversationViewProps) {
+  const visibleItems = useMemo(() => coalesceVisibleFragments(product.items), [product.items]);
+  const nodes = useMemo(() => renderItems(visibleItems), [visibleItems]);
   return (
     <div className="timeline-inner" data-product-conversation="true">
+      {product.pageInfo?.hasOlder && onLoadEarlier ? (
+        <button className="button button-quiet history-load-earlier" type="button" onClick={onLoadEarlier} disabled={loadingEarlier}>
+          {loadingEarlier ? "Loading earlier…" : "Load earlier"}
+        </button>
+      ) : null}
       {product.items.length === 0 ? (
         <div className="timeline-intro">
           <p className="timeline-intro-copy">No messages yet. Send the first message below.</p>

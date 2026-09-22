@@ -14,10 +14,20 @@ async function invokeCoreRequest(request, { exchange, ensureCore, delay, onResul
       if (request.messageType === "snapshot") {
         throw Object.assign(new Error(error), { goalportRejected: true });
       }
-      return { goalportRejected: true, requestId: request.requestId, error };
+      const rejected = response.payload;
+      if (rejected && (rejected.requestId !== request.requestId || rejected.accepted !== false)) {
+        throw new Error("Core rejection identity does not match the request; result remains unknown");
+      }
+      return { ...rejected, goalportRejected: true, requestId: request.requestId, error };
     }
     const body = response?.payload || response;
     if (request.messageType === "snapshot") return body?.snapshot || body;
+    if (request.messageType === "history_page") {
+      if (body?.requestId !== request.requestId || body?.accepted !== true || !body.historyPage) {
+        throw new Error("Core did not return a matching history page");
+      }
+      return body;
+    }
     if (!body || body.requestId !== request.requestId || body.accepted !== true || !body.snapshot) {
       throw new Error("Core did not return a matching command acknowledgement; result remains unknown");
     }
@@ -31,7 +41,8 @@ async function invokeCoreRequest(request, { exchange, ensureCore, delay, onResul
     await delay(120);
     result = await attempt();
   }
-  if (!result?.goalportRejected) onResult?.(result?.snapshot || result);
+  if (result?.snapshot) onResult?.(result.snapshot);
+  else if (request.messageType === "snapshot" && !result?.goalportRejected) onResult?.(result);
   return result;
 }
 

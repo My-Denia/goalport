@@ -22,7 +22,7 @@ A durable profile directory contains only data you would back up, migrate or res
 | `goalport.sqlite` (plus WAL files) | All Campaign, Task, Attempt, event, decision and receipt records |
 | `goalport.sqlite.launcher.log` | How Core was launched, including breakaway or inherited-job mode |
 | `goalport.sqlite.core.log` | Core diagnostics |
-| `backups/`, `import-journal.json`, `.import-staging-*` | Consistency backups and crash-safe import staging |
+| `backups/`, `import-journal.json`, `.import-staging-*` | Atomically published consistency backups and proof-bound crash-safe import/recovery staging |
 
 The Electron/Chromium browser state (caches, `Local State`, `Preferences`, `Network`, session storage, `window-state.json`) lives in its own namespace keyed by the durable profile identity. It is never written into the durable profile directory, so backing up a `--data-dir` gives you pure GoalPort data, and a fresh profile decision can never race Chromium session files. Browser-state identity follows the canonical durable profile path (not the Core build), and deleting it only resets window geometry and caches. A `--user-data-dir <absolute path>` (the standard Chromium switch) relocates the application-data root: both the durable channel directories and the `electron` namespace move inside the relocated root and stay physically separate; combined with `--data-dir`, the `--data-dir` keeps owning the durable location. Historical Chromium files left in an older profile directory are ignored, never deleted, and no longer used.
 
@@ -42,6 +42,19 @@ GoalPort refuses unknown files in an unmarked directory, incompatible or corrupt
 data, a mismatched marker identity, and a missing database after a recorded open.
 Known Chromium leftovers from the former shared directory remain compatible and
 are preserved. See [profile continuity](profile-continuity.md) for backup and import behavior.
+
+When older GoalPort data has a nonempty SQLite WAL but no SHM, GoalPort does not
+write-open the original database. It copies a stable main+WAL snapshot into the
+new profile's owned staging area, lets SQLite recover and verify only that copy,
+and shows an import offer only after the recovered copy passes integrity and
+schema checks. Accepting the offer promotes the proof-bound copy; the original
+files remain byte-for-byte unchanged. Declining explicitly removes the owned
+temporary copy before starting fresh. Exiting keeps the pending offer for the
+next startup.
+
+Incomplete backup files use non-`.sqlite` partial names and never count toward
+retention. A final backup name appears only after copy, verification,
+checkpoint and file sync complete, using an atomic no-overwrite publication.
 
 Durable and browser paths must be physically disjoint, including junction and
 short-name aliases. Neither may contain the other. For example, combining

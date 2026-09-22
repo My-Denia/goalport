@@ -1,6 +1,18 @@
 const { contextBridge, ipcRenderer } = require("electron");
 const requestId = () => `desktop-snapshot-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+// Defense in depth: even an accidentally reused preload exposes nothing in a
+// popup/subframe or any document other than the main process's exact app file.
+const expectedArgument = process.argv.find((arg) => arg.startsWith("--goalport-app-document="));
+let trustedDocument = false;
+try {
+  const expected = new URL(decodeURIComponent(expectedArgument?.slice("--goalport-app-document=".length) || ""));
+  const actual = new URL(globalThis.location.href);
+  actual.hash = "";
+  trustedDocument = process.isMainFrame === true && expected.protocol === "file:" && actual.href === expected.href;
+} catch { /* Missing or malformed identity fails closed. */ }
+
+if (trustedDocument) {
 contextBridge.exposeInMainWorld("__GOALPORT_ELECTRON__", true);
 contextBridge.exposeInMainWorld("goalportCore", {
   appInfo: () => ipcRenderer.invoke("goalport:app-info"),
@@ -36,3 +48,4 @@ contextBridge.exposeInMainWorld("goalportCore", {
     return () => ipcRenderer.removeListener("goalport:close-choice-failed", listener);
   }
 });
+}

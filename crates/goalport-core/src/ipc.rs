@@ -8,8 +8,9 @@
 //! desktop or a provider Runtime.
 
 use crate::{
-    commands::{CommandError, CommandExecution, CommandProcessor, CoreCommand},
+    commands::{CommandError, CommandExecution, CommandProcessor, CoreCommand, CoreOperation},
     projection::UiController,
+    response_bounds::{MAX_RESPONSE_BYTES, bound_error, bound_result_metadata, bound_ui_response},
     store::{Store, StoreError},
 };
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,7 @@ impl IpcRequest {
     }
 
     pub fn validate(&self) -> Result<(), IpcError> {
+        validate_header(&self.protocol_version, &self.request_id, None)?;
         if self.protocol_version != IPC_PROTOCOL_VERSION
             && self.protocol_version != CONNECTED_UI_PROTOCOL_VERSION
         {
@@ -56,12 +58,10 @@ impl IpcRequest {
                 received: self.protocol_version.clone(),
             });
         }
-        if self.request_id.trim().is_empty() {
-            return Err(IpcError::Invalid("request_id is empty".into()));
-        }
         if self.entity_version <= 0 {
             return Err(IpcError::Invalid("entity_version must be positive".into()));
         }
+        validate_core_command_ids(&self.command)?;
         Ok(())
     }
 }
@@ -75,6 +75,10 @@ pub struct IpcResponse {
     pub duplicate: bool,
     pub result: Option<CommandExecution>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_reference: Option<Value>,
 }
 
 /// Compatibility wire shape used by the thin Tauri bridge. It is intentionally
@@ -109,6 +113,11 @@ pub struct UiCommandResponse {
 
 impl UiCommandRequest {
     pub fn validate(&self) -> Result<(), IpcError> {
+        validate_header(
+            &self.protocol_version,
+            &self.request_id,
+            Some(&self.message_type),
+        )?;
         if self.protocol_version != IPC_PROTOCOL_VERSION
             && self.protocol_version != CONNECTED_UI_PROTOCOL_VERSION
         {
@@ -117,32 +126,218 @@ impl UiCommandRequest {
                 received: self.protocol_version.clone(),
             });
         }
-        if self.request_id.trim().is_empty() || self.message_type.trim().is_empty() {
-            return Err(IpcError::Invalid(
-                "request_id and message_type are required".into(),
-            ));
-        }
         if self.entity_version < 0 {
             return Err(IpcError::Invalid(
                 "entity_version must be non-negative".into(),
             ));
         }
+        if !supported_ui_message(&self.message_type) {
+            return Err(IpcError::Invalid("unsupported message_type".into()));
+        }
+        validate_ui_operational_ids(&self.payload)?;
         Ok(())
     }
+}
+
+fn validate_header(
+    protocol_version: &str,
+    request_id: &str,
+    message_type: Option<&str>,
+) -> Result<(), IpcError> {
+    if protocol_version.is_empty() || protocol_version.as_bytes().len() > 64 {
+        return Err(IpcError::Invalid(
+            "protocol_version is empty or exceeds 64 bytes".into(),
+        ));
+    }
+    if request_id.trim().is_empty() || request_id.as_bytes().len() > 256 {
+        return Err(IpcError::Invalid(
+            "request_id is empty or exceeds 256 bytes".into(),
+        ));
+    }
+    if let Some(message_type) = message_type
+        && (message_type.trim().is_empty() || message_type.as_bytes().len() > 64)
+    {
+        return Err(IpcError::Invalid(
+            "message_type is empty or exceeds 64 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn supported_ui_message(value: &str) -> bool {
+    matches!(
+        value,
+        "snapshot"
+            | "select_project"
+            | "select_campaign"
+            | "create_campaign"
+            | "create_campaign_with_task"
+            | "select_runtime"
+            | "select_attempt"
+            | "start_conversation"
+            | "conversation_send"
+            | "rename_conversation"
+            | "send_message"
+            | "resolve_decision"
+            | "permission_response"
+            | "interrupt"
+            | "safe_stop"
+            | "cancel"
+            | "reconnect"
+            | "handoff"
+            | "reassign"
+            | "revoke_authorization"
+            | "request_owner_action"
+            | "resume_native_session"
+            | "continue_in_isolated_workspace"
+            | "recheck_stop_responsibility"
+            | "classify_recovery"
+            | "close_adapter_transport"
+            | "mark_runtime_exit"
+            | "observe_workspace_edit"
+            | "queue_override"
+            | "record_close_choice"
+            | "get_startup_receipt"
+            | "get_close_choice_receipt"
+            | "history_page"
+    )
+}
+
+fn validate_ui_operational_ids(value: &Value) -> Result<(), IpcError> {
+    fn visit(value: &Value, key: Option<&str>) -> Result<(), IpcError> {
+        if let (Some(key), Some(text)) = (key, value.as_str()) {
+            let lower = key.to_ascii_lowercase();
+            let identifier = matches!(
+                lower.as_str(),
+                "projectid"
+                    | "project_id"
+                    | "campaignid"
+                    | "campaign_id"
+                    | "taskid"
+                    | "task_id"
+                    | "attemptid"
+                    | "attempt_id"
+                    | "sourceattemptid"
+                    | "source_attempt_id"
+                    | "decisionid"
+                    | "decision_id"
+                    | "requestid"
+                    | "request_id"
+                    | "operationid"
+                    | "operation_id"
+                    | "receiptid"
+                    | "receipt_id"
+                    | "queueid"
+                    | "queue_id"
+                    | "requestreference"
+            );
+            if identifier && text.as_bytes().len() > 256 {
+                return Err(IpcError::Invalid(format!(
+                    "operational identifier {key} exceeds 256 bytes"
+                )));
+            }
+            if matches!(lower.as_str(), "workspaceroot" | "workspace_root")
+                && serde_json::to_vec(text)?.len() > 128 * 1024
+            {
+                return Err(IpcError::Invalid("workspace path exceeds 128 KiB".into()));
+            }
+        }
+        match value {
+            Value::Object(map) => {
+                for (child_key, child) in map {
+                    visit(child, Some(child_key))?;
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    visit(child, key)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    visit(value, None)
+}
+
+fn validate_goalport_id(name: &str, value: &str) -> Result<(), IpcError> {
+    if value.as_bytes().len() > 256 {
+        return Err(IpcError::Invalid(format!(
+            "operational identifier {name} exceeds 256 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_core_command_ids(command: &CoreCommand) -> Result<(), IpcError> {
+    validate_goalport_id("command.id", &command.command.id)?;
+    validate_goalport_id("command.attempt_id", &command.command.attempt_id)?;
+    match &command.operation {
+        CoreOperation::TransitionAttempt {
+            attempt_id,
+            event_id,
+            ..
+        } => {
+            validate_goalport_id("attempt_id", attempt_id)?;
+            validate_goalport_id("event_id", event_id)?;
+        }
+        CoreOperation::AppendEvent { event } => {
+            validate_goalport_id("event.id", &event.id)?;
+            validate_goalport_id("event.attempt_id", &event.attempt_id)?;
+        }
+        CoreOperation::AcquireLease { lease } => {
+            validate_goalport_id("lease.attempt_id", &lease.attempt_id)?;
+        }
+        CoreOperation::ReleaseLease { attempt_id, .. }
+        | CoreOperation::RevokeLease { attempt_id, .. } => {
+            validate_goalport_id("attempt_id", attempt_id)?;
+        }
+        CoreOperation::MarkOutboxUnknown { outbox_id, .. }
+        | CoreOperation::ReconcileOutbox { outbox_id, .. } => {
+            validate_goalport_id("outbox_id", outbox_id)?;
+        }
+    }
+    Ok(())
 }
 
 impl IpcResponse {
     fn error(request: &IpcRequest, error: impl Into<String>) -> Self {
         Self {
             protocol_version: IPC_PROTOCOL_VERSION.into(),
-            request_id: request.request_id.clone(),
+            request_id: if request.request_id.as_bytes().len() <= 256 {
+                request.request_id.clone()
+            } else {
+                String::new()
+            },
             entity_version: request.entity_version,
             ok: false,
             duplicate: false,
             result: None,
-            error: Some(error.into()),
+            error: Some(bound_error(&error.into())),
+            result_truncated: None,
+            result_reference: None,
         }
     }
+}
+
+fn bound_legacy_response(mut response: IpcResponse) -> IpcResponse {
+    if let Some(error) = response.error.take() {
+        response.error = Some(bound_error(&error));
+    }
+    if serde_json::to_vec(&response).is_ok_and(|bytes| bytes.len() <= MAX_RESPONSE_BYTES) {
+        return response;
+    }
+    let reference = response.result.as_ref().map(|result| {
+        serde_json::json!({
+            "commandId": result.command.id,
+            "attemptId": result.command.attempt_id,
+            "state": format!("{:?}", result.command.state).to_ascii_uppercase()
+        })
+    });
+    response.result = None;
+    response.result_truncated = Some(true);
+    response.result_reference = reference;
+    response
 }
 
 #[derive(Debug, Error)]
@@ -316,7 +511,7 @@ impl CoreServer {
 
     pub fn handle(&self, request: IpcRequest) -> IpcResponse {
         if let Err(error) = request.validate() {
-            return IpcResponse::error(&request, error.to_string());
+            return bound_legacy_response(IpcResponse::error(&request, error.to_string()));
         }
         if let Some(response) = self
             .ledger
@@ -340,9 +535,12 @@ impl CoreServer {
                 duplicate: result.duplicate,
                 result: Some(result),
                 error: None,
+                result_truncated: None,
+                result_reference: None,
             },
             Err(error) => IpcResponse::error(&request, error.to_string()),
         };
+        let response = bound_legacy_response(response);
         self.ledger
             .lock()
             .expect("ipc ledger poisoned")
@@ -383,28 +581,75 @@ impl CoreServer {
                     // historical StoreCounts response. Connected Preview v2
                     // requests below receive the complete UI projection.
                     let counts = self.processor.store().counts()?;
-                    Ok(serde_json::to_value(UiCommandResponse {
+                    let value = serde_json::to_value(UiCommandResponse {
                         protocol_version: IPC_PROTOCOL_VERSION,
                         request_id: request.request_id,
                         entity_version: request.entity_version,
                         ok: true,
                         payload: serde_json::to_value(counts)?,
                         error: None,
-                    })?)
+                    })?;
+                    bound_ui_response(value).map_err(IpcError::Invalid)
                 } else {
                     if std::env::var_os("GOALPORT_DEBUG").is_some() {
                         eprintln!("goalport-ui: handling {}", request.message_type);
                     }
-                    match self
-                        .ui
-                        .lock()
-                        .expect("ui projection poisoned")
-                        .handle(request.clone())
-                    {
-                        Ok(result) => {
+                    if request.message_type == "history_page" {
+                        let outcome = self
+                            .ui
+                            .lock()
+                            .expect("ui projection poisoned")
+                            .history_page(&request);
+                        let value = match outcome {
+                            Ok(page) => serde_json::to_value(UiCommandResponse {
+                                protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                                request_id: request.request_id.clone(),
+                                entity_version: request.entity_version,
+                                ok: true,
+                                payload: serde_json::json!({
+                                    "requestId": request.request_id,
+                                    "accepted": true,
+                                    "historyPage": page
+                                }),
+                                error: None,
+                            })?,
+                            Err(error) => {
+                                let error = bound_error(&error);
+                                serde_json::to_value(UiCommandResponse {
+                                    protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                                    request_id: request.request_id.clone(),
+                                    entity_version: request.entity_version,
+                                    ok: false,
+                                    payload: serde_json::json!({
+                                        "requestId": request.request_id,
+                                        "accepted": false,
+                                        "rejection": {
+                                            "code": "history-page-rejected",
+                                            "message": error.clone(),
+                                            "deliveryState": "FAILED",
+                                            "nativeDispatchState": "NOT_STARTED",
+                                            "retryMode": "NONE",
+                                            "reservation": Value::Null
+                                        }
+                                    }),
+                                    error: Some(error),
+                                })?
+                            }
+                        };
+                        return bound_ui_response(value).map_err(IpcError::Invalid);
+                    }
+                    let outcome = {
+                        let mut ui = self.ui.lock().expect("ui projection poisoned");
+                        ui.handle(request.clone())
+                    };
+                    match outcome {
+                        Ok(mut result) => {
                             if std::env::var_os("GOALPORT_DEBUG").is_some() {
                                 eprintln!("goalport-ui: completed {}", request.message_type);
                             }
+                            let (receipt, _truncated) =
+                                bound_result_metadata(result.receipt.take());
+                            result.receipt = receipt;
                             let value = serde_json::to_value(UiCommandResponse {
                                 protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
                                 request_id: request.request_id,
@@ -419,16 +664,26 @@ impl CoreServer {
                                     serde_json::to_vec(&value)?.len()
                                 );
                             }
-                            Ok(value)
+                            bound_ui_response(value).map_err(IpcError::Invalid)
                         }
-                        Err(error) => Ok(serde_json::to_value(UiCommandResponse {
-                            protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
-                            request_id: request.request_id,
-                            entity_version: request.entity_version,
-                            ok: false,
-                            payload: Value::Null,
-                            error: Some(error),
-                        })?),
+                        Err(error) => {
+                            let error = bound_error(&error);
+                            let rejected = self
+                                .ui
+                                .lock()
+                                .expect("ui projection poisoned")
+                                .rejected_payload(&request, &error)
+                                .map_err(IpcError::Invalid)?;
+                            let value = serde_json::to_value(UiCommandResponse {
+                                protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                                request_id: request.request_id,
+                                entity_version: request.entity_version,
+                                ok: false,
+                                payload: rejected,
+                                error: Some(error),
+                            })?;
+                            bound_ui_response(value).map_err(IpcError::Invalid)
+                        }
                     }
                 }
             }
@@ -580,11 +835,13 @@ mod windows_pipe {
             minwinbase::SECURITY_ATTRIBUTES,
             namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW},
             processthreadsapi::{GetCurrentProcess, OpenProcess, OpenProcessToken},
-            securitybaseapi::{EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation},
+            securitybaseapi::{
+                EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation,
+            },
             winbase::{
                 FILE_FLAG_FIRST_PIPE_INSTANCE, GetNamedPipeServerProcessId, LocalFree,
-                PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, SECURITY_IDENTIFICATION,
+                PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+                PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, SECURITY_IDENTIFICATION,
                 SECURITY_SQOS_PRESENT,
             },
             winnt::{
@@ -1223,7 +1480,9 @@ mod tests {
                 handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
                 processthreadsapi::{GetCurrentProcess, OpenProcessToken},
                 securitybaseapi::GetTokenInformation,
-                winbase::{PIPE_REJECT_REMOTE_CLIENTS, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT},
+                winbase::{
+                    PIPE_REJECT_REMOTE_CLIENTS, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
+                },
                 winnt::{GENERIC_READ, GENERIC_WRITE, TOKEN_QUERY, TOKEN_USER, TokenUser},
             },
         };
@@ -1262,7 +1521,10 @@ mod tests {
         fn current_user_sid_string() -> String {
             unsafe {
                 let mut token = std::ptr::null_mut();
-                assert_ne!(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token), 0);
+                assert_ne!(
+                    OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                    0
+                );
                 let mut buffer = vec![0_u64; 128];
                 let mut needed = 0;
                 assert_ne!(
@@ -1278,7 +1540,10 @@ mod tests {
                 CloseHandle(token);
                 let sid = (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
                 let mut raw: *mut u16 = std::ptr::null_mut();
-                assert_ne!(winapi::shared::sddl::ConvertSidToStringSidW(sid, &mut raw), 0);
+                assert_ne!(
+                    winapi::shared::sddl::ConvertSidToStringSidW(sid, &mut raw),
+                    0
+                );
                 let length = (0..).take_while(|&index| *raw.add(index) != 0).count();
                 let text = String::from_utf16(std::slice::from_raw_parts(raw, length)).unwrap();
                 winapi::um::winbase::LocalFree(raw.cast());

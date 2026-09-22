@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import type { BootstrapActionType, BootstrapFacts, BootstrapState } from "../ipc";
+import type { BootstrapAction, BootstrapActionType, BootstrapFacts, BootstrapState } from "../ipc";
 
 // Startup-continuity screens shown inside the boot shell before any business
 // data is trusted. The renderer displays facts pushed by the main process and
 // forwards user actions; all decisions live in the main-process profile
 // manager, never here.
 
-function send(type: BootstrapActionType) {
-  void window.goalportCore?.bootstrapAction?.({ type });
+function send(action: BootstrapAction) {
+  void window.goalportCore?.bootstrapAction?.(action);
 }
 
 function countLabel(counts: Record<string, number> | null): string | null {
@@ -29,10 +29,10 @@ function createdByLabel(facts: BootstrapFacts): string {
   return version ? `GoalPort ${version}` : "an earlier GoalPort build";
 }
 
-function ActionButton({ kind, children, autoFocus }: { kind: BootstrapActionType; children: React.ReactNode; autoFocus?: boolean }) {
+function ActionButton({ kind, action, children, autoFocus }: { kind: BootstrapActionType; action?: BootstrapAction; children: React.ReactNode; autoFocus?: boolean }) {
   return (
     <button type="button" className={kind === "import-accept" || kind === "retry" || kind === "fresh" ? "bootstrap-primary" : "bootstrap-secondary"}
-      autoFocus={autoFocus} onClick={() => send(kind)}>
+      autoFocus={autoFocus} onClick={() => send(action ?? { type: kind } as BootstrapAction)}>
       {children}
     </button>
   );
@@ -67,6 +67,11 @@ export function BootstrapScreen({ state }: { state: BootstrapState }) {
   if (state.phase === "import-offer") {
     const facts = state.facts;
     const summary = countLabel(facts.counts);
+    const recoveryOffer = facts.recoveryDisposition === "POSITIVELY_IDENTIFIED_RECOVERABLE";
+    const unprovenRecovery = facts.needsRecovery && !recoveryOffer;
+    const boundRecovery = recoveryOffer && Boolean(facts.operationId && facts.recoveryProofToken)
+      ? { type: "import-accept" as const, operationId: facts.operationId!, recoveryProofToken: facts.recoveryProofToken! }
+      : null;
     return shell(
       <>
         <h2>Found existing GoalPort data</h2>
@@ -77,14 +82,22 @@ export function BootstrapScreen({ state }: { state: BootstrapState }) {
         {facts.liveSource ? (
           <p className="bootstrap-note">The other GoalPort is still running. Import takes a point-in-time snapshot and does not disturb it.</p>
         ) : null}
-        {facts.needsRecovery ? (
-          <p className="bootstrap-note">The existing data&apos;s journal needs a one-time recovery read so it can be copied safely. The original files are not modified beyond that standard recovery.</p>
+        {recoveryOffer ? (
+          <p className="bootstrap-note">GoalPort verified a detached recovery copy. Accepting imports that verified copy; the original database and journal files remain unchanged.</p>
         ) : null}
         <div className="bootstrap-actions">
-          <ActionButton kind="import-accept" autoFocus>Use my existing data</ActionButton>
+          {(recoveryOffer && !boundRecovery) || unprovenRecovery ? null : (
+            <ActionButton kind="import-accept" action={boundRecovery ?? { type: "import-accept" }} autoFocus>Use my existing data</ActionButton>
+          )}
           <ActionButton kind="fresh">Start fresh</ActionButton>
         </div>
-        <small className="bootstrap-footnote">A verified copy is imported; the original stays where it is.</small>
+        <small className="bootstrap-footnote">
+          {recoveryOffer && !boundRecovery
+            ? "The recovery proof is incomplete, so this offer cannot be accepted. Try checking the data again."
+            : unprovenRecovery
+              ? "This data needs recovery, but GoalPort has no verified detached recovery proof. Check it again before importing."
+            : "A verified copy is imported; the original stays where it is."}
+        </small>
       </>
     );
   }

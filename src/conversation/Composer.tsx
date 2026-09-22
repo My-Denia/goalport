@@ -6,6 +6,7 @@ interface RuntimePickerProps {
   runtimes: RuntimeProfile[];
   runtime: ProductRuntimeSelection;
   blocked: boolean;
+  blockedReason?: string;
   connected: boolean;
   onSelect: (provider: string) => void;
   /** Bumped by the app to open and focus the chooser (Session details → Change Runtime). */
@@ -18,7 +19,7 @@ interface RuntimePickerProps {
  * Runtime selection (which survives stopped/unavailable states) — never from
  * `attempt.state`.
  */
-export function RuntimePicker({ runtimes, runtime, blocked, connected, onSelect, focusSignal }: RuntimePickerProps) {
+export function RuntimePicker({ runtimes, runtime, blocked, blockedReason, connected, onSelect, focusSignal }: RuntimePickerProps) {
   const [open, setOpen] = useState(false);
   const display = runtimeSelectionDisplay(runtime);
   const selectBlocked = blocked || !connected;
@@ -94,7 +95,7 @@ export function RuntimePicker({ runtimes, runtime, blocked, connected, onSelect,
           ))}
           {selectBlocked ? (
             <p className="runtime-picker-hint">
-              {!connected ? "Reconnect Core to select." : "Selection is blocked while a hold governs this workspace."}
+              {!connected ? "Reconnect Core to select." : (blockedReason ?? "Selection is blocked while a hold governs this workspace.")}
             </p>
           ) : null}
         </div>
@@ -109,6 +110,7 @@ interface ComposerProps {
   runtime: ProductRuntimeSelection;
   turn: ProductTurn;
   busy: boolean;
+  retryLabel?: string;
   /** Bumped by the app to open and focus the chooser (Session details → Change Runtime). */
   chooserFocusSignal: number;
   onChange: (value: string) => void;
@@ -125,7 +127,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
+export function Composer({ draft, snapshot, runtime, turn, busy, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // IME composition guards. `composing` covers the active composition; the
   // timestamp catches the stray Enter some IMEs emit right after
@@ -134,8 +136,11 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
   const compositionEndedAtRef = useRef(0);
 
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
+  const controlUnavailable = snapshot.bounds?.projectionUnavailable === true;
   const connected = snapshot.connection === "connected";
-  const canSubmit = draft.trim().length > 0 && connected && !held && turn.canSend && !busy;
+  const reconciling = Boolean(retryLabel);
+  const canSubmit = draft.trim().length > 0 && connected && !busy
+    && (reconciling || (!held && turn.canSend));
   const pending = turn.state === "starting" || turn.state === "stopping";
 
   // Auto-grow: keep the textarea matched to its content within a sane maximum.
@@ -178,7 +183,9 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
     }
   };
 
-  const placeholder = held
+  const placeholder = reconciling
+    ? "Retry the same request identity to reconcile its recorded result…"
+    : held
     ? "Core holds write responsibility while residual execution is unknown…"
     : !connected
       ? "Reconnect Core before sending a new message…"
@@ -186,7 +193,9 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
         ? turn.reason || "Sending is not available right now…"
         : "Ask the selected Runtime to continue… (Enter to send, Shift+Enter for a new line)";
 
-  const hint = held
+  const hint = reconciling
+    ? "This checks the existing request. Core will not dispatch UNKNOWN work again."
+    : held
     ? "Sending is blocked: Core holds write responsibility for residual execution."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
@@ -199,7 +208,8 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
       <RuntimePicker
         runtimes={snapshot.runtimes}
         runtime={runtime}
-        blocked={held}
+        blocked={held || controlUnavailable}
+        blockedReason={controlUnavailable ? "Selection is unavailable until Core provides a full control snapshot." : undefined}
         connected={connected}
         onSelect={onSelectRuntime}
         focusSignal={chooserFocusSignal}
@@ -215,7 +225,7 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           rows={2}
-          disabled={held}
+          disabled={held && !reconciling}
         />
         <div className="composer-actions">
           <span className="composer-hint">{hint}</span>
@@ -244,8 +254,8 @@ export function Composer({ draft, snapshot, runtime, turn, busy, chooserFocusSig
                 <span aria-hidden="true">◌</span> {turn.state === "stopping" ? "Stopping…" : "Starting…"}
               </button>
             ) : (
-              <button className="send-button" type="submit" aria-label="Send message" disabled={!canSubmit}>
-                <span>{busy ? "Sending…" : "Send"}</span>
+              <button className="send-button" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
+                <span>{busy ? "Sending…" : (retryLabel ?? "Send")}</span>
                 <span className="send-arrow" aria-hidden="true">↗</span>
               </button>
             )}

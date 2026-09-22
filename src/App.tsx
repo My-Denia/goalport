@@ -1,8 +1,17 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCoreClient, persistedAttemptId, reusableAttemptId, type AppInfo, type CoreCommand } from "./ipc";
+import {
+  getCoreClient,
+  mergeHistoryPageIntoSnapshot,
+  mergeSnapshotHistory,
+  persistedAttemptId,
+  reusableAttemptId,
+  type AppInfo,
+  type CoreCommand
+} from "./ipc";
 import {
   DEMO_SNAPSHOT,
   EMPTY_SNAPSHOT,
+  HISTORY_WINDOW_ADVANCED_NOTICE,
   resolvePermission,
   withConnection,
   type CoreSnapshot,
@@ -25,6 +34,14 @@ import type { BootstrapState } from "./ipc";
 import { conversationTitle, headlineState } from "./lib/display";
 import { useModalFocus } from "./lib/useModalFocus";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
+import {
+  canExplicitlyRetry,
+  conversationSendIntent,
+  retryLabel,
+  settleSendIntent,
+  startConversationIntent,
+  type SendIntent
+} from "./lib/sendIntent";
 import "./styles.css";
 
 function noticeAfterRuntimeSelect(next: CoreSnapshot, current: ActiveNotice | null): ActiveNotice | null {
@@ -82,11 +99,14 @@ function freshRequestId(): string {
 interface GoalDraft extends GoalDraftValue {
   requestId: string;
   baselineCampaignId: string;
+  intent?: SendIntent;
 }
 
 function App() {
   const client = useMemo(() => getCoreClient(), []);
   const [snapshot, setSnapshot] = useState<CoreSnapshot>(() => client.mode === "browser-preview" ? DEMO_SNAPSHOT : EMPTY_SNAPSHOT);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const [campaignDrafts, setCampaignDrafts] = useState<Record<string, string>>({});
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
@@ -97,6 +117,8 @@ function App() {
   const [targetNotices, setTargetNotices] = useState<Record<string, ActiveNotice>>({});
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
+  const [sendIntents, setSendIntents] = useState<Record<string, SendIntent>>({});
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
@@ -123,6 +145,7 @@ function App() {
   const selectionIntent = useRef(0);
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
+  const historyRequest = useRef(0);
 
   useEffect(() => {
     const api = window.goalportCore;
@@ -142,12 +165,27 @@ function App() {
     return () => { active = false; unsubscribe(); };
   }, []);
 
+  const projectionUnavailable = snapshot.bounds?.projectionUnavailable === true;
   const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);
-  const draftCampaignId = activeCampaign?.id ?? "";
+  // A capacity acknowledgement may omit the navigation row while preserving
+  // the bounded authoritative active id. Keep that id as the pending intent /
+  // history key; an absent id remains unavailable and never means "fresh".
+  const draftCampaignId = activeCampaign?.id
+    ?? (projectionUnavailable ? snapshot.activeCampaignId.trim() : "");
   const draft = draftCampaignId ? campaignDrafts[draftCampaignId] ?? "" : "";
   const product = snapshot.productConversation;
   const hasGoal = Boolean(draftCampaignId);
-  const draftActive = draftGoal !== null || (!hasGoal && !draftDismissed);
+  const draftActive = draftGoal !== null
+    || (!projectionUnavailable && !hasGoal && !draftDismissed);
+  const activeSendIntent = sendIntents[draftCampaignId];
+  const activeRetryLabel = retryLabel(activeSendIntent);
+  const draftRetryLabel = retryLabel(draftGoal?.intent);
+
+  function capacityBlocksNewWork(action: string): boolean {
+    if (!snapshot.bounds?.projectionUnavailable) return false;
+    setActiveNotice({ sentence: `Core returned a capacity-limited control view, so GoalPort cannot ${action} until a full control snapshot is available.` });
+    return true;
+  }
 
   // Scroll follow/unseen is driven by visible content identity, not item
   // count: streaming grows one item's body at constant length, and identical
@@ -160,6 +198,13 @@ function App() {
     // still on screen, so keystrokes cannot silently move to the requested one.
     if (!draftCampaignId) return;
     setCampaignDrafts((current) => ({ ...current, [draftCampaignId]: value }));
+    setSendIntents((current) => {
+      const intent = current[draftCampaignId];
+      if (!intent || intent.message === value.trim()) return current;
+      const next = { ...current };
+      delete next[draftCampaignId];
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -171,7 +216,7 @@ function App() {
     const refresh = async (allowStart: boolean) => {
       const next = await client.snapshot();
       if (!mounted) return;
-      setSnapshot(next);
+      setSnapshot((current) => current.loadedHistory ? mergeSnapshotHistory(current, next) : next);
       setBooted(true);
       if (allowStart && !autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview") {
         autoStartAttempted = true;
@@ -196,7 +241,7 @@ function App() {
   // ever submitted again from it.
   useEffect(() => {
     if (!draftGoal) return;
-    if (snapshot.activeCampaignId && snapshot.activeCampaignId !== draftGoal.baselineCampaignId) {
+    if (!draftGoal.intent && snapshot.activeCampaignId && snapshot.activeCampaignId !== draftGoal.baselineCampaignId) {
       setDraftGoal(null);
       setDraftError(null);
       setDraftBlocked(false);
@@ -288,6 +333,11 @@ function App() {
   }
 
   function handleCloseChoice(choice: "continue" | "stop") {
+    if (snapshot.bounds?.projectionUnavailable) {
+      setActiveNotice({ sentence: "Core returned a capacity-limited control view, so GoalPort cannot target this Runtime for a close action. Keep the window open and reconnect first." });
+      setCloseChoiceOpen(true);
+      return;
+    }
     if (!window.goalportCore?.confirmCloseChoice) {
       setCloseChoiceOpen(false);
       return;
@@ -350,36 +400,45 @@ function App() {
   // -----------------------------------------------------------------------
   async function handleDraftSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draftGoal || draftBusy || draftBlocked || draftInFlight.current) return;
-    const workspace = draftGoal.workspace.trim();
-    const provider = draftGoal.provider;
-    const message = draftGoal.message.trim();
+    if (!draftGoal || draftBusy || draftInFlight.current) return;
+    const retrying = canExplicitlyRetry(draftGoal.intent);
+    if (draftBlocked && !retrying) return;
+    const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();
+    const provider = draftGoal.intent?.provider ?? draftGoal.provider;
+    const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !provider || !message) return;
     if (!client.startConversation) {
       setDraftError({ sentence: "This build of GoalPort cannot start a new conversation. Update GoalPort and try again." });
       return;
     }
-    if (snapshot.stopResponsibility?.writeResponsibility === "held"
+    if (!retrying && snapshot.bounds?.projectionUnavailable) {
+      setDraftError({ sentence: "Core confirmed the previous state but could not project enough control data to start new work. Retry a pending request or reconnect first." });
+      return;
+    }
+    if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held"
       && snapshot.stopResponsibility.blocksCurrentWorkspace !== false) {
       setDraftError({ sentence: "A held Stop governs a workspace in this view, so no new goal can start here." });
       return;
     }
     draftInFlight.current = true;
     setDraftBusy(true);
+    const intent = draftGoal.intent
+      ? { ...draftGoal.intent, state: "sending" as const }
+      : startConversationIntent(draftGoal.requestId, workspace, provider, message);
+    setDraftGoal((current) => current ? { ...current, intent } : current);
     try {
-      const next = await client.startConversation(workspace, provider, message, draftGoal.requestId);
+      const next = await client.startConversation(workspace, provider, message, intent.requestId);
       setSnapshot(next);
       const failure = client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation");
       if (failure) {
-        // Definitive refusal: a later explicit attempt may mint a new request
-        // id. Transport error: delivery is uncertain, so the same id stays and
-        // resubmission is blocked (Core deduplicates by this id).
         setDraftError(failure);
-        if (next.commandOutcome?.kind === "transport-error") {
-          setDraftBlocked(true);
-        } else {
-          setDraftGoal((current) => current ? { ...current, requestId: freshRequestId() } : current);
-        }
+        const retained = settleSendIntent(intent, next.commandOutcome);
+        setDraftBlocked(false);
+        setDraftGoal((current) => current ? {
+          ...current,
+          ...(retained ? { requestId: retained.requestId, intent: retained } : { requestId: freshRequestId(), intent: undefined }),
+          baselineCampaignId: next.commandOutcome?.rejection?.reservation?.campaignId ?? current.baselineCampaignId
+        } : current);
         return;
       }
       setDraftGoal(null);
@@ -418,40 +477,68 @@ function App() {
   // -----------------------------------------------------------------------
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (snapshot.stopResponsibility?.writeResponsibility === "held") {
+    const retainedIntent = sendIntents[draftCampaignId];
+    const retrying = canExplicitlyRetry(retainedIntent);
+    if (!retrying && snapshot.bounds?.projectionUnavailable) {
+      setActiveNotice({ sentence: "Core acknowledged the last action with a capacity-limited view. Reconnect before starting new work." });
+      return;
+    }
+    if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held") {
       setActiveNotice({ sentence: "Core refused new work while residual execution is unknown and write responsibility is held." });
       return;
     }
     const turn = product?.turn;
-    if (!turn?.canSend) {
+    if (!retrying && !turn?.canSend) {
       setActiveNotice({ sentence: turn?.reason || "Sending is not available for this conversation right now." });
       return;
     }
     if (sendInFlight.current) return;
     const submittedDraft = draft;
-    const message = submittedDraft.trim();
+    const message = retainedIntent?.message ?? submittedDraft.trim();
     if (!message) return;
     const target = {
-      campaignId: snapshot.activeCampaignId,
+      campaignId: retainedIntent?.campaignId ?? snapshot.activeCampaignId,
       taskId: snapshot.activeTask.id,
-      attemptId: persistedAttemptId(snapshot.attempt.id) ?? snapshot.attempt.id,
+      attemptId: retainedIntent?.attemptId ?? persistedAttemptId(snapshot.attempt.id) ?? snapshot.attempt.id,
       selection: selectionIntent.current
     };
     const targetKey = commandTargetKey(target.campaignId, target.taskId, target.attemptId);
     sendInFlight.current = true;
     setSendBusy(true);
+    const intent = retainedIntent
+      ? { ...retainedIntent, state: "sending" as const }
+      : conversationSendIntent(freshRequestId(), target.campaignId, target.attemptId, message);
+    setSendIntents((current) => ({ ...current, [target.campaignId]: intent }));
     try {
       const next = client.conversationSend
-        ? await client.conversationSend(message, target.campaignId, target.attemptId)
+        ? await client.conversationSend(message, target.campaignId, target.attemptId, intent.requestId)
         : await client.sendMessage(message, target.campaignId, target.attemptId, target.taskId);
-      if (target.selection === selectionIntent.current) setSnapshot(next);
+      if (target.selection === selectionIntent.current) {
+        setSnapshot((current) => current.loadedHistory ? mergeSnapshotHistory(current, next) : next);
+      }
       const messageType = client.conversationSend ? "conversation_send" : "send_message";
       const failure = client.mode === "browser-preview" ? null : commandFailure(next, messageType);
       if (failure) {
-        setTargetNotices((current) => ({ ...current, [targetKey]: failure }));
+        const retained = settleSendIntent(intent, next.commandOutcome);
+        setSendIntents((current) => {
+          const updated = { ...current };
+          if (retained) updated[target.campaignId] = retained;
+          else delete updated[target.campaignId];
+          return updated;
+        });
+        const reservationAttempt = next.commandOutcome?.rejection?.reservation?.attemptId;
+        const noticeKey = reservationAttempt
+          ? commandTargetKey(target.campaignId, target.taskId, reservationAttempt)
+          : targetKey;
+        setTargetNotices((current) => ({ ...current, [noticeKey]: failure }));
         if (target.selection === selectionIntent.current) setActiveNotice(failure);
         return;
       }
+      setSendIntents((current) => {
+        const updated = { ...current };
+        delete updated[target.campaignId];
+        return updated;
+      });
       // Quiet success: only the accepted campaign's draft clears.
       setCampaignDrafts((current) => current[target.campaignId] === submittedDraft
         ? { ...current, [target.campaignId]: "" }
@@ -463,6 +550,10 @@ function App() {
   }
 
   async function handlePermissionDecision(decisionId: string, allow: boolean) {
+    if (allow && snapshot.bounds?.projectionUnavailable) {
+      setActiveNotice({ sentence: "Permission Allow requires the full request facts, which are unavailable in this capacity-limited view. Decline remains available." });
+      return;
+    }
     if (allow && snapshot.stopResponsibility?.writeResponsibility === "held") {
       setActiveNotice({ sentence: "Permission Allow is blocked while Core holds Stop responsibility. Decline remains available." });
       return;
@@ -503,6 +594,7 @@ function App() {
   }
 
   async function handleOwnerAction(action: string) {
+    if (capacityBlocksNewWork(`request owner-only ${action}`)) return;
     if (!client.requestOwnerAction) {
       setActiveNotice({ sentence: "Owner-only requests require a connected Core." });
       return;
@@ -541,6 +633,7 @@ function App() {
   // refusals are surfaced with their exact reason in Technical details rather
   // than reworded, because Core's wording names the specific cause.
   async function handleContinue(attemptId: string) {
+    if (capacityBlocksNewWork("create isolated follow-up work")) return;
     if (!client.continueInIsolatedWorkspace) {
       setActiveNotice({ sentence: "This build cannot continue in a new workspace." });
       return;
@@ -575,6 +668,7 @@ function App() {
   }
 
   function openHandoffDialog() {
+    if (capacityBlocksNewWork("start a handoff")) return;
     if (snapshot.stopResponsibility?.writeResponsibility === "held") {
       setActiveNotice({ sentence: "Handoff is blocked while residual execution remains unknown and Core holds write responsibility." });
       return;
@@ -615,6 +709,7 @@ function App() {
   }
 
   async function handleOffline() {
+    if (capacityBlocksNewWork("change the Runtime transport state")) return;
     const next = client.mode === "browser-preview" ? withConnection(snapshot, "disconnected") : await client.setConnection("disconnected");
     setSnapshot(next);
     setActiveNotice({ sentence: "UI is offline. Core keeps committed task state; uncommitted input remains in this window." });
@@ -623,6 +718,7 @@ function App() {
   // Stop appears only for a proven cancellable live turn (product turn
   // canStop); never for an idle session.
   async function handleStop() {
+    if (capacityBlocksNewWork("target this Runtime with Stop")) return;
     const attemptId = persistedAttemptId(snapshot.attempt.id);
     if (!client.interrupt || !attemptId || !product?.turn.canStop) {
       setActiveNotice({ sentence: "There is no Runtime turn that can be stopped right now." });
@@ -649,6 +745,7 @@ function App() {
   }
 
   async function handleRenameCampaign(campaignId: string, title: string) {
+    if (capacityBlocksNewWork("rename this goal")) return;
     if (!client.renameConversation) {
       setActiveNotice({ sentence: "This build of GoalPort cannot rename goals." });
       return;
@@ -698,6 +795,7 @@ function App() {
   }
 
   async function selectRuntime(provider: string) {
+    if (capacityBlocksNewWork("select a new Runtime")) return;
     if (!client.selectRuntime || !snapshot.activeCampaignId || !snapshot.activeTask.id) {
       setActiveNotice({ sentence: "Select or start a goal before choosing a Runtime." });
       return;
@@ -723,12 +821,58 @@ function App() {
     try {
       const selected = await client.chooseWorkspace();
       if (selected) {
-        setDraftGoal((current) => current ? { ...current, workspace: selected } : current);
+        setDraftGoal((current) => current
+          ? { ...current, workspace: selected, intent: undefined, requestId: current.intent ? freshRequestId() : current.requestId }
+          : {
+              workspace: selected,
+              provider: "",
+              message: "",
+              requestId: freshRequestId(),
+              baselineCampaignId: snapshot.activeCampaignId
+            });
         setDraftError(null);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setDraftError({ sentence: "Workspace selection failed.", technical: message });
+    }
+  }
+
+  async function loadEarlierConversation() {
+    const pageInfo = snapshot.productConversation?.pageInfo;
+    const ownerId = snapshot.activeCampaignId;
+    if (!client.historyPage || !ownerId || !pageInfo?.hasOlder || !pageInfo.olderCursor || historyLoading) return;
+    const requestedOlderCursor = pageInfo.olderCursor;
+    const requestGeneration = ++historyRequest.current;
+    const viewIntent = selectionIntent.current;
+    setHistoryLoading(true);
+    try {
+      const page = await client.historyPage({
+        scope: "conversation",
+        ownerId,
+        direction: "older",
+        cursor: requestedOlderCursor
+      });
+      if (requestGeneration !== historyRequest.current || viewIntent !== selectionIntent.current
+        || page.scope !== "conversation" || page.ownerId !== ownerId
+        || snapshotRef.current.activeCampaignId !== ownerId) return;
+      if (snapshotRef.current.productConversation?.pageInfo?.olderCursor !== requestedOlderCursor) {
+        setSnapshot((current) => current.notices.includes(HISTORY_WINDOW_ADVANCED_NOTICE)
+          ? current
+          : { ...current, notices: [HISTORY_WINDOW_ADVANCED_NOTICE, ...current.notices] });
+        setActiveNotice({ sentence: HISTORY_WINDOW_ADVANCED_NOTICE });
+        return;
+      }
+      anchor.prepareForPrepend();
+      setSnapshot((current) => current.activeCampaignId === ownerId
+        ? mergeHistoryPageIntoSnapshot(current, page, requestedOlderCursor)
+        : current);
+    } catch (error) {
+      if (requestGeneration === historyRequest.current) {
+        setActiveNotice({ sentence: "Earlier conversation history could not be loaded.", technical: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      if (requestGeneration === historyRequest.current) setHistoryLoading(false);
     }
   }
 
@@ -800,12 +944,22 @@ function App() {
                 runtimes={snapshot.runtimes}
                 connected={snapshot.connection === "connected"}
                 busy={draftBusy}
-                blockedFromSending={draftBlocked}
+                blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                retryLabel={draftRetryLabel}
                 error={draftError}
                 canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                 onBrowse={() => { void chooseWorkspace(); }}
-                onChange={(value) => setDraftGoal((current) =>
-                  current ? { ...current, ...value } : { ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId })}
+                onChange={(value) => setDraftGoal((current) => {
+                  if (!current) return { ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId };
+                  const changed = current.workspace !== value.workspace
+                    || current.provider !== value.provider
+                    || current.message !== value.message;
+                  return {
+                    ...current,
+                    ...value,
+                    ...(changed && current.intent ? { requestId: freshRequestId(), intent: undefined } : {})
+                  };
+                })}
                 onSubmit={handleDraftSend}
                 onDiscard={handleDiscardDraft}
               />
@@ -836,7 +990,11 @@ function App() {
               />
 
               <div className="timeline-scroll" ref={anchor.ref} onScroll={anchor.handleScroll} tabIndex={-1} aria-label="Conversation timeline">
-                <ProductConversationView product={product} />
+                <ProductConversationView
+                  product={product}
+                  loadingEarlier={historyLoading}
+                  onLoadEarlier={client.historyPage ? () => { void loadEarlierConversation(); } : undefined}
+                />
                 {anchor.unseenCount > 0 ? (
                   <button className="jump-latest" type="button" onClick={() => anchor.scrollToBottom()}>
                     {anchor.unseenCount} new {anchor.unseenCount === 1 ? "message" : "messages"} ↓
@@ -866,8 +1024,11 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
-                turn={product.turn}
+                turn={snapshot.bounds?.projectionUnavailable && !activeRetryLabel
+                  ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
+                  : product.turn}
                 busy={sendBusy}
+                retryLabel={activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}

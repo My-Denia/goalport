@@ -173,7 +173,7 @@ export async function main(argv = process.argv.slice(2)) {
     };
     const stage = resolve(out, "stage");
     mkdirSync(stage);
-    for (const name of ["main.cjs", "preload.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
+    for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
     cpSync(frontend, resolve(stage, "dist"), { recursive: true });
     writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, main: "main.cjs" }, null, 2));
     writeFileSync(resolve(stage, "build-info.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);

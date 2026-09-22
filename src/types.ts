@@ -17,6 +17,8 @@ export type EvidenceState = "verified" | "needs-review" | "stale" | "unavailable
 export type ProviderSupport = "supported" | "partial" | "unsupported" | "unknown";
 export type AttemptState = "active" | "waiting" | "completed" | "failed" | "uncertain";
 
+export const HISTORY_WINDOW_ADVANCED_NOTICE = "Conversation history advanced beyond the loaded window. Earlier history remains available; load it again from the current conversation boundary.";
+
 // ---------------------------------------------------------------------------
 // Product conversation read model (product-interaction-reset).
 //
@@ -53,6 +55,20 @@ export interface ProductConversationItem {
   actions?: string[];
   /** Exact technical detail (raw error context). Collapsed in the normal UI. */
   technicalDetails?: string;
+  /** Stable identity shared by bounded fragments of one logical item. */
+  logicalItemId?: string;
+  fragmentIndex?: number;
+  continuesBefore?: boolean;
+  continuesAfter?: boolean;
+}
+
+export interface HistoryPageInfo {
+  olderCursor: string | null;
+  newerCursor: string | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  contentBytes: number;
+  itemCount: number;
 }
 
 export type ProductRuntimeSelectionState = "none" | "selected" | "unavailable";
@@ -85,6 +101,7 @@ export interface ProductTurn {
 
 export interface ProductConversation {
   items: ProductConversationItem[];
+  pageInfo?: HistoryPageInfo;
   runtime: ProductRuntimeSelection;
   turn: ProductTurn;
   /** Deterministic product title (rename > first prompt > root task title). */
@@ -97,7 +114,7 @@ const PRODUCT_TURN_STATES: readonly ProductTurnState[] = [
   "stopping", "stopped", "completed", "failed", "uncertain"
 ];
 
-function normalizeProductItem(value: unknown): ProductConversationItem | null {
+export function normalizeProductConversationItem(value: unknown): ProductConversationItem | null {
   const raw = asRecord(value);
   if (!raw) return null;
   const id = optionalText(raw.id);
@@ -115,7 +132,11 @@ function normalizeProductItem(value: unknown): ProductConversationItem | null {
     actions: Array.isArray(raw.actions)
       ? raw.actions.map((action) => asText(action, "")).filter(Boolean)
       : undefined,
-    technicalDetails: optionalText(raw.technicalDetails ?? raw.technical_details)
+    technicalDetails: optionalText(raw.technicalDetails ?? raw.technical_details),
+    logicalItemId: optionalText(raw.logicalItemId ?? raw.logical_item_id),
+    fragmentIndex: optionalNumber(raw.fragmentIndex ?? raw.fragment_index),
+    continuesBefore: optionalBoolean(raw.continuesBefore ?? raw.continues_before),
+    continuesAfter: optionalBoolean(raw.continuesAfter ?? raw.continues_after)
   };
 }
 
@@ -136,10 +157,11 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
   if (!PRODUCT_RUNTIME_STATES.includes(runtimeState as ProductRuntimeSelectionState)) return null;
   if (!PRODUCT_TURN_STATES.includes(turnState as ProductTurnState)) return null;
   const items = Array.isArray(raw.items)
-    ? raw.items.map(normalizeProductItem).filter(isPresent)
+    ? raw.items.map(normalizeProductConversationItem).filter(isPresent)
     : [];
   return {
     items,
+    pageInfo: normalizeHistoryPageInfo(raw.pageInfo ?? raw.page_info),
     runtime: {
       state: runtimeState as ProductRuntimeSelectionState,
       provider: asText(runtimeRaw.provider, ""),
@@ -162,6 +184,41 @@ export interface CoreCommandOutcome {
   messageType: string;
   duplicate?: boolean;
   error?: string;
+  rejection?: CommandRejection;
+}
+
+export type DeliveryState = "FAILED" | "DELIVERED" | "UNKNOWN";
+export type NativeDispatchState = "NOT_STARTED" | "STARTED" | "UNKNOWN";
+export type RetryMode = "SAME_REQUEST" | "NEW_REQUEST" | "RECONCILE" | "NONE";
+
+export interface ConversationReservation {
+  kind: "first-send" | "stop-successor";
+  requestId: string;
+  campaignId: string;
+  taskId: string;
+  attemptId: string;
+  sourceAttemptId?: string;
+  messageReserved: boolean;
+}
+
+export interface CommandRejection {
+  code: string;
+  message: string;
+  deliveryState: DeliveryState;
+  nativeDispatchState: NativeDispatchState;
+  retryMode: RetryMode;
+  reservation: ConversationReservation | null;
+}
+
+export interface SnapshotBounds {
+  maxEnvelopeBytes?: number;
+  truncated: boolean;
+  projectionUnavailable: boolean;
+  omittedCounts: Partial<Record<
+    "projects" | "campaigns" | "decisions" | "evidence" | "notices" |
+    "relatedHolds" | "conversationItems" | "timelineItems",
+    number
+  >>;
 }
 
 export interface ProjectSummary {
@@ -207,6 +264,10 @@ export interface TimelineItem {
   evidenceState?: EvidenceState;
   details?: string[];
   accent?: "violet" | "blue" | "amber" | "green" | "red" | "slate";
+  logicalItemId?: string;
+  fragmentIndex?: number;
+  continuesBefore?: boolean;
+  continuesAfter?: boolean;
 }
 
 export interface RuntimeProfile {
@@ -302,6 +363,7 @@ export interface CoreSnapshot {
   };
   attempt: AttemptSummary;
   timeline: TimelineItem[];
+  timelinePageInfo?: HistoryPageInfo;
   cursor: number;
   runtimes: RuntimeProfile[];
   decisions: DecisionRequest[];
@@ -310,6 +372,9 @@ export interface CoreSnapshot {
   relatedHolds: StopResponsibilitySummary[];
   preview: boolean;
   notices: string[];
+  bounds?: SnapshotBounds;
+  /** Desktop-local marker: explicit older pages are retained across recent polling snapshots. */
+  loadedHistory?: { conversationOwnerId?: string; timelineOwnerId?: string };
   /** Added by the desktop client only for the Promise that completed a command. */
   commandOutcome?: CoreCommandOutcome;
   /**
@@ -868,6 +933,7 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
     activeTask: rawActiveTask,
     attempt: rawAttempt,
     timeline: rawTimeline,
+    timelinePageInfo: normalizeHistoryPageInfo(raw.timelinePageInfo ?? raw.timeline_page_info),
     cursor: asNumber(raw.cursor, rawTimeline.length),
     runtimes: Array.isArray(raw.runtimes) ? raw.runtimes.map(normalizeRuntime).filter(isPresent) : [],
     decisions: Array.isArray(raw.decisions) ? raw.decisions.map(normalizeDecision).filter(isPresent) : [],
@@ -880,6 +946,7 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
       : [],
     preview: raw.preview === true,
     notices: Array.isArray(raw.notices) ? raw.notices.map((notice) => asText(notice, "")).filter(Boolean) : [],
+    bounds: normalizeSnapshotBounds(raw.bounds),
     commandOutcome: undefined,
     productConversation: normalizeProductConversation(raw.productConversation ?? raw.product_conversation)
   };
@@ -939,7 +1006,7 @@ function normalizeCampaign(value: unknown): CampaignSummary | null {
   };
 }
 
-function normalizeTimelineItem(value: unknown): TimelineItem | null {
+export function normalizeTimelineItem(value: unknown): TimelineItem | null {
   const raw = asRecord(value) ?? {};
   const id = optionalText(raw.id);
   if (!id) return null;
@@ -957,7 +1024,11 @@ function normalizeTimelineItem(value: unknown): TimelineItem | null {
     status: typeof raw.status === "string" ? raw.status : undefined,
     evidenceState: normalizeEvidenceState(raw.evidenceState ?? raw.evidence_state),
     details,
-    accent: normalizeAccent(raw.accent)
+    accent: normalizeAccent(raw.accent),
+    logicalItemId: optionalText(raw.logicalItemId ?? raw.logical_item_id),
+    fragmentIndex: optionalNumber(raw.fragmentIndex ?? raw.fragment_index),
+    continuesBefore: optionalBoolean(raw.continuesBefore ?? raw.continues_before),
+    continuesAfter: optionalBoolean(raw.continuesAfter ?? raw.continues_after)
   };
 }
 
@@ -1111,6 +1182,84 @@ function normalizeStopResponsibility(value: unknown): StopResponsibilitySummary 
 function optionalText(value: unknown): string | undefined {
   const text = asText(value, "");
   return text.length > 0 ? text : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+export function normalizeHistoryPageInfo(value: unknown): HistoryPageInfo | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  return {
+    olderCursor: optionalText(raw.olderCursor ?? raw.older_cursor) ?? null,
+    newerCursor: optionalText(raw.newerCursor ?? raw.newer_cursor) ?? null,
+    hasOlder: raw.hasOlder === true || raw.has_older === true,
+    hasNewer: raw.hasNewer === true || raw.has_newer === true,
+    contentBytes: Math.max(0, asNumber(raw.contentBytes ?? raw.content_bytes, 0)),
+    itemCount: Math.max(0, asNumber(raw.itemCount ?? raw.item_count, 0))
+  };
+}
+
+export function normalizeCommandRejection(value: unknown): CommandRejection | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const deliveryState = asText(raw.deliveryState ?? raw.delivery_state, "").trim().toUpperCase();
+  const nativeDispatchState = asText(raw.nativeDispatchState ?? raw.native_dispatch_state, "").trim().toUpperCase();
+  const retryMode = asText(raw.retryMode ?? raw.retry_mode, "").trim().toUpperCase();
+  if (!["FAILED", "DELIVERED", "UNKNOWN"].includes(deliveryState)
+    || !["NOT_STARTED", "STARTED", "UNKNOWN"].includes(nativeDispatchState)
+    || !["SAME_REQUEST", "NEW_REQUEST", "RECONCILE", "NONE"].includes(retryMode)) return undefined;
+  const reservationRaw = asRecord(raw.reservation);
+  let reservation: ConversationReservation | null = null;
+  if (reservationRaw) {
+    const kind = normalized(reservationRaw.kind, "");
+    const requestId = optionalText(reservationRaw.requestId ?? reservationRaw.request_id);
+    const campaignId = optionalText(reservationRaw.campaignId ?? reservationRaw.campaign_id);
+    const taskId = optionalText(reservationRaw.taskId ?? reservationRaw.task_id);
+    const attemptId = optionalText(reservationRaw.attemptId ?? reservationRaw.attempt_id);
+    if ((kind === "first-send" || kind === "stop-successor") && requestId && campaignId && taskId && attemptId) {
+      reservation = {
+        kind,
+        requestId,
+        campaignId,
+        taskId,
+        attemptId,
+        sourceAttemptId: optionalText(reservationRaw.sourceAttemptId ?? reservationRaw.source_attempt_id),
+        messageReserved: reservationRaw.messageReserved === true || reservationRaw.message_reserved === true
+      };
+    }
+  }
+  return {
+    code: asText(raw.code, "core-refused"),
+    message: asText(raw.message, "Core rejected the request"),
+    deliveryState: deliveryState as DeliveryState,
+    nativeDispatchState: nativeDispatchState as NativeDispatchState,
+    retryMode: retryMode as RetryMode,
+    reservation
+  };
+}
+
+function normalizeSnapshotBounds(value: unknown): SnapshotBounds | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const omittedRaw = asRecord(raw.omittedCounts ?? raw.omitted_counts ?? raw.omitted);
+  const omittedCounts: SnapshotBounds["omittedCounts"] = {};
+  for (const key of ["projects", "campaigns", "decisions", "evidence", "notices", "relatedHolds", "conversationItems", "timelineItems"] as const) {
+    const snake = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+    const count = omittedRaw ? optionalNumber(omittedRaw[key] ?? omittedRaw[snake]) : undefined;
+    if (count !== undefined && count > 0) omittedCounts[key] = count;
+  }
+  return {
+    maxEnvelopeBytes: optionalNumber(raw.maxEnvelopeBytes ?? raw.max_envelope_bytes),
+    truncated: raw.truncated === true,
+    projectionUnavailable: raw.projectionUnavailable === true || raw.projection_unavailable === true,
+    omittedCounts
+  };
 }
 
 function normalizeRecheck(value: unknown): RecheckObservationSummary | null {

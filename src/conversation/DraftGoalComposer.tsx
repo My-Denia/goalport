@@ -95,6 +95,7 @@ interface DraftGoalComposerProps {
   connected: boolean;
   busy: boolean;
   blockedFromSending: boolean;
+  retryLabel?: string;
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
   onBrowse: () => void;
@@ -110,7 +111,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, error, canBrowse, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // IME composition guards, identical to the conversation composer.
@@ -118,7 +119,7 @@ export function DraftGoalComposer({
   const compositionEndedAtRef = useRef(0);
 
   const canSubmit = !busy
-    && !blockedFromSending
+    && (!blockedFromSending || Boolean(retryLabel))
     && connected
     && draft.workspace.trim().length > 0
     && draft.provider.length > 0
@@ -227,8 +228,8 @@ export function DraftGoalComposer({
 
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onDiscard} disabled={busy}>Discard draft</button>
-          <button className="button button-primary" type="submit" aria-label="Send message" disabled={!canSubmit}>
-            {busy ? "Starting…" : "Send"}
+          <button className="button button-primary" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
+            {busy ? "Starting…" : (retryLabel ?? "Send")}
             <span aria-hidden="true">↗</span>
           </button>
         </div>

@@ -9,9 +9,13 @@ use crate::{
     assurance::{ActionAuthority, ApprovalContext},
     commands::{CoreCommand, CoreOperation, sha256_hex},
     domain::{
-        AccessMode, AgentEventEnvelope, AgentEventType, Attempt, AttemptState, Campaign,
-        Command, CommandState, Decision, DecisionState, Event, Evidence, Project, Task,
-        Verdict, WorkspaceLease,
+        AccessMode, AgentEventEnvelope, AgentEventType, Attempt, AttemptState, Campaign, Command,
+        CommandState, Decision, DecisionState, Event, Evidence, Project, Task, Verdict,
+        WorkspaceLease,
+    },
+    history::{
+        HISTORY_ITEMS_BYTES, HistoryDirection, HistoryPage, HistoryPageInfo, conversation_page,
+        recent_conversation, recent_timeline, timeline_after, timeline_page,
     },
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, UiCommandRequest},
     product_conversation::{
@@ -20,11 +24,11 @@ use crate::{
     },
     runtime_manager::{RegistrationWithdrawal, RuntimeManager, TransportState},
     store::{
-        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization,
+        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ConfirmedStopSuccessor,
         ConversationPrepareOutcome, ConversationRequestPhase, ConversationRequestRow,
-        ConversationStart, ConfirmedStopSuccessor, EventRecord, NewRecheckObservation,
-        RecheckVerdict, RuntimeEpochBinding, RuntimeObservation, StopNativeTurnState,
-        StopResponsibility, StopResponsibilityUpdate, Store, StoreError,
+        ConversationStart, EventRecord, NewRecheckObservation, RecheckVerdict, RuntimeEpochBinding,
+        RuntimeObservation, StopNativeTurnState, StopResponsibility, StopResponsibilityUpdate,
+        Store, StoreError,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -88,6 +92,14 @@ pub struct UiTask {
 #[serde(rename_all = "camelCase")]
 pub struct UiTimelineItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logical_item_id: String,
+    #[serde(default)]
+    pub fragment_index: usize,
+    #[serde(default)]
+    pub continues_before: bool,
+    #[serde(default)]
+    pub continues_after: bool,
     pub kind: String,
     /// Raw journal event kind (e.g. `message.user`). Additive, display-only:
     /// lets the GUI distinguish a user-authored message from other `message`
@@ -204,6 +216,7 @@ pub struct CoreSnapshot {
     pub active_task: UiTask,
     pub attempt: UiAttempt,
     pub timeline: Vec<UiTimelineItem>,
+    pub timeline_page_info: HistoryPageInfo,
     pub cursor: i64,
     pub runtimes: Vec<UiRuntime>,
     pub decisions: Vec<UiDecision>,
@@ -221,6 +234,17 @@ pub struct CoreSnapshot {
     pub product_conversation: ProductConversation,
     pub preview: bool,
     pub notices: Vec<String>,
+    #[serde(default)]
+    pub bounds: ProjectionBounds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionBounds {
+    pub truncated: bool,
+    pub projection_unavailable: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub omitted_counts: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -357,7 +381,7 @@ impl UiController {
             self.selected_task_id = None;
             self.selected_attempt_id = None;
             self.flush_runtime_events()?;
-            return Ok(CoreSnapshot {
+            let mut snapshot = CoreSnapshot {
                 protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
                 build_id: self.build_id.clone(),
                 connection: "connected".into(),
@@ -379,6 +403,7 @@ impl UiController {
                 },
                 attempt: unassigned_attempt_ui(String::new()),
                 timeline: Vec::new(),
+                timeline_page_info: HistoryPageInfo::default(),
                 cursor: 0,
                 runtimes: runtime_profiles(),
                 decisions: Vec::new(),
@@ -387,6 +412,7 @@ impl UiController {
                 related_holds: Vec::new(),
                 product_conversation: ProductConversation {
                     items: Vec::new(),
+                    page_info: HistoryPageInfo::default(),
                     runtime: ProductRuntimeSelection {
                         state: "none".into(),
                         provider: String::new(),
@@ -402,7 +428,10 @@ impl UiController {
                 },
                 preview: false,
                 notices: self.notices.clone(),
-            });
+                bounds: ProjectionBounds::default(),
+            };
+            crate::response_bounds::bound_snapshot(&mut snapshot)?;
+            return Ok(snapshot);
         }
         if !projects
             .iter()
@@ -469,30 +498,24 @@ impl UiController {
         self.selected_campaign_id = active_campaign.as_ref().map(|item| item.id.clone());
         self.selected_task_id = active_task_id;
         self.selected_attempt_id = Some(active_attempt.id.clone());
-        let records = self
-            .store
-            .list_event_records(&active_attempt.id, after_cursor.unwrap_or(0))
-            .map_err(store_message)?;
-        let timeline =
-            coalesce_reply_deltas(records.iter().map(event_to_timeline).collect(), &records);
-        let cursor = records
-            .last()
-            .map(|record| record.event.seq)
-            .unwrap_or(active_attempt.last_event_seq);
+        let (timeline, timeline_page_info) = if let Some(after_cursor) = after_cursor {
+            timeline_after(&self.store, &active_attempt.id, after_cursor)?
+        } else {
+            recent_timeline(&self.store, &active_attempt.id)?
+        };
+        let cursor = active_attempt.last_event_seq;
         let decisions = self
             .store
-            .list_decisions()
+            .decisions_for_attempt(&active_attempt.id, 256)
             .map_err(store_message)?
             .into_iter()
-            .filter(|decision| decision.attempt_id == active_attempt.id)
             .map(|decision| decision_to_ui(decision, &self.store))
             .collect::<Vec<_>>();
         let evidence = self
             .store
-            .list_evidence()
+            .evidence_for_attempt(&active_attempt.id, 256)
             .map_err(store_message)?
             .into_iter()
-            .filter(|item| item.attempt_id == active_attempt.id)
             .map(evidence_to_ui)
             .collect::<Vec<_>>();
         let project_ui = project_to_ui(&selected_project);
@@ -548,11 +571,10 @@ impl UiController {
             });
         let mut runtimes = runtime_profiles();
         if active_attempt.provider.eq_ignore_ascii_case("claude") {
-            let observed_version = self.store.list_event_records(&active_attempt.id, 0)
-                .map_err(store_message)?.into_iter().find_map(|record| {
-                    if record.event.kind != "runtime.session.created" { return None; }
-                    record.payload.as_ref()?.get("runtime_version")?.as_str().map(str::to_owned)
-                });
+            let observed_version = self
+                .store
+                .latest_runtime_session_version(&active_attempt.id)
+                .map_err(store_message)?;
             if let Some(version) = observed_version {
                 if let Some(profile) = runtimes.iter_mut().find(|profile| profile.id == "claude") {
                     profile.version = version;
@@ -573,6 +595,12 @@ impl UiController {
             })
             .map(|task| task.title.clone())
             .unwrap_or_default();
+        let (conversation_items, conversation_page_info) =
+            recent_conversation(&self.store, &active_campaign_id)?;
+        let first_user_message = self
+            .store
+            .campaign_first_user_message(&active_campaign_id)
+            .map_err(store_message)?;
         let product_conversation = product_conversation(
             &self.store,
             &mut self.runtime_manager,
@@ -582,8 +610,11 @@ impl UiController {
                 workspace_root: &selected_project.workspace_root,
                 root_task_title: &root_task_title,
             },
+            conversation_items,
+            first_user_message.as_deref(),
+            conversation_page_info,
         )?;
-        Ok(CoreSnapshot {
+        let mut snapshot = CoreSnapshot {
             related_holds,
             protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
             build_id: self.build_id.clone(),
@@ -596,6 +627,7 @@ impl UiController {
             active_task: task_ui,
             attempt: attempt_to_ui(&active_attempt, &self.store),
             timeline,
+            timeline_page_info,
             cursor,
             runtimes,
             decisions,
@@ -606,7 +638,7 @@ impl UiController {
                 && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
                 let mut notices = self.notices.clone();
-                self.merge_permission_denied_notices(&mut notices)?;
+                self.merge_permission_denied_notices(&mut notices, &active_attempt.id)?;
                 if let Ok(queued) = self.store.pending_admissions() {
                     for row in queued.iter().filter(|row| row.override_reason.is_none()) {
                         notices.push(format!("Queued under resource pressure: {}", row.id));
@@ -614,7 +646,24 @@ impl UiController {
                 }
                 notices
             },
-        })
+            bounds: ProjectionBounds::default(),
+        };
+        if snapshot.product_conversation.page_info.has_older {
+            snapshot.bounds.truncated = true;
+            snapshot
+                .bounds
+                .omitted_counts
+                .insert("conversationItems".into(), 1);
+        }
+        if snapshot.timeline_page_info.has_older {
+            snapshot.bounds.truncated = true;
+            snapshot
+                .bounds
+                .omitted_counts
+                .insert("timelineItems".into(), 1);
+        }
+        crate::response_bounds::bound_snapshot(&mut snapshot)?;
+        Ok(snapshot)
     }
 
     pub fn handle(&mut self, request: UiCommandRequest) -> Result<UiCommandResult, String> {
@@ -731,6 +780,168 @@ impl UiController {
             snapshot,
             receipt,
         })
+    }
+
+    /// Read-only byte-paged history. The response intentionally carries no
+    /// full snapshot; callers merge stable fragments into the recent bounded
+    /// compatibility arrays.
+    pub fn history_page(&mut self, request: &UiCommandRequest) -> Result<HistoryPage, String> {
+        request.validate().map_err(|error| error.to_string())?;
+        if request.message_type != "history_page" {
+            return Err("history_page handler received another message type".into());
+        }
+        let scope = payload_text(&request.payload, "scope")?;
+        let owner_id = payload_text(&request.payload, "ownerId")?;
+        let direction = match payload_text(&request.payload, "direction")?.as_str() {
+            "older" => HistoryDirection::Older,
+            "newer" => HistoryDirection::Newer,
+            _ => return Err("history direction must be older or newer".into()),
+        };
+        let cursor = request
+            .payload
+            .get("cursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        match scope.as_str() {
+            "conversation" => {
+                self.store.get_campaign(&owner_id).map_err(store_message)?;
+                conversation_page(
+                    &self.store,
+                    &owner_id,
+                    direction,
+                    cursor,
+                    HISTORY_ITEMS_BYTES,
+                )
+            }
+            "timeline" => {
+                self.store.get_attempt(&owner_id).map_err(store_message)?;
+                timeline_page(
+                    &self.store,
+                    &owner_id,
+                    direction,
+                    cursor,
+                    HISTORY_ITEMS_BYTES,
+                )
+            }
+            _ => Err("history scope must be conversation or timeline".into()),
+        }
+    }
+
+    /// Build the structured rejection carried by a failed UI response. Durable
+    /// conversation-request facts win; unstructured errors remain UNKNOWN and
+    /// therefore can never authorize a fresh request identity.
+    pub fn rejected_payload(
+        &mut self,
+        request: &UiCommandRequest,
+        message: &str,
+    ) -> Result<Value, String> {
+        let mut delivery_state = "UNKNOWN".to_string();
+        let mut native_dispatch_state = "UNKNOWN".to_string();
+        let mut retry_mode = "RECONCILE".to_string();
+        let mut reservation = Value::Null;
+
+        if let Some(row) = self
+            .store
+            .conversation_request(&request.request_id)
+            .map_err(store_message)?
+        {
+            if let Some(result) = row.result.as_ref() {
+                if let Some(value) = result.get("deliveryState").and_then(Value::as_str) {
+                    delivery_state = value.to_owned();
+                }
+                if let Some(value) = result.get("nativeDispatchState").and_then(Value::as_str) {
+                    native_dispatch_state = value.to_owned();
+                }
+                if let Some(value) = result.get("retryMode").and_then(Value::as_str) {
+                    retry_mode = value.to_owned();
+                }
+                if let Some(value) = result.get("reservation") {
+                    reservation = value.clone();
+                }
+            }
+            if reservation.is_null() {
+                reservation = json!({
+                    "kind": if row.source_attempt_id.is_some() { "stop-successor" } else { "first-send" },
+                    "requestId": row.request_id,
+                    "campaignId": row.campaign_id,
+                    "taskId": row.task_id,
+                    "attemptId": row.attempt_id,
+                    "sourceAttemptId": row.source_attempt_id,
+                    "messageReserved": row.source_attempt_id.is_none()
+                });
+            }
+            if row.phase == "unknown" || row.phase == "dispatching" {
+                delivery_state = "UNKNOWN".into();
+                native_dispatch_state = "UNKNOWN".into();
+                retry_mode = "RECONCILE".into();
+            } else if conversation_request_is_predispatch_retryable(&row) {
+                delivery_state = "FAILED".into();
+                native_dispatch_state = "NOT_STARTED".into();
+                retry_mode = "SAME_REQUEST".into();
+            }
+        } else if let (Ok(attempt_id), Ok(message_text)) = (
+            payload_text(&request.payload, "attemptId"),
+            payload_text(&request.payload, "message"),
+        ) && let Ok(command) =
+            send_message_command(&request.request_id, &attempt_id, &message_text)
+            && let Ok(row) = self.store.get_command(&command.command.id)
+            && row.attempt_id == command.command.attempt_id
+            && row.payload_hash == command.command.payload_hash
+        {
+            let result = self.store.command_result(&row.id).map_err(store_message)?;
+            delivery_state = result
+                .as_ref()
+                .and_then(|value| value.get("deliveryState"))
+                .and_then(Value::as_str)
+                .unwrap_or("UNKNOWN")
+                .to_owned();
+            match row.state {
+                CommandState::Pending => {
+                    native_dispatch_state = "NOT_STARTED".into();
+                    retry_mode = "SAME_REQUEST".into();
+                    if delivery_state == "UNKNOWN" {
+                        delivery_state = "FAILED".into();
+                    }
+                }
+                CommandState::Executing | CommandState::Unknown => {
+                    native_dispatch_state = "UNKNOWN".into();
+                    delivery_state = "UNKNOWN".into();
+                    retry_mode = "RECONCILE".into();
+                }
+                CommandState::Failed => {
+                    native_dispatch_state = if delivery_state == "FAILED" {
+                        "STARTED".into()
+                    } else {
+                        "UNKNOWN".into()
+                    };
+                    retry_mode = if delivery_state == "FAILED" {
+                        "NEW_REQUEST".into()
+                    } else {
+                        "RECONCILE".into()
+                    };
+                }
+                CommandState::Succeeded => {
+                    delivery_state = "DELIVERED".into();
+                    native_dispatch_state = "STARTED".into();
+                    retry_mode = "NONE".into();
+                }
+            }
+        }
+
+        let snapshot = self.snapshot(None)?;
+        Ok(json!({
+            "requestId": request.request_id,
+            "accepted": false,
+            "snapshot": snapshot,
+            "rejection": {
+                "code": rejection_code(request, &delivery_state, &native_dispatch_state),
+                "message": message,
+                "deliveryState": delivery_state,
+                "nativeDispatchState": native_dispatch_state,
+                "retryMode": retry_mode,
+                "reservation": reservation
+            }
+        }))
     }
 
     fn ensure_seed(&mut self, workspace_root: &str) -> Result<(), String> {
@@ -953,10 +1164,7 @@ impl UiController {
     /// So row 1 short-circuits BEFORE `observe_process` is called: with nothing
     /// recorded there is nothing to observe. `not-running` is reachable only from
     /// a real `NotRunning` on a real recorded identity.
-    fn recheck_stop_responsibility(
-        &mut self,
-        request: &UiCommandRequest,
-    ) -> Result<Value, String> {
+    fn recheck_stop_responsibility(&mut self, request: &UiCommandRequest) -> Result<Value, String> {
         let attempt_id = payload_text_default(
             &request.payload,
             "attemptId",
@@ -978,7 +1186,10 @@ impl UiController {
             .iter()
             .filter(|lease| {
                 crate::domain::workspace_keys_overlap(&lease.workspace_key, &held.workspace_key)
-                    && matches!(lease.state, crate::domain::LeaseState::Active | crate::domain::LeaseState::Uncertain)
+                    && matches!(
+                        lease.state,
+                        crate::domain::LeaseState::Active | crate::domain::LeaseState::Uncertain
+                    )
             })
             .count() as i64;
         let pending_outbox = self
@@ -1125,7 +1336,13 @@ impl UiController {
 
         let source_task = self
             .store
-            .get_task(&self.store.get_attempt(&source_attempt_id).map_err(store_message)?.task_id)
+            .get_task(
+                &self
+                    .store
+                    .get_attempt(&source_attempt_id)
+                    .map_err(store_message)?
+                    .task_id,
+            )
             .map_err(store_message)?;
         let source_campaign = self
             .store
@@ -1181,8 +1398,7 @@ impl UiController {
         // the previous ManagedRuntime, and for Claude that Drop reaches child.kill().
         // A continuation that reused the held attempt id would therefore force-kill
         // the residual process with no event and no record. Refuse; never replace.
-        if self.runtime_manager.has_attempt(&new_attempt_id)
-            || new_attempt_id == source_attempt_id
+        if self.runtime_manager.has_attempt(&new_attempt_id) || new_attempt_id == source_attempt_id
         {
             return Err(format!(
                 "continuation refused: a live runtime is already registered under \
@@ -1925,7 +2141,9 @@ impl UiController {
         // `runtime.transport.closed` event.
         let transport = if provider.eq_ignore_ascii_case("codex") {
             match self.runtime_manager.transport_state(attempt_id) {
-                Some(TransportState::Closed { reason }) => json!({ "closed": true, "reason": reason }),
+                Some(TransportState::Closed { reason }) => {
+                    json!({ "closed": true, "reason": reason })
+                }
                 _ => json!({ "closed": false }),
             }
         } else {
@@ -2024,17 +2242,19 @@ impl UiController {
         &self,
         attempt_id: &str,
     ) -> Result<Option<(String, Option<String>)>, String> {
-        Ok(self.latest_admission_failure(attempt_id)?.and_then(|payload| {
-            (payload["registration"].as_str() == Some("kept")).then(|| {
-                (
-                    payload["stage"].as_str().unwrap_or("unknown").to_owned(),
-                    payload["registration_identity"]
-                        .as_str()
-                        .filter(|identity| !identity.is_empty())
-                        .map(str::to_owned),
-                )
-            })
-        }))
+        Ok(self
+            .latest_admission_failure(attempt_id)?
+            .and_then(|payload| {
+                (payload["registration"].as_str() == Some("kept")).then(|| {
+                    (
+                        payload["stage"].as_str().unwrap_or("unknown").to_owned(),
+                        payload["registration_identity"]
+                            .as_str()
+                            .filter(|identity| !identity.is_empty())
+                            .map(str::to_owned),
+                    )
+                })
+            }))
     }
 
     /// Appends the append-only success record of one registration. Written by each legitimate
@@ -2154,10 +2374,7 @@ impl UiController {
                     && row.kind == command.command.kind
                     && row.payload_hash == command.command.payload_hash
                 {
-                    let result = self
-                        .store
-                        .command_result(&row.id)
-                        .map_err(store_message)?;
+                    let result = self.store.command_result(&row.id).map_err(store_message)?;
                     // Identity is content-bound AND request-bound: `stable_suffix` is lossy, so two
                     // different request ids can share one command id; a row recorded by this
                     // increment names its request id, and a different id is a collision, not a
@@ -2166,7 +2383,8 @@ impl UiController {
                     if !same_request(result.as_ref(), &request.request_id) {
                         return Err(request_collision(&request.request_id, result.as_ref()));
                     }
-                    if let Some(answer) = replay_answer(&request.request_id, &row, result.as_ref()) {
+                    if let Some(answer) = replay_answer(&request.request_id, &row, result.as_ref())
+                    {
                         return answer;
                     }
                 }
@@ -2254,9 +2472,16 @@ impl UiController {
             // The first user message of an orchestrated conversation was already
             // reserved inside the preparation transaction; it is never appended a
             // second time.
-            let reserved_first_message = orchestration.is_some_and(|binding| binding.first_message_reserved);
+            let reserved_first_message =
+                orchestration.is_some_and(|binding| binding.first_message_reserved);
             if !reserved_first_message {
                 let mut user_payload = json!({ "text": message, "requestId": request.request_id });
+                if let Some(handoff_id) =
+                    orchestration.and_then(|binding| binding.generated_handoff_id.as_deref())
+                {
+                    user_payload["origin"] = json!("generated-handoff");
+                    user_payload["handoffId"] = json!(handoff_id);
+                }
                 if let Some(binding) = self.persist_runtime_epoch_binding(&attempt_id)? {
                     let observed_at = store::utc_now_iso();
                     user_payload["goalportRuntime"] =
@@ -2382,7 +2607,8 @@ impl UiController {
                     // Report what can actually be confirmed and stop; nothing is re-sent to prove a
                     // failure. A transient error with the transport still open keeps the retry below.
                     if provider.eq_ignore_ascii_case("codex") {
-                        let closed_reason = match self.runtime_manager.transport_state(&attempt_id) {
+                        let closed_reason = match self.runtime_manager.transport_state(&attempt_id)
+                        {
                             Some(TransportState::Closed { reason }) => Some(reason),
                             _ => None,
                         };
@@ -2528,7 +2754,8 @@ impl UiController {
         })();
         match result {
             Ok(()) => {
-                let recorded = json!({ "requestId": request.request_id, "deliveryState": delivery });
+                let recorded =
+                    json!({ "requestId": request.request_id, "deliveryState": delivery });
                 if let Err(error) =
                     self.store
                         .finish_command(&command_id, CommandState::Succeeded, &recorded)
@@ -2620,6 +2847,12 @@ impl UiController {
         let request_id = request.request_id.clone();
         let payload_hash = conversation_payload_hash(&canonical, &provider, &message);
         let native_command_id = format!("ui-send-{}", stable_suffix(&request_id));
+        let request_hash = sha256_hex(request_id.as_bytes());
+        let campaign_id = format!("campaign-{request_hash}");
+        let task_id = format!("task-{request_hash}");
+        let attempt_id = format!("attempt-{request_hash}");
+        let claim_token = fresh_claim_token();
+        let mut rearmed = false;
         if let Some(row) = self
             .store
             .conversation_request(&request_id)
@@ -2636,14 +2869,37 @@ impl UiController {
             if row.phase == "succeeded" {
                 return Ok(true);
             }
-            return Err(conversation_request_status_error(&row));
+            if !conversation_request_is_predispatch_retryable(&row) {
+                return Err(conversation_request_status_error(&row));
+            }
+            if row.campaign_id != campaign_id
+                || row.task_id != task_id
+                || row.attempt_id != attempt_id
+                || row.source_attempt_id.is_some()
+            {
+                return Err(format!(
+                    "conversation request {request_id} reservation identity no longer matches the first-send request"
+                ));
+            }
+            if self
+                .runtime_manager
+                .selected_provider(&row.attempt_id)
+                .is_some()
+                || self
+                    .runtime_manager
+                    .registration_identity(&row.attempt_id)
+                    .is_some()
+            {
+                return Err(format!(
+                    "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
+                ));
+            }
+            self.store
+                .rearm_failed_conversation_request(&request_id, &payload_hash, &claim_token)
+                .map_err(store_message)?;
+            rearmed = true;
         }
 
-        let claim_token = fresh_claim_token();
-        let request_hash = sha256_hex(request_id.as_bytes());
-        let campaign_id = format!("campaign-{request_hash}");
-        let task_id = format!("task-{request_hash}");
-        let attempt_id = format!("attempt-{request_hash}");
         let title = deterministic_conversation_title(&message);
         let goal = bounded_core_text(&message, 2048);
         let start = ConversationStart {
@@ -2665,8 +2921,7 @@ impl UiController {
                 id: task_id.clone(),
                 campaign_id: campaign_id.clone(),
                 title: title.clone(),
-                acceptance:
-                    "Persist ordered Runtime events and recover without replay.".into(),
+                acceptance: "Persist ordered Runtime events and recover without replay.".into(),
                 state: crate::domain::WorkStatus::InProgress,
             },
             policy_id: format!("policy-{request_hash}"),
@@ -2688,17 +2943,26 @@ impl UiController {
             selected_provider: provider.clone(),
             first_user_message: message.clone(),
         };
-        let project = match self.store.prepare_conversation_start(&start) {
-            Ok(ConversationPrepareOutcome::Prepared { project, .. }) => {
-                project.ok_or_else(|| "prepared conversation has no project".to_string())?
-            }
-            Ok(ConversationPrepareOutcome::Existing(row)) => {
-                if row.phase == "succeeded" {
-                    return Ok(true);
+        let project = if rearmed {
+            let project_id = self
+                .store
+                .campaign_project(&campaign_id)
+                .map_err(store_message)?
+                .ok_or_else(|| "re-armed conversation has no owning project".to_string())?;
+            self.store.get_project(&project_id).map_err(store_message)?
+        } else {
+            match self.store.prepare_conversation_start(&start) {
+                Ok(ConversationPrepareOutcome::Prepared { project, .. }) => {
+                    project.ok_or_else(|| "prepared conversation has no project".to_string())?
                 }
-                return Err(conversation_request_status_error(&row));
+                Ok(ConversationPrepareOutcome::Existing(row)) => {
+                    if row.phase == "succeeded" {
+                        return Ok(true);
+                    }
+                    return Err(conversation_request_status_error(&row));
+                }
+                Err(error) => return Err(store_message(error)),
             }
-            Err(error) => return Err(store_message(error)),
         };
         // The message is durable even if native admission fails. Keep its
         // conversation visible so retrying cannot silently create a second goal.
@@ -2746,7 +3010,18 @@ impl UiController {
                 &json!({
                     "requestId": request_id,
                     "stage": "admission",
-                    "error": error
+                    "error": error,
+                    "deliveryState": "FAILED",
+                    "nativeDispatchState": "NOT_STARTED",
+                    "retryMode": "SAME_REQUEST",
+                    "reservation": {
+                        "kind": "first-send",
+                        "requestId": request_id,
+                        "campaignId": campaign_id,
+                        "taskId": task_id,
+                        "attemptId": attempt_id,
+                        "messageReserved": true
+                    }
                 }),
             );
             return Err(error);
@@ -2780,6 +3055,7 @@ impl UiController {
         let binding = OrchestrationBinding {
             native_command_id: native_command_id.clone(),
             first_message_reserved: true,
+            generated_handoff_id: None,
         };
         let send_outcome = self.send_message_with_reservation(&send_request, Some(&binding));
         let command_result = self
@@ -2818,6 +3094,16 @@ impl UiController {
                     &json!({
                         "requestId": request_id,
                         "deliveryState": delivery,
+                        "nativeDispatchState": if delivery == "UNKNOWN" { "UNKNOWN" } else { "STARTED" },
+                        "retryMode": if delivery == "UNKNOWN" { "RECONCILE" } else { "NEW_REQUEST" },
+                        "reservation": {
+                            "kind": "first-send",
+                            "requestId": request_id,
+                            "campaignId": campaign_id,
+                            "taskId": task_id,
+                            "attemptId": attempt_id,
+                            "messageReserved": true
+                        },
                         "error": error
                     }),
                 );
@@ -2837,7 +3123,10 @@ impl UiController {
     fn conversation_send(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
         let campaign_id = payload_text(&request.payload, "campaignId")?;
         let message = payload_text(&request.payload, "message")?;
-        let campaign = self.store.get_campaign(&campaign_id).map_err(store_message)?;
+        let campaign = self
+            .store
+            .get_campaign(&campaign_id)
+            .map_err(store_message)?;
         let tasks = self
             .store
             .tasks_for_campaign(&campaign_id)
@@ -2906,12 +3195,18 @@ impl UiController {
         message: &str,
     ) -> Result<bool, String> {
         let request_id = request.request_id.clone();
-        let payload_hash = conversation_payload_hash(
-            &source.id,
-            &source.provider,
-            message,
-        );
+        let payload_hash = conversation_payload_hash(&source.id, &source.provider, message);
         let native_command_id = format!("ui-send-{}", stable_suffix(&request_id));
+        let successor_hash =
+            sha256_hex(format!("{request_id}:confirmed-stop-successor").as_bytes());
+        let successor_attempt = Attempt::new(
+            format!("attempt-{successor_hash}"),
+            &task.id,
+            &source.provider,
+            format!("{}-cap-v1", source.provider),
+        );
+        let claim_token = fresh_claim_token();
+        let mut rearmed_row = None;
         if let Some(row) = self
             .store
             .conversation_request(&request_id)
@@ -2928,23 +3223,48 @@ impl UiController {
             if row.phase == "succeeded" {
                 return Ok(true);
             }
-            return Err(conversation_request_status_error(&row));
+            if !conversation_request_is_predispatch_retryable(&row) {
+                return Err(conversation_request_status_error(&row));
+            }
+            if row.source_attempt_id.as_deref() != Some(source.id.as_str())
+                || row.attempt_id != successor_attempt.id
+                || row.task_id != task.id
+            {
+                return Err(format!(
+                    "conversation request {request_id} reservation identity no longer matches the Stop successor"
+                ));
+            }
+            if self
+                .runtime_manager
+                .selected_provider(&row.attempt_id)
+                .is_some()
+                || self
+                    .runtime_manager
+                    .registration_identity(&row.attempt_id)
+                    .is_some()
+            {
+                return Err(format!(
+                    "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
+                ));
+            }
+            rearmed_row = Some(
+                self.store
+                    .rearm_failed_conversation_request(&request_id, &payload_hash, &claim_token)
+                    .map_err(store_message)?,
+            );
         }
         let workspace = self.workspace_for_campaign(&task.campaign_id)?;
         self.ensure_workspace_ingress_allowed(&workspace, "continue after Stop")?;
-        let auth = self.store.get_campaign_authorization(&task.campaign_id).map_err(store_message)?;
+        let auth = self
+            .store
+            .get_campaign_authorization(&task.campaign_id)
+            .map_err(store_message)?;
         if !auth.provider_authorized || !auth.action_authorized {
-            return Err("Current conversation authorization denies sending; no successor was created".into());
+            return Err(
+                "Current conversation authorization denies sending; no successor was created"
+                    .into(),
+            );
         }
-        let successor_hash =
-            sha256_hex(format!("{request_id}:confirmed-stop-successor").as_bytes());
-        let successor_attempt = Attempt::new(
-            format!("attempt-{successor_hash}"),
-            &task.id,
-            &source.provider,
-            format!("{}-cap-v1", source.provider),
-        );
-        let claim_token = fresh_claim_token();
         let successor = ConfirmedStopSuccessor {
             source_attempt_id: source.id.clone(),
             request_id: request_id.clone(),
@@ -2953,22 +3273,29 @@ impl UiController {
             native_command_id: native_command_id.clone(),
             successor_attempt: successor_attempt.clone(),
         };
-        let outcome = self
-            .store
-            .insert_confirmed_stop_successor(&successor)
-            .map_err(store_message)?;
-        let row = match outcome {
-            ConversationPrepareOutcome::Prepared { row, .. } => row,
-            ConversationPrepareOutcome::Existing(row) => {
-                if row.phase == "succeeded" {
-                    return Ok(true);
+        let row = if let Some(row) = rearmed_row {
+            row
+        } else {
+            let outcome = self
+                .store
+                .insert_confirmed_stop_successor(&successor)
+                .map_err(store_message)?;
+            match outcome {
+                ConversationPrepareOutcome::Prepared { row, .. } => row,
+                ConversationPrepareOutcome::Existing(row) => {
+                    if row.phase == "succeeded" {
+                        return Ok(true);
+                    }
+                    return Err(conversation_request_status_error(&row));
                 }
-                return Err(conversation_request_status_error(&row));
             }
         };
         let attempt_id = row.attempt_id.clone();
         let campaign_id = row.campaign_id.clone();
         let task_id = row.task_id.clone();
+        self.selected_campaign_id = Some(campaign_id.clone());
+        self.selected_task_id = Some(task_id.clone());
+        self.selected_attempt_id = Some(attempt_id.clone());
         if let Err(error) = self
             .store
             .claim_conversation_request(&request_id, &claim_token)
@@ -3008,7 +3335,19 @@ impl UiController {
                 &json!({
                     "requestId": request_id,
                     "stage": "successor-admission",
-                    "error": error
+                    "error": error,
+                    "deliveryState": "FAILED",
+                    "nativeDispatchState": "NOT_STARTED",
+                    "retryMode": "SAME_REQUEST",
+                    "reservation": {
+                        "kind": "stop-successor",
+                        "requestId": request_id,
+                        "campaignId": campaign_id,
+                        "taskId": task_id,
+                        "attemptId": attempt_id,
+                        "sourceAttemptId": source.id,
+                        "messageReserved": false
+                    }
                 }),
             );
             return Err(error);
@@ -3039,6 +3378,7 @@ impl UiController {
         let binding = OrchestrationBinding {
             native_command_id: native_command_id.clone(),
             first_message_reserved: false,
+            generated_handoff_id: None,
         };
         let send_outcome = self.send_message_with_reservation(&send_request, Some(&binding));
         let command_result = self
@@ -3077,6 +3417,17 @@ impl UiController {
                     &json!({
                         "requestId": request_id,
                         "deliveryState": delivery,
+                        "nativeDispatchState": if delivery == "UNKNOWN" { "UNKNOWN" } else { "STARTED" },
+                        "retryMode": if delivery == "UNKNOWN" { "RECONCILE" } else { "NEW_REQUEST" },
+                        "reservation": {
+                            "kind": "stop-successor",
+                            "requestId": request_id,
+                            "campaignId": campaign_id,
+                            "taskId": task_id,
+                            "attemptId": attempt_id,
+                            "sourceAttemptId": source.id,
+                            "messageReserved": false
+                        },
                         "error": error
                     }),
                 );
@@ -3503,12 +3854,7 @@ impl UiController {
             "goal-runs/goalport-electron-stable-v1/evidence/locks/shared-interface-freeze.json",
         );
         let new_id = format!("attempt-handoff-{}", stable_suffix(&request.request_id));
-        let new_attempt = Attempt::new(
-            &new_id,
-            &task.id,
-            &provider,
-            format!("{provider}-cap-v1"),
-        );
+        let new_attempt = Attempt::new(&new_id, &task.id, &provider, format!("{provider}-cap-v1"));
         self.store
             .insert_rollover_attempt(&new_attempt, &old_attempt_id)
             .map_err(store_message)?;
@@ -3569,8 +3915,10 @@ impl UiController {
             .iter()
             .map(|intent| format!("{:?}", intent.state).to_ascii_uppercase())
             .collect::<Vec<_>>();
+        let handoff_id = format!("handoff-{}", sha256_hex(request.request_id.as_bytes()));
         let packet = json!({
             "packetVersion": "goalport.handoff.v1",
+            "handoffId": handoff_id,
             "campaignId": campaign.id.clone(),
             "taskId": task.id.clone(),
             "goal": bounded_core_text(&campaign.goal, 2048),
@@ -3607,8 +3955,12 @@ impl UiController {
         // Keep the packet in both timelines: the old Attempt proves the
         // responsibility boundary; the new Attempt lets a freshly connected
         // GUI inspect the exact Core-generated handoff without copying text.
-        self.persist_event(&old_attempt_id, "handoff.completed", packet.clone(), None)?;
-        self.persist_event(&new_id, "handoff.completed", packet.clone(), None)?;
+        let mut source_packet = packet.clone();
+        source_packet["summarySide"] = json!("source");
+        let mut destination_packet = packet.clone();
+        destination_packet["summarySide"] = json!("destination");
+        self.persist_event(&old_attempt_id, "handoff.completed", source_packet, None)?;
+        self.persist_event(&new_id, "handoff.completed", destination_packet, None)?;
         if let Ok(instruction) = payload_text(&request.payload, "handoffInstruction") {
             // The first prompt of the new Attempt is constructed inside Core
             // from the persisted packet.  A host supplies only a bounded
@@ -3621,9 +3973,9 @@ impl UiController {
             );
             let handoff_request_id =
                 format!("handoff-instruction-{}", stable_suffix(&request.request_id));
-            let _ = self.send_message(&UiCommandRequest {
+            let generated_request = UiCommandRequest {
                 protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
-                request_id: handoff_request_id,
+                request_id: handoff_request_id.clone(),
                 entity_version: request.entity_version,
                 message_type: "send_message".into(),
                 payload: json!({
@@ -3632,7 +3984,14 @@ impl UiController {
                     "attemptId": new_id,
                     "message": handoff_message
                 }),
-            })?;
+            };
+            let generated_binding = OrchestrationBinding {
+                native_command_id: format!("ui-send-{}", stable_suffix(&handoff_request_id)),
+                first_message_reserved: false,
+                generated_handoff_id: Some(handoff_id),
+            };
+            let _ =
+                self.send_message_with_reservation(&generated_request, Some(&generated_binding))?;
         }
         Ok(())
     }
@@ -4065,7 +4424,9 @@ impl UiController {
         };
         let (identity, reason) = match &confirmation {
             None => ("unregistered", None),
-            Some(crate::runtime_manager::ProcessConfirmation::Confirmed { .. }) => ("confirmed", None),
+            Some(crate::runtime_manager::ProcessConfirmation::Confirmed { .. }) => {
+                ("confirmed", None)
+            }
             Some(crate::runtime_manager::ProcessConfirmation::Exited { .. }) => ("exited", None),
             Some(crate::runtime_manager::ProcessConfirmation::Unknown { reason }) => {
                 ("unknown", Some(reason.clone()))
@@ -4317,67 +4678,65 @@ impl UiController {
         self.notices.insert(0, notice);
     }
 
-    fn merge_permission_denied_notices(&self, notices: &mut Vec<String>) -> Result<(), String> {
-        let campaigns = self.store.list_campaigns().map_err(store_message)?;
-        for campaign in campaigns {
-            let tasks = self
-                .store
-                .tasks_for_campaign(&campaign.id)
-                .map_err(store_message)?;
-            for task in tasks {
-                let attempts = self
-                    .store
-                    .attempts_for_task(&task.id)
-                    .map_err(store_message)?;
-                for attempt in attempts {
-                    let records = self
-                        .store
-                        .list_event_records(&attempt.id, 0)
-                        .map_err(store_message)?;
-                    for record in records {
-                        if record.event.kind != "permission.response" {
-                            continue;
-                        }
-                        let Some(payload) = record.payload.as_ref() else {
-                            continue;
-                        };
-                        if payload.get("allow") != Some(&json!(false)) {
-                            continue;
-                        }
-                        let Some(decision_id) = payload.get("decisionId").and_then(Value::as_str)
-                        else {
-                            continue;
-                        };
-                        if notices.iter().any(|notice| {
-                            notice.contains(decision_id) && notice.contains("Permission denied")
-                        }) {
-                            continue;
-                        }
-                        let notice = payload
-                            .get("notice")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| {
-                                let session = payload
-                                    .get("sessionHash")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned)
-                                    .or_else(|| attempt.provider_session.as_deref().map(hash_id))
-                                    .unwrap_or_else(|| "unbound".into());
-                                permission_denied_notice(
-                                    decision_id,
-                                    &attempt.id,
-                                    &campaign.id,
-                                    &task.id,
-                                    &session,
-                                    &record.event.seq.to_string(),
-                                )
-                            });
-                        if !notices.iter().any(|existing| existing == &notice) {
-                            notices.push(notice);
-                        }
-                    }
-                }
+    fn merge_permission_denied_notices(
+        &self,
+        notices: &mut Vec<String>,
+        attempt_id: &str,
+    ) -> Result<(), String> {
+        if attempt_id == UNASSIGNED_ATTEMPT_ID {
+            return Ok(());
+        }
+        let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
+        let task = self
+            .store
+            .get_task(&attempt.task_id)
+            .map_err(store_message)?;
+        let records = self
+            .store
+            .attempt_event_records_before(attempt_id, None, 256)
+            .map_err(store_message)?;
+        for ordered in records {
+            let record = ordered.record;
+            if record.event.kind != "permission.response" {
+                continue;
+            }
+            let Some(payload) = record.payload.as_ref() else {
+                continue;
+            };
+            if payload.get("allow") != Some(&json!(false)) {
+                continue;
+            }
+            let Some(decision_id) = payload.get("decisionId").and_then(Value::as_str) else {
+                continue;
+            };
+            if notices
+                .iter()
+                .any(|notice| notice.contains(decision_id) && notice.contains("Permission denied"))
+            {
+                continue;
+            }
+            let notice = payload
+                .get("notice")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    let session = payload
+                        .get("sessionHash")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| attempt.provider_session.as_deref().map(hash_id))
+                        .unwrap_or_else(|| "unbound".into());
+                    permission_denied_notice(
+                        decision_id,
+                        &attempt.id,
+                        &task.campaign_id,
+                        &task.id,
+                        &session,
+                        &record.event.seq.to_string(),
+                    )
+                });
+            if !notices.iter().any(|existing| existing == &notice) {
+                notices.push(notice);
             }
         }
         Ok(())
@@ -4419,7 +4778,9 @@ impl UiController {
             AgentEventType::TurnCompleted => "runtime.turn.completed",
             AgentEventType::TurnFailed => "runtime.turn.failed",
             AgentEventType::Cancelled => "runtime.turn.cancelled",
-            AgentEventType::Unknown if event.payload.get("claude_native_frame").is_some() => "runtime.native.frame",
+            AgentEventType::Unknown if event.payload.get("claude_native_frame").is_some() => {
+                "runtime.native.frame"
+            }
             AgentEventType::Unknown => "runtime.event.unknown",
         };
         let state = match event.event_type {
@@ -4689,12 +5050,7 @@ fn project_to_ui(project: &Project) -> UiProject {
 }
 
 fn unassigned_attempt(task_id: String) -> Attempt {
-    Attempt::new(
-        UNASSIGNED_ATTEMPT_ID,
-        task_id,
-        "unassigned",
-        "unassigned",
-    )
+    Attempt::new(UNASSIGNED_ATTEMPT_ID, task_id, "unassigned", "unassigned")
 }
 
 fn unassigned_attempt_ui(task_id: String) -> UiAttempt {
@@ -4764,10 +5120,7 @@ fn attempt_to_ui(attempt: &Attempt, store: &Store) -> UiAttempt {
     if attempt.id == UNASSIGNED_ATTEMPT_ID {
         return unassigned_attempt_ui(attempt.task_id.clone());
     }
-    let event_count = store
-        .list_events(&attempt.id)
-        .map(|events| events.len())
-        .unwrap_or_default();
+    let event_count = store.event_count(&attempt.id).unwrap_or_default();
     UiAttempt {
         id: attempt.id.clone(),
         task_id: attempt.task_id.clone(),
@@ -4838,7 +5191,7 @@ fn coalesce_reply_deltas(
     out
 }
 
-fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
+pub(crate) fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
     let payload = record.payload.as_ref();
     let kind = if record.event.kind == "runtime.native.frame" {
         "audit"
@@ -4926,6 +5279,10 @@ fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
     }
     UiTimelineItem {
         id: record.event.id.clone(),
+        logical_item_id: record.event.id.clone(),
+        fragment_index: 0,
+        continues_before: false,
+        continues_after: false,
         kind: kind.into(),
         event_kind: record.event.kind.clone(),
         actor: if record.event.kind.starts_with("runtime") {
@@ -4934,7 +5291,11 @@ fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
             "Core"
         }
         .into(),
-        title: if record.event.kind == "runtime.native.frame" { "Native protocol evidence".into() } else { timeline_title(kind) },
+        title: if record.event.kind == "runtime.native.frame" {
+            "Native protocol evidence".into()
+        } else {
+            timeline_title(kind)
+        },
         body,
         timestamp: record.created_at.clone(),
         status,
@@ -4965,21 +5326,24 @@ fn timeline_title(kind: &str) -> String {
 }
 
 fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
-    let action = store.list_event_records(&decision.attempt_id, 0).ok()
-        .and_then(|records| records.into_iter().rev().find_map(|record| {
-            if record.event.kind != "runtime.permission.request" { return None; }
-            let payload = record.payload?;
-            let id = payload.get("request_id").or_else(|| payload.get("requestId"))?.as_str()?;
-            if id != decision.id { return None; }
-            payload.get("text").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(str::to_owned)
-        }));
-    let provider = store.get_attempt(&decision.attempt_id).ok().map(|attempt| attempt.provider).unwrap_or_else(|| "Runtime".into());
+    let action = store
+        .permission_request_text(&decision.attempt_id, &decision.id)
+        .ok()
+        .flatten()
+        .filter(|text| !text.trim().is_empty());
+    let provider = store
+        .get_attempt(&decision.attempt_id)
+        .ok()
+        .map(|attempt| attempt.provider)
+        .unwrap_or_else(|| "Runtime".into());
     UiDecision {
         action_known: action.is_some(),
         id: decision.id,
         title: format!("{provider} wants your approval"),
         kind: decision.kind,
-        facts: vec![action.unwrap_or_else(|| "The Runtime did not provide action details. Keep waiting or decline.".into())],
+        facts: vec![action.unwrap_or_else(|| {
+            "The Runtime did not provide action details. Keep waiting or decline.".into()
+        })],
         recommendation: "Allow only if you understand the requested action.".into(),
         default_behavior: "Keep waiting; no approval is sent.".into(),
         state: if decision.state == DecisionState::Pending {
@@ -5339,7 +5703,10 @@ fn live_rollover_of(
     while cursor < reachable.len() {
         let parent = reachable[cursor].clone();
         cursor += 1;
-        for (_, child) in edges.iter().filter(|(edge_parent, _)| edge_parent == &parent) {
+        for (_, child) in edges
+            .iter()
+            .filter(|(edge_parent, _)| edge_parent == &parent)
+        {
             if !reachable.iter().any(|seen| seen == child) {
                 reachable.push(child.clone());
             }
@@ -5385,7 +5752,10 @@ fn resolve_admission_attempt_id(
             .map_err(store_message)?
             .into_iter()
             .filter(|attempt| {
-                matches!(attempt.state, AttemptState::Active | AttemptState::AwaitingReview)
+                matches!(
+                    attempt.state,
+                    AttemptState::Active | AttemptState::AwaitingReview
+                )
             })
             .map(|attempt| attempt.id)
             .collect::<Vec<_>>();
@@ -5582,6 +5952,7 @@ fn stop_native_turn_state_str(state: StopNativeTurnState) -> &'static str {
 struct OrchestrationBinding {
     native_command_id: String,
     first_message_reserved: bool,
+    generated_handoff_id: Option<String>,
 }
 
 /// The payload hash of a conversation-scope request: binds the identity the
@@ -5640,24 +6011,56 @@ fn conversation_request_status_error(row: &ConversationRequestRow) -> String {
                 .unwrap_or_default()
         ),
         "failed" => format!(
-            "it already failed{}",
+            "it already failed{}{}",
             row.result
                 .as_ref()
                 .and_then(|value| value.get("error"))
                 .and_then(Value::as_str)
                 .map(|error| format!(": {error}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if conversation_request_is_predispatch_retryable(row) {
+                "; an explicit same-request retry may re-run admission before native dispatch"
+            } else {
+                ""
+            }
         ),
-        "unknown" => "its delivery is UNKNOWN; it is never dispatched automatically and never re-sent".into(),
+        "unknown" => "its delivery is UNKNOWN; it is never dispatched automatically, and an explicit same-request Retry only reconciles the recorded request".into(),
         other => format!(
             "it is {other} (unsetted after an interrupted invocation or a Core restart); \
              it is never dispatched automatically"
         ),
     };
     format!(
-        "conversation request {} was already recorded: {outcome}; send again explicitly with a new request",
+        "conversation request {} was already recorded: {outcome}",
         row.request_id
     )
+}
+
+fn conversation_request_is_predispatch_retryable(row: &ConversationRequestRow) -> bool {
+    row.phase == "failed"
+        && row.result.as_ref().is_some_and(|result| {
+            result.get("deliveryState").and_then(Value::as_str) == Some("FAILED")
+                && result.get("nativeDispatchState").and_then(Value::as_str) == Some("NOT_STARTED")
+                && result.get("retryMode").and_then(Value::as_str) == Some("SAME_REQUEST")
+        })
+}
+
+fn rejection_code(
+    request: &UiCommandRequest,
+    delivery_state: &str,
+    native_dispatch_state: &str,
+) -> &'static str {
+    if delivery_state == "UNKNOWN" || native_dispatch_state == "UNKNOWN" {
+        "delivery-unknown"
+    } else if native_dispatch_state == "NOT_STARTED" {
+        if request.message_type == "start_conversation" {
+            "first-send-admission-failed"
+        } else {
+            "admission-failed"
+        }
+    } else {
+        "command-rejected"
+    }
 }
 
 /// The exact `CoreCommand` `send_message` records for a request, exposed so a caller (or a
@@ -5777,11 +6180,17 @@ mod replay_answer_tests {
     #[test]
     fn same_request_requires_the_recorded_request_id_to_match_when_present() {
         assert!(same_request(None, "r"));
-        assert!(same_request(Some(&json!({ "deliveryState": "FAILED" })), "r"));
+        assert!(same_request(
+            Some(&json!({ "deliveryState": "FAILED" })),
+            "r"
+        ));
         assert!(same_request(Some(&json!({ "requestId": "r" })), "r"));
         assert!(!same_request(Some(&json!({ "requestId": "r-other" })), "r"));
         let text = request_collision("r", Some(&json!({ "requestId": "r-other" })));
-        assert!(text.contains("collides") && text.contains("r-other") && text.ends_with("was not sent"), "{text}");
+        assert!(
+            text.contains("collides") && text.contains("r-other") && text.ends_with("was not sent"),
+            "{text}"
+        );
         assert!(request_collision("r", None).contains("<unrecorded>"));
     }
 
@@ -5813,46 +6222,115 @@ mod replay_answer_tests {
     #[test]
     fn pending_falls_through_and_succeeded_is_the_duplicate_success() {
         assert!(replay_answer("r", &row(CommandState::Pending), None).is_none());
-        assert_eq!(replay_answer("r", &row(CommandState::Succeeded), None), Some(Ok(true)));
         assert_eq!(
-            replay_answer("r", &row(CommandState::Succeeded), Some(&json!({ "deliveryState": "DELIVERED" }))),
+            replay_answer("r", &row(CommandState::Succeeded), None),
+            Some(Ok(true))
+        );
+        assert_eq!(
+            replay_answer(
+                "r",
+                &row(CommandState::Succeeded),
+                Some(&json!({ "deliveryState": "DELIVERED" }))
+            ),
             Some(Ok(true))
         );
     }
 
     #[test]
     fn failed_reports_the_recorded_delivery_state_and_reason_on_each_axis() {
-        let failed = refusal(CommandState::Failed, Some(json!({ "deliveryState": "FAILED", "error": "stream closed" })));
-        assert!(failed.contains("[state=FAILED]") && failed.contains("[delivery=FAILED]") && failed.contains("stream closed"), "{failed}");
-        let delivered = refusal(CommandState::Failed, Some(json!({ "deliveryState": "DELIVERED", "error": "recovery persistence failed" })));
-        assert!(delivered.contains("[state=FAILED]") && delivered.contains("[delivery=DELIVERED]") && delivered.contains("recovery persistence failed"), "{delivered}");
-        let unknown = refusal(CommandState::Failed, Some(json!({ "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" })));
-        assert!(unknown.contains("[state=FAILED]") && unknown.contains("[delivery=UNKNOWN]") && !unknown.contains("[delivery=FAILED]"), "{unknown}");
+        let failed = refusal(
+            CommandState::Failed,
+            Some(json!({ "deliveryState": "FAILED", "error": "stream closed" })),
+        );
+        assert!(
+            failed.contains("[state=FAILED]")
+                && failed.contains("[delivery=FAILED]")
+                && failed.contains("stream closed"),
+            "{failed}"
+        );
+        let delivered = refusal(
+            CommandState::Failed,
+            Some(json!({ "deliveryState": "DELIVERED", "error": "recovery persistence failed" })),
+        );
+        assert!(
+            delivered.contains("[state=FAILED]")
+                && delivered.contains("[delivery=DELIVERED]")
+                && delivered.contains("recovery persistence failed"),
+            "{delivered}"
+        );
+        let unknown = refusal(
+            CommandState::Failed,
+            Some(json!({ "deliveryState": "UNKNOWN", "error": "write failed; delivery unknown" })),
+        );
+        assert!(
+            unknown.contains("[state=FAILED]")
+                && unknown.contains("[delivery=UNKNOWN]")
+                && !unknown.contains("[delivery=FAILED]"),
+            "{unknown}"
+        );
         for text in [&failed, &delivered, &unknown] {
-            assert!(text.starts_with("replayed request r ") && text.ends_with("it was not sent again"), "{text}");
+            assert!(
+                text.starts_with("replayed request r ") && text.ends_with("it was not sent again"),
+                "{text}"
+            );
         }
     }
 
     #[test]
     fn missing_or_malformed_results_are_reported_as_not_recorded_never_invented() {
         let none = refusal(CommandState::Failed, None);
-        assert!(none.contains("[state=FAILED] [delivery=UNKNOWN]: reason not recorded"), "{none}");
-        let empty = refusal(CommandState::Failed, Some(json!({ "deliveryState": "", "error": "   " })));
-        assert!(empty.contains("[delivery=UNKNOWN]: reason not recorded"), "{empty}");
-        let bogus = refusal(CommandState::Failed, Some(json!({ "deliveryState": "SENT", "error": 7 })));
-        assert!(bogus.contains("[delivery=UNKNOWN]: reason not recorded"), "{bogus}");
+        assert!(
+            none.contains("[state=FAILED] [delivery=UNKNOWN]: reason not recorded"),
+            "{none}"
+        );
+        let empty = refusal(
+            CommandState::Failed,
+            Some(json!({ "deliveryState": "", "error": "   " })),
+        );
+        assert!(
+            empty.contains("[delivery=UNKNOWN]: reason not recorded"),
+            "{empty}"
+        );
+        let bogus = refusal(
+            CommandState::Failed,
+            Some(json!({ "deliveryState": "SENT", "error": 7 })),
+        );
+        assert!(
+            bogus.contains("[delivery=UNKNOWN]: reason not recorded"),
+            "{bogus}"
+        );
         let absent = refusal(CommandState::Failed, Some(json!({ "requestId": "r" })));
-        assert!(absent.contains("[delivery=UNKNOWN]: reason not recorded"), "{absent}");
+        assert!(
+            absent.contains("[delivery=UNKNOWN]: reason not recorded"),
+            "{absent}"
+        );
         let unknown = refusal(CommandState::Unknown, None);
-        assert!(unknown.contains("[state=UNKNOWN] [delivery=UNKNOWN]: reason not recorded"), "{unknown}");
-        let unknown_with = refusal(CommandState::Unknown, Some(json!({ "deliveryState": "UNKNOWN", "error": "uncertain send" })));
-        assert!(unknown_with.contains("[state=UNKNOWN] [delivery=UNKNOWN]: uncertain send"), "{unknown_with}");
+        assert!(
+            unknown.contains("[state=UNKNOWN] [delivery=UNKNOWN]: reason not recorded"),
+            "{unknown}"
+        );
+        let unknown_with = refusal(
+            CommandState::Unknown,
+            Some(json!({ "deliveryState": "UNKNOWN", "error": "uncertain send" })),
+        );
+        assert!(
+            unknown_with.contains("[state=UNKNOWN] [delivery=UNKNOWN]: uncertain send"),
+            "{unknown_with}"
+        );
     }
 
     #[test]
     fn executing_is_in_progress_with_unknown_delivery_whatever_the_row_carries() {
-        let text = refusal(CommandState::Executing, Some(json!({ "deliveryState": "DELIVERED", "error": "stale" })));
-        assert!(text.contains("[state=EXECUTING] [delivery=UNKNOWN]: still in progress; result not recorded yet"), "{text}");
+        let text = refusal(
+            CommandState::Executing,
+            Some(json!({ "deliveryState": "DELIVERED", "error": "stale" })),
+        );
+        assert!(
+            text.contains(
+                "[state=EXECUTING] [delivery=UNKNOWN]: still in progress; result not recorded yet"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -5866,7 +6344,13 @@ mod replay_answer_tests {
         assert_eq!(a.command.id, other_message.command.id);
         assert_ne!(a.command.payload_hash, other_message.command.payload_hash);
         assert_ne!(a.command.payload_hash, other_attempt.command.payload_hash);
-        assert_eq!(send_message_command("!!!", "attempt-a", "x").unwrap().command.id, "ui-send-request");
+        assert_eq!(
+            send_message_command("!!!", "attempt-a", "x")
+                .unwrap()
+                .command
+                .id,
+            "ui-send-request"
+        );
     }
 }
 
@@ -5921,24 +6405,26 @@ mod coalesce_tests {
 
     #[test]
     fn native_protocol_evidence_never_coalesces_into_assistant_message() {
-        let items=coalesce(&[
-            record(1,"runtime.native.frame",Some("Claude result protocol evidence; generation time unknown")),
-            record(2,"runtime.reply.delta",Some("DECLINE_FINISHED")),
+        let items = coalesce(&[
+            record(
+                1,
+                "runtime.native.frame",
+                Some("Claude result protocol evidence; generation time unknown"),
+            ),
+            record(2, "runtime.reply.delta", Some("DECLINE_FINISHED")),
         ]);
-        assert_eq!(items.len(),2);
-        assert_eq!(items[0].kind,"audit");
-        assert_eq!(items[0].title,"Native protocol evidence");
-        assert_eq!(message_bodies(&items),vec!["DECLINE_FINISHED"]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].kind, "audit");
+        assert_eq!(items[0].title, "Native protocol evidence");
+        assert_eq!(message_bodies(&items), vec!["DECLINE_FINISHED"]);
     }
 
     #[test]
     fn mismatched_claude_cancel_is_journaled_without_cancelling_attempt() {
         let store = Store::memory().unwrap();
-        let mut controller = UiController::new_seeded_fixture(
-            store.clone(),
-            "synthetic://goalport-fixture",
-        )
-        .unwrap();
+        let mut controller =
+            UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture")
+                .unwrap();
         let snapshot = controller.snapshot(None).unwrap();
         let attempt_id = "attempt-claude-mismatch";
         store
@@ -6121,10 +6607,7 @@ mod resolve_admission_attempt_id_tests {
             false,
         )
         .unwrap();
-        assert_eq!(
-            resolved,
-            fresh_attempt_id("task-1", "scenario", "req-1")
-        );
+        assert_eq!(resolved, fresh_attempt_id("task-1", "scenario", "req-1"));
     }
 
     #[test]

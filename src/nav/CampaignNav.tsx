@@ -23,6 +23,8 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const campaignListUnavailable = snapshot.bounds?.projectionUnavailable === true
+    && snapshot.campaigns.length === 0;
 
   useEffect(() => {
     if (renamingId) renameInputRef.current?.focus();
@@ -61,11 +63,15 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
 
       <div className="sidebar-section-title">
         <span>Goals</span>
-        <span className="count-badge">{snapshot.campaigns.length}</span>
+        <span className="count-badge" aria-label={campaignListUnavailable ? "Goal list unavailable" : undefined}>
+          {campaignListUnavailable ? "–" : snapshot.campaigns.length}
+        </span>
       </div>
 
       <div className="campaign-list">
-        {snapshot.campaigns.length === 0 ? (
+        {campaignListUnavailable ? (
+          <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
+        ) : snapshot.campaigns.length === 0 ? (
           <p className="nav-empty">No goals yet. Start one from the top bar.</p>
         ) : (
           snapshot.campaigns.map((campaign) => {

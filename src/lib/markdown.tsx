@@ -18,7 +18,7 @@ const INLINE_TOKEN = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([
 function safeHref(url: string): string | null {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : null;
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname && !parsed.username && !parsed.password ? parsed.toString() : null;
   } catch {
     return null;
   }

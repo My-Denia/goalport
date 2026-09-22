@@ -42,6 +42,7 @@ export function useScrollAnchor(resetKey: string, contentSignature?: string) {
   const ref = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const [unseenCount, setUnseenCount] = useState(0);
+  const pendingPrependRef = useRef<{ height: number; top: number; pinned: boolean } | null>(null);
   // What the reader has already been offered, together with the view it
   // belonged to. Null until the first snapshot after mount.
   const seenContentRef = useRef<{ resetKey: string; signature: string | undefined } | null>(null);
@@ -68,6 +69,17 @@ export function useScrollAnchor(resetKey: string, contentSignature?: string) {
     }
     pinnedRef.current = true;
     setUnseenCount(0);
+  }, []);
+
+  /** Capture geometry immediately before an older history page is prepended. */
+  const prepareForPrepend = useCallback(() => {
+    const element = ref.current;
+    if (!element) return;
+    pendingPrependRef.current = {
+      height: element.scrollHeight,
+      top: element.scrollTop,
+      pinned: pinnedRef.current
+    };
   }, []);
 
   /** Called by the owner whenever new content may have arrived. */
@@ -99,6 +111,14 @@ export function useScrollAnchor(resetKey: string, contentSignature?: string) {
   useLayoutEffect(() => {
     const seen = seenContentRef.current;
     seenContentRef.current = { resetKey, signature: contentSignature };
+    const prepend = pendingPrependRef.current;
+    if (prepend) {
+      pendingPrependRef.current = null;
+      const element = ref.current;
+      if (element) element.scrollTop = prepend.top + Math.max(0, element.scrollHeight - prepend.height);
+      pinnedRef.current = prepend.pinned;
+      return;
+    }
     if (seen === null || seen.resetKey !== resetKey) {
       // First snapshot after mount, or a deliberate view (campaign) switch:
       // adopt what is on screen as the baseline. This content is not "new" —
@@ -112,5 +132,5 @@ export function useScrollAnchor(resetKey: string, contentSignature?: string) {
     notifyContentChanged();
   }, [resetKey, contentSignature, notifyContentChanged]);
 
-  return { ref, unseenCount, handleScroll, scrollToBottom, notifyContentChanged };
+  return { ref, unseenCount, handleScroll, scrollToBottom, notifyContentChanged, prepareForPrepend };
 }

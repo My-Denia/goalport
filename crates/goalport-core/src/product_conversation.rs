@@ -22,17 +22,20 @@
 
 use crate::{
     domain::{Attempt, AttemptState, DecisionState},
+    history::HistoryPageInfo,
     runtime_manager::RuntimeManager,
-    store::{ConversationPreference, EventRecord, Store, StopResponsibility},
+    store::{ConversationPreference, EventRecord, StopResponsibility, Store},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// The additive product snapshot member (camelCase wire contract).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductConversation {
     pub items: Vec<ProductConversationItem>,
+    pub page_info: HistoryPageInfo,
     pub runtime: ProductRuntimeSelection,
     pub turn: ProductTurn,
     /// Additive beyond the packet's minimum wire shape: the deterministic
@@ -45,6 +48,14 @@ pub struct ProductConversation {
 #[serde(rename_all = "camelCase")]
 pub struct ProductConversationItem {
     pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub logical_item_id: String,
+    #[serde(default)]
+    pub fragment_index: usize,
+    #[serde(default)]
+    pub continues_before: bool,
+    #[serde(default)]
+    pub continues_after: bool,
     /// `user-message` | `assistant-message` | `activity-summary` |
     /// `actionable-error` | `handoff-summary`.
     pub kind: String,
@@ -102,15 +113,14 @@ pub fn product_conversation(
     store: &Store,
     runtime_manager: &mut RuntimeManager,
     context: &ProductConversationContext<'_>,
+    items: Vec<ProductConversationItem>,
+    first_user_message: Option<&str>,
+    page_info: HistoryPageInfo,
 ) -> Result<ProductConversation, String> {
-    let records = store
-        .campaign_event_records(context.campaign_id)
-        .map_err(|error| error.to_string())?;
-    let items = project_items(&records);
     let preference = store
         .conversation_preference(context.campaign_id)
         .map_err(|error| error.to_string())?;
-    let title = effective_title(&preference, &records, context.root_task_title);
+    let title = effective_title(&preference, first_user_message, context.root_task_title);
     let runtime = project_runtime(store, runtime_manager, context, &preference)?;
     let mut turn = project_turn(store, runtime_manager, context, &runtime)?;
     if turn.can_send && !campaign_send_authorized(store, context.campaign_id)? {
@@ -119,6 +129,7 @@ pub fn product_conversation(
     }
     Ok(ProductConversation {
         items,
+        page_info,
         runtime,
         turn,
         title,
@@ -130,7 +141,7 @@ pub fn product_conversation(
 /// otherwise the existing root task title. Nothing is rewritten to compute it.
 fn effective_title(
     preference: &Option<ConversationPreference>,
-    records: &[EventRecord],
+    first_user_message: Option<&str>,
     root_task_title: &str,
 ) -> String {
     if let Some(title) = preference
@@ -140,18 +151,7 @@ fn effective_title(
     {
         return title.trim().to_owned();
     }
-    let first_prompt = records.iter().find_map(|record| {
-        if record.event.kind != "message.user" {
-            return None;
-        }
-        record
-            .payload
-            .as_ref()
-            .and_then(|payload| payload.get("text"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    });
-    if let Some(prompt) = first_prompt {
+    if let Some(prompt) = first_user_message {
         let normalized: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
         let bounded: String = normalized.chars().take(TITLE_MAX_CHARS).collect();
         if !bounded.is_empty() {
@@ -164,10 +164,11 @@ fn effective_title(
 /// Allowlist projection of the campaign journal. Consecutive provider reply
 /// deltas of one attempt are aggregated into a single assistant message (the
 /// proven runtime reply body); everything not in the allowlist is skipped.
-fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
+pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
     let mut items = Vec::new();
     let mut pending_reply: Option<ProductConversationItem> = None;
     let mut reply_attempt = String::new();
+    let mut seen_handoff_operations = HashSet::new();
     for record in records {
         let payload = record.payload.as_ref();
         let text_of = |key: &str| {
@@ -178,10 +179,18 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
         };
         // Diagnostic frames/bookkeeping interleaved with deltas are not new
         // messages. Only semantic boundaries (or another attempt) split replies.
-        let boundary = matches!(record.event.kind.as_str(),
-            "message.user" | "runtime.tool.activity" | "runtime.turn.started"
-            | "runtime.turn.completed" | "runtime.turn.cancelled" | "runtime.turn.failed"
-            | "runtime.send.failed" | "handoff.completed");
+        let boundary = matches!(
+            record.event.kind.as_str(),
+            "message.user"
+                | "runtime.tool.activity"
+                | "runtime.turn.started"
+                | "runtime.turn.completed"
+                | "runtime.turn.cancelled"
+                | "runtime.turn.failed"
+                | "runtime.send.failed"
+                | "runtime.transport.closed"
+                | "handoff.completed"
+        );
         if boundary || (!reply_attempt.is_empty() && reply_attempt != record.event.attempt_id) {
             if let Some(reply) = pending_reply.take() {
                 items.push(reply);
@@ -189,6 +198,13 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
         }
         match record.event.kind.as_str() {
             "message.user" => {
+                if payload
+                    .and_then(|value| value.get("origin"))
+                    .and_then(Value::as_str)
+                    == Some("generated-handoff")
+                {
+                    continue;
+                }
                 let Some(text) = text_of("text") else {
                     continue;
                 };
@@ -197,6 +213,10 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
                 }
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
+                    logical_item_id: record.event.id.clone(),
+                    fragment_index: 0,
+                    continues_before: false,
+                    continues_after: false,
                     kind: "user-message".into(),
                     body: text,
                     actor: Some("user".into()),
@@ -215,6 +235,10 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
                         reply_attempt = record.event.attempt_id.clone();
                         pending_reply = Some(ProductConversationItem {
                             id: record.event.id.clone(),
+                            logical_item_id: record.event.id.clone(),
+                            fragment_index: 0,
+                            continues_before: false,
+                            continues_after: false,
                             kind: "assistant-message".into(),
                             body: delta,
                             actor: None,
@@ -240,6 +264,10 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
                 };
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
+                    logical_item_id: record.event.id.clone(),
+                    fragment_index: 0,
+                    continues_before: false,
+                    continues_after: false,
                     kind: "activity-summary".into(),
                     body,
                     actor: None,
@@ -248,7 +276,9 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
                     technical_details: None,
                 });
             }
-            "runtime.turn.failed" | "runtime.send.failed" | "attempt.admission.failed"
+            "runtime.turn.failed"
+            | "runtime.send.failed"
+            | "attempt.admission.failed"
             | "runtime.transport.closed" => {
                 let technical_body = text_of("text").or_else(|| text_of("error"));
                 let body = match record.event.kind.as_str() {
@@ -273,24 +303,56 @@ fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
                 }
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
+                    logical_item_id: record.event.id.clone(),
+                    fragment_index: 0,
+                    continues_before: false,
+                    continues_after: false,
                     kind: "actionable-error".into(),
                     body,
                     actor: None,
                     timestamp: Some(record.created_at.clone()),
                     actions: None,
-                    technical_details: Some(
-                        Value::Object(technical).to_string(),
-                    ),
+                    technical_details: Some(Value::Object(technical).to_string()),
                 });
             }
             "handoff.completed" => {
+                let summary_side = payload
+                    .and_then(|value| value.get("summarySide"))
+                    .and_then(Value::as_str);
+                let historical_source = payload
+                    .and_then(|value| value.pointer("/oldAttempt/id"))
+                    .and_then(Value::as_str)
+                    == Some(record.event.attempt_id.as_str());
+                if summary_side.is_some_and(|side| side != "source")
+                    || (summary_side.is_none() && !historical_source)
+                {
+                    continue;
+                }
                 let provider = payload
                     .and_then(|value| value.get("newAttempt"))
                     .and_then(|value| value.get("provider"))
                     .and_then(Value::as_str)
                     .unwrap_or("another Runtime");
+                let logical_item_id = payload
+                    .and_then(|value| value.get("handoffId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        payload
+                            .and_then(|value| value.pointer("/authorization/requestHash"))
+                            .and_then(Value::as_str)
+                            .map(|hash| format!("handoff-{hash}"))
+                    })
+                    .unwrap_or_else(|| record.event.id.clone());
+                if !seen_handoff_operations.insert(logical_item_id.clone()) {
+                    continue;
+                }
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
+                    logical_item_id,
+                    fragment_index: 0,
+                    continues_before: false,
+                    continues_after: false,
                     kind: "handoff-summary".into(),
                     body: format!("Handed off to {provider}"),
                     actor: None,
@@ -390,7 +452,7 @@ fn project_turn(
         .map_err(|error| error.to_string())?;
     let facts = runtime_manager.turn_facts(&attempt.id);
     let pending_permission = store
-        .list_decisions()
+        .decisions_for_attempt(&attempt.id, 1)
         .map_err(|error| error.to_string())?
         .into_iter()
         .any(|decision| {
@@ -439,11 +501,20 @@ fn project_turn(
             ),
         });
     }
-    let records = store.list_event_records(&attempt.id, 0).map_err(|error| error.to_string())?;
-    let latest_turn_fact = records.iter().rev().find(|record| matches!(record.event.kind.as_str(),
-        "attempt.interrupt.requested" | "runtime.turn.started" | "runtime.turn.completed"
-        | "runtime.turn.failed" | "runtime.turn.cancelled" | "attempt.cancelled"));
-    if latest_turn_fact.is_some_and(|record| record.event.kind == "attempt.interrupt.requested") {
+    let latest_turn_fact = store
+        .latest_event_kind_in(
+            &attempt.id,
+            &[
+                "attempt.interrupt.requested",
+                "runtime.turn.started",
+                "runtime.turn.completed",
+                "runtime.turn.failed",
+                "runtime.turn.cancelled",
+                "attempt.cancelled",
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if latest_turn_fact.as_deref() == Some("attempt.interrupt.requested") {
         return Ok(ProductTurn {
             state: if facts.is_some_and(|facts| facts.in_flight) { "stopping" } else { "uncertain" }.into(),
             can_stop: false, can_send: false,
@@ -514,9 +585,11 @@ fn project_turn(
         // so an old native registration is not a prerequisite (including restart).
         let stopped_can_continue = attempt.state == AttemptState::Cancelled
             && runtime.state != "none"
-            && store.confirmed_cancellation(&attempt.id).map_err(|error| error.to_string())?;
-        let send_allowed = stopped_can_continue || (attempt.state == AttemptState::AwaitingReview
-            && runtime.state == "selected");
+            && store
+                .confirmed_cancellation(&attempt.id)
+                .map_err(|error| error.to_string())?;
+        let send_allowed = stopped_can_continue
+            || (attempt.state == AttemptState::AwaitingReview && runtime.state == "selected");
         let reason = fixed_reason.map(str::to_owned).or_else(|| {
             (!send_allowed).then(|| {
                 format!(

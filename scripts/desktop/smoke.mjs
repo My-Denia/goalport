@@ -77,7 +77,7 @@ const PROTOCOL_MAP = {
   firstSend: "DraftGoalComposer submit -> start_conversation {workspaceRoot, provider, message} with a caller-stable requestId (one command, at-most-once claim machine in Core)",
   continuationSend: "Composer submit -> conversation_send {message, campaignId, attemptId} (send_message remains the Core-internal/native ledger command)",
   runtimeChoice: "runtime-picker -> select_runtime {provider, campaignId, taskId, attemptId?} (draft picker is local state only; no Core command before first Send)",
-  responses: "accepted envelope {requestId, accepted:true, duplicate, snapshot} | refusal {goalportRejected:true, requestId, error}",
+  responses: "accepted envelope {requestId, accepted:true, duplicate, snapshot} | refusal {goalportRejected:true, requestId, error, accepted:false, snapshot, rejection}; rejected reservations retain authoritative identity for same-request retry",
   attemptStates: "UI: waiting|active|completed|failed; database state casing is checked separately"
 };
 
