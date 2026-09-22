@@ -74,12 +74,12 @@ test("renderer main/subframe navigation, redirects and webviews are denied befor
   assert.ok(main.indexOf("protectRenderer(mainWindow.webContents") < main.indexOf("await mainWindow.loadFile"));
 });
 
-test("app document identity folds only the Windows drive letter", () => {
+test("app document identity folds Windows drive-path case only", () => {
   const app = "file:///C:/GoalPort/dist/index.html";
   assert.equal(isAppDocument("file:///c:/GoalPort/dist/index.html", app), true);
+  assert.equal(isAppDocument("file:///C:/goalport/dist/INDEX.html", app), true);
   assert.equal(isAppDocument(`${app}#local-anchor`, app), true);
   assert.equal(isAppDocument("file://localhost/C:/GoalPort/dist/index.html", app), true);
-  assert.equal(isAppDocument("file:///C:/goalport/dist/index.html", app), false);
   assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", app), false);
   assert.equal(isAppDocument(`${app}?next=1`, app), false);
   assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html%2Fsecret", app), false);
@@ -103,7 +103,7 @@ test("preload exposes bridge only to exact main app document, never external/sub
     ["file:///other.html", true, true, false], [appUrl, true, false, false],
     ["file:///c:/GoalPort/dist/index.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
     ["file:///C:/GoalPort/dist/index.html#anchor", true, true, true, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/goalport/dist/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/goalport/dist/INDEX.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
     ["file:///C:/GoalPort/dist/index.html?next=1", true, true, false, "file:///C:/GoalPort/dist/index.html"],
     ["file://server/share/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
     ["file://remote/C:/GoalPort/dist/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],

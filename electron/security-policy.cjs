@@ -3,8 +3,9 @@
 // Identity of one local app file. Fragment is ignored. Query is part of the
 // identity. Only an empty host is local: the URL parser already folds
 // localhost into that form, and any surviving host (UNC or remote) is rejected.
-// The only case fold is the Windows drive letter. The rest of the path,
-// including percent-encoded separators, stays as the URL serializer stored it.
+// A Windows drive path is compared case-insensitively because CI showed
+// Chromium and Node spelling the same file with different case in more than
+// the drive letter. Percent-encoded separators are not decoded.
 // Kept in lockstep with the copy in preload.cjs (sandbox cannot require this file).
 function appDocumentKey(href) {
   const url = new URL(href);
@@ -12,7 +13,7 @@ function appDocumentKey(href) {
   if (url.username || url.password || url.hostname) return null;
   url.hash = "";
   const drive = url.pathname.match(/^\/([A-Za-z])(:.*)$/);
-  if (drive) url.pathname = `/${drive[1].toLowerCase()}${drive[2]}`;
+  if (drive) url.pathname = `/${drive[1].toLowerCase()}${drive[2].toLowerCase()}`;
   return url.href;
 }
 
