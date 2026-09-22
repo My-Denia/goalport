@@ -4,14 +4,17 @@ All GoalPort state stays on your machine. There is no GoalPort account, no GoalP
 
 ## Where data lives
 
-| How GoalPort was started | Profile directory |
-| --- | --- |
-| Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` |
-| Unpackaged development (`pnpm electron:dev`) | `%APPDATA%\GoalPort\dev` |
-| `--data-dir <absolute path>` | that directory |
-| `--test-profile <absolute path>` | that directory, synthetic Scenario only (see [testing](testing.md)) |
+The layout below describes the current development candidate. Previously
+published rc.1 assets retain their original storage behavior.
 
-A profile directory contains:
+| How GoalPort was started | Durable profile directory | Electron/Chromium browser state |
+| --- | --- | --- |
+| Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` | `%APPDATA%\GoalPort\electron\<profile key>` |
+| Unpackaged development (`pnpm electron:dev`) | `%APPDATA%\GoalPort\dev` | `%APPDATA%\GoalPort\electron\<profile key>` |
+| `--data-dir <absolute path>` | that directory | the separate `electron\<profile key>` namespace next to the app-data root, never inside the `--data-dir` |
+| `--test-profile <absolute path>` | that directory, synthetic Scenario only (see [testing](testing.md)) | `<parent of the test directory>\electron\<profile key>` (test-owned scratch) |
+
+A durable profile directory contains only data you would back up, migrate or restore:
 
 | File | Purpose |
 | --- | --- |
@@ -19,7 +22,9 @@ A profile directory contains:
 | `goalport.sqlite` (plus WAL files) | All Campaign, Task, Attempt, event, decision and receipt records |
 | `goalport.sqlite.launcher.log` | How Core was launched, including breakaway or inherited-job mode |
 | `goalport.sqlite.core.log` | Core diagnostics |
-| Electron profile data | Window/browser state for this profile |
+| `backups/`, `import-journal.json`, `.import-staging-*` | Atomically published consistency backups and proof-bound crash-safe import/recovery staging |
+
+The Electron/Chromium browser state (caches, `Local State`, `Preferences`, `Network`, session storage, `window-state.json`) lives in its own namespace keyed by the durable profile identity. It is never written into the durable profile directory, so backing up a `--data-dir` gives you pure GoalPort data, and a fresh profile decision can never race Chromium session files. Browser-state identity follows the canonical durable profile path (not the Core build), and deleting it only resets window geometry and caches. A `--user-data-dir <absolute path>` (the standard Chromium switch) relocates the application-data root: both the durable channel directories and the `electron` namespace move inside the relocated root and stay physically separate; combined with `--data-dir`, the `--data-dir` keeps owning the durable location. Historical Chromium files left in an older profile directory are ignored, never deleted, and no longer used.
 
 The RC profile is separate from data folders used by earlier GoalPort development builds and from historical acceptance databases. Explicit `--data-dir` and `--test-profile` paths take precedence over the defaults. A normal profile and a test profile cannot share a directory, and the two flags cannot be combined.
 
@@ -29,18 +34,38 @@ To keep a separate normal profile:
 pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --data-dir C:\GoalPortData\rc1
 ```
 
-## Profiles are bound to a build
+## Profile identity and compatibility
 
-The first launch writes `goalport-profile.json` with the mode (normal or synthetic test), the RC version, the Core binary SHA-256 and a key derived from the canonical directory path. On later launches GoalPort refuses the profile, without rewriting anything, when:
+The marker identifies the canonical durable path and normal or synthetic mode.
+Build hashes record provenance; compatible builds can reopen the same data.
+GoalPort refuses unknown files in an unmarked directory, incompatible or corrupt
+data, a mismatched marker identity, and a missing database after a recorded open.
+Known Chromium leftovers from the former shared directory remain compatible and
+are preserved. See [profile continuity](profile-continuity.md) for backup and import behavior.
 
-- the directory is not empty and has no marker. Legacy databases are never adopted or imported;
-- the marker belongs to a different mode;
-- the marker belongs to another RC version or Core build;
-- the marker uses the earlier case-folded path identity format, or the directory was moved so its canonical key no longer matches.
+When older GoalPort data has a nonempty SQLite WAL but no SHM, GoalPort does not
+write-open the original database. It copies a stable main+WAL snapshot into the
+new profile's owned staging area, lets SQLite recover and verify only that copy,
+and shows an import offer only after the recovered copy passes integrity and
+schema checks. Accepting the offer promotes the proof-bound copy; the original
+files remain byte-for-byte unchanged. Declining explicitly removes the owned
+temporary copy before starting fresh. Exiting keeps the pending offer for the
+next startup.
+
+Incomplete backup files use non-`.sqlite` partial names and never count toward
+retention. A final backup name appears only after copy, verification,
+checkpoint and file sync complete, using an atomic no-overwrite publication.
+
+Durable and browser paths must be physically disjoint, including junction and
+short-name aliases. Neither may contain the other. For example, combining
+`--user-data-dir R` with `--data-dir R\GoalPort` is refused before browser setup;
+choose a separate durable directory. Redirecting the browser namespace outside
+the relocated app-data root or synthetic scratch root is also refused.
 
 The Core pipe name is derived from the same profile key and Core hash. Two different builds therefore cannot attach to each other's Core.
 
-**Database migration and import are not provided in this RC.** When you change builds, use a new data directory. Development runs do not import or migrate RC data.
+The previously published rc.1 package remains build-bound; these candidate
+changes do not alter its files or its behavior.
 
 ## Workspaces
 

@@ -1,12 +1,16 @@
-const { app, BrowserWindow, ipcMain, Notification, shell, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, Notification, screen, shell, dialog } = require("electron");
 const { spawn, execFile } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { pathToFileURL } = require("node:url");
+const { createTrustedIpcHandler, protectRenderer, isAppDocument } = require("./security-policy.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
+const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 function reportStartupFailure(error) {
@@ -15,17 +19,97 @@ function reportStartupFailure(error) {
   app.exit(1);
 }
 
-let appVersion, profile;
+// Build identity: distribution separates the release channel from development
+// candidates. Packaged apps read it from build-info.json (inside the asar);
+// an unpackaged run is `dev`. A packaged app without build-info falls back to
+// `release` (the historical behavior; verify-package flags such a package).
+function readBuildInfo() {
+  for (const candidate of [path.join(__dirname, "build-info.json"), path.join(appRoot, "build-info.json")]) {
+    try { return JSON.parse(fs.readFileSync(candidate, "utf8")); } catch { /* absent or unreadable */ }
+  }
+  return null;
+}
+function resolveChannel() {
+  if (!app.isPackaged) return "dev";
+  const info = readBuildInfo();
+  return info?.distribution === "dev-candidate" ? "dev-candidate" : "release";
+}
+function channelLabel(channel) {
+  if (channel === "release") return "RC";
+  if (channel === "dev-candidate") return "Dev candidate";
+  return "Dev";
+}
+
+// The standard Chromium switch relocates the application-data ROOT (profiles
+// live under <dir>/GoalPort/<channel>). This is a real product feature for
+// redirected/portable homes, not a test hook: the full default profile
+// selection (channel namespace, discovery, compatibility) keeps running inside
+// the relocated root. Windows known-folder resolution ignores the APPDATA
+// environment variable, so this switch is the supported way to relocate.
+function appDataRoot(argv, electronAppData) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    if (arg === "--user-data-dir" && argv[index + 1] && path.isAbsolute(argv[index + 1])) return path.resolve(argv[index + 1]);
+    if (arg.startsWith("--user-data-dir=")) {
+      const value = arg.slice("--user-data-dir=".length);
+      if (value && path.isAbsolute(value)) return path.resolve(value);
+    }
+  }
+  return electronAppData;
+}
+
+let appVersion, profile, profileManager, launchChannel;
+let selectedCoreBinary, selectedLauncherBinary;
+let legacyIsolated = false;
 try {
   const launchArgs = launchArguments(process.argv);
-  const legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  // Resolve before sanitizing launch variables. Hashing one executable then
+  // selecting another after scrub breaks dev startup's identity contract.
+  selectedCoreBinary = resolveCoreBinary();
+  selectedLauncherBinary = resolveLauncherBinary();
   appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
-  profile = legacyIsolated ? null : prepareProfile({
-    args: launchArgs, appData: app.getPath("appData"), version: appVersion, isPackaged: app.isPackaged,
+  launchChannel = legacyIsolated ? null : resolveChannel();
+  profile = legacyIsolated ? null : resolveProfilePaths({
+    args: launchArgs, appData: appDataRoot(process.argv, app.getPath("appData")), channel: launchChannel,
     coreSha256: fileSha256(coreBinary() || "")
   });
   if (profile) {
-    app.setPath("userData", profile.directory);
+    // Storage-boundary startup sequence: Electron/Chromium userData points at
+    // the BROWSER-STATE namespace, a directory physically separate from the
+    // durable profile root and derived from the durable identity only. The
+    // durable root is NEVER created or written pre-ready — Chromium therefore
+    // cannot put anything into it, and "is this a fresh durable profile" can
+    // no longer race with transient session files. Nothing else is decided
+    // here: every compatibility/ownership decision happens in the post-ready
+    // bootstrap with a real window on screen, against the durable root only.
+    assertProfileStorageBoundary(profile);
+    fs.mkdirSync(profile.browserStateDirectory, { recursive: true });
+    assertProfileStorageBoundary(profile);
+    // Chromium itself needs a writable userData; probe now so an unwritable
+    // browser-state directory produces an honest refusal instead of a silent
+    // exit. (Durable-root writability is NOT probed here: the bootstrap's
+    // classifyFsError reports an unwritable durable location honestly once a
+    // window exists.)
+    {
+      const probe = path.join(profile.browserStateDirectory, `.write-probe-${process.pid}`);
+      fs.writeFileSync(probe, "writable-probe");
+      fs.rmSync(probe, { force: true });
+    }
+    app.setPath("userData", profile.browserStateDirectory);
+    profileManager = new ProfileManager({
+      directory: profile.durableDirectory,
+      appData: appDataRoot(process.argv, app.getPath("appData")),
+      build: {
+        version: appVersion,
+        distribution: app.isPackaged ? launchChannel : "dev",
+        channel: profile.channel,
+        coreSha256: profile.coreSha256,
+        mode: profile.mode,
+        profileKey: profile.profileKey
+      },
+      deps: { execCore: runTracedCoreProfileCommand, log: (line) => console.log(`[profile] ${line}`) }
+    });
     const env = childEnvironment(process.env, profile);
     for (const key of Object.keys(process.env)) {
       if (key.startsWith("GOALPORT_") && !(key in env)) delete process.env[key];
@@ -142,6 +226,8 @@ const PIPE_NAME = configuredPipeName.startsWith("\\\\.\\pipe\\")
   : `\\\\.\\pipe\\${configuredPipeName}`;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 let mainWindow;
+const appDocumentUrl = pathToFileURL(path.join(appRoot, "dist", "index.html")).href;
+const handleTrusted = createTrustedIpcHandler(ipcMain, () => mainWindow, appDocumentUrl);
 if (process.env.GOALPORT_ALLOW_MULTI_INSTANCE !== "1") {
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
@@ -160,6 +246,7 @@ let coreLaunchPromise;
 let allowQuitAfterCloseChoice = false;
 let closePromptOpen = false;
 let lastAttemptActive = false;
+let lastProjectionUnavailable = false;
 let lastAttemptId = "";
 let lastAttemptProvider = "";
 let lastStopResponsibilityHeld = false;
@@ -211,6 +298,9 @@ function normalizeClosePayload(payload) {
 }
 
 function coreBinary() {
+  return selectedCoreBinary;
+}
+function resolveCoreBinary() {
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, "goalport-core.exe");
     return fs.existsSync(bundled) ? bundled : undefined;
@@ -226,6 +316,9 @@ function coreBinary() {
 }
 
 function launcherBinary() {
+  return selectedLauncherBinary;
+}
+function resolveLauncherBinary() {
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, "goalport-core-launcher.exe");
     return fs.existsSync(bundled) ? bundled : undefined;
@@ -267,9 +360,18 @@ function pipeAvailable() {
   });
 }
 
+// The profile bootstrap owns the decision whether this build may open the
+// data at all; the renderer's snapshot polling must not spawn a Core before
+// that decision is made (in the old pre-ready-marker architecture this could
+// not happen because the profile was settled before any window existed).
+let profileReady = false;
+
 async function ensureCore() {
   if (!profile && isolatedRequired() && !isThisRunIsolatedPipe(process.env.GOALPORT_CORE_PIPE || configuredPipeName)) {
     throw new Error(`isolated Electron refused to attach to non this-run pipe: ${process.env.GOALPORT_CORE_PIPE || configuredPipeName}`);
+  }
+  if (profileManager && !profileReady) {
+    throw new Error("GoalPort is still preparing this data profile; Core start is gated");
   }
   if (await pipeAvailable()) return coreGate.verify();
   if (coreLaunchPromise) return coreLaunchPromise;
@@ -367,6 +469,410 @@ async function verifyCoreConnection() {
   });
 }
 
+// Synchronous-looking async wrapper for `goalport-core profile ...`
+// subcommands (inspect / backup / import). Never spawns a server, never
+// migrates a database.
+const { execFile: execFileAsync } = require("node:child_process");
+function runCoreProfileCommand(args) {
+  const binary = coreBinary();
+  if (!binary) return Promise.resolve({ code: -1, stdout: "", error: "Core binary is missing" });
+  return new Promise((resolve) => {
+    execFileAsync(binary, args, { timeout: 120000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : -1) : 0, stdout: String(stdout ?? ""), error: error?.message });
+    });
+  });
+}
+
+// ---------- Original startup inspection diagnostics ----------
+// Bounded, in-memory trace of the `goalport-core profile inspect` that the
+// profile bootstrap itself issues during startup. This is the ONLY record of
+// the original startup inspection; the separately-labelled post-failure
+// re-probe lives in scripts/desktop/diagnostics.mjs and never substitutes for
+// it. Diagnostic constraints:
+//   * additive only: the trace observes execCore results and NEVER alters
+//     them, the profile decision, the phase/kind contract or any
+//     goalport:bootstrap-state notification. It is exposed solely as the
+//     optional `diagnostics` child of the goalport:bootstrap-current result.
+//   * bounded and sanitized at the source: at most
+//     ORIGINAL_INSPECT_MAX_RECORDS records are kept; every captured string is
+//     capped and user-profile paths are redacted; stdout is never captured or
+//     exposed — only selected fact fields of the parsed report survive.
+//   * fail-safe: any error inside the trace is swallowed; diagnostics can
+//     never mask, delay or replace the original startup failure.
+const ORIGINAL_INSPECT_MAX_RECORDS = 8;
+const ORIGINAL_INSPECT_STRING_CAP = 200;
+const originalInspectTrace = { records: [], total: 0 };
+
+function redactTraceText(value) {
+  return String(value ?? "")
+    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\\/\s"']+/gi, "<user-profile>")
+    .replace(/\/(?:home|Users)\/[^/\s"']+/g, "<user-profile>")
+    .slice(0, ORIGINAL_INSPECT_STRING_CAP);
+}
+
+// Selected fact fields of the inspect report only. Anything else the report
+// carries (counts, epochs, foreign tables, arbitrary extra fields) is dropped.
+function selectedInspectFacts(value) {
+  if (!value || typeof value !== "object") return null;
+  const facts = {};
+  for (const key of ["ok", "exists", "openable", "needsRecovery", "empty"]) {
+    facts[key] = typeof value[key] === "boolean" ? value[key] : null;
+  }
+  for (const key of ["schemaVersion", "currentSchemaVersion"]) {
+    facts[key] = Number.isSafeInteger(value[key]) && value[key] >= 0 ? value[key] : null;
+  }
+  facts.quickCheck = typeof value.quickCheck === "string" ? redactTraceText(value.quickCheck) : null;
+  facts.errorReason = typeof value.error === "string" ? redactTraceText(value.error) : null;
+  return facts;
+}
+
+// Names the inspected database WITHOUT recording any path: the bootstrap's
+// own profile database vs. a discovery/import inspection of other data.
+function originalInspectTarget(args) {
+  try {
+    const dbIndex = args.indexOf("--db");
+    if (dbIndex < 0 || !args[dbIndex + 1] || !profile) return "unknown";
+    const relative = path.relative(path.resolve(profile.directory), path.resolve(String(args[dbIndex + 1])));
+    return relative.toLowerCase() === "goalport.sqlite" ? "own-database" : "other-database";
+  } catch {
+    return "unknown";
+  }
+}
+
+function beginOriginalInspectRecord(args, purpose) {
+  const record = {
+    target: originalInspectTarget(args),
+    purpose: purpose === "post-core-open" ? "post-core-open" : "classification",
+    status: "pending",
+    startedAt: isoNow(),
+    startedAtMs: Date.now(),
+    endedAt: null,
+    elapsedMs: null,
+    exitCode: null,
+    execError: null,
+    malformed: null,
+    parseNote: null,
+    facts: null
+  };
+  originalInspectTrace.records.push(record);
+  originalInspectTrace.total += 1;
+  if (originalInspectTrace.records.length > ORIGINAL_INSPECT_MAX_RECORDS) {
+    originalInspectTrace.records.splice(0, originalInspectTrace.records.length - ORIGINAL_INSPECT_MAX_RECORDS);
+  }
+  return record;
+}
+
+function completeOriginalInspectRecord(record, result) {
+  record.status = "completed";
+  record.endedAt = isoNow();
+  record.elapsedMs = Math.max(0, Date.now() - record.startedAtMs);
+  record.exitCode = Number.isInteger(result?.code) ? result.code : null;
+  record.execError = result?.error ? redactTraceText(result.error) : null;
+  try {
+    const line = String(result?.stdout || "").split(/\r?\n/).find((candidate) => candidate.trim());
+    if (!line) {
+      record.malformed = true;
+      record.parseNote = "no parsable output line";
+      return;
+    }
+    record.facts = selectedInspectFacts(JSON.parse(line));
+    record.malformed = false;
+  } catch (error) {
+    record.malformed = true;
+    record.parseNote = redactTraceText(error?.message || error);
+  }
+}
+
+// Snapshot for the optional diagnostics child of goalport:bootstrap-current.
+// A pending record reports its elapsed-so-far in the copy only; the live
+// record keeps waiting for its completion facts.
+function originalInspectDiagnostics() {
+  return {
+    kind: "original-startup-inspect-trace",
+    note: "bounded in-memory trace of the original startup `goalport-core profile inspect` recorded by this build; distinct from any post-failure diagnostic re-probe",
+    totalInspections: originalInspectTrace.total,
+    droppedRecords: Math.max(0, originalInspectTrace.total - originalInspectTrace.records.length),
+    records: originalInspectTrace.records.map((record) => {
+      const { startedAtMs, ...snapshot } = { ...record };
+      if (snapshot.status === "pending") snapshot.elapsedMs = Math.max(0, Date.now() - startedAtMs);
+      return snapshot;
+    })
+  };
+}
+
+function runTracedCoreProfileCommand(args, context) {
+  let record = null;
+  try {
+    if (Array.isArray(args) && args[0] === "profile" && args[1] === "inspect") record = beginOriginalInspectRecord(args, context?.purpose);
+  } catch { /* diagnostics must never break startup */ }
+  const finish = (result) => {
+    try { if (record) completeOriginalInspectRecord(record, result); } catch { /* swallow */ }
+  };
+  return runCoreProfileCommand(args).then(
+    (result) => { finish(result); return result; },
+    (error) => {
+      finish({ code: -1, stdout: "", error: String(error?.message || error) });
+      throw error;
+    }
+  );
+}
+
+// ---------- profile bootstrap (startup continuity) ----------
+// All profile compatibility/ownership decisions run here, after a real window
+// exists, with structured states pushed to the renderer. The renderer only
+// displays facts and forwards user actions; it never decides.
+// A bootstrap that may continue returns the structured outcome (its
+// `formatVersion` is the schema fact the resolved decision committed to);
+// every terminal path returns the string "exit".
+let bootstrapWaiter = null;
+function waitForBootstrapAction() {
+  return new Promise((resolve) => { bootstrapWaiter = resolve; });
+}
+let lastBootstrapState = { phase: "checking" };
+let profileDisposition = null;
+function pushBootstrap(state) {
+  lastBootstrapState = state;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send("goalport:bootstrap-state", state); } catch { /* window mid-close */ }
+}
+function importFacts(discovery) {
+  return {
+    sourcePath: discovery?.path ?? null,
+    createdBy: discovery?.marker?.createdBy ?? null,
+    markerSchema: discovery?.marker?.markerSchemaVersion ?? null,
+    counts: discovery?.inspection?.counts ?? null,
+    schemaVersion: discovery?.inspection?.schemaVersion ?? null,
+    bytes: discovery?.inspection?.bytes ?? null,
+    recoveryDisposition: "NOT_REQUIRED",
+    recoveryMethod: null,
+    recoveryProofToken: null,
+    operationId: null,
+    sourceMutationOnAccept: "NONE",
+    liveSource: discovery?.inspection?.latestEpoch?.priorCore === "live-exact"
+  };
+}
+function quitFromBootstrap() {
+  allowQuitAfterCloseChoice = true;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  app.exit(0);
+}
+async function chooseFreshDirectoryAndRelaunch() {
+  const choice = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose an empty folder for a fresh GoalPort data profile",
+    properties: ["openDirectory", "createDirectory", "dontAddToRecent"]
+  });
+  if (choice.canceled || !choice.filePaths[0]) return false;
+  // relaunchArguments strips the mutually-exclusive --data-dir/--test-profile
+  // pair (both spellings) and keeps every other switch — a --user-data-dir
+  // relocation or a debugging switch survives the relaunch.
+  app.relaunch({ args: relaunchArguments(process.argv.slice(1), choice.filePaths[0]) });
+  quitFromBootstrap();
+  return true;
+}
+const BOOTSTRAP_ERROR_SCREENS = {
+  "newer-schema": { canChooseDir: true, headline: "This data profile is from a newer GoalPort." },
+  "unsupported-legacy": { canChooseDir: true, headline: "This data profile uses an unsupported legacy format." },
+  "corrupt": { canChooseDir: true, headline: "This data profile failed an integrity check." },
+  "corrupt-marker": { canChooseDir: true, headline: "This data profile's record file is damaged." },
+  "missing-database": { canChooseDir: true, headline: "This data profile record exists but its database is missing." },
+  "not-a-profile": { canChooseDir: true, headline: "This data directory is not an empty or existing GoalPort profile." },
+  "identity-mismatch": { canChooseDir: true, headline: "This data directory belongs to a different profile identity." },
+  "inspection-failed": { canChooseDir: true, headline: "This data profile could not be examined." },
+  "needs-recovery": { canChooseDir: true, headline: "This data profile's database cannot be verified without recovery." },
+  "readonly-dir": { canChooseDir: true, headline: "The data directory cannot be written." },
+  "disk-full": { canChooseDir: true, headline: "There is not enough disk space to continue." },
+  "import-failed": { canChooseDir: true, headline: "Importing the existing data did not complete." },
+  "backup-failed": { canChooseDir: true, headline: "A safety backup of the existing data could not be created." },
+  "core-start": { canChooseDir: false, headline: "The local Core could not start with this data profile." },
+  "internal-error": { canChooseDir: false, headline: "GoalPort hit an unexpected condition while opening this data profile." }
+};
+async function bootstrapErrorScreen(kind, message) {
+  const screen = BOOTSTRAP_ERROR_SCREENS[kind] || BOOTSTRAP_ERROR_SCREENS["internal-error"];
+  pushBootstrap({ phase: "error", kind, headline: screen.headline, message: String(message || ""), canChooseDir: screen.canChooseDir, dataPath: profile?.directory ?? null });
+  while (true) {
+    const action = await waitForBootstrapAction();
+    if (action?.type === "choose-dir") { if (await chooseFreshDirectoryAndRelaunch()) return "exit"; continue; }
+    if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+    if (action?.type === "exit") return "exit";
+  }
+}
+function classifyFsError(error) {
+  const code = String(error?.code || "");
+  if (["EACCES", "EPERM", "EROFS"].includes(code)) return "readonly-dir";
+  if (["ENOSPC", "EDQUOT"].includes(code)) return "disk-full";
+  return "internal-error";
+}
+async function runProfileBootstrap() {
+  pushBootstrap({ phase: "checking" });
+  let outcome;
+  try {
+    outcome = await profileManager.resolve();
+    profileDisposition = outcome.kind;
+  } catch (error) {
+    return (await bootstrapErrorScreen(classifyFsError(error), error?.message)) === "exit" ? "exit" : "exit";
+  }
+  switch (outcome.kind) {
+    case "fresh":
+      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return outcome;
+    case "resume-import":
+      try { profileManager.finalizeImport(outcome.journal); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return outcome;
+    case "reopen":
+      if (outcome.needsBackup) {
+        pushBootstrap({ phase: "backing-up" });
+        try { await profileManager.backupOwnDatabase(); } catch (error) { return await bootstrapExitOnError("backup-failed", error); }
+      }
+      return outcome;
+    case "adopt-v1": {
+      // Explicit --data-dir carrying a v1 marker: verified backup, then an
+      // in-place marker upgrade (metadata only; the database never moves).
+      pushBootstrap({ phase: "backing-up" });
+      try { await profileManager.backupOwnDatabase(); } catch (error) { return await bootstrapExitOnError("backup-failed", error); }
+      try {
+        const state = profileManager.readMarker();
+        if (!state || state.problem) throw new Error(state?.problem || "marker disappeared");
+        profileManager.adoptV1Marker(state);
+      } catch (error) { return await bootstrapExitOnError("internal-error", error); }
+      return outcome;
+    }
+    case "import-offer":
+    case "import-recovery-offer": {
+      const recovery = outcome.kind === "import-recovery-offer";
+      const facts = { ...importFacts(outcome.discovery), ...(recovery ? outcome.recovery : {}) };
+      pushBootstrap({ phase: "import-offer", facts });
+      while (true) {
+        const action = await waitForBootstrapAction();
+        if (action?.type === "exit") return "exit";
+        if (action?.type === "import-accept") {
+          pushBootstrap({ phase: "importing", facts });
+          try {
+            if (recovery) await profileManager.acceptRecovery(outcome.journal, {
+              operationId: action.operationId, recoveryProofToken: action.recoveryProofToken
+            });
+            else await profileManager.runImport(outcome.discovery);
+          } catch (error) {
+            return await bootstrapExitOnError("import-failed", error);
+          }
+          return outcome;
+        }
+        if (action?.type !== "fresh") continue;
+        // Only an explicit decline can abandon an owned recovery probe. A
+        // malformed action, exit or stale consent must never fall into fresh.
+        try {
+          if (recovery) await profileManager.declineRecovery(outcome.journal);
+          profileManager.beginFresh();
+        } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+        return outcome;
+      }
+    }
+    case "import-incompatible": {
+      pushBootstrap({ phase: "import-incompatible", facts: importFacts(outcome.discovery), reason: outcome.reason });
+      while (true) {
+        const action = await waitForBootstrapAction();
+        if (action?.type === "fresh") {
+          try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+          return outcome;
+        }
+        if (action?.type === "open-folder" && outcome.discovery?.path) { shell.openPath(outcome.discovery.path); continue; }
+        if (action?.type === "exit") return "exit";
+      }
+    }
+    case "live-core":
+    case "unknown-core": {
+      const live = outcome.kind === "live-core";
+      while (true) {
+        pushBootstrap({
+          phase: "coordination",
+          kind: outcome.kind,
+          headline: live
+            ? "Your GoalPort data is still in use by a running GoalPort Core."
+            : "GoalPort cannot confirm whether a previous Core is still using this data.",
+          detail: outcome.epoch ?? null,
+          dataPath: profile?.directory ?? null
+        });
+        const action = await waitForBootstrapAction();
+        if (action?.type === "retry") {
+          return await runProfileBootstrap();
+        }
+        if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+        if (action?.type === "exit") return "exit";
+      }
+    }
+    default:
+      return await bootstrapExitOnError(outcome.kind, outcome.reason || outcome.kind);
+  }
+}
+async function bootstrapExitOnError(kind, error) {
+  const disposition = await bootstrapErrorScreen(kind, error?.message || error);
+  return disposition === "exit" ? "exit" : "exit";
+}
+// Synthetic (--test-profile) bootstrap: the same fail-closed decisions as
+// normal data, minus channel behaviors (discovery/import/v1 adoption) that
+// never apply to an explicit per-test directory. Only a genuinely fresh
+// directory or a compatible synthetic reopen may continue; every other
+// outcome refuses BEFORE any marker write, backup write-open or Core launch.
+// Synthetic data is disposable, so a compatible reopen skips the consistency
+// backup — no write-open ever happens on this path.
+async function runSyntheticProfileBootstrap() {
+  pushBootstrap({ phase: "checking" });
+  let outcome;
+  try {
+    outcome = await profileManager.resolve();
+    profileDisposition = outcome.kind;
+  } catch (error) {
+    return await bootstrapExitOnError(classifyFsError(error), error);
+  }
+  switch (outcome.kind) {
+    case "fresh":
+      try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
+      return outcome;
+    case "reopen":
+      return outcome;
+    default:
+      return await bootstrapExitOnError(outcome.kind, outcome.reason || outcome.kind);
+  }
+}
+// The Core spawn itself can still lose an ownership race with a Core that
+// became live between inspection and spawn: classify structurally, never by
+// matching the error text.
+async function startCoreWithCoordination() {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await ensureCore();
+      return true;
+    } catch (error) {
+      let outcome = null;
+      try { outcome = await profileManager.resolve(); } catch { /* classify below */ }
+      if (attempt < 20 && (outcome?.kind === "live-core" || outcome?.kind === "unknown-core")) {
+        const disposition = await coordinationFromOutcome(outcome);
+        if (disposition === "retry") continue;
+        return false;
+      }
+      await bootstrapExitOnError("core-start", error);
+      return false;
+    }
+  }
+}
+async function coordinationFromOutcome(outcome) {
+  const live = outcome.kind === "live-core";
+  while (true) {
+    pushBootstrap({
+      phase: "coordination",
+      kind: outcome.kind,
+      headline: live
+        ? "Your GoalPort data is still in use by a running GoalPort Core."
+        : "GoalPort cannot confirm whether a previous Core is still using this data.",
+      detail: outcome.epoch ?? null,
+      dataPath: profile?.directory ?? null
+    });
+    const action = await waitForBootstrapAction();
+    if (action?.type === "retry") return "retry";
+    if (action?.type === "open-folder" && profile?.directory) { shell.openPath(profile.directory); continue; }
+    if (action?.type === "exit") return "exit";
+  }
+}
+
 const coreGate = createCoreGate({ verify: verifyCoreConnection });
 
 // Every request to Core goes through this gate (see createCoreGate).
@@ -415,6 +921,8 @@ function closeAttemptTarget(active, selectedId, held, heldId) {
 }
 
 function cacheAttempt(snapshot) {
+  lastProjectionUnavailable = snapshot?.bounds?.projectionUnavailable === true || snapshot?.bounds?.projection_unavailable === true;
+  if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");
   lastAttemptActive = state === "active" || state === "ACTIVE";
   lastAttemptId = String(snapshot?.attempt?.id || lastAttemptId || "");
@@ -476,7 +984,10 @@ function promptRendererCloseChoice() {
 async function quitAfterCloseChoice() {
   allowQuitAfterCloseChoice = true;
   closePromptOpen = false;
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    saveWindowState({ statePath: path.join(app.getPath("userData"), STATE_FILE), win: mainWindow });
+    mainWindow.destroy();
+  }
   app.quit();
 }
 
@@ -501,70 +1012,203 @@ function maybeNotify(request, result) {
   }
 }
 
+// Integrated title bar (Windows): keep the native window controls via the
+// Window Controls Overlay and let the renderer own the bar surface. The height
+// matches the CSS title bar height in styles.css; colors follow the app surface.
+const TITLE_BAR_HEIGHT = 40;
+
+// The screen API can be absent in embedded/test hosts; window sizing then falls
+// back to the rc.1 defaults instead of refusing to start.
+function primaryDisplay() {
+  try {
+    return screen?.getPrimaryDisplay?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function allDisplays() {
+  try {
+    return screen?.getAllDisplays?.() ?? [];
+  } catch {
+    return [];
+  }
+}
+
 async function createWindow() {
-  await ensureCore();
+  const primary = primaryDisplay();
+  const displays = allDisplays();
+  const state = loadWindowState({
+    statePath: path.join(app.getPath("userData"), STATE_FILE),
+    displays,
+    primaryDisplay: primary ?? { workArea: { x: 0, y: 0, width: 1440, height: 920 } }
+  });
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
-    minWidth: 720,
-    minHeight: 640,
-    title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : "RC"}`,
+    ...state.bounds,
+    minWidth: 480,
+    minHeight: 420,
+    title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : (launchChannel ? channelLabel(launchChannel) : "RC")}`,
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#1a1a1e",
+      symbolColor: "#c8c7c5",
+      height: TITLE_BAR_HEIGHT
+    },
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      additionalArguments: [`--goalport-app-document=${encodeURIComponent(appDocumentUrl)}`]
     }
   });
+  protectRenderer(mainWindow.webContents, appDocumentUrl, (url) => shell.openExternal(url));
+  if (state.maximized) mainWindow.maximize();
+  const rememberWindowState = () => saveWindowState({
+    statePath: path.join(app.getPath("userData"), STATE_FILE),
+    win: mainWindow
+  });
+  mainWindow.on("resize", rememberWindowState);
+  mainWindow.on("move", rememberWindowState);
   await mainWindow.loadFile(path.join(appRoot, "dist", "index.html"));
+  try {
+    const loaded = mainWindow.webContents.getURL();
+    if (!isAppDocument(loaded, appDocumentUrl)) {
+      let hostClass = "malformed";
+      let queryDiff = 0;
+      let pathLowerEqual = 0;
+      let lenDelta = 0;
+      try {
+        const actual = new URL(loaded);
+        const expected = new URL(appDocumentUrl);
+        const host = actual.hostname.toLowerCase();
+        hostClass = host ? (host === "localhost" ? "localhost" : "other") : "empty";
+        queryDiff = actual.search === expected.search ? 0 : 1;
+        pathLowerEqual = actual.pathname.toLowerCase() === expected.pathname.toLowerCase() ? 1 : 0;
+        lenDelta = actual.pathname.length - expected.pathname.length;
+      } catch { /* malformed stays */ }
+      console.error(`goalport-document-mismatch hostClass=${hostClass} queryDiff=${queryDiff} pathLowerEqual=${pathLowerEqual} lenDelta=${lenDelta}`);
+    }
+  } catch {
+    console.error("goalport-document-mismatch hostClass=malformed");
+  }
   if (isolatedRequired() && mainWindow && !mainWindow.isDestroyed()) {
     await mainWindow.webContents.executeJavaScript("window.__GOALPORT_ISOLATED=1");
   }
   mainWindow.on("close", (event) => {
+    saveWindowState({ statePath: path.join(app.getPath("userData"), STATE_FILE), win: mainWindow });
     if (allowQuitAfterCloseChoice) return;
-    if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
+    if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) return;
     event.preventDefault();
     promptRendererCloseChoice();
   });
+  if (profileManager && profile && profile.mode === "normal" && !profile.testMode) {
+    const outcome = await runProfileBootstrap();
+    if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
+    profileReady = true;
+    if (!(await startCoreWithCoordination())) { quitFromBootstrap(); return; }
+    try { await profileManager.recordOpenedDatabase(); } catch (error) {
+      profileReady = false;
+      await bootstrapExitOnError("inspection-failed", error);
+      quitFromBootstrap(); return;
+    }
+    pushBootstrap({ phase: "done" });
+  } else if (profileManager && profile) {
+    // Synthetic test profiles (--test-profile) pass the SAME ProfileManager
+    // validation before any Core launch: marker product/mode/path identity,
+    // then database compatibility through the read-only inspection. There is
+    // no synthetic profileReady shortcut anymore — a damaged, foreign, newer
+    // or unmarked directory refuses without spawning Core, and only a fresh
+    // or compatible-reopen bootstrap reaches ensureCore.
+    const outcome = await runSyntheticProfileBootstrap();
+    if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
+    profileReady = true;
+    await ensureCore();
+    try { await profileManager.recordOpenedDatabase(); } catch (error) {
+      profileReady = false;
+      await bootstrapExitOnError("inspection-failed", error);
+      quitFromBootstrap(); return;
+    }
+    pushBootstrap({ phase: "done" });
+  } else {
+    // Legacy isolated tooling (no profile; env-bound contract asserted
+    // pre-ready in assertIsolatedLaunch) keeps the direct path. It now also
+    // receives the bootstrap done signal: this branch is an active admission
+    // contract, and a renderer that subscribes to bootstrap states must not
+    // wait on "checking" forever (nothing else will ever push a state here).
+    profileReady = true;
+    await ensureCore();
+    pushBootstrap({ phase: "done" });
+  }
   await refreshAttemptCache();
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle("goalport:app-info", () => ({
-    version: appVersion, channel: "Stable V1 RC", testMode: isolatedRequired(), dataPath: app.getPath("userData")
+  handleTrusted("goalport:app-info", () => ({
+    version: appVersion,
+    channel: profile?.testMode ? "Synthetic test" : (launchChannel === "release" || !launchChannel ? "Stable V1 RC" : channelLabel(launchChannel)),
+    distribution: app.isPackaged ? (launchChannel || "release") : "dev",
+    testMode: isolatedRequired(),
+    // dataPath is the durable profile root (the user's backup/migration
+    // unit); browserStatePath is the separate Electron/Chromium namespace.
+    // Profile-less legacy isolated runs keep reporting their env-bound
+    // userData as both.
+    dataPath: profile?.durableDirectory ?? app.getPath("userData"),
+    browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData")
   }));
-  ipcMain.handle("goalport:choose-workspace", async () => {
+  handleTrusted("goalport:bootstrap-current", () => {
+    // An additive optional diagnostics child exposes
+    // the bounded original-inspect trace. The bootstrap state itself — every
+    // phase/kind and every goalport:bootstrap-state notification — is returned
+    // unchanged, and the child is never stored into lastBootstrapState.
+    if (!profileManager) return lastBootstrapState;
+    try {
+      return { ...lastBootstrapState, diagnostics: { profileDisposition, originalProfileInspect: originalInspectDiagnostics() } };
+    } catch {
+      return lastBootstrapState;
+    }
+  });
+  handleTrusted("goalport:bootstrap-action", (event, payload) => {
+    if (bootstrapWaiter) {
+      const resolve = bootstrapWaiter;
+      bootstrapWaiter = null;
+      resolve(payload);
+    }
+    return { ok: true };
+  });
+  handleTrusted("goalport:choose-workspace", async () => {
     const choice = await dialog.showOpenDialog(mainWindow, { title: "Choose a project workspace", properties: ["openDirectory"] });
     return choice.canceled ? null : choice.filePaths[0] || null;
   });
-  ipcMain.handle("goalport:core-snapshot", (_, request) => invokeCore(request));
-  ipcMain.handle("goalport:core-command", (_, request) => invokeCore(request));
-  ipcMain.handle("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
-  ipcMain.handle("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
-  ipcMain.handle("goalport:request-close", async () => {
+  handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
+  handleTrusted("goalport:core-command", (_, request) => invokeCore(request));
+  handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
+  handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
+  handleTrusted("goalport:request-close", async () => {
     if (allowQuitAfterCloseChoice) {
       await quitAfterCloseChoice();
       return { ok: true, allowQuitLatch: true };
     }
     await refreshAttemptCache();
-    if (!lastAttemptActive && !lastStopResponsibilityHeld) {
+    if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) {
       await quitAfterCloseChoice();
       return { ok: true, allowQuitLatch: true, prompted: false };
     }
     promptRendererCloseChoice();
     return { ok: true, prompted: true, allowQuitLatch: false };
   });
-  ipcMain.handle("goalport:confirm-close-choice", async (event, rawPayload) => {
+  handleTrusted("goalport:confirm-close-choice", async (event, rawPayload) => {
     const parsed = normalizeClosePayload(rawPayload);
     const selected = parsed.choice;
     const requestId = parsed.requestId;
-    const senderWindow = BrowserWindow.fromWebContents(event.sender);
     const identity = electronIdentity();
     const mainReceivedAtUtc = isoNow();
-    if (!senderWindow || senderWindow.isDestroyed() || senderWindow !== mainWindow) {
-      return { ok: false, requestId, choice: selected, allowQuitLatch: false, coreAcknowledged: false, error: "window-mismatch" };
-    }
     await refreshAttemptCache();
+    if (lastProjectionUnavailable) {
+      const error = "Core acknowledged the operation, but its current control projection is unavailable. Reconnect before changing close responsibility.";
+      notifyCloseChoiceFailed({ requestId, error });
+      return { ok: false, requestId, choice: selected, allowQuitLatch: false, coreAcknowledged: false, error };
+    }
     const closeAttemptId = closeAttemptTarget(lastAttemptActive, lastAttemptId, lastStopResponsibilityHeld, lastHeldAttemptId);
     if (selected === "continue") {
       if ((!lastAttemptActive && !lastStopResponsibilityHeld) || !closeAttemptId) {
@@ -644,7 +1288,7 @@ app.whenReady().then(() => {
       return { ok: false, requestId, choice: "stop", allowQuitLatch: false, coreAcknowledged: false, error: message };
     }
   });
-  ipcMain.handle("goalport:dismiss-close-choice", () => {
+  handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };
   });
@@ -653,13 +1297,13 @@ app.whenReady().then(() => {
 
 app.on("before-quit", (event) => {
   if (allowQuitAfterCloseChoice) return;
-  if (!lastAttemptActive && !lastStopResponsibilityHeld) return;
+  if (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable) return;
   event.preventDefault();
   promptRendererCloseChoice();
 });
 
 app.on("window-all-closed", () => {
-  if (allowQuitAfterCloseChoice || (!lastAttemptActive && !lastStopResponsibilityHeld)) {
+  if (allowQuitAfterCloseChoice || (!lastAttemptActive && !lastStopResponsibilityHeld && !lastProjectionUnavailable)) {
     if (process.platform !== "darwin") app.quit();
   }
 });

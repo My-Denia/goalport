@@ -59,7 +59,7 @@ pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 2. In GoalPort, choose a workspace folder and enter a Campaign goal.
 3. Select a Runtime and send a message. Keep the window wider than 1020 px, or the right rail (Runtimes, Decision Inbox, Stop) is hidden.
 
-Data lives in `%APPDATA%\GoalPort\rc`. The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
+Data lives in `%APPDATA%\GoalPort\rc`. Electron/Chromium browser shell state (caches, preferences, window geometry) is stored separately under `%APPDATA%\GoalPort\electron\<profile key>`, so the profile directory holds only durable GoalPort data. The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
 
 ## How it works
 

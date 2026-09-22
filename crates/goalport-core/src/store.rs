@@ -18,7 +18,7 @@ use std::{
 };
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -575,7 +575,78 @@ impl Store {
                  UNIQUE(source_attempt_id)
              );
              CREATE INDEX IF NOT EXISTS idx_stop_continuations_source
-                 ON stop_continuations(source_attempt_id);",
+                 ON stop_continuations(source_attempt_id);
+             -- Schema v9, product-interaction layer (plan product-interaction-reset R2/R3).
+             --
+             -- product_event_order gives campaign-wide reading an order that is
+             -- explicit, INTEGER-keyed and therefore stable across VACUUM, unlike the
+             -- implicit events.rowid. Backfill runs once per database inside this
+             -- migration transaction, ordered by the CURRENT rowid; the AFTER INSERT
+             -- trigger allocates order_seq for every subsequent events insert in the
+             -- same SQLite transaction as the insert itself. No existing event row is
+             -- rewritten.
+             CREATE TABLE IF NOT EXISTS product_event_order (
+                 order_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                 event_id TEXT UNIQUE NOT NULL
+             );
+             INSERT INTO product_event_order(event_id)
+                 SELECT id FROM events WHERE id NOT IN (SELECT event_id FROM product_event_order)
+                 ORDER BY rowid;
+             CREATE TRIGGER IF NOT EXISTS trg_events_product_order_after_insert
+                 AFTER INSERT ON events
+                 BEGIN
+                     INSERT INTO product_event_order(event_id) VALUES (NEW.id);
+                 END;
+             -- Per-campaign product preferences. selected_provider is the persisted
+             -- Runtime preference: it survives terminal attempts, restarts and
+             -- admission failures, and is never cleared by turn terminality. The
+             -- backfill is deterministic and only fills absent rows: the last durable
+             -- attempt by insertion rowid for the campaign (terminal or not); a
+             -- campaign with no attempt keeps no row, which reads as state 'none'.
+             CREATE TABLE IF NOT EXISTS conversation_preferences (
+                 campaign_id TEXT PRIMARY KEY,
+                 selected_provider TEXT,
+                 title TEXT
+             );
+             INSERT INTO conversation_preferences(campaign_id, selected_provider)
+                 SELECT t.campaign_id, (
+                     SELECT a.provider FROM attempts a
+                     JOIN tasks t2 ON t2.id = a.task_id
+                     WHERE t2.campaign_id = t.campaign_id
+                     ORDER BY a.rowid DESC LIMIT 1
+                 )
+                 FROM tasks t
+                 GROUP BY t.campaign_id
+                 ON CONFLICT(campaign_id) DO NOTHING;
+             -- First-send / explicit-send orchestration ledger (R3 claim machine).
+             -- request_id is the full request identity (PRIMARY KEY); payload_hash
+             -- binds workspace/provider/prompt. claim_token is generated per
+             -- invocation, inserted with the row and never returned to other
+             -- callers: only the INSERT winner can move prepared->claimed.
+             -- native_command_id is fixed at preparation and must equal the send
+             -- command id the eventual native send records. phase is the claim
+             -- machine: prepared -> claimed -> dispatching -> terminal
+             -- (succeeded|failed|unknown). source_attempt_id names the cancelled
+             -- source for a confirmed-stop successor; the partial UNIQUE index
+             -- makes one source get at most one successor.
+             CREATE TABLE IF NOT EXISTS conversation_requests (
+                 request_id TEXT PRIMARY KEY,
+                 payload_hash TEXT NOT NULL,
+                 campaign_id TEXT NOT NULL,
+                 task_id TEXT NOT NULL,
+                 attempt_id TEXT NOT NULL,
+                 phase TEXT NOT NULL CHECK(phase IN
+                     ('prepared','claimed','dispatching','succeeded','failed','unknown')),
+                 claim_token TEXT NOT NULL,
+                 native_command_id TEXT NOT NULL UNIQUE,
+                 result_json TEXT,
+                 source_attempt_id TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_requests_source
+                 ON conversation_requests(source_attempt_id)
+                 WHERE source_attempt_id IS NOT NULL;",
         )?;
         tx.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
@@ -1545,150 +1616,1084 @@ impl Store {
 
         let mut connection = self.inner.lock().expect("store mutex poisoned");
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let projects = {
-            let mut statement =
-                tx.prepare("SELECT id, workspace_root FROM projects ORDER BY rowid, id")?;
-            let rows = statement.query_map([], |row| {
-                Ok(Project {
-                    id: row.get(0)?,
-                    workspace_root: row.get(1)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let matching = match_workspace_project(&projects, proposed_project, |workspace_root| {
-            std::fs::canonicalize(Path::new(workspace_root)).ok()
-        })?;
-        let project = if let Some(existing) = matching {
-            existing
-        } else {
-            if let Some(existing) = projects
-                .iter()
-                .find(|project| project.id == proposed_project.id)
-            {
-                return Err(StoreError::IdempotencyConflict(existing.id.clone()));
-            }
-            tx.execute(
-                "INSERT INTO projects(id, workspace_root) VALUES (?1, ?2)",
-                params![proposed_project.id, proposed_project.workspace_root],
-            )?;
-            proposed_project.clone()
-        };
+        let project = ensure_workspace_campaign_on(
+            &tx,
+            proposed_project,
+            campaign,
+            task,
+            policy_id,
+            policy_payload_json,
+            authorization,
+        )?;
+        tx.commit()?;
+        Ok(project)
+    }
 
-        let campaign_existing: Option<(String, String, String)> = tx
+    /// Reserve a whole first-send conversation in ONE IMMEDIATE SQLite transaction
+    /// (plan product-interaction-reset R2/R3): the workspace campaign (project,
+    /// campaign, root task, policy snapshot, authorization), the request-derived
+    /// initial queued Attempt, the original first user message event, the Runtime
+    /// preference row and the `conversation_requests` prepared row. Either every
+    /// row exists or none does.
+    ///
+    /// A repeat of the same request id returns the recorded row when the payload
+    /// hash matches, and is refused with `IdempotencyConflict` when it does not; in
+    /// neither case does a repeat execute or resume anything.
+    pub fn prepare_conversation_start(
+        &self,
+        start: &ConversationStart,
+    ) -> Result<ConversationPrepareOutcome, StoreError> {
+        if start.request_id.trim().is_empty() {
+            return Err(StoreError::InvalidState(
+                "conversation request id is required".into(),
+            ));
+        }
+        if start.payload_hash.trim().is_empty()
+            || start.claim_token.trim().is_empty()
+            || start.native_command_id.trim().is_empty()
+        {
+            return Err(StoreError::InvalidState(
+                "conversation request hash, claim token and native command id are required".into(),
+            ));
+        }
+        if start.attempt.state != AttemptState::Queued
+            || start.attempt.last_event_seq != 0
+            || start.attempt.provider_session.is_some()
+        {
+            return Err(StoreError::InvalidState(
+                "the reserved Attempt must be a new queued row".into(),
+            ));
+        }
+        if start.first_user_message.trim().is_empty() {
+            return Err(StoreError::InvalidState(
+                "the first user message is required".into(),
+            ));
+        }
+        if start.selected_provider.trim().is_empty() {
+            return Err(StoreError::InvalidState(
+                "the selected Runtime provider is required".into(),
+            ));
+        }
+        if start.campaign.root_task_id != start.task.id
+            || start.task.campaign_id != start.campaign.id
+        {
+            return Err(StoreError::InvalidState(
+                "campaign root_task_id and task campaign_id must agree".into(),
+            ));
+        }
+        if start.attempt.task_id != start.task.id {
+            return Err(StoreError::InvalidState(
+                "the reserved Attempt must belong to the root task".into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = conversation_request_on(&tx, &start.request_id)? {
+            if existing.payload_hash != start.payload_hash {
+                return Err(StoreError::IdempotencyConflict(format!(
+                    "conversation request {} was recorded with a different payload",
+                    start.request_id
+                )));
+            }
+            return Ok(ConversationPrepareOutcome::Existing(existing));
+        }
+        let project = ensure_workspace_campaign_on(
+            &tx,
+            &start.project,
+            &start.campaign,
+            &start.task,
+            &start.policy_id,
+            &start.policy_payload_json,
+            &start.authorization,
+        )?;
+        let attempt_existing: Option<(String, String, Option<String>, String, i64, String)> = tx
             .query_row(
-                "SELECT goal, root_task_id, state FROM campaigns WHERE id=?1",
-                params![campaign.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                "SELECT task_id, provider, provider_session, state, last_event_seq, capability_version FROM attempts WHERE id=?1",
+                params![start.attempt.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((goal, root_task_id, state)) = campaign_existing {
-            if goal != campaign.goal
-                || root_task_id != campaign.root_task_id
-                || state != work_status_string(campaign.state)
-            {
-                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+        if let Some((task_id, provider, session, state, last_seq, _)) = attempt_existing {
+            let same = task_id == start.attempt.task_id
+                && provider == start.attempt.provider
+                && session.is_none()
+                && state == attempt_state_string(AttemptState::Queued)
+                && last_seq == 0;
+            if !same {
+                return Err(StoreError::IdempotencyConflict(start.attempt.id.clone()));
             }
         } else {
             tx.execute(
-                "INSERT INTO campaigns(id, goal, root_task_id, state) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO attempts(id, task_id, provider, provider_session, state, last_event_seq, capability_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    campaign.id,
-                    campaign.goal,
-                    campaign.root_task_id,
-                    work_status_string(campaign.state)
+                    start.attempt.id,
+                    start.attempt.task_id,
+                    start.attempt.provider,
+                    start.attempt.provider_session,
+                    attempt_state_string(start.attempt.state),
+                    start.attempt.last_event_seq,
+                    start.attempt.capability_version
                 ],
             )?;
         }
-
-        let task_existing: Option<(String, String, String, String)> = tx
+        // The original first user message, reserved exactly once. The event id uses
+        // the same core-event-{attempt}-{seq} convention as `persist_event`, and the
+        // later native send is told the message is already reserved so it never
+        // appends a second message.user.
+        let message_event_id = format!("core-event-{}-1", start.attempt.id);
+        let message_exists: Option<i64> = tx
             .query_row(
-                "SELECT campaign_id, title, acceptance, state FROM tasks WHERE id=?1",
-                params![task.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()?;
-        if let Some((campaign_id, title, acceptance, state)) = task_existing {
-            if campaign_id != task.campaign_id
-                || title != task.title
-                || acceptance != task.acceptance
-                || state != work_status_string(task.state)
-            {
-                return Err(StoreError::IdempotencyConflict(task.id.clone()));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO tasks(id, campaign_id, title, acceptance, state) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    task.id,
-                    task.campaign_id,
-                    task.title,
-                    task.acceptance,
-                    work_status_string(task.state)
-                ],
-            )?;
-        }
-
-        let mapping: Option<String> = tx
-            .query_row(
-                "SELECT project_id FROM campaign_projects WHERE campaign_id=?1",
-                params![campaign.id],
+                "SELECT 1 FROM events WHERE id=?1",
+                params![message_event_id],
                 |row| row.get(0),
             )
             .optional()?;
-        if let Some(existing_project) = mapping {
-            if existing_project != project.id {
-                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
-            }
-        } else {
+        if message_exists.is_none() {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "text": start.first_user_message,
+                "requestId": start.request_id,
+                "reservedBy": "start_conversation"
+            }))?;
             tx.execute(
-                "INSERT INTO campaign_projects(campaign_id, project_id) VALUES (?1, ?2)",
-                params![campaign.id, project.id],
+                "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at) VALUES (?1, ?2, 1, 'message.user', NULL, NULL, ?3, ?4)",
+                params![message_event_id, start.attempt.id, payload, now()],
+            )?;
+            tx.execute(
+                "UPDATE attempts SET last_event_seq=1, version=version+1 WHERE id=?1",
+                params![start.attempt.id],
             )?;
         }
+        tx.execute(
+            "INSERT INTO conversation_preferences(campaign_id, selected_provider, title) VALUES (?1, ?2, NULL)
+             ON CONFLICT(campaign_id) DO UPDATE SET selected_provider=excluded.selected_provider",
+            params![start.campaign.id, start.selected_provider],
+        )?;
+        insert_conversation_request_on(
+            &tx,
+            &NewConversationRequest {
+                request_id: start.request_id.clone(),
+                payload_hash: start.payload_hash.clone(),
+                campaign_id: start.campaign.id.clone(),
+                task_id: start.task.id.clone(),
+                attempt_id: start.attempt.id.clone(),
+                claim_token: start.claim_token.clone(),
+                native_command_id: start.native_command_id.clone(),
+                source_attempt_id: None,
+            },
+        )?;
+        let row = conversation_request_on(&tx, &start.request_id)?
+            .ok_or_else(|| StoreError::InvalidState("prepared row missing after insert".into()))?;
+        tx.commit()?;
+        Ok(ConversationPrepareOutcome::Prepared {
+            project: Some(project),
+            row,
+        })
+    }
 
-        let existing_policy: Option<(String, String)> = tx
-            .query_row(
-                "SELECT campaign_id, payload_json FROM policy_snapshots WHERE id=?1",
-                params![policy_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((campaign_id, payload)) = existing_policy {
-            if campaign_id != campaign.id || payload != policy_payload_json {
-                return Err(StoreError::IdempotencyConflict(policy_id.into()));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO policy_snapshots(id, campaign_id, payload_json, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![policy_id, campaign.id, policy_payload_json, now()],
-            )?;
-        }
-
-        let existing_authorization: Option<(i64, i64, i64)> = tx
-            .query_row(
-                "SELECT provider_authorized, transfer_authorized, action_authorized FROM campaign_authorizations WHERE campaign_id=?1",
-                params![campaign.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let expected = (
-            i64::from(authorization.provider_authorized),
-            i64::from(authorization.transfer_authorized),
-            i64::from(authorization.action_authorized),
-        );
-        if let Some(existing) = existing_authorization {
-            if existing != expected {
-                return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO campaign_authorizations(campaign_id, provider_authorized, transfer_authorized, action_authorized, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![campaign.id, expected.0, expected.1, expected.2, now()],
-            )?;
+    /// CAS prepared -> claimed. Only the caller holding `claim_token` — the token
+    /// inserted with the row by the invocation whose INSERT succeeded — can move
+    /// the row; every other or later caller fails and must re-read the row to
+    /// report its status. Repeats never execute or resume.
+    pub fn claim_conversation_request(
+        &self,
+        request_id: &str,
+        claim_token: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE conversation_requests SET phase='claimed', updated_at=?3
+             WHERE request_id=?1 AND phase='prepared' AND claim_token=?2",
+            params![request_id, claim_token, now()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} was not claimed; it is not prepared for this invocation"
+            )));
         }
         tx.commit()?;
-        Ok(project)
+        Ok(())
+    }
+
+    /// CAS claimed -> dispatching. Only a row this invocation changed (changed=1)
+    /// permits the native send; anything else must stop before any native call.
+    pub fn begin_dispatch_conversation_request(
+        &self,
+        request_id: &str,
+        claim_token: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE conversation_requests SET phase='dispatching', updated_at=?3
+             WHERE request_id=?1 AND phase='claimed' AND claim_token=?2",
+            params![request_id, claim_token, now()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} was not moved to dispatching; native dispatch is refused"
+            )));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record the terminal outcome of a conversation request. Write-once: a row
+    /// already in a terminal phase is refused. The terminal phase and the result
+    /// are written in one UPDATE so a terminal row is never observable without
+    /// its recorded outcome.
+    pub fn finish_conversation_request(
+        &self,
+        request_id: &str,
+        phase: ConversationRequestPhase,
+        result: &Value,
+    ) -> Result<(), StoreError> {
+        if !phase.is_terminal() {
+            return Err(StoreError::InvalidState(
+                "finish_conversation_request records terminal phases only".into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous_result: Option<String> = tx
+            .query_row(
+                "SELECT result_json FROM conversation_requests WHERE request_id=?1",
+                params![request_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut stored_result = result.clone();
+        if let Some(previous) = previous_result
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            && let Some(attempts) = previous.get("attempts").and_then(Value::as_array)
+            && let Some(object) = stored_result.as_object_mut()
+        {
+            object.insert("attempts".into(), Value::Array(attempts.clone()));
+        }
+        let result_json = serde_json::to_string(&stored_result)?;
+        let changed = tx.execute(
+            "UPDATE conversation_requests SET phase=?2, result_json=?3, updated_at=?4
+             WHERE request_id=?1 AND phase IN ('prepared','claimed','dispatching')",
+            params![request_id, phase.as_str(), result_json, now()],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} is not in an unsettled phase; its recorded result is written once"
+            )));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Re-arm a proven pre-dispatch conversation reservation for an explicit
+    /// same-ID retry. This is the only terminal -> prepared transition in the
+    /// request machine. The transaction proves that the prior failure said
+    /// NOT_STARTED, that no native command row exists, and that the exact
+    /// reserved campaign/task/attempt (plus first-message or Stop lineage) is
+    /// still present. Runtime registration facts are checked by the caller
+    /// immediately before this CAS because they are process-local.
+    pub fn rearm_failed_conversation_request(
+        &self,
+        request_id: &str,
+        payload_hash: &str,
+        claim_token: &str,
+    ) -> Result<ConversationRequestRow, StoreError> {
+        if request_id.trim().is_empty()
+            || payload_hash.trim().is_empty()
+            || claim_token.trim().is_empty()
+        {
+            return Err(StoreError::InvalidState(
+                "request id, payload hash and claim token are required to re-arm a reservation"
+                    .into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = conversation_request_on(&tx, request_id)?
+            .ok_or_else(|| StoreError::NotFound(format!("conversation request {request_id}")))?;
+        if row.payload_hash != payload_hash {
+            return Err(StoreError::IdempotencyConflict(format!(
+                "conversation request {request_id} payload changed"
+            )));
+        }
+        if row.phase != "failed" {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} is {}, not a retryable failed reservation",
+                row.phase
+            )));
+        }
+        let result = row.result.as_ref().ok_or_else(|| {
+            StoreError::InvalidState(format!(
+                "conversation request {request_id} has no failure proof"
+            ))
+        })?;
+        let retryable = result.get("deliveryState").and_then(Value::as_str) == Some("FAILED")
+            && result.get("nativeDispatchState").and_then(Value::as_str) == Some("NOT_STARTED")
+            && result.get("retryMode").and_then(Value::as_str) == Some("SAME_REQUEST");
+        if !retryable {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} does not carry proven pre-dispatch retry facts"
+            )));
+        }
+        let native_command_exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM commands WHERE id=?1 LIMIT 1",
+                params![row.native_command_id],
+                |db_row| db_row.get(0),
+            )
+            .optional()?;
+        if native_command_exists.is_some() {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} already has a native command row; dispatch cannot be re-armed"
+            )));
+        }
+        let target_matches: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts a
+                 JOIN tasks t ON t.id=a.task_id
+                 WHERE a.id=?1 AND a.task_id=?2 AND t.campaign_id=?3 LIMIT 1",
+                params![row.attempt_id, row.task_id, row.campaign_id],
+                |db_row| db_row.get(0),
+            )
+            .optional()?;
+        if target_matches.is_none() {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} no longer owns its reserved target"
+            )));
+        }
+        let reservation_matches: Option<i64> = if let Some(source_attempt_id) =
+            row.source_attempt_id.as_deref()
+        {
+            let source_state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM attempts WHERE id=?1",
+                    params![source_attempt_id],
+                    |db_row| db_row.get(0),
+                )
+                .optional()?;
+            if source_state.as_deref() != Some(attempt_state_string(AttemptState::Cancelled))
+                || !cancellation_confirmed_on(&tx, source_attempt_id)?
+            {
+                return Err(StoreError::InvalidState(format!(
+                    "conversation request {request_id} no longer has a confirmed cancelled source"
+                )));
+            }
+            let unsafe_source: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 WHERE
+                       EXISTS(SELECT 1 FROM stop_responsibilities WHERE attempt_id=?1)
+                       OR EXISTS(
+                         SELECT 1 FROM outbox o JOIN commands c ON c.id=o.command_id
+                         WHERE c.attempt_id=?1 AND o.state!='SUCCEEDED'
+                       )
+                       OR EXISTS(
+                         SELECT 1 FROM attempts newer
+                         WHERE newer.task_id=?2
+                           AND newer.rowid>(SELECT rowid FROM attempts WHERE id=?3)
+                       )",
+                    params![source_attempt_id, row.task_id, row.attempt_id],
+                    |db_row| db_row.get(0),
+                )
+                .optional()?;
+            if unsafe_source.is_some() {
+                return Err(StoreError::InvalidState(format!(
+                    "conversation request {request_id} Stop successor is no longer the latest safe reservation"
+                )));
+            }
+            tx.query_row(
+                "SELECT 1 FROM events
+                 WHERE attempt_id=?1 AND kind='attempt.created'
+                   AND json_extract(payload_json,'$.rolledFrom')=?2 LIMIT 1",
+                params![row.attempt_id, source_attempt_id],
+                |db_row| db_row.get(0),
+            )
+            .optional()?
+        } else {
+            tx.query_row(
+                "SELECT 1 FROM events
+                 WHERE attempt_id=?1 AND kind='message.user'
+                   AND json_extract(payload_json,'$.requestId')=?2 LIMIT 1",
+                params![row.attempt_id, row.request_id],
+                |db_row| db_row.get(0),
+            )
+            .optional()?
+        };
+        if reservation_matches.is_none() {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} reservation proof no longer matches"
+            )));
+        }
+        let mut attempts = result
+            .get("attempts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut previous = result.clone();
+        if let Some(object) = previous.as_object_mut() {
+            object.remove("attempts");
+        }
+        attempts.push(previous);
+        let rearmed_result = serde_json::to_string(&serde_json::json!({
+            "attempts": attempts,
+            "rearmed": true,
+            "retryMode": "SAME_REQUEST",
+            "nativeDispatchState": "NOT_STARTED"
+        }))?;
+        let changed = tx.execute(
+            "UPDATE conversation_requests
+             SET phase='prepared', claim_token=?2, result_json=?3, updated_at=?4
+             WHERE request_id=?1 AND phase='failed' AND payload_hash=?5",
+            params![request_id, claim_token, rearmed_result, now(), payload_hash],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::InvalidState(format!(
+                "conversation request {request_id} changed while its retry was being re-armed"
+            )));
+        }
+        let row = conversation_request_on(&tx, request_id)?
+            .ok_or_else(|| StoreError::InvalidState("re-armed request disappeared".into()))?;
+        tx.commit()?;
+        Ok(row)
+    }
+
+    /// Restart recovery (R3): every prepared/claimed/dispatching row is a command
+    /// whose settlement this process can no longer prove. All become
+    /// 'unknown' with a recorded reason; nothing is ever dispatched by recovery.
+    pub fn mark_unsettled_conversation_requests_unknown(&self) -> Result<usize, StoreError> {
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE conversation_requests
+             SET phase='unknown',
+                 result_json=COALESCE(result_json, ?1),
+                 updated_at=?2
+             WHERE phase IN ('prepared','claimed','dispatching')",
+            params![
+                serde_json::to_string(&serde_json::json!({
+                    "recovered": "core-restart",
+                    "deliveryState": "UNKNOWN",
+                    "note": "the request was not settled before the Core process ended; it is never dispatched automatically"
+                }))?,
+                now()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn confirmed_cancellation(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        cancellation_confirmed_on(&connection, attempt_id)
+    }
+
+    pub fn conversation_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ConversationRequestRow>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        conversation_request_on(&connection, request_id)
+    }
+
+    /// Create the same-provider successor of a durably confirmed stop in one
+    /// transaction (plan R3 `insert_confirmed_stop_successor`). Loads the source
+    /// provider/task/state and verifies, transactionally: the source state is
+    /// CANCELLED; a durable cancellation event exists for that source (its
+    /// `state_after` is CANCELLED); no Stop responsibility is held for it; no
+    /// unsettled outbox intent belongs to it; the selected preference provider (if
+    /// recorded) matches; the successor provider equals the source provider; and
+    /// the source is the task's latest attempt. Inserts the successor Attempt, its
+    /// rolledFrom lineage event, the preference pointer and the request mapping
+    /// atomically. The source state is never rewritten. An uncertain or
+    /// unconfirmed source is refused here, before any native registration.
+    pub fn insert_confirmed_stop_successor(
+        &self,
+        successor: &ConfirmedStopSuccessor,
+    ) -> Result<ConversationPrepareOutcome, StoreError> {
+        let source_attempt_id = successor.source_attempt_id.trim();
+        if source_attempt_id.is_empty()
+            || successor.request_id.trim().is_empty()
+            || successor.payload_hash.trim().is_empty()
+            || successor.claim_token.trim().is_empty()
+            || successor.native_command_id.trim().is_empty()
+        {
+            return Err(StoreError::InvalidState(
+                "successor source, request, payload hash, claim token and native command id are required"
+                    .into(),
+            ));
+        }
+        if successor.successor_attempt.id == source_attempt_id {
+            return Err(StoreError::InvalidState(
+                "the successor must be a distinct Attempt".into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = conversation_request_on(&tx, &successor.request_id)? {
+            if existing.payload_hash != successor.payload_hash {
+                return Err(StoreError::IdempotencyConflict(format!(
+                    "successor request {} was recorded with a different payload",
+                    successor.request_id
+                )));
+            }
+            return Ok(ConversationPrepareOutcome::Existing(existing));
+        }
+        let source: (String, String, String) = tx
+            .query_row(
+                "SELECT task_id, provider, state FROM attempts WHERE id=?1",
+                params![source_attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("attempt {source_attempt_id}")))?;
+        let (source_task_id, source_provider, source_state) = source;
+        if source_state != attempt_state_string(AttemptState::Cancelled) {
+            return Err(StoreError::InvalidState(format!(
+                "confirmed-stop successor requires source attempt {source_attempt_id} to be CANCELLED, not {source_state}; no replacement is created"
+            )));
+        }
+        if !cancellation_confirmed_on(&tx, source_attempt_id)? {
+            return Err(StoreError::InvalidState(format!(
+                "attempt {source_attempt_id} is CANCELLED without a durable cancellation event; an unconfirmed stop never creates a replacement"
+            )));
+        }
+        let held: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM stop_responsibilities WHERE attempt_id=?1 LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if held.is_some() {
+            return Err(StoreError::StopResponsibilityConflict {
+                attempt_id: source_attempt_id.to_owned(),
+                operation_id: format!("successor-of-{source_attempt_id}"),
+            });
+        }
+        let unsettled_outbox: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM outbox o INNER JOIN commands c ON c.id=o.command_id
+                 WHERE c.attempt_id=?1 AND o.state != 'SUCCEEDED' LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if unsettled_outbox.is_some() {
+            return Err(StoreError::InvalidState(format!(
+                "attempt {source_attempt_id} still has a pending, dispatching, failed or unknown outbox effect; no replacement is created"
+            )));
+        }
+        let latest: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts WHERE task_id=?1 AND rowid > (SELECT rowid FROM attempts WHERE id=?2) LIMIT 1",
+                params![source_task_id, source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if latest.is_some() {
+            return Err(StoreError::InvalidState(format!(
+                "attempt {source_attempt_id} is not the latest Attempt of its task; successors are created only from the latest, cancelled attempt"
+            )));
+        }
+        let campaign_id: String = tx
+            .query_row(
+                "SELECT campaign_id FROM tasks WHERE id=?1",
+                params![source_task_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("task {source_task_id}")))?;
+        let preferred: Option<Option<String>> = tx
+            .query_row(
+                "SELECT selected_provider FROM conversation_preferences WHERE campaign_id=?1",
+                params![campaign_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(Some(provider)) = preferred.as_ref() {
+            if !provider.eq_ignore_ascii_case(&source_provider) {
+                return Err(StoreError::InvalidState(format!(
+                    "selected Runtime preference is {provider} but the confirmed-stop successor must use the source provider {source_provider}"
+                )));
+            }
+        }
+        if !successor
+            .successor_attempt
+            .provider
+            .eq_ignore_ascii_case(&source_provider)
+        {
+            return Err(StoreError::InvalidState(format!(
+                "confirmed-stop successor provider {} must equal the source provider {source_provider}",
+                successor.successor_attempt.provider
+            )));
+        }
+        if successor.successor_attempt.task_id != source_task_id {
+            return Err(StoreError::InvalidState(
+                "the successor must belong to the source task".into(),
+            ));
+        }
+        if successor.successor_attempt.state != AttemptState::Queued
+            || successor.successor_attempt.last_event_seq != 0
+            || successor.successor_attempt.provider_session.is_some()
+        {
+            return Err(StoreError::InvalidState(
+                "the successor must be a new queued row with no events or provider session".into(),
+            ));
+        }
+        let existing_successor: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts WHERE id=?1",
+                params![successor.successor_attempt.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_successor.is_some() {
+            return Err(StoreError::IdempotencyConflict(
+                successor.successor_attempt.id.clone(),
+            ));
+        }
+        let lineage_payload = serde_json::to_string(&serde_json::json!({
+            "provider": successor.successor_attempt.provider,
+            "rolledFrom": source_attempt_id,
+        }))?;
+        let event_id = format!("core-event-{}-1", successor.successor_attempt.id);
+        tx.execute(
+            "INSERT INTO attempts(id, task_id, provider, provider_session, state, last_event_seq, capability_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                successor.successor_attempt.id,
+                successor.successor_attempt.task_id,
+                successor.successor_attempt.provider,
+                successor.successor_attempt.provider_session,
+                attempt_state_string(successor.successor_attempt.state),
+                successor.successor_attempt.last_event_seq,
+                successor.successor_attempt.capability_version
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at) VALUES (?1, ?2, 1, 'attempt.created', NULL, NULL, ?3, ?4)",
+            params![event_id, successor.successor_attempt.id, lineage_payload, now()],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET last_event_seq=1, version=version+1 WHERE id=?1",
+            params![successor.successor_attempt.id],
+        )?;
+        tx.execute(
+            "INSERT INTO conversation_preferences(campaign_id, selected_provider, title) VALUES (?1, ?2, NULL)
+             ON CONFLICT(campaign_id) DO UPDATE SET selected_provider=excluded.selected_provider",
+            params![campaign_id, source_provider],
+        )?;
+        insert_conversation_request_on(
+            &tx,
+            &NewConversationRequest {
+                request_id: successor.request_id.clone(),
+                payload_hash: successor.payload_hash.clone(),
+                campaign_id,
+                task_id: source_task_id,
+                attempt_id: successor.successor_attempt.id.clone(),
+                claim_token: successor.claim_token.clone(),
+                native_command_id: successor.native_command_id.clone(),
+                source_attempt_id: Some(source_attempt_id.to_owned()),
+            },
+        )?;
+        let row = conversation_request_on(&tx, &successor.request_id)?
+            .ok_or_else(|| StoreError::InvalidState("successor row missing after insert".into()))?;
+        tx.commit()?;
+        Ok(ConversationPrepareOutcome::Prepared { project: None, row })
+    }
+
+    /// The persisted Runtime preference for a campaign, if a row exists.
+    pub fn conversation_preference(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Option<ConversationPreference>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT selected_provider, title FROM conversation_preferences WHERE campaign_id=?1",
+                params![campaign_id],
+                |row| {
+                    Ok(ConversationPreference {
+                        selected_provider: row.get(0)?,
+                        title: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Persist the Runtime preference. Written only after an accepted selection
+    /// (or inside the first-send/successor transactions); never cleared by turn
+    /// terminality, so a cancelled or failed attempt keeps its provider selected.
+    pub fn set_conversation_provider(
+        &self,
+        campaign_id: &str,
+        provider: &str,
+    ) -> Result<(), StoreError> {
+        if campaign_id.trim().is_empty() || provider.trim().is_empty() {
+            return Err(StoreError::InvalidState(
+                "campaign id and provider are required for the Runtime preference".into(),
+            ));
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        connection.execute(
+            "INSERT INTO conversation_preferences(campaign_id, selected_provider, title) VALUES (?1, ?2, NULL)
+             ON CONFLICT(campaign_id) DO UPDATE SET selected_provider=excluded.selected_provider",
+            params![campaign_id, provider],
+        )?;
+        Ok(())
+    }
+
+    /// Rename: update the product title durably. The original prompt and history
+    /// are never rewritten; only this preference column changes.
+    pub fn set_conversation_title(&self, campaign_id: &str, title: &str) -> Result<(), StoreError> {
+        let title = title.trim();
+        if campaign_id.trim().is_empty() {
+            return Err(StoreError::InvalidState(
+                "campaign id is required to rename a conversation".into(),
+            ));
+        }
+        if title.is_empty() {
+            return Err(StoreError::InvalidState(
+                "conversation title must not be empty".into(),
+            ));
+        }
+        if title.chars().count() > 200 {
+            return Err(StoreError::InvalidState(
+                "conversation title is too long (limit 200 characters)".into(),
+            ));
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        connection.execute(
+            "INSERT INTO conversation_preferences(campaign_id, selected_provider, title) VALUES (?1, NULL, ?2)
+             ON CONFLICT(campaign_id) DO UPDATE SET title=excluded.title",
+            params![campaign_id, title],
+        )?;
+        Ok(())
+    }
+
+    /// The campaign's full event journal in durable cross-attempt order: events of
+    /// every attempt of every task of the campaign, ordered by the explicit,
+    /// VACUUM-stable product_event_order sequence (R3), never by timestamps.
+    pub fn campaign_event_records(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT e.id, e.attempt_id, e.seq, e.kind, e.payload_ref, e.payload_json, e.created_at
+             FROM events e
+             JOIN attempts a ON a.id = e.attempt_id
+             JOIN tasks t ON t.id = a.task_id
+             JOIN product_event_order o ON o.event_id = e.id
+             WHERE t.campaign_id = ?1
+             ORDER BY o.order_seq ASC",
+        )?;
+        let rows = statement.query_map(params![campaign_id], |row| {
+            let payload_json: Option<String> = row.get(5)?;
+            let payload = payload_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| to_sql_error(DomainError::InvalidEntity(error.to_string())))?;
+            Ok(EventRecord {
+                event: Event {
+                    id: row.get(0)?,
+                    attempt_id: row.get(1)?,
+                    seq: row.get(2)?,
+                    kind: row.get(3)?,
+                    payload_ref: row.get(4)?,
+                },
+                payload,
+                created_at: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Bounded campaign journal window in immutable product order. `before` is
+    /// exclusive; `None` selects the newest rows. Results are returned in
+    /// display order even though SQLite reads the newest rows first.
+    pub fn campaign_event_records_before(
+        &self,
+        campaign_id: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<OrderedEventRecord>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT o.order_seq, e.id, e.attempt_id, e.seq, e.kind, e.payload_ref, e.payload_json, e.created_at
+             FROM events e
+             JOIN attempts a ON a.id=e.attempt_id
+             JOIN tasks t ON t.id=a.task_id
+             JOIN product_event_order o ON o.event_id=e.id
+             WHERE t.campaign_id=?1 AND o.order_seq<?2
+             ORDER BY o.order_seq DESC LIMIT ?3",
+        )?;
+        let anchor = before.unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![campaign_id, anchor, limit as i64],
+            ordered_event_from_row,
+        )?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        records.reverse();
+        Ok(records)
+    }
+
+    /// Bounded campaign journal window after an exclusive durable position.
+    pub fn campaign_event_records_after(
+        &self,
+        campaign_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<OrderedEventRecord>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT o.order_seq, e.id, e.attempt_id, e.seq, e.kind, e.payload_ref, e.payload_json, e.created_at
+             FROM events e
+             JOIN attempts a ON a.id=e.attempt_id
+             JOIN tasks t ON t.id=a.task_id
+             JOIN product_event_order o ON o.event_id=e.id
+             WHERE t.campaign_id=?1 AND o.order_seq>?2
+             ORDER BY o.order_seq ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![campaign_id, after, limit as i64],
+            ordered_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Bounded single-attempt timeline window before an exclusive sequence.
+    pub fn attempt_event_records_before(
+        &self,
+        attempt_id: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<OrderedEventRecord>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT e.seq, e.id, e.attempt_id, e.seq, e.kind, e.payload_ref, e.payload_json, e.created_at
+             FROM events e WHERE e.attempt_id=?1 AND e.seq<?2
+             ORDER BY e.seq DESC LIMIT ?3",
+        )?;
+        let anchor = before.unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![attempt_id, anchor, limit as i64],
+            ordered_event_from_row,
+        )?;
+        let mut records = rows.collect::<Result<Vec<_>, _>>()?;
+        records.reverse();
+        Ok(records)
+    }
+
+    /// Bounded single-attempt timeline window after an exclusive sequence.
+    pub fn attempt_event_records_after(
+        &self,
+        attempt_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<OrderedEventRecord>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT e.seq, e.id, e.attempt_id, e.seq, e.kind, e.payload_ref, e.payload_json, e.created_at
+             FROM events e WHERE e.attempt_id=?1 AND e.seq>?2
+             ORDER BY e.seq ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![attempt_id, after, limit as i64],
+            ordered_event_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Targeted title fallback: read only the first user-authored message.
+    pub fn campaign_first_user_message(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT json_extract(e.payload_json,'$.text')
+                 FROM events e
+                 JOIN attempts a ON a.id=e.attempt_id
+                 JOIN tasks t ON t.id=a.task_id
+                 JOIN product_event_order o ON o.event_id=e.id
+                 WHERE t.campaign_id=?1 AND e.kind='message.user'
+                   AND COALESCE(json_extract(e.payload_json,'$.origin'),'user')!='generated-handoff'
+                   AND NOT (
+                     json_extract(e.payload_json,'$.requestId') LIKE 'handoff-instruction-%'
+                     AND EXISTS(
+                       SELECT 1 FROM events prior
+                       WHERE prior.attempt_id=e.attempt_id AND prior.seq=e.seq-1
+                         AND prior.kind='handoff.completed'
+                         AND json_extract(prior.payload_json,'$.packetVersion')='goalport.handoff.v1'
+                         AND json_extract(prior.payload_json,'$.newAttempt.id')=e.attempt_id
+                         AND json_extract(prior.payload_json,'$.authorization.requestHash') IS NOT NULL
+                     )
+                   )
+                 ORDER BY o.order_seq ASC LIMIT 1",
+                params![campaign_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Stable presentation identity for one streamed reply delta. It finds the
+    /// first delta after the latest semantic boundary (or attempt change) using
+    /// durable product order, so adjacent pages share a logical item without
+    /// loading the campaign journal.
+    pub fn campaign_reply_group_id(
+        &self,
+        campaign_id: &str,
+        position: i64,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let current_attempt: Option<String> = connection
+            .query_row(
+                "SELECT e.attempt_id FROM events e
+                 JOIN attempts a ON a.id=e.attempt_id
+                 JOIN tasks t ON t.id=a.task_id
+                 JOIN product_event_order o ON o.event_id=e.id
+                 WHERE t.campaign_id=?1 AND o.order_seq=?2",
+                params![campaign_id, position],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(current_attempt) = current_attempt else {
+            return Ok(None);
+        };
+        let boundary: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(o.order_seq),0)
+             FROM events e
+             JOIN attempts a ON a.id=e.attempt_id
+             JOIN tasks t ON t.id=a.task_id
+             JOIN product_event_order o ON o.event_id=e.id
+             WHERE t.campaign_id=?1 AND o.order_seq<?2 AND (
+                 e.attempt_id!=?3 OR e.kind IN (
+                   'message.user','runtime.tool.activity','runtime.turn.started',
+                   'runtime.turn.completed','runtime.turn.cancelled','runtime.turn.failed',
+                   'runtime.send.failed','runtime.transport.closed','handoff.completed'
+                 )
+             )",
+            params![campaign_id, position, current_attempt],
+            |row| row.get(0),
+        )?;
+        Ok(connection
+            .query_row(
+                "SELECT e.id FROM events e
+                 JOIN attempts a ON a.id=e.attempt_id
+                 JOIN tasks t ON t.id=a.task_id
+                 JOIN product_event_order o ON o.event_id=e.id
+                 WHERE t.campaign_id=?1 AND e.attempt_id=?2
+                   AND e.kind='runtime.reply.delta'
+                   AND o.order_seq>?3 AND o.order_seq<=?4
+                 ORDER BY o.order_seq ASC LIMIT 1",
+                params![campaign_id, current_attempt, boundary, position],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Backward-compatible proof for handoff prompts written before typed
+    /// `origin`/`handoffId` existed. The deterministic request namespace alone
+    /// is insufficient; require the immediately preceding durable structured
+    /// handoff packet to name this attempt as its destination.
+    pub fn historical_generated_handoff_message(
+        &self,
+        attempt_id: &str,
+        event_seq: i64,
+        request_id: &str,
+    ) -> Result<bool, StoreError> {
+        if !request_id.starts_with("handoff-instruction-") || event_seq <= 1 {
+            return Ok(false);
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE attempt_id=?1 AND seq=?2 AND kind='handoff.completed'
+                   AND json_extract(payload_json,'$.packetVersion')='goalport.handoff.v1'
+                   AND json_extract(payload_json,'$.newAttempt.id')=?1
+                   AND json_extract(payload_json,'$.authorization.requestHash') IS NOT NULL
+                 LIMIT 1",
+                params![attempt_id, event_seq - 1],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Whether this source-side handoff fact is the canonical first durable
+    /// record for its operation identity. Both new `handoffId` packets and
+    /// historical packets (authorization request hash) are covered, so a
+    /// repeated fact cannot render another summary on a later page.
+    pub fn campaign_handoff_is_canonical(
+        &self,
+        campaign_id: &str,
+        position: i64,
+        operation_id: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let first: Option<i64> = connection
+            .query_row(
+                "SELECT MIN(o.order_seq)
+                 FROM events e
+                 JOIN attempts a ON a.id=e.attempt_id
+                 JOIN tasks t ON t.id=a.task_id
+                 JOIN product_event_order o ON o.event_id=e.id
+                 WHERE t.campaign_id=?1 AND e.kind='handoff.completed'
+                   AND (
+                     json_extract(e.payload_json,'$.summarySide')='source'
+                     OR (
+                       json_extract(e.payload_json,'$.summarySide') IS NULL
+                       AND json_extract(e.payload_json,'$.oldAttempt.id')=e.attempt_id
+                     )
+                   )
+                   AND COALESCE(
+                     json_extract(e.payload_json,'$.handoffId'),
+                     'handoff-' || json_extract(e.payload_json,'$.authorization.requestHash')
+                   )=?2",
+                params![campaign_id, operation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(first == Some(position))
+    }
+
+    /// Ids of commands for this attempt that are still Executing (no recorded
+    /// result) or Unknown. Product turn model input: an unsettled command makes
+    /// the turn uncertain, fail-closed.
+    pub fn unsettled_commands_for_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id FROM commands WHERE attempt_id=?1 AND state IN ('EXECUTING','UNKNOWN')",
+        )?;
+        let rows = statement.query_map(params![attempt_id], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// VACUUM the database. Maintenance surface for the explicit order_seq test:
+    /// the point is that the INTEGER PRIMARY KEY values survive it.
+    pub fn vacuum(&self) -> Result<(), StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        connection.execute_batch("VACUUM")?;
+        Ok(())
     }
 
     pub fn record_command(&self, command: &Command) -> Result<Command, StoreError> {
@@ -2078,6 +3083,81 @@ impl Store {
 
     pub fn latest_event_seq(&self, attempt_id: &str) -> Result<i64, StoreError> {
         Ok(self.get_attempt(attempt_id)?.last_event_seq)
+    }
+
+    pub fn event_count(&self, attempt_id: &str) -> Result<usize, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM events WHERE attempt_id=?1",
+            params![attempt_id],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn latest_event_kind_in(
+        &self,
+        attempt_id: &str,
+        kinds: &[&str],
+    ) -> Result<Option<String>, StoreError> {
+        if kinds.is_empty() {
+            return Ok(None);
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let placeholders = std::iter::repeat("?")
+            .take(kinds.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT kind FROM events WHERE attempt_id=? AND kind IN ({placeholders}) ORDER BY seq DESC LIMIT 1"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(kinds.len() + 1);
+        values.push(&attempt_id);
+        for kind in kinds {
+            values.push(kind);
+        }
+        Ok(connection
+            .query_row(&sql, values.as_slice(), |row| row.get(0))
+            .optional()?)
+    }
+
+    pub fn latest_runtime_session_version(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT json_extract(payload_json,'$.runtime_version') FROM events
+                 WHERE attempt_id=?1 AND kind='runtime.session.created'
+                   AND json_type(payload_json,'$.runtime_version')='text'
+                 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn permission_request_text(
+        &self,
+        attempt_id: &str,
+        decision_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT json_extract(payload_json,'$.text') FROM events
+                 WHERE attempt_id=?1 AND kind='runtime.permission.request'
+                   AND COALESCE(
+                     json_extract(payload_json,'$.request_id'),
+                     json_extract(payload_json,'$.requestId')
+                   )=?2
+                   AND json_type(payload_json,'$.text')='text'
+                 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id, decision_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Rebuild only the projections from the immutable event log. This is used on restart and
@@ -2713,6 +3793,28 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn decisions_for_attempt(
+        &self,
+        attempt_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Decision>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, attempt_id, kind, state FROM decisions
+             WHERE attempt_id=?1
+             ORDER BY (state='PENDING') DESC, rowid DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![attempt_id, limit as i64], |row| {
+            Ok(Decision {
+                id: row.get(0)?,
+                attempt_id: row.get(1)?,
+                kind: row.get(2)?,
+                state: parse_decision_state(&row.get::<_, String>(3)?).map_err(to_sql_error)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn update_decision_state(
         &self,
         id: &str,
@@ -2808,6 +3910,28 @@ impl Store {
             "SELECT id, attempt_id, claim, snapshot_hash, verdict FROM evidence ORDER BY rowid, id",
         )?;
         let rows = statement.query_map([], |row| {
+            Ok(Evidence {
+                id: row.get(0)?,
+                attempt_id: row.get(1)?,
+                claim: row.get(2)?,
+                snapshot_hash: row.get(3)?,
+                verdict: parse_verdict(&row.get::<_, String>(4)?)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn evidence_for_attempt(
+        &self,
+        attempt_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Evidence>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id, attempt_id, claim, snapshot_hash, verdict FROM evidence
+             WHERE attempt_id=?1 ORDER BY rowid DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![attempt_id, limit as i64], |row| {
             Ok(Evidence {
                 id: row.get(0)?,
                 attempt_id: row.get(1)?,
@@ -3288,8 +4412,7 @@ fn match_workspace_project<F>(
 where
     F: Fn(&str) -> Option<std::path::PathBuf>,
 {
-    let requested_key =
-        crate::domain::normalize_workspace_key(Path::new(&proposed.workspace_root));
+    let requested_key = crate::domain::normalize_workspace_key(Path::new(&proposed.workspace_root));
     let requested_identity = canonicalize(&proposed.workspace_root);
     let candidates = projects
         .iter()
@@ -3410,11 +4533,395 @@ pub struct StoreCounts {
     pub outbox: i64,
 }
 
+// Shared by presentation and the transactional successor admission. A state
+// name alone is not proof of a confirmed native cancellation.
+fn cancellation_confirmed_on(
+    connection: &Connection,
+    attempt_id: &str,
+) -> Result<bool, StoreError> {
+    let found: Option<i64> = connection.query_row(
+        "SELECT 1 FROM events WHERE attempt_id=?1 AND state_after='CANCELLED' AND (
+           (kind='attempt.cancelled' AND json_extract(payload_json,'$.confirmed')=1)
+           OR kind='runtime.turn.cancelled'
+           OR (kind='runtime.turn.completed' AND json_extract(payload_json,'$.status') IN ('interrupted','cancelled'))
+         ) LIMIT 1",
+        params![attempt_id], |row| row.get(0),
+    ).optional()?;
+    Ok(found.is_some())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     pub event: Event,
     pub payload: Option<Value>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderedEventRecord {
+    /// Campaign-wide product order for conversation pages, or per-attempt
+    /// event sequence for timeline pages.
+    pub position: i64,
+    pub record: EventRecord,
+}
+
+fn ordered_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrderedEventRecord> {
+    let payload_json: Option<String> = row.get(6)?;
+    let payload = payload_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| to_sql_error(DomainError::InvalidEntity(error.to_string())))?;
+    Ok(OrderedEventRecord {
+        position: row.get(0)?,
+        record: EventRecord {
+            event: Event {
+                id: row.get(1)?,
+                attempt_id: row.get(2)?,
+                seq: row.get(3)?,
+                kind: row.get(4)?,
+                payload_ref: row.get(5)?,
+            },
+            payload,
+            created_at: row.get(7)?,
+        },
+    })
+}
+
+/// Phase of a conversation-scope request in the R3 claim machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConversationRequestPhase {
+    Prepared,
+    Claimed,
+    Dispatching,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+impl ConversationRequestPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Claimed => "claimed",
+            Self::Dispatching => "dispatching",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Unknown)
+    }
+
+    pub fn is_settled_phase(value: &str) -> bool {
+        matches!(value, "succeeded" | "failed" | "unknown")
+    }
+}
+
+/// The durable row of a conversation request (first-send or explicit-send).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationRequestRow {
+    pub request_id: String,
+    pub payload_hash: String,
+    pub campaign_id: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    pub phase: String,
+    pub claim_token: String,
+    pub native_command_id: String,
+    pub result: Option<Value>,
+    pub source_attempt_id: Option<String>,
+}
+
+impl ConversationRequestRow {
+    /// A phase string a repeat must answer from the record: everything except a
+    /// row this invocation itself just prepared. Recovered unsettled rows
+    /// (prepared/claimed/dispatching after a restart) are repeats too — they are
+    /// uncertain, never dispatched.
+    pub fn phase_is_settled(&self) -> bool {
+        ConversationRequestPhase::is_settled_phase(&self.phase)
+    }
+}
+
+/// A new conversation_requests row to insert inside a transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NewConversationRequest {
+    request_id: String,
+    payload_hash: String,
+    campaign_id: String,
+    task_id: String,
+    attempt_id: String,
+    claim_token: String,
+    native_command_id: String,
+    source_attempt_id: Option<String>,
+}
+
+/// The complete first-send reservation submitted to one transaction.
+#[derive(Debug, Clone)]
+pub struct ConversationStart {
+    pub request_id: String,
+    pub payload_hash: String,
+    pub claim_token: String,
+    pub native_command_id: String,
+    pub project: Project,
+    pub campaign: Campaign,
+    pub task: Task,
+    pub policy_id: String,
+    pub policy_payload_json: String,
+    pub authorization: CampaignAuthorization,
+    pub attempt: Attempt,
+    pub selected_provider: String,
+    pub first_user_message: String,
+}
+
+/// The same-provider successor of a durably confirmed stop.
+#[derive(Debug, Clone)]
+pub struct ConfirmedStopSuccessor {
+    pub source_attempt_id: String,
+    pub request_id: String,
+    pub payload_hash: String,
+    pub claim_token: String,
+    pub native_command_id: String,
+    pub successor_attempt: Attempt,
+}
+
+/// Result of `prepare_conversation_start` / `insert_confirmed_stop_successor`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversationPrepareOutcome {
+    /// The transaction inserted the rows. `project` is None on the successor
+    /// path, which reuses the existing project.
+    Prepared {
+        project: Option<Project>,
+        row: ConversationRequestRow,
+    },
+    /// The request id already existed with the same payload: the recorded row is
+    /// returned untouched and the caller must answer from it, never re-execute.
+    Existing(ConversationRequestRow),
+}
+
+/// Persisted per-campaign product preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPreference {
+    pub selected_provider: Option<String>,
+    pub title: Option<String>,
+}
+
+fn insert_conversation_request_on(
+    tx: &Transaction<'_>,
+    request: &NewConversationRequest,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO conversation_requests(
+             request_id, payload_hash, campaign_id, task_id, attempt_id, phase,
+             claim_token, native_command_id, result_json, source_attempt_id, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'prepared', ?6, ?7, NULL, ?8, ?9, ?9)",
+        params![
+            request.request_id,
+            request.payload_hash,
+            request.campaign_id,
+            request.task_id,
+            request.attempt_id,
+            request.claim_token,
+            request.native_command_id,
+            request.source_attempt_id,
+            now()
+        ],
+    )?;
+    Ok(())
+}
+
+fn conversation_request_on(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<ConversationRequestRow>, StoreError> {
+    Ok(connection
+        .query_row(
+            "SELECT request_id, payload_hash, campaign_id, task_id, attempt_id, phase,
+                    claim_token, native_command_id, result_json, source_attempt_id
+             FROM conversation_requests WHERE request_id=?1",
+            params![request_id],
+            |row| {
+                let raw_result: Option<String> = row.get(8)?;
+                Ok(ConversationRequestRow {
+                    request_id: row.get(0)?,
+                    payload_hash: row.get(1)?,
+                    campaign_id: row.get(2)?,
+                    task_id: row.get(3)?,
+                    attempt_id: row.get(4)?,
+                    phase: row.get(5)?,
+                    claim_token: row.get(6)?,
+                    native_command_id: row.get(7)?,
+                    result: raw_result
+                        .as_deref()
+                        .and_then(|text| serde_json::from_str(text).ok()),
+                    source_attempt_id: row.get(9)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The transactional core of `create_workspace_campaign`, reused by the
+/// first-send reservation so project/campaign/task/policy/authorization rows
+/// and the conversation rows commit together (plan R2: extend/reuse the existing
+/// create_workspace_campaign transaction).
+fn ensure_workspace_campaign_on(
+    tx: &Transaction<'_>,
+    proposed_project: &Project,
+    campaign: &Campaign,
+    task: &Task,
+    policy_id: &str,
+    policy_payload_json: &str,
+    authorization: &CampaignAuthorization,
+) -> Result<Project, StoreError> {
+    let projects = {
+        let mut statement =
+            tx.prepare("SELECT id, workspace_root FROM projects ORDER BY rowid, id")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                workspace_root: row.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let matching = match_workspace_project(&projects, proposed_project, |workspace_root| {
+        std::fs::canonicalize(Path::new(workspace_root)).ok()
+    })?;
+    let project = if let Some(existing) = matching {
+        existing
+    } else {
+        if let Some(existing) = projects
+            .iter()
+            .find(|project| project.id == proposed_project.id)
+        {
+            return Err(StoreError::IdempotencyConflict(existing.id.clone()));
+        }
+        tx.execute(
+            "INSERT INTO projects(id, workspace_root) VALUES (?1, ?2)",
+            params![proposed_project.id, proposed_project.workspace_root],
+        )?;
+        proposed_project.clone()
+    };
+
+    let campaign_existing: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT goal, root_task_id, state FROM campaigns WHERE id=?1",
+            params![campaign.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((goal, root_task_id, state)) = campaign_existing {
+        if goal != campaign.goal
+            || root_task_id != campaign.root_task_id
+            || state != work_status_string(campaign.state)
+        {
+            return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO campaigns(id, goal, root_task_id, state) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                campaign.id,
+                campaign.goal,
+                campaign.root_task_id,
+                work_status_string(campaign.state)
+            ],
+        )?;
+    }
+
+    let task_existing: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT campaign_id, title, acceptance, state FROM tasks WHERE id=?1",
+            params![task.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if let Some((campaign_id, title, acceptance, state)) = task_existing {
+        if campaign_id != task.campaign_id
+            || title != task.title
+            || acceptance != task.acceptance
+            || state != work_status_string(task.state)
+        {
+            return Err(StoreError::IdempotencyConflict(task.id.clone()));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO tasks(id, campaign_id, title, acceptance, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                task.id,
+                task.campaign_id,
+                task.title,
+                task.acceptance,
+                work_status_string(task.state)
+            ],
+        )?;
+    }
+
+    let mapping: Option<String> = tx
+        .query_row(
+            "SELECT project_id FROM campaign_projects WHERE campaign_id=?1",
+            params![campaign.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_project) = mapping {
+        if existing_project != project.id {
+            return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO campaign_projects(campaign_id, project_id) VALUES (?1, ?2)",
+            params![campaign.id, project.id],
+        )?;
+    }
+
+    let existing_policy: Option<(String, String)> = tx
+        .query_row(
+            "SELECT campaign_id, payload_json FROM policy_snapshots WHERE id=?1",
+            params![policy_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((campaign_id, payload)) = existing_policy {
+        if campaign_id != campaign.id || payload != policy_payload_json {
+            return Err(StoreError::IdempotencyConflict(policy_id.into()));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO policy_snapshots(id, campaign_id, payload_json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![policy_id, campaign.id, policy_payload_json, now()],
+        )?;
+    }
+
+    let existing_authorization: Option<(i64, i64, i64)> = tx
+        .query_row(
+            "SELECT provider_authorized, transfer_authorized, action_authorized FROM campaign_authorizations WHERE campaign_id=?1",
+            params![campaign.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let expected = (
+        i64::from(authorization.provider_authorized),
+        i64::from(authorization.transfer_authorized),
+        i64::from(authorization.action_authorized),
+    );
+    if let Some(existing) = existing_authorization {
+        if existing != expected {
+            return Err(StoreError::IdempotencyConflict(campaign.id.clone()));
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO campaign_authorizations(campaign_id, provider_authorized, transfer_authorized, action_authorized, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![campaign.id, expected.0, expected.1, expected.2, now()],
+        )?;
+    }
+    Ok(project)
 }
 
 fn insert_or_conflict<F>(
@@ -4015,19 +5522,18 @@ mod tests {
             id: "project-lower".into(),
             workspace_root: r"Z:\identity-probe\foo".into(),
         };
-        let result = match_workspace_project(
-            std::slice::from_ref(&stored),
-            &proposed,
-            |workspace_root| match workspace_root {
-                r"Z:\identity-probe\Foo" => {
-                    Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\Foo"))
+        let result =
+            match_workspace_project(std::slice::from_ref(&stored), &proposed, |workspace_root| {
+                match workspace_root {
+                    r"Z:\identity-probe\Foo" => {
+                        Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\Foo"))
+                    }
+                    r"Z:\identity-probe\foo" => {
+                        Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\foo"))
+                    }
+                    _ => None,
                 }
-                r"Z:\identity-probe\foo" => {
-                    Some(std::path::PathBuf::from(r"\\?\Z:\identity-probe\foo"))
-                }
-                _ => None,
-            },
-        );
+            });
         assert!(matches!(result, Err(StoreError::InvalidState(_))));
     }
 
@@ -4042,11 +5548,9 @@ mod tests {
             workspace_root: r"Z:\Program Files\workspace".into(),
         };
         let identity = std::path::PathBuf::from(r"\\?\Z:\Program Files\workspace");
-        let matched = match_workspace_project(
-            std::slice::from_ref(&stored),
-            &proposed,
-            |_| Some(identity.clone()),
-        )
+        let matched = match_workspace_project(std::slice::from_ref(&stored), &proposed, |_| {
+            Some(identity.clone())
+        })
         .unwrap();
         assert_eq!(matched, Some(stored));
     }
@@ -4066,9 +5570,8 @@ mod tests {
             workspace_root: r"Z:\actual\workspace".into(),
         };
         let identity = std::path::PathBuf::from(r"\\?\Z:\actual\workspace");
-        let result = match_workspace_project(&[first, second], &proposed, |_| {
-            Some(identity.clone())
-        });
+        let result =
+            match_workspace_project(&[first, second], &proposed, |_| Some(identity.clone()));
         assert!(matches!(result, Err(StoreError::InvalidState(_))));
     }
 
@@ -4302,7 +5805,10 @@ mod tests {
             .unwrap();
         assert_eq!(row.state, CommandState::Failed);
         assert_eq!(store.command_result("cmd-1").unwrap(), Some(result));
-        assert_eq!(store.get_command("cmd-1").unwrap().state, CommandState::Failed);
+        assert_eq!(
+            store.get_command("cmd-1").unwrap().state,
+            CommandState::Failed
+        );
     }
 
     #[test]
@@ -4319,7 +5825,10 @@ mod tests {
             CommandState::Failed,
             &serde_json::json!({ "deliveryState": "FAILED", "error": "must not land" }),
         );
-        assert!(matches!(refused, Err(StoreError::InvalidState(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(StoreError::InvalidState(_))),
+            "{refused:?}"
+        );
         // Same terminal state again: update_command_state would short-circuit it, finish_command
         // refuses it so a recorded result is written exactly once.
         let again = store.finish_command(
@@ -4327,8 +5836,14 @@ mod tests {
             CommandState::Succeeded,
             &serde_json::json!({ "deliveryState": "FAILED" }),
         );
-        assert!(matches!(again, Err(StoreError::InvalidState(_))), "{again:?}");
-        assert_eq!(store.get_command("cmd-2").unwrap().state, CommandState::Succeeded);
+        assert!(
+            matches!(again, Err(StoreError::InvalidState(_))),
+            "{again:?}"
+        );
+        assert_eq!(
+            store.get_command("cmd-2").unwrap().state,
+            CommandState::Succeeded
+        );
         assert_eq!(store.command_result("cmd-2").unwrap(), Some(first));
         // Pending -> Failed is refused by the transition check (only Pending -> Executing exists).
         let _ = store.insert_attempt(&attempt());
@@ -4342,7 +5857,10 @@ mod tests {
             })
             .unwrap();
         let pending = store.finish_command("cmd-2b", CommandState::Failed, &serde_json::json!({}));
-        assert!(matches!(pending, Err(StoreError::InvalidState(_))), "{pending:?}");
+        assert!(
+            matches!(pending, Err(StoreError::InvalidState(_))),
+            "{pending:?}"
+        );
         assert_eq!(store.command_result("cmd-2b").unwrap(), None);
     }
 
@@ -4367,7 +5885,11 @@ mod tests {
         assert_eq!(first.schema_version().unwrap(), SCHEMA_VERSION);
         seeded_command(&first, "cmd-4");
         first
-            .finish_command("cmd-4", CommandState::Unknown, &serde_json::json!({ "deliveryState": "UNKNOWN" }))
+            .finish_command(
+                "cmd-4",
+                CommandState::Unknown,
+                &serde_json::json!({ "deliveryState": "UNKNOWN" }),
+            )
             .unwrap();
         drop(first);
         let second = Store::open(&path).unwrap();
@@ -4391,31 +5913,47 @@ mod tests {
             payload_hash: "hash".into(),
             state: CommandState::Pending,
         };
-        let first = store.record_command_for_request(&command, "req-original").unwrap();
+        let first = store
+            .record_command_for_request(&command, "req-original")
+            .unwrap();
         assert_eq!(first.state, CommandState::Pending);
         assert_eq!(
             store.command_result("cmd-5").unwrap(),
             Some(serde_json::json!({ "requestId": "req-original" })),
             "a new row names its request from the moment it exists"
         );
-        let again = store.record_command_for_request(&command, "req-colliding").unwrap();
+        let again = store
+            .record_command_for_request(&command, "req-colliding")
+            .unwrap();
         assert_eq!(again.state, CommandState::Pending);
         assert_eq!(
             store.command_result("cmd-5").unwrap(),
             Some(serde_json::json!({ "requestId": "req-original" })),
             "an existing row keeps its original request id"
         );
-        let other = Command { payload_hash: "other".into(), ..command.clone() };
+        let other = Command {
+            payload_hash: "other".into(),
+            ..command.clone()
+        };
         assert!(matches!(
             store.record_command_for_request(&other, "req-x"),
             Err(StoreError::IdempotencyConflict(_))
         ));
         // the terminal write replaces the stamp with the full result, as before
-        store.update_command_state("cmd-5", CommandState::Executing).unwrap();
         store
-            .finish_command("cmd-5", CommandState::Succeeded, &serde_json::json!({ "requestId": "req-original", "deliveryState": "DELIVERED" }))
+            .update_command_state("cmd-5", CommandState::Executing)
             .unwrap();
-        assert_eq!(store.command_result("cmd-5").unwrap().unwrap()["deliveryState"], "DELIVERED");
+        store
+            .finish_command(
+                "cmd-5",
+                CommandState::Succeeded,
+                &serde_json::json!({ "requestId": "req-original", "deliveryState": "DELIVERED" }),
+            )
+            .unwrap();
+        assert_eq!(
+            store.command_result("cmd-5").unwrap().unwrap()["deliveryState"],
+            "DELIVERED"
+        );
     }
 
     #[test]
@@ -4430,11 +5968,23 @@ mod tests {
         // Both connections observe the row Executing; only one terminal write may land.
         let a = std::thread::spawn({
             let store = first.clone();
-            move || store.finish_command("cmd-6", CommandState::Failed, &serde_json::json!({ "writer": "a" }))
+            move || {
+                store.finish_command(
+                    "cmd-6",
+                    CommandState::Failed,
+                    &serde_json::json!({ "writer": "a" }),
+                )
+            }
         });
         let b = std::thread::spawn({
             let store = second.clone();
-            move || store.finish_command("cmd-6", CommandState::Succeeded, &serde_json::json!({ "writer": "b" }))
+            move || {
+                store.finish_command(
+                    "cmd-6",
+                    CommandState::Succeeded,
+                    &serde_json::json!({ "writer": "b" }),
+                )
+            }
         });
         let outcomes = [a.join().unwrap(), b.join().unwrap()];
         let winners: Vec<&str> = outcomes
@@ -4443,11 +5993,25 @@ mod tests {
             .filter(|(_, o)| o.is_ok())
             .map(|(i, _)| if i == 0 { "a" } else { "b" })
             .collect();
-        assert_eq!(winners.len(), 1, "exactly one terminal write lands: {outcomes:?}");
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one terminal write lands: {outcomes:?}"
+        );
         let stored = first.command_result("cmd-6").unwrap().unwrap();
-        assert_eq!(stored["writer"], winners[0], "the stored result belongs to the winner: {stored}");
+        assert_eq!(
+            stored["writer"], winners[0],
+            "the stored result belongs to the winner: {stored}"
+        );
         let state = first.get_command("cmd-6").unwrap().state;
-        assert_eq!(state, if winners[0] == "a" { CommandState::Failed } else { CommandState::Succeeded });
+        assert_eq!(
+            state,
+            if winners[0] == "a" {
+                CommandState::Failed
+            } else {
+                CommandState::Succeeded
+            }
+        );
         // The loser waits (up to 5 s, rusqlite's default busy timeout) if the winner still holds
         // SQLite's write lock, and is then refused by the read (already terminal) or by the state
         // predicate; either way it is an error and it never writes.
@@ -4463,15 +6027,24 @@ mod tests {
         let first = Store::open(&path).unwrap();
         seeded_command(&first, "cmd-7");
         let second = Store::open(&path).unwrap();
-        let recorded = serde_json::json!({ "writer": "finish", "deliveryState": "FAILED", "error": "x" });
+        let recorded =
+            serde_json::json!({ "writer": "finish", "deliveryState": "FAILED", "error": "x" });
         let a = std::thread::spawn({
             let store = first.clone();
             let recorded = recorded.clone();
-            move || store.finish_command("cmd-7", CommandState::Failed, &recorded).map(|_| ())
+            move || {
+                store
+                    .finish_command("cmd-7", CommandState::Failed, &recorded)
+                    .map(|_| ())
+            }
         });
         let b = std::thread::spawn({
             let store = second.clone();
-            move || store.update_command_state("cmd-7", CommandState::Succeeded).map(|_| ())
+            move || {
+                store
+                    .update_command_state("cmd-7", CommandState::Succeeded)
+                    .map(|_| ())
+            }
         });
         let _ = (a.join().unwrap(), b.join().unwrap());
         let state = first.get_command("cmd-7").unwrap().state;
@@ -4483,8 +6056,12 @@ mod tests {
         // deterministic driver of the wrong-predicate shape is the same-state test below.
         match (state, result) {
             (CommandState::Failed, Some(r)) => assert_eq!(r, recorded),
-            (CommandState::Succeeded, r) => assert!(r.is_none() || r != Some(recorded.clone()), "{r:?}"),
-            other => panic!("unexpected terminal record (both writers refused, or a state neither wrote): {other:?}"),
+            (CommandState::Succeeded, r) => {
+                assert!(r.is_none() || r != Some(recorded.clone()), "{r:?}")
+            }
+            other => panic!(
+                "unexpected terminal record (both writers refused, or a state neither wrote): {other:?}"
+            ),
         }
     }
 
@@ -4492,9 +6069,16 @@ mod tests {
     fn update_command_state_still_short_circuits_the_same_state() {
         let store = Store::open_in_memory().unwrap();
         seeded_command(&store, "cmd-8");
-        store.update_command_state("cmd-8", CommandState::Executing).unwrap();
-        assert_eq!(store.get_command("cmd-8").unwrap().state, CommandState::Executing);
-        store.update_command_state("cmd-8", CommandState::Failed).unwrap();
+        store
+            .update_command_state("cmd-8", CommandState::Executing)
+            .unwrap();
+        assert_eq!(
+            store.get_command("cmd-8").unwrap().state,
+            CommandState::Executing
+        );
+        store
+            .update_command_state("cmd-8", CommandState::Failed)
+            .unwrap();
         assert!(matches!(
             store.update_command_state("cmd-8", CommandState::Executing),
             Err(StoreError::InvalidState(_))
@@ -4517,20 +6101,46 @@ mod tests {
             })
             .unwrap();
         // Pending -> Executing is a permitted transition, but not a place for a result.
-        let refused = store.finish_command("cmd-9", CommandState::Executing, &serde_json::json!({ "writer": "one" }));
-        assert!(matches!(refused, Err(StoreError::InvalidState(_))), "{refused:?}");
-        assert_eq!(store.get_command("cmd-9").unwrap().state, CommandState::Pending);
+        let refused = store.finish_command(
+            "cmd-9",
+            CommandState::Executing,
+            &serde_json::json!({ "writer": "one" }),
+        );
+        assert!(
+            matches!(refused, Err(StoreError::InvalidState(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            store.get_command("cmd-9").unwrap().state,
+            CommandState::Pending
+        );
         assert_eq!(store.command_result("cmd-9").unwrap(), None);
         // The bare transition still works, and the single terminal write then lands once.
-        store.update_command_state("cmd-9", CommandState::Executing).unwrap();
         store
-            .finish_command("cmd-9", CommandState::Succeeded, &serde_json::json!({ "writer": "two" }))
+            .update_command_state("cmd-9", CommandState::Executing)
             .unwrap();
-        assert_eq!(store.command_result("cmd-9").unwrap(), Some(serde_json::json!({ "writer": "two" })));
+        store
+            .finish_command(
+                "cmd-9",
+                CommandState::Succeeded,
+                &serde_json::json!({ "writer": "two" }),
+            )
+            .unwrap();
+        assert_eq!(
+            store.command_result("cmd-9").unwrap(),
+            Some(serde_json::json!({ "writer": "two" }))
+        );
         assert!(matches!(
-            store.finish_command("cmd-9", CommandState::Failed, &serde_json::json!({ "writer": "three" })),
+            store.finish_command(
+                "cmd-9",
+                CommandState::Failed,
+                &serde_json::json!({ "writer": "three" })
+            ),
             Err(StoreError::InvalidState(_))
         ));
-        assert_eq!(store.command_result("cmd-9").unwrap(), Some(serde_json::json!({ "writer": "two" })));
+        assert_eq!(
+            store.command_result("cmd-9").unwrap(),
+            Some(serde_json::json!({ "writer": "two" }))
+        );
     }
 }

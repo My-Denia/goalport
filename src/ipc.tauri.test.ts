@@ -174,6 +174,64 @@ describe("connected Tauri Core command payloads", () => {
     expect(after.commandOutcome?.requestId).toBe(lastCoreCommandRequest().requestId);
   });
 
+  it("installs the authoritative typed rejection snapshot and reservation", async () => {
+    const client = getCoreClient();
+    await client.snapshot();
+    invokeMock.mockImplementationOnce(async (_command, args: { request: CoreCommand }) => ({
+      goalportRejected: true,
+      requestId: args.request.requestId,
+      accepted: false,
+      error: "admission failed",
+      snapshot: { ...DEMO_SNAPSHOT, activeCampaignId: "campaign-reserved" },
+      rejection: {
+        code: "admission-failed",
+        message: "admission failed",
+        deliveryState: "FAILED",
+        nativeDispatchState: "NOT_STARTED",
+        retryMode: "SAME_REQUEST",
+        reservation: {
+          kind: "first-send",
+          requestId: args.request.requestId,
+          campaignId: "campaign-reserved",
+          taskId: "task-reserved",
+          attemptId: "attempt-reserved",
+          messageReserved: true
+        }
+      }
+    }));
+
+    const after = await client.startConversation!("C:\\work", "codex", "hello", "stable-start");
+    expect(after.activeCampaignId).toBe("campaign-reserved");
+    expect(after.connection).toBe("connected");
+    expect(after.commandOutcome).toEqual(expect.objectContaining({
+      kind: "refused",
+      requestId: "stable-start",
+      rejection: expect.objectContaining({ retryMode: "SAME_REQUEST" })
+    }));
+  });
+
+  it("requests a bounded history page without replacing the cached snapshot", async () => {
+    const client = getCoreClient();
+    const before = await client.snapshot();
+    invokeMock.mockImplementationOnce(async (_command, args: { request: CoreCommand }) => ({
+      requestId: args.request.requestId,
+      accepted: true,
+      historyPage: {
+        scope: "conversation",
+        ownerId: before.activeCampaignId,
+        conversationItems: [{ id: "old-1", kind: "user-message", body: "older" }],
+        pageInfo: { olderCursor: null, newerCursor: "cursor-1", hasOlder: false, hasNewer: true, contentBytes: 80, itemCount: 1 }
+      }
+    }));
+    const page = await client.historyPage!({ scope: "conversation", ownerId: before.activeCampaignId, direction: "older", cursor: "cursor-2" });
+    expect(page.conversationItems?.map((item) => item.id)).toEqual(["old-1"]);
+    expect(lastCoreCommandRequest()).toEqual(expect.objectContaining({
+      messageType: "history_page",
+      payload: { scope: "conversation", ownerId: before.activeCampaignId, direction: "older", cursor: "cursor-2" }
+    }));
+    expect((await client.snapshot()).activeCampaignId).toBe(before.activeCampaignId);
+  });
+
   it("fails closed when a command response carries a different request identity", async () => {
     const client = getCoreClient();
     await client.snapshot();

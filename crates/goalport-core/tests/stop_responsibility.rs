@@ -72,8 +72,10 @@ fn stop_commit_is_schema_v7_and_survives_reopen_with_lease_uncertain() {
 
     assert!(begun.inserted);
     // Schema v8 added the append-only re-check ledger and the continuation record.
-    // Both are new tables; every column asserted by this suite is unchanged.
-    assert_eq!(first.schema_version().unwrap(), 8);
+    // Schema v9 (product-interaction-reset) adds conversation preferences,
+    // request bookkeeping and durable product-event ordering. Every column
+    // asserted by this suite is unchanged.
+    assert_eq!(first.schema_version().unwrap(), 9);
     assert_eq!(
         begun.responsibility.native_turn_state,
         StopNativeTurnState::Pending

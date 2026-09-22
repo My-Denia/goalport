@@ -228,7 +228,15 @@ pub fn begin_startup_epoch(
                     "duplicate or replayed Core launch epoch nonce {nonce}"
                 ));
             }
-            let status = epoch_status(previous);
+            let status = if previous.state == "IMPORTED_SNAPSHOT" {
+                // A snapshot deliberately detached from its source directory by
+                // a recorded import: the recorded pid belongs to the SOURCE
+                // directory's server, so liveness there says nothing about
+                // THIS profile. Provenance lives in the row's reconciliation.
+                PriorCoreStatus::Ended
+            } else {
+                epoch_status(previous)
+            };
             require_prior_ended(status, &previous.epoch_id)?;
             if status == PriorCoreStatus::Ended
                 && (matches!(previous.state.as_str(), "RECONCILING" | "STARTUP_PENDING")
@@ -518,6 +526,34 @@ pub fn fail_startup_epoch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_snapshot_epoch_reads_as_prior_ended_even_while_source_core_runs() {
+        // The recorded pid is THIS process (definitely LiveExact if liveness
+        // were consulted). IMPORTED_SNAPSHOT must short-circuit to Ended: the
+        // row was detached from its source directory by a recorded import.
+        let epoch = CoreLaunchEpoch {
+            epoch_id: "core-epoch:imported".into(),
+            launch_nonce: "imported".into(),
+            core_pid: i64::from(std::process::id()),
+            core_creation_date: process_identity::current_identity().creation_date(),
+            core_executable_path: process_identity::current_identity().executable_path,
+            core_executable_sha256: process_identity::current_identity().executable_sha256,
+            previous_epoch_id: None,
+            state: "IMPORTED_SNAPSHOT".into(),
+            reconciliation: Some(json!({"importedSnapshot": true})),
+            created_at: store::utc_now_iso(),
+            activated_at: None,
+        };
+        assert_eq!(epoch_status(&epoch), PriorCoreStatus::LiveExact);
+        let status = if epoch.state == "IMPORTED_SNAPSHOT" {
+            PriorCoreStatus::Ended
+        } else {
+            epoch_status(&epoch)
+        };
+        assert_eq!(status, PriorCoreStatus::Ended);
+        assert!(require_prior_ended(status, &epoch.epoch_id).is_ok());
+    }
 
     #[test]
     fn recorded_process_status_is_fail_closed() {

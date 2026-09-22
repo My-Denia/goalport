@@ -1,15 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  appendPreviewConversationMessage,
   appendPreviewMessage,
   createPreviewCampaign,
   DEMO_SNAPSHOT,
   EMPTY_SNAPSHOT,
+  HISTORY_WINDOW_ADVANCED_NOTICE,
+  normalizeCommandRejection,
+  normalizeHistoryPageInfo,
+  normalizeProductConversationItem,
+  normalizeTimelineItem,
+  renamePreviewConversation,
   resolveCoreSnapshot,
   resolvePermission,
+  startPreviewConversation,
   withConnection,
   type ConnectionState,
+  type CommandRejection,
   type CoreCommandOutcome,
   type CoreSnapshot,
+  type HistoryPageInfo,
+  type ProductConversationItem,
   type TimelineItem
 } from "./types";
 
@@ -51,6 +62,10 @@ export interface CoreCommand {
     | "create_campaign"
     | "create_campaign_with_task"
     | "select_runtime"
+    | "start_conversation"
+    | "conversation_send"
+    | "history_page"
+    | "rename_conversation"
     | "send_message"
     | "resolve_decision"
     | "permission_response"
@@ -97,14 +112,77 @@ export interface CoreClient {
   chooseWorkspace?(): Promise<string | null>;
   appInfo?(): Promise<AppInfo>;
   dispatch?(request: CoreCommand): Promise<CoreSnapshot>;
+  /**
+   * First-send orchestration (product-interaction-reset): ONE
+   * `start_conversation` dispatch carrying a caller-stable request id. Optional
+   * for compatibility with older CoreClient fixtures; the desktop
+   * implementations dispatch the new command.
+   */
+  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot>;
+  /** Explicit Send on an existing conversation: `conversation_send`, gated by product.turn.canSend upstream. */
+  conversationSend?(message: string, campaignId: string, attemptId: string | undefined, requestId: string): Promise<CoreSnapshot>;
+  historyPage?(request: HistoryPageRequest): Promise<HistoryPage>;
+  /** Durable product title rename. */
+  renameConversation?(campaignId: string, title: string): Promise<CoreSnapshot>;
+}
+
+export interface HistoryPageRequest {
+  scope: "conversation" | "timeline";
+  ownerId: string;
+  direction: "older" | "newer";
+  cursor?: string;
+}
+
+export interface HistoryPage {
+  scope: "conversation" | "timeline";
+  ownerId: string;
+  conversationItems?: ProductConversationItem[];
+  timelineItems?: TimelineItem[];
+  pageInfo: HistoryPageInfo;
 }
 
 export interface AppInfo {
   version: string;
   channel: string;
+  distribution?: string;
   testMode: boolean;
   dataPath: string;
 }
+
+export interface BootstrapFacts {
+  sourcePath: string | null;
+  createdBy: { version: string | null; coreSha256: string | null; distribution: string | null } | null;
+  markerSchema: number | null;
+  counts: Record<string, number> | null;
+  schemaVersion: number | null;
+  bytes: number | null;
+  needsRecovery: boolean;
+  liveSource: boolean;
+  recoveryDisposition?: "NOT_REQUIRED" | "POSITIVELY_IDENTIFIED_RECOVERABLE";
+  recoveryMethod?: string | null;
+  recoveryProofToken?: string | null;
+  operationId?: string | null;
+  sourceMutationOnAccept?: "NONE";
+}
+
+export type BootstrapState =
+  | { phase: "checking" | "backing-up" | "importing" | "done" }
+  | { phase: "import-offer"; facts: BootstrapFacts }
+  | { phase: "import-incompatible"; facts: BootstrapFacts; reason: string }
+  | { phase: "coordination"; kind: "live-core" | "unknown-core"; headline: string; detail: Record<string, unknown> | null; dataPath: string | null }
+  | { phase: "error"; kind: string; headline: string; message: string; canChooseDir: boolean; dataPath: string | null };
+
+export type BootstrapActionType =
+  | "import-accept"
+  | "fresh"
+  | "retry"
+  | "exit"
+  | "open-folder"
+  | "choose-dir";
+
+export type BootstrapAction =
+  | { type: Exclude<BootstrapActionType, "import-accept"> }
+  | { type: "import-accept"; operationId?: string; recoveryProofToken?: string };
 
 export interface CommandTraceEntry {
   phase: "issued" | "settled";
@@ -140,6 +218,9 @@ declare global {
       requestClose?: () => Promise<unknown>;
       confirmCloseChoice?: (payload: CloseChoicePayload | "continue" | "stop") => Promise<unknown>;
       dismissCloseChoice?: () => Promise<unknown>;
+      bootstrapCurrent?: () => Promise<BootstrapState>;
+      bootstrapAction?: (payload: BootstrapAction) => Promise<unknown>;
+      onBootstrapState?: (callback: (state: BootstrapState) => void) => () => void;
       onClosePrompt?: (callback: () => void) => () => void;
       onCloseChoiceFailed?: (callback: (payload?: unknown) => void) => () => void;
     };
@@ -207,9 +288,41 @@ class PreviewCoreClient implements CoreClient {
     return this.state;
   }
 
+  async startConversation(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot> {
+    this.state = startPreviewConversation(this.state, workspaceRoot, provider, message, requestId);
+    return this.state;
+  }
+
+  async conversationSend(message: string, _campaignId?: string, _attemptId?: string, _requestId?: string): Promise<CoreSnapshot> {
+    // appendPreviewMessage records the legacy timeline copy (diagnostics) and the
+    // product items (conversation) in one step, with an honest preview note.
+    this.state = appendPreviewMessage(this.state, message);
+    return this.state;
+  }
+
+  async historyPage(request: HistoryPageRequest): Promise<HistoryPage> {
+    return {
+      scope: request.scope,
+      ownerId: request.ownerId,
+      ...(request.scope === "conversation" ? { conversationItems: [] } : { timelineItems: [] }),
+      pageInfo: { olderCursor: null, newerCursor: null, hasOlder: false, hasNewer: false, contentBytes: 2, itemCount: 0 }
+    };
+  }
+
+  async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
+    this.state = renamePreviewConversation(this.state, campaignId, title);
+    return this.state;
+  }
+
   async openInVsCode(): Promise<void> {
     // The browser preview cannot launch a local editor. The UI keeps this action explicit.
     return Promise.resolve();
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    // The browser preview is a development surface, and says so honestly:
+    // fault injection in Developer diagnostics is gated on exactly this.
+    return { version: "preview", channel: "preview", distribution: "dev", testMode: false, dataPath: "" };
   }
 }
 
@@ -391,10 +504,17 @@ class TauriCoreClient implements CoreClient {
           throw new Error("Core rejection identity did not match the request");
         }
         const message = errorMessage(rawRecord.error);
+        const rejection = normalizeCommandRejection(rawRecord.rejection);
+        const authoritative = resolveCoreSnapshot(rawRecord.snapshot);
+        if (rejection?.reservation && rejection.reservation.requestId !== command.requestId) {
+          throw new Error("Core rejection reservation identity did not match the request");
+        }
+        if (authoritative) this.entityVersion += 1;
+        const base = authoritative ?? this.lastSnapshot;
         this.lastSnapshot = {
-          ...this.lastSnapshot,
-          commandOutcome: commandOutcome(command, "refused", message),
-          notices: [`Core refused: ${message}`, ...this.lastSnapshot.notices]
+          ...base,
+          commandOutcome: commandOutcome(command, "refused", message, rejection),
+          notices: [`Core refused: ${message}`, ...base.notices]
         };
         this.rememberIsolatedSnapshot();
         return this.lastSnapshot;
@@ -441,6 +561,63 @@ class TauriCoreClient implements CoreClient {
     const persisted = persistedAttemptId(attemptId);
     if (persisted) payload.attemptId = persisted;
     return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "select_runtime", payload });
+  }
+
+  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string): Promise<CoreSnapshot> {
+    // ONE dispatch for the whole first-send orchestration; Core owns the
+    // at-most-once claim with this request identity. The caller keeps the id
+    // stable across retries of the same intent.
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: stableRequestId,
+      entityVersion: this.entityVersion,
+      messageType: "start_conversation",
+      payload: { workspaceRoot, provider, message }
+    });
+  }
+
+  async conversationSend(message: string, campaignId: string, attemptId: string | undefined, stableRequestId: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string | number | boolean> = { message, campaignId };
+    const persisted = persistedAttemptId(attemptId);
+    if (persisted) payload.attemptId = persisted;
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: stableRequestId,
+      entityVersion: this.entityVersion,
+      messageType: "conversation_send",
+      payload
+    });
+  }
+
+  async historyPage(request: HistoryPageRequest): Promise<HistoryPage> {
+    await this.waitForMutationQueue();
+    const command: CoreCommand = {
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: requestId(),
+      entityVersion: this.entityVersion,
+      messageType: "history_page",
+      payload: {
+        scope: request.scope,
+        ownerId: request.ownerId,
+        direction: request.direction,
+        ...(request.cursor ? { cursor: request.cursor } : {})
+      }
+    };
+    traceCommand("issued", command);
+    const raw = await this.invoke<unknown>("core_command", { request: command });
+    const page = historyPageEnvelope(raw, command);
+    traceCommand("settled", command, "accepted");
+    return page;
+  }
+
+  async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
+    return this.dispatch({
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: requestId(),
+      entityVersion: this.entityVersion,
+      messageType: "rename_conversation",
+      payload: { campaignId, title }
+    });
   }
 
   private rememberIsolatedSnapshot(): void {
@@ -504,14 +681,52 @@ class TauriCoreClient implements CoreClient {
 function commandOutcome(
   command: CoreCommand,
   kind: CoreCommandOutcome["kind"],
-  error?: string
+  error?: string,
+  rejection?: CommandRejection
 ): CoreCommandOutcome {
   return {
     kind,
     requestId: command.requestId,
     messageType: command.messageType,
-    ...(error ? { error } : {})
+    ...(error ? { error } : {}),
+    ...(rejection ? { rejection } : {})
   };
+}
+
+function historyPageEnvelope(raw: unknown, command: CoreCommand): HistoryPage {
+  const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+  if (!record || record.requestId !== command.requestId || record.accepted !== true) {
+    throw new Error("Core did not return a matching history page acknowledgement");
+  }
+  const page = record.historyPage && typeof record.historyPage === "object"
+    ? record.historyPage as Record<string, unknown>
+    : null;
+  if (!page) throw new Error("Core did not return a history page");
+  const scope = page.scope;
+  const ownerId = page.ownerId ?? page.owner_id;
+  if ((scope !== "conversation" && scope !== "timeline") || typeof ownerId !== "string") {
+    throw new Error("Core returned an invalid history page identity");
+  }
+  const pageInfo = normalizeHistoryPageInfo(page.pageInfo ?? page.page_info);
+  if (!pageInfo) throw new Error("Core returned invalid history page metadata");
+  return {
+    scope,
+    ownerId,
+    ...(scope === "conversation" ? {
+      conversationItems: Array.isArray(page.conversationItems ?? page.conversation_items)
+        ? ((page.conversationItems ?? page.conversation_items) as unknown[]).map(normalizeProductConversationItem).filter(isPresent)
+        : []
+    } : {
+      timelineItems: Array.isArray(page.timelineItems ?? page.timeline_items)
+        ? ((page.timelineItems ?? page.timeline_items) as unknown[]).map(normalizeTimelineItem).filter(isPresent)
+        : []
+    }),
+    pageInfo
+  };
+}
+
+function isPresent<T>(value: T | null): value is T {
+  return value !== null;
 }
 
 function commandEnvelope(raw: unknown, command: CoreCommand): { snapshot: unknown; duplicate?: boolean } {
@@ -533,17 +748,131 @@ function mergeReconnectProjection(previous: CoreSnapshot, next: CoreSnapshot): C
     && previous.activeTask.id === next.activeTask.id
     && previous.attempt.id === next.attempt.id;
   if (!sameView) return next;
-  const timeline = dedupeTimeline([...previous.timeline, ...next.timeline]);
-  return { ...next, timeline, cursor: Math.max(previous.cursor, next.cursor) };
+  const timeline = mergeByStableId(previous.timeline, next.timeline);
+  const productConversation = previous.productConversation && next.productConversation
+    ? {
+        ...next.productConversation,
+        items: mergeByStableId(previous.productConversation.items, next.productConversation.items),
+        pageInfo: mergePageInfo(previous.productConversation.pageInfo, next.productConversation.pageInfo)
+      }
+    : next.productConversation;
+  return {
+    ...next,
+    timeline,
+    timelinePageInfo: mergePageInfo(previous.timelinePageInfo, next.timelinePageInfo),
+    productConversation,
+    cursor: Math.max(previous.cursor, next.cursor)
+  };
 }
 
-function dedupeTimeline(items: TimelineItem[]): TimelineItem[] {
-  const seen = new Set<string>();
-  return items.filter((item) => {
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  });
+function mergeByStableId<T extends { id: string }>(earlier: readonly T[], later: readonly T[]): T[] {
+  const order: string[] = [];
+  const byId = new Map<string, T>();
+  for (const item of [...earlier, ...later]) {
+    if (!byId.has(item.id)) order.push(item.id);
+    byId.set(item.id, item);
+  }
+  return order.map((id) => byId.get(id)!).filter(Boolean);
+}
+
+function mergePageInfo(older: HistoryPageInfo | undefined, newer: HistoryPageInfo | undefined): HistoryPageInfo | undefined {
+  if (!older) return newer;
+  if (!newer) return older;
+  return {
+    olderCursor: older.olderCursor,
+    newerCursor: newer.newerCursor,
+    hasOlder: older.hasOlder,
+    hasNewer: newer.hasNewer,
+    contentBytes: newer.contentBytes,
+    itemCount: newer.itemCount
+  };
+}
+
+function rangesOverlap<T extends { id: string }>(left: readonly T[], right: readonly T[]): boolean {
+  if (left.length === 0 || right.length === 0) return false;
+  const ids = new Set(left.map((item) => item.id));
+  return right.some((item) => ids.has(item.id));
+}
+
+function withHistoryAdvancedNotice(snapshot: CoreSnapshot): CoreSnapshot {
+  if (snapshot.notices.includes(HISTORY_WINDOW_ADVANCED_NOTICE)) return snapshot;
+  return { ...snapshot, notices: [HISTORY_WINDOW_ADVANCED_NOTICE, ...snapshot.notices] };
+}
+
+/** Preserve pages the reader explicitly loaded while accepting newer polling state. */
+export function mergeSnapshotHistory(previous: CoreSnapshot, next: CoreSnapshot): CoreSnapshot {
+  const sameConversation = previous.activeCampaignId === next.activeCampaignId;
+  if (!sameConversation) return next;
+  const requestedConversationHistory = previous.loadedHistory?.conversationOwnerId === next.activeCampaignId;
+  const keepConversationHistory = requestedConversationHistory
+    && Boolean(previous.productConversation && next.productConversation)
+    && rangesOverlap(previous.productConversation?.items ?? [], next.productConversation?.items ?? []);
+  const productConversation = keepConversationHistory && previous.productConversation && next.productConversation
+    ? {
+        ...next.productConversation,
+        items: mergeByStableId(previous.productConversation.items, next.productConversation.items),
+        pageInfo: mergePageInfo(previous.productConversation.pageInfo, next.productConversation.pageInfo)
+      }
+    : next.productConversation;
+  const requestedTimelineHistory = previous.attempt.id === next.attempt.id
+    && previous.loadedHistory?.timelineOwnerId === next.attempt.id;
+  const sameAttempt = requestedTimelineHistory && rangesOverlap(previous.timeline, next.timeline);
+  const loadedHistory = {
+    ...(keepConversationHistory ? { conversationOwnerId: next.activeCampaignId } : {}),
+    ...(sameAttempt ? { timelineOwnerId: next.attempt.id } : {})
+  };
+  const merged = {
+    ...next,
+    loadedHistory: Object.keys(loadedHistory).length > 0 ? loadedHistory : undefined,
+    productConversation,
+    timeline: sameAttempt ? mergeByStableId(previous.timeline, next.timeline) : next.timeline,
+    timelinePageInfo: sameAttempt ? mergePageInfo(previous.timelinePageInfo, next.timelinePageInfo) : next.timelinePageInfo
+  };
+  const historyAdvanced = previous.notices.includes(HISTORY_WINDOW_ADVANCED_NOTICE)
+    || (requestedConversationHistory && !keepConversationHistory);
+  return historyAdvanced ? withHistoryAdvancedNotice(merged) : merged;
+}
+
+export function mergeHistoryPageIntoSnapshot(
+  snapshot: CoreSnapshot,
+  page: HistoryPage,
+  requestedOlderCursor?: string
+): CoreSnapshot {
+  if (page.scope === "conversation") {
+    if (page.ownerId !== snapshot.activeCampaignId || !snapshot.productConversation) return snapshot;
+    if (requestedOlderCursor !== undefined
+      && snapshot.productConversation.pageInfo?.olderCursor !== requestedOlderCursor) {
+      return withHistoryAdvancedNotice(snapshot);
+    }
+    return {
+      ...snapshot,
+      notices: snapshot.notices.filter((notice) => notice !== HISTORY_WINDOW_ADVANCED_NOTICE),
+      loadedHistory: { ...snapshot.loadedHistory, conversationOwnerId: page.ownerId },
+      productConversation: {
+        ...snapshot.productConversation,
+        items: mergeByStableId(page.conversationItems ?? [], snapshot.productConversation.items),
+        pageInfo: {
+          ...page.pageInfo,
+          newerCursor: snapshot.productConversation.pageInfo?.newerCursor ?? page.pageInfo.newerCursor,
+          hasNewer: snapshot.productConversation.pageInfo?.hasNewer ?? page.pageInfo.hasNewer,
+          itemCount: mergeByStableId(page.conversationItems ?? [], snapshot.productConversation.items).length
+        }
+      }
+    };
+  }
+  if (page.ownerId !== snapshot.attempt.id) return snapshot;
+  const timeline = mergeByStableId(page.timelineItems ?? [], snapshot.timeline);
+  return {
+    ...snapshot,
+    loadedHistory: { ...snapshot.loadedHistory, timelineOwnerId: page.ownerId },
+    timeline,
+    timelinePageInfo: {
+      ...page.pageInfo,
+      newerCursor: snapshot.timelinePageInfo?.newerCursor ?? page.pageInfo.newerCursor,
+      hasNewer: snapshot.timelinePageInfo?.hasNewer ?? page.pageInfo.hasNewer,
+      itemCount: timeline.length
+    }
+  };
 }
 
 function traceCommand(

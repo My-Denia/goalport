@@ -28,8 +28,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SEED_CAMPAIGN: &str = "campaign-synthetic-preview";
-const SEED_TASK: &str = "task-synthetic-preview";
 const LIVE_REFUSAL: &str = "has a registered Runtime that is no longer live; it is kept, not replaced";
 
 /// One mutex for everything process-global this file touches: the launch-identity variables the
@@ -405,17 +403,59 @@ fn c2_live_app_server_is_confirmed_r1() {
 // C3 / C5: transports without a process identity are not-applicable, never "exited"
 // ---------------------------------------------------------------------------------------------
 
-fn select_seed_scenario(server: &CoreServer, id: &str) -> String {
+/// The historical synthetic seed (`campaign-synthetic-preview`) is no longer created by
+/// `CoreServer::new`: normal Core construction never seeds synthetic rows, and admission now
+/// requires a real project whose workspace exists. These cases therefore create a Campaign
+/// through the command surface on an existing fixture workspace and drive the scenario select
+/// with the ids that command actually returned; every command's success is asserted before its
+/// payload is read.
+fn select_scenario_attempt(server: &CoreServer, id: &str) -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let workspace = scratch_root().join(format!("i3-{id}-{nonce}"));
+    fs::create_dir_all(&workspace).expect("case workspace should be creatable");
+
+    let created = call(
+        server,
+        &format!("{id}-create"),
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.to_string_lossy(),
+            "goal": format!("recovery classification scenario case {id}")
+        }),
+    );
+    assert_eq!(created["ok"], true, "create_campaign refused: {created}");
+    let snapshot = &created["payload"]["snapshot"];
+    let project = snapshot["selectedProjectId"]
+        .as_str()
+        .expect("project id in the create snapshot")
+        .to_owned();
+    let campaign = snapshot["activeCampaignId"]
+        .as_str()
+        .expect("campaign id in the create snapshot")
+        .to_owned();
+    let task = snapshot["activeTask"]["id"]
+        .as_str()
+        .expect("root task id in the create snapshot")
+        .to_owned();
+
     let selected = call(
         server,
-        id,
+        &format!("{id}-select"),
         "select_runtime",
-        json!({ "provider": "scenario", "campaignId": SEED_CAMPAIGN, "taskId": SEED_TASK }),
+        json!({
+            "projectId": project,
+            "campaignId": campaign,
+            "taskId": task,
+            "provider": "scenario"
+        }),
     );
     assert_eq!(selected["ok"], true, "{selected}");
     selected["payload"]["snapshot"]["attempt"]["id"]
         .as_str()
-        .unwrap()
+        .expect("select_runtime returns the registered attempt")
         .to_string()
 }
 
@@ -423,7 +463,7 @@ fn select_seed_scenario(server: &CoreServer, id: &str) -> String {
 fn c3_scenario_claim_r1_is_unsupported_and_not_applicable() {
     assert_env_pinned();
     let server = CoreServer::new(Store::memory().unwrap());
-    let attempt = select_seed_scenario(&server, "c3-select");
+    let attempt = select_scenario_attempt(&server, "c3");
     let classified = call(
         &server,
         "c3-classify",
@@ -440,7 +480,7 @@ fn c3_scenario_claim_r1_is_unsupported_and_not_applicable() {
 fn c5_other_claims_pass_through_with_identity_reported() {
     assert_env_pinned();
     let server = CoreServer::new(Store::memory().unwrap());
-    let attempt = select_seed_scenario(&server, "c5-select");
+    let attempt = select_scenario_attempt(&server, "c5");
     let classified = call(
         &server,
         "c5-classify",

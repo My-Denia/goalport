@@ -11,7 +11,8 @@ function canonicalPath(value) {
       // The native Windows API expands 8.3 aliases; the JS realpath fallback
       // can leave them intact. The database itself may not exist yet.
       return path.join(fs.realpathSync.native(ancestor), path.relative(ancestor, absolute));
-    } catch {
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
       const parent = path.dirname(ancestor);
       if (parent === ancestor) return absolute;
       ancestor = parent;
@@ -19,25 +20,6 @@ function canonicalPath(value) {
   }
 }
 const normalizedPath = (value) => canonicalPath(value).replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "").replaceAll("/", "\\");
-
-function validateProfileMarker(marker, { mode, coreSha256, version, profileKey }) {
-  const deadline = Date.now() + 1000;
-  let existing;
-  while (true) {
-    try {
-      existing = JSON.parse(fs.readFileSync(marker, "utf8"));
-      break;
-    } catch (error) {
-      // An exclusive creator may have opened the file but not finished its
-      // first write. Never overwrite it; wait briefly for a complete marker.
-      if (!(error instanceof SyntaxError || error.code === "ENOENT") || Date.now() >= deadline) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
-  }
-  if (existing?.product !== "GoalPort" || existing.schemaVersion !== 1 || existing.mode !== mode) throw new Error("This data directory belongs to a different profile; choose a new directory");
-  if (existing.coreSha256 !== coreSha256 || existing.version !== version) throw new Error("This data profile belongs to another RC build. Choose a new --data-dir; automatic migration is not supported");
-  if (existing.identityVersion !== 2 || existing.profileKey !== profileKey) throw new Error("This data profile uses an older or different path identity. Choose a new --data-dir; automatic migration is not supported");
-}
 
 function launchArguments(argv) {
   const result = {};
@@ -52,31 +34,134 @@ function launchArguments(argv) {
   return result;
 }
 
-// Normal RC state has a new product-owned location. Existing arbitrary/legacy
-// SQLite files are never adopted or migrated just because they are nearby.
-function prepareProfile({ args, appData, version, coreSha256, isPackaged = true }) {
+// Rebuilds a relaunch argv whose EXCLUSIVE profile location is newDataDir:
+// strips any existing mutually-exclusive --data-dir/--test-profile pair (both
+// the two-token and --flag=value spellings, including their values) and
+// appends the new --data-dir. Every other argument — the --user-data-dir
+// application-root relocation, Chromium/CDP switches, positional arguments —
+// survives untouched, so a relaunch after "choose a fresh directory" can never
+// drop a relocation or debugging flag, and a synthetic --test-profile refusal
+// screen can relaunch into a normal --data-dir without a dead repeat.
+function relaunchArguments(argv, newDataDir) {
+  const kept = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    if (arg === "--data-dir" || arg === "--test-profile") {
+      const value = argv[index + 1];
+      if (value !== undefined && !String(value).startsWith("--")) index += 1; // drop the consumed value too
+      continue;
+    }
+    if (arg.startsWith("--data-dir=") || arg.startsWith("--test-profile=")) continue;
+    if (arg === "--") continue; // argument separator has no meaning in a rebuilt argv
+    kept.push(arg);
+  }
+  kept.push("--data-dir", newDataDir);
+  return kept;
+}
+
+// Channel namespaces own separate profile directories under the product root.
+// `release` keeps the historical `rc` directory; every development build
+// (packaged dev candidates and unpackaged dev) shares `dev`, so development
+// data stays stable across builds instead of forking per Core hash.
+// A synthetic test profile is an explicit per-test directory and never
+// participates in channel discovery.
+const CHANNEL_DIRECTORIES = Object.freeze({ release: "rc", "dev-candidate": "dev", dev: "dev" });
+
+function profileDirectoryFor({ args, appData, channel }) {
+  if (args["--test-profile"] || args["--data-dir"]) return path.resolve(args["--test-profile"] || args["--data-dir"]);
+  const leaf = CHANNEL_DIRECTORIES[channel] || "dev";
+  return path.join(appData, "GoalPort", leaf);
+}
+
+// The Electron/Chromium browser-state namespace (caches, Local State,
+// Preferences, Network, session storage…) is DERIVED from the canonical
+// durable identity and is PHYSICALLY SEPARATE from the durable profile root:
+//   * normal profiles (default channel directory or an explicit --data-dir)
+//     use <appData>/GoalPort/electron/<profileKey> — inside the same
+//     application-data root (so a --user-data-dir relocation keeps both
+//     namespaces inside the relocated boundary) but never inside the durable
+//     directory, not even for --data-dir;
+//   * a synthetic --test-profile uses a test-owned sibling
+//     dirname(<test-profile>)/electron/<profileKey>, so packaged tests never
+//     write into the real application-data root.
+// The browser identity deliberately does NOT include the Core hash: a
+// differently-built candidate reuses the same durable AND browser identity
+// (only the runtime pipe stays per-build).
+function browserStateDirectoryFor({ args, appData, canonical, key }) {
+  if (args["--test-profile"]) return path.join(path.dirname(canonical), "electron", key);
+  return path.join(appData, "GoalPort", "electron", key);
+}
+
+// Physical namespace comparison, independent of profileKey's frozen spelling
+// contract. Windows directory aliases and case must not conceal containment.
+function storagePathRelationship(durableDirectory, browserStateDirectory) {
+  const durable = normalizedPath(durableDirectory).toLowerCase();
+  const browser = normalizedPath(browserStateDirectory).toLowerCase();
+  const inside = (parent, child) => child.startsWith(parent.replace(/\\+$/, "") + "\\");
+  const samePath = durable === browser;
+  const browserInsideDurable = inside(durable, browser);
+  const durableInsideBrowser = inside(browser, durable);
+  return { samePath, browserInsideDurable, durableInsideBrowser,
+    disjoint: !samePath && !browserInsideDurable && !durableInsideBrowser };
+}
+
+function assertProfileStorageBoundary({ durableDirectory, browserStateDirectory, browserStateOwnerDirectory }) {
+  if (!storagePathRelationship(durableDirectory, browserStateDirectory).disjoint) {
+    throw new Error("GoalPort durable data and Electron browser state must be separate, non-overlapping directories. Choose a different --data-dir or --user-data-dir root.");
+  }
+  const ownership = storagePathRelationship(browserStateOwnerDirectory, browserStateDirectory);
+  if (!ownership.browserInsideDurable || ownership.samePath) {
+    throw new Error("Electron browser state escapes its application or test-owned root. Remove the redirected browser-state path or choose a different root.");
+  }
+}
+
+// Pure path/identity computation for one profile. It never reads or writes
+// the marker, never validates builder identity, and never refuses on build
+// hash: those decisions belong to the profile manager's compatibility flow
+// (data-format authority is the schema_migrations table, inspected read-only
+// by the Core binary). `directory` and `durableDirectory` are the same
+// durable profile root (the user's backup/migration unit: marker, SQLite
+// database, backups, import journal); `browserStateDirectory` is the separate
+// Electron/Chromium userData root — the two are never the same path.
+function resolveProfilePaths({ args, appData, channel, coreSha256 }) {
   if (!/^[a-f0-9]{64}$/.test(coreSha256)) throw new Error("Packaged Core identity is unavailable");
   const mode = args["--test-profile"] ? "synthetic-test" : "normal";
-  const directory = path.resolve(args["--test-profile"] || args["--data-dir"] || path.join(appData, "GoalPort", isPackaged ? "rc" : "dev"));
-  const marker = path.join(directory, "goalport-profile.json");
-  if (fs.existsSync(directory) && !fs.existsSync(marker) && fs.readdirSync(directory).length && !fs.existsSync(marker)) {
-    throw new Error("Data directory is not an empty or existing GoalPort RC profile; legacy databases are not imported");
-  }
-  fs.mkdirSync(directory, { recursive: true });
-  const canonical = fs.realpathSync.native(directory);
+  const directory = profileDirectoryFor({ args, appData, channel });
+  const canonical = canonicalPath(directory);
   const key = hash(normalizedPath(canonical)).slice(0, 20);
-  try {
-    fs.writeFileSync(marker, `${JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", version, coreSha256, mode }, null, 2)}\n`, { flag: "wx" });
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    validateProfileMarker(marker, { mode, coreSha256, version, profileKey: key });
-  }
   const slug = `goalport-rc-${key}`;
+  const browserStateDirectory = canonicalPath(browserStateDirectoryFor({ args, appData, canonical, key }));
+  // Ownership comes from the requested scratch parent, not from the target of
+  // a redirected profile leaf. A junction must not redefine the test's owner.
+  const browserStateOwnerDirectory = canonicalPath(args["--test-profile"] ? path.dirname(directory) : appData);
+  assertProfileStorageBoundary({ durableDirectory: canonical, browserStateDirectory, browserStateOwnerDirectory });
   return {
-    mode, directory: canonical, database: path.join(canonical, "goalport.sqlite"),
-    pipe: `\\\\.\\pipe\\${slug}-${coreSha256.slice(0, 20)}`, slug,
-    coreSha256, version, testMode: mode === "synthetic-test"
+    mode,
+    channel: args["--test-profile"] || args["--data-dir"] ? null : channel,
+    directory: canonical,
+    durableDirectory: canonical,
+    browserStateDirectory,
+    browserStateOwnerDirectory,
+    marker: path.join(canonical, "goalport-profile.json"),
+    database: path.join(canonical, "goalport.sqlite"),
+    profileKey: key,
+    pipe: `\\\\.\\pipe\\${slug}-${coreSha256.slice(0, 20)}`,
+    slug,
+    coreSha256,
+    testMode: mode === "synthetic-test"
   };
+}
+
+// Marker identity (NOT data-format compatibility): the marker proves this
+// directory belongs to this product/mode/path identity. Builder version and
+// Core hash in the marker are provenance metadata (`createdBy`,
+// `lastOpenedBy`), never reopen conditions.
+function validateProfileIdentity(marker, { mode, profileKey }) {
+  if (!marker || marker.product !== "GoalPort") throw new Error("This data directory belongs to a different product; choose a new directory");
+  const schema = marker.markerSchemaVersion ?? marker.schemaVersion;
+  if (schema !== 1 && schema !== 2) throw new Error("This data profile uses an unknown profile-record format; choose a new directory");
+  if (marker.mode !== mode) throw new Error("This data directory belongs to a different profile mode; choose a new directory");
+  if (marker.identityVersion !== 2 || marker.profileKey !== profileKey) throw new Error("This data profile uses an older or different path identity. Choose a new --data-dir; automatic migration is not supported");
 }
 
 function assertCoreIdentity(receipt, profile) {
@@ -135,6 +220,7 @@ function childEnvironment(env, profile) {
 }
 
 module.exports = {
-  launchArguments, prepareProfile, assertCoreIdentity, childEnvironment, normalizedPath,
-  assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL
+  launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
+  childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
+  CHANNEL_DIRECTORIES, canonicalPath, storagePathRelationship, assertProfileStorageBoundary
 };

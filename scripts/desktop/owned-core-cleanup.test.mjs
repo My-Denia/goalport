@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import launchConfig from "../../electron/launch-config.cjs";
+import { buildMarkerV2 } from "../../electron/profile-manager.cjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 
-function fixture(t, { alias = false } = {}) {
+function fixture(t, { alias = false, markerVersion = 1 } = {}) {
   const base = mkdtempSync(resolve(tmpdir(), "goalport-cleanup-test-"));
   t.after(() => rmSync(base, { recursive: true, force: true }));
   const real = resolve(base, "real");
@@ -24,7 +25,21 @@ function fixture(t, { alias = false } = {}) {
   const created = Date.now(), creationDate = `/Date(${created})/`;
   const core = { pid: 424242, creationDate, createdMs: created, executablePath, executableSha256: coreSha256 };
   const ready = { kind: "launch-ready", readyState: "READY_COMMITTED", launchNonce: "fixture-nonce", coreEpochId: "core-epoch:fixture-nonce", startupReceiptId: "startup:fixture-nonce", databaseIdentity: resolve(canonicalRoot, "profile/goalport.sqlite"), pipeIdentity: `\\\\.\\pipe\\goalport-rc-${key}-${coreSha256.slice(0, 20)}`, core };
-  writeFileSync(resolve(profileDirectory, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", mode: "synthetic-test", coreSha256, version: "1.0.0-rc.1" }));
+  const markerPath = resolve(profileDirectory, "goalport-profile.json");
+  if (markerVersion === 2) {
+    // The same writer the product uses for packaged profiles (markerSchemaVersion 2).
+    // Builder provenance deliberately does NOT match this fixture build: it must
+    // never be cleanup authority for v2 markers.
+    const foreignProvenance = { version: "0.0.0-other-builder", coreSha256: "f".repeat(64), distribution: "release" };
+    writeFileSync(markerPath, JSON.stringify(buildMarkerV2({
+      profileKey: key, mode: "synthetic-test", channel: null,
+      createdBy: foreignProvenance,
+      lastOpenedBy: { ...foreignProvenance, at: new Date(created).toISOString() },
+      formatVersion: null
+    })));
+  } else {
+    writeFileSync(markerPath, JSON.stringify({ schemaVersion: 1, identityVersion: 2, profileKey: key, product: "GoalPort", mode: "synthetic-test", coreSha256, version: "1.0.0-rc.1" }));
+  }
   writeFileSync(ready.databaseIdentity, "inert DB bytes");
   const readyPath = resolve(profileDirectory, "goalport.sqlite.launch-ready");
   writeFileSync(readyPath, JSON.stringify(ready));
@@ -35,7 +50,7 @@ function fixture(t, { alias = false } = {}) {
     observe: () => { observations.push(live); return live ? liveObservation() : { state: "absent" }; },
     stop: (pid) => { stops.push(pid); live = false; }
   };
-  return { options, ready, readyPath, stops, core, observations, liveObservation, setLive: (value) => { live = value; } };
+  return { options, ready, readyPath, markerPath, key, base, stops, core, observations, liveObservation, setLive: (value) => { live = value; } };
 }
 const unknown = (reason = "fixture observer timeout") => ({ state: "unknown", reason, errorCode: "ETIMEDOUT", status: null, elapsedMs: 5000 });
 
@@ -131,4 +146,88 @@ test("an aliased package and profile spelling resolves to the same owned Core", 
   const f = fixture(t, { alias: true });
   const result = await cleanupOwnedCore(f.options);
   assert.equal(result.verifiedCoreStopped, true); assert.deepEqual(f.stops, [f.core.pid]);
+});
+
+// ---------- marker schema v2 (packaged profiles: markerSchemaVersion 2) ----------
+
+test("marker v2 packaged shape cleans its owned Core while builder provenance stays non-authoritative", async (t) => {
+  const f = fixture(t, { markerVersion: 2 });
+  const result = await cleanupOwnedCore(f.options);
+  assert.equal(result.source, "launch-ready"); assert.equal(result.verifiedCoreStopped, true);
+  assert.deepEqual(f.stops, [f.core.pid]);
+});
+
+test("marker v2 with an aliased directory spelling still binds the exact canonical profileKey", { skip: process.platform !== "win32" }, async (t) => {
+  const f = fixture(t, { alias: true, markerVersion: 2 });
+  assert.equal((await cleanupOwnedCore(f.options)).verifiedCoreStopped, true);
+  assert.deepEqual(f.stops, [f.core.pid]);
+});
+
+test("marker v2 wrong product, mode, schema or identityVersion stops zero processes", async (t) => {
+  const cases = [
+    ["product", (marker) => { marker.product = "GoalPort Desktop"; }],
+    ["mode", (marker) => { marker.mode = "normal"; }],
+    ["schema-unknown", (marker) => { marker.markerSchemaVersion = 3; }],
+    ["schema-missing", (marker) => { delete marker.markerSchemaVersion; }],
+    ["identity-version-1", (marker) => { marker.identityVersion = 1; }],
+    ["identity-version-3", (marker) => { marker.identityVersion = 3; }]
+  ];
+  for (const [kind, mutate] of cases) {
+    const f = fixture(t, { markerVersion: 2 });
+    const marker = buildMarkerV2({ profileKey: f.key, mode: "synthetic-test" });
+    mutate(marker);
+    writeFileSync(f.markerPath, JSON.stringify(marker));
+    await assert.rejects(cleanupOwnedCore(f.options), (error) => error.phase === "identity", `${kind} must refuse cleanup`);
+    assert.deepEqual(f.stops, []);
+  }
+});
+
+test("marker v2 profileKey must equal the exact canonical directory identity", async (t) => {
+  const nextHex = { "0": "1", "1": "2", "2": "3", "3": "4", "4": "5", "5": "6", "6": "7", "7": "8", "8": "9", "9": "a", "a": "b", "b": "c", "c": "d", "d": "e", "e": "f", "f": "0" };
+  for (const kind of ["foreign-directory", "near-miss-key"]) {
+    const f = fixture(t, { markerVersion: 2 });
+    const key = kind === "foreign-directory"
+      ? createHash("sha256").update(launchConfig.normalizedPath(resolve(tmpdir(), "foreign-goalport-profile"))).digest("hex").slice(0, 20)
+      : nextHex[f.key[0]] + f.key.slice(1);
+    writeFileSync(f.markerPath, JSON.stringify(buildMarkerV2({ profileKey: key, mode: "synthetic-test" })));
+    await assert.rejects(cleanupOwnedCore(f.options), (error) => error.phase === "identity", `${kind} must refuse cleanup`);
+    assert.deepEqual(f.stops, []);
+  }
+});
+
+test("marker v2 with forged, stale or mismatched committed-ready identity stops zero processes", async (t) => {
+  for (const kind of ["pending-state", "receipt-id", "epoch-nonce", "core-hash", "core-path", "pid-reuse", "missing-ready"]) {
+    const f = fixture(t, { markerVersion: 2 });
+    if (kind === "pending-state") f.ready.readyState = "STARTUP_PENDING";
+    if (kind === "receipt-id") f.ready.startupReceiptId = "startup:stale";
+    if (kind === "epoch-nonce") f.ready.coreEpochId = "core-epoch:stale";
+    if (kind === "core-hash") f.ready.core.executableSha256 = "0".repeat(64);
+    if (kind === "core-path") f.ready.core.executablePath += "-other";
+    if (kind === "pid-reuse") f.options.observe = () => ({ ...f.liveObservation(), CreationDate: "/Date(1)/" });
+    if (kind === "missing-ready") rmSync(f.readyPath);
+    else writeFileSync(f.readyPath, JSON.stringify(f.ready));
+    await assert.rejects(cleanupOwnedCore(f.options), undefined, `${kind} must refuse cleanup`);
+    assert.deepEqual(f.stops, []);
+  }
+});
+
+test("builder provenance matching this build never authorizes cleanup of a foreign profile", async (t) => {
+  const f = fixture(t);
+  const provenance = { version: f.options.version, coreSha256: f.options.coreSha256, distribution: "dev-candidate" };
+  const foreignKey = createHash("sha256").update(launchConfig.normalizedPath(resolve(f.base, "other-profile"))).digest("hex").slice(0, 20);
+  writeFileSync(f.markerPath, JSON.stringify(buildMarkerV2({
+    profileKey: foreignKey, mode: "synthetic-test", channel: null,
+    createdBy: provenance, lastOpenedBy: { ...provenance, at: new Date().toISOString() }, formatVersion: null
+  })));
+  await assert.rejects(cleanupOwnedCore(f.options), (error) => error.phase === "identity");
+  assert.deepEqual(f.stops, []);
+});
+
+test("a profile directory without a marker authorizes nothing (missing-marker shape)", async (t) => {
+  for (const markerVersion of [1, 2]) {
+    const f = fixture(t, { markerVersion });
+    rmSync(f.markerPath);
+    await assert.rejects(cleanupOwnedCore(f.options), (error) => error.phase === "identity");
+    assert.deepEqual(f.stops, []);
+  }
 });

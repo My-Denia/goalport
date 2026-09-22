@@ -24,6 +24,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("pipe-peer") {
         return pipe_peer(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("profile") {
+        return profile(&args[1..]);
+    }
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -106,6 +109,130 @@ fn serve(args: &[String]) -> Result<(), String> {
     {
         let _ = (pipe, server);
         Err("serve requires Windows Named Pipe support".into())
+    }
+}
+
+/// `profile inspect|backup|import|recovery-probe|verify-source|verify-staging …`:
+/// startup-continuity storage operations.
+/// Never migrates a database. Output contract: exactly one JSON line on
+/// stdout; success exits 0, failure exits 3 with `{ok:false, stage, error}`.
+fn profile(args: &[String]) -> ExitCode {
+    use goalport_core::profile_ops;
+    let Some(command) = args.first().map(String::as_str) else {
+        println!(
+            "{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"usage\",\"error\":\"profile requires inspect|backup|import|recovery-probe|verify-source|verify-staging\"}}",
+            profile_ops::PROFILE_OPS_SCHEMA
+        );
+        return ExitCode::from(profile_ops::PROFILE_OPS_FAILURE_EXIT);
+    };
+    let flags = |name: &str| -> Option<String> {
+        option(args, name).or_else(|| {
+            if args.iter().any(|arg| arg == name) {
+                Some(String::new())
+            } else {
+                None
+            }
+        })
+    };
+    let result: Result<serde_json::Value, String> = match command {
+        "inspect" => match option(args, "--db") {
+            Some(db) => profile_ops::inspect(&PathBuf::from(db), flags("--quick-check").is_some()),
+            None => Err("profile inspect requires --db".into()),
+        },
+        "backup" => match (option(args, "--db"), option(args, "--out")) {
+            (Some(db), Some(out)) => profile_ops::backup(
+                &PathBuf::from(db),
+                &PathBuf::from(out),
+                flags("--allow-write-open").is_some(),
+            ),
+            _ => Err("profile backup requires --db and --out".into()),
+        },
+        "import" => match (option(args, "--source-db"), option(args, "--staging-dir")) {
+            (Some(source), Some(staging)) => {
+                let provenance = option(args, "--provenance")
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or(serde_json::json!(null));
+                if flags("--allow-source-recovery").is_some() {
+                    profile_ops::import(&PathBuf::from(source), &PathBuf::from(staging), &provenance, true)
+                } else {
+                    match (
+                        option(args, "--operation-id"),
+                        option(args, "--source-marker-sha256"),
+                        option(args, "--provenance-sha256"),
+                    ) {
+                        (Some(operation_id), Some(marker), Some(provenance_sha)) => profile_ops::import_bound(
+                            &PathBuf::from(source),
+                            &PathBuf::from(staging),
+                            &provenance,
+                            &operation_id,
+                            &marker,
+                            &provenance_sha,
+                        ),
+                        (None, None, None) => profile_ops::import(
+                            &PathBuf::from(source),
+                            &PathBuf::from(staging),
+                            &provenance,
+                            false,
+                        ),
+                        _ => Err("bound profile import requires --operation-id, --source-marker-sha256 and --provenance-sha256 together".into()),
+                    }
+                }
+            }
+            _ => Err("profile import requires --source-db and --staging-dir".into()),
+        },
+        "recovery-probe" => match (
+            option(args, "--source-db"),
+            option(args, "--staging-dir"),
+            option(args, "--operation-id"),
+            option(args, "--source-marker-sha256"),
+            option(args, "--provenance-sha256"),
+        ) {
+            (Some(source), Some(staging), Some(operation_id), Some(marker), Some(provenance)) => profile_ops::recovery_probe(
+                &PathBuf::from(source),
+                &PathBuf::from(staging),
+                &operation_id,
+                &marker,
+                &provenance,
+            ),
+            _ => Err("profile recovery-probe requires --source-db, --staging-dir, --operation-id, --source-marker-sha256 and --provenance-sha256".into()),
+        },
+        "verify-source" => match (
+            option(args, "--source-db"),
+            option(args, "--expected-source-snapshot-token"),
+        ) {
+            (Some(source), Some(token)) => profile_ops::verify_source(&PathBuf::from(source), &token),
+            _ => Err("profile verify-source requires --source-db and --expected-source-snapshot-token".into()),
+        },
+        "verify-staging" => match (
+            option(args, "--staging-dir"),
+            option(args, "--expected-operation-id"),
+            option(args, "--expected-proof-token"),
+            option(args, "--expected-source-binding-sha256"),
+        ) {
+            (Some(staging), Some(operation_id), Some(proof), Some(binding)) => profile_ops::verify_staging(
+                &PathBuf::from(staging),
+                &operation_id,
+                &proof,
+                &binding,
+            ),
+            _ => Err("profile verify-staging requires --staging-dir, --expected-operation-id, --expected-proof-token and --expected-source-binding-sha256".into()),
+        },
+        unknown => Err(format!("unknown profile subcommand {unknown}; use inspect|backup|import|recovery-probe|verify-source|verify-staging")),
+    };
+    match result {
+        Ok(mut value) => {
+            value["ok"] = serde_json::json!(true);
+            println!("{}", value);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!(
+                "{{\"schema\":\"{}\",\"ok\":false,\"stage\":\"profile\",\"error\":{}}}",
+                profile_ops::PROFILE_OPS_SCHEMA,
+                serde_json::to_string(&error).unwrap_or_else(|_| "\"error\"".into())
+            );
+            ExitCode::from(profile_ops::PROFILE_OPS_FAILURE_EXIT)
+        }
     }
 }
 

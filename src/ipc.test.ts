@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { getCoreClient, persistedAttemptId, reusableAttemptId, resetCoreClientForTests } from "./ipc";
-import { resolveCoreSnapshot } from "./types";
+import { DEMO_SNAPSHOT, resolveCoreSnapshot } from "./types";
 
 afterEach(() => resetCoreClientForTests());
 
@@ -74,6 +74,30 @@ describe("Core client preview transport", () => {
     expect(snapshot?.campaigns[0].projectId).toBe("p-1");
     expect(snapshot?.activeTask.state).toBe("in-progress");
     expect(snapshot?.timeline[0].kind).toBe("message");
+  });
+
+  it("normalizes bounded page, fragment and capacity metadata", () => {
+    const snapshot = resolveCoreSnapshot({
+      ...DEMO_SNAPSHOT,
+      timeline: [{
+        ...DEMO_SNAPSHOT.timeline[0],
+        id: "timeline-fragment",
+        logical_item_id: "timeline-logical",
+        fragment_index: 1,
+        continues_before: true
+      }],
+      timeline_page_info: { older_cursor: "older", newer_cursor: "newer", has_older: true, has_newer: false, content_bytes: 99, item_count: 1 },
+      bounds: { truncated: true, projection_unavailable: true, omitted_counts: { conversation_items: 7 } },
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation,
+        items: [{ id: "product-fragment", kind: "assistant-message", body: "tail", logical_item_id: "answer", fragment_index: 2, continues_before: true }],
+        page_info: { older_cursor: null, newer_cursor: "latest", has_older: false, has_newer: false, content_bytes: 55, item_count: 1 }
+      }
+    });
+    expect(snapshot?.timeline[0]).toEqual(expect.objectContaining({ logicalItemId: "timeline-logical", fragmentIndex: 1, continuesBefore: true }));
+    expect(snapshot?.timelinePageInfo).toEqual(expect.objectContaining({ olderCursor: "older", contentBytes: 99 }));
+    expect(snapshot?.productConversation?.items[0]).toEqual(expect.objectContaining({ logicalItemId: "answer", fragmentIndex: 2 }));
+    expect(snapshot?.bounds).toEqual(expect.objectContaining({ projectionUnavailable: true, omittedCounts: { conversationItems: 7 } }));
   });
 
   it("keeps a normal empty projection empty instead of inheriting demo identities", () => {

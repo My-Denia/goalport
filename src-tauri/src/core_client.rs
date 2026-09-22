@@ -167,9 +167,14 @@ impl CoreConnection {
 
     pub fn command(&self, request: UiCommandRequest) -> Result<Value, String> {
         request.validate()?;
+        let request_id = request.request_id.clone();
         let wire = serde_json::to_value(request)
             .map_err(|error| format!("unable to encode Core command: {error}"))?;
-        unwrap_command_result(self.exchange(&wire)?)
+        let response = self.exchange(&wire)?;
+        if response.get("requestId").or_else(|| response.get("request_id")).and_then(Value::as_str) != Some(request_id.as_str()) {
+            return Err("Core response identity does not match the request; result remains unknown".into());
+        }
+        unwrap_command_result(response)
     }
 
     fn exchange(&self, value: &Value) -> Result<Value, String> {
@@ -237,13 +242,14 @@ fn tagged_core_rejection(value: &Value) -> Option<Value> {
     if value.get("ok").and_then(Value::as_bool) != Some(false) {
         return None;
     }
-    Some(json!({
-        "goalportRejected": true,
-        "error": value
+    let mut result = value.get("payload").and_then(Value::as_object).cloned().unwrap_or_default();
+    result.insert("goalportRejected".into(), json!(true));
+    result.insert("requestId".into(), value.get("requestId").or_else(|| value.get("request_id")).cloned().unwrap_or(Value::Null));
+    result.insert("error".into(), json!(value
             .get("error")
             .and_then(Value::as_str)
-            .unwrap_or("Core rejected the UI request")
-    }))
+            .unwrap_or("Core rejected the UI request")));
+    Some(Value::Object(result))
 }
 
 fn unwrap_ui_snapshot_payload(value: Value) -> Result<Value, String> {
@@ -276,7 +282,12 @@ fn unwrap_command_result(value: Value) -> Result<Value, String> {
     if let Some(rejected) = tagged_core_rejection(&value) {
         return Ok(rejected);
     }
-    unwrap_ui_snapshot_payload(value)
+    // Preserve request acknowledgement, reservation and history metadata. The
+    // renderer must never infer delivery from a bare snapshot after a command.
+    if let Some(payload) = value.get("payload") {
+        return Ok(payload.clone());
+    }
+    Ok(value)
 }
 
 fn write_frame(writer: &mut File, payload: &[u8]) -> Result<(), String> {
@@ -409,13 +420,27 @@ mod tests {
     }
 
     #[test]
-    fn command_result_extracts_the_snapshot_payload() {
+    fn command_result_preserves_acknowledgement_and_snapshot_payload() {
         let snapshot = unwrap_command_result(json!({
             "ok": true,
-            "payload": { "snapshot": { "connection": "connected", "attempt": { "id": "a-1" } } }
+            "payload": { "requestId": "r1", "accepted": true, "snapshot": { "connection": "connected", "attempt": { "id": "a-1" } } }
         }))
         .expect("ok:true still unwraps to the snapshot");
-        assert_eq!(snapshot["connection"], "connected");
-        assert_eq!(snapshot["attempt"]["id"], "a-1");
+        assert_eq!(snapshot["requestId"], "r1");
+        assert_eq!(snapshot["accepted"], true);
+        assert_eq!(snapshot["snapshot"]["connection"], "connected");
+        assert_eq!(snapshot["snapshot"]["attempt"]["id"], "a-1");
+    }
+
+    #[test]
+    fn rejection_keeps_authoritative_reservation_and_history_has_no_snapshot() {
+        let rejected = unwrap_command_result(json!({"requestId":"r1","ok":false,"error":"admission failed",
+            "payload":{"requestId":"r1","accepted":false,"snapshot":{"activeCampaignId":"c1"},
+            "rejection":{"retryMode":"SAME_REQUEST","reservation":{"campaignId":"c1"}}}})).unwrap();
+        assert_eq!(rejected["rejection"]["reservation"]["campaignId"], "c1");
+        assert_eq!(rejected["snapshot"]["activeCampaignId"], "c1");
+        let page = unwrap_command_result(json!({"ok":true,"payload":{"requestId":"h1","accepted":true,"historyPage":{"ownerId":"c1"}}})).unwrap();
+        assert_eq!(page["historyPage"]["ownerId"], "c1");
+        assert!(page.get("snapshot").is_none());
     }
 }

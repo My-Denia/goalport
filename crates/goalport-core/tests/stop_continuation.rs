@@ -1,4 +1,7 @@
-//! Post-Stop re-check and continuation (schema v8).
+//! Post-Stop re-check and continuation. The re-check ledger and continuation
+//! record tables arrived in schema v8; this suite runs against the current
+//! product schema (v9, product-interaction-reset), which adds conversation
+//! preferences, request bookkeeping and durable product-event ordering.
 //!
 //! The re-check is the FACT layer: it observes current reality and appends one row
 //! to a ledger. It never writes `stop_responsibilities`, so it can neither release
@@ -124,7 +127,10 @@ fn the_ledger_rejects_a_quiescence_verdict_at_the_sqlite_layer() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("recheck.sqlite");
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 8);
+    // The current schema, not a historical one: v9 adds conversation tables
+    // and durable product-event ordering; the re-check verdict CHECK
+    // constraint asserted below is unchanged since v8.
+    assert_eq!(store.schema_version().unwrap(), 9);
     drop(store);
 
     let raw = rusqlite::Connection::open(&path).unwrap();

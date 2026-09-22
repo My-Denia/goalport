@@ -75,14 +75,16 @@ describe("a pre-revision hold still blocks everything", () => {
     const composer = (await screen.findByRole("textbox", { name: /message composer/i })) as HTMLTextAreaElement;
     expect(composer.disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /assign next step/i }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /open details panel/i }));
+    expect((screen.getByRole("button", { name: /handoff/i }) as HTMLButtonElement).disabled).toBe(true);
     // Allow: this test's NAME claimed it for two audit rounds while the body never
     // asserted it. DEMO_SNAPSHOT carries a pending permission decision, so the button
     // is rendered and the assertion was always writable -- it was simply missing.
     const allow = screen.getByRole("button", { name: /allow once/i }) as HTMLButtonElement;
     expect(allow.disabled).toBe(true);
-    const select = screen.queryByRole("button", { name: /select claude code/i }) as HTMLButtonElement | null;
-    if (select) expect(select.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Select Runtime" }));
+    const select = screen.getByRole("option", { name: /claude code/i }) as HTMLButtonElement;
+    expect(select.disabled).toBe(true);
   });
 
   it("leaves the handler guards unreachable, which is the stronger property", async () => {
@@ -101,7 +103,8 @@ describe("a pre-revision hold still blocks everything", () => {
       relatedHolds: []
     });
     await screen.findByRole("region", { name: /stop responsibility/i });
-    fireEvent.click(screen.getByRole("button", { name: "Close window" }));
+    fireEvent.click(screen.getByRole("button", { name: "Application menu" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Close window" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog", { name: /continue running in the background/i })).toBeTruthy()
     );
@@ -153,7 +156,7 @@ describe("the blocked-work panel", () => {
     mount({ ...DEMO_SNAPSHOT, preview: false, stopResponsibility: HOLD, relatedHolds: [] });
     const panel = await screen.findByRole("region", { name: /stop responsibility/i });
     expect(panel.textContent).toContain("Last re-check: observation-unavailable");
-    expect(panel.textContent).toContain("observed at 1788600009999");
+    expect(panel.textContent).toContain(`observed at ${new Date(1788600009999).toLocaleString()}`);
     expect(panel.textContent).toContain("Nothing could be concluded");
     expect(panel.textContent).toContain("not evidence that anything stopped");
   });
@@ -247,7 +250,7 @@ describe("a refused continuation is never announced as a success", () => {
     fireEvent.click(screen.getByRole("button", { name: /continue in a new isolated workspace/i }));
 
     await waitFor(() =>
-      expect(document.body.textContent).toContain("Continuation refused")
+      expect(document.body.textContent).toContain("GoalPort could not complete that action.")
     );
     expect(document.body.textContent).toContain("already has a continuation");
     // The success line must be absent, not merely outranked.
