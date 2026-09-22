@@ -138,8 +138,8 @@ test("path model: --data-dir owns ONLY the durable location; the browser namespa
   const paths = resolveProfilePaths({ ...settings(root, { "--data-dir": explicit }), channel: "release" });
   assert.equal(paths.durableDirectory, resolve(realpathSync.native(root), "explicit-data"), "the durable root is exactly the user's explicit path");
   assert.notEqual(normalizedPath(paths.durableDirectory), normalizedPath(paths.browserStateDirectory));
-  assert.equal(paths.browserStateDirectory, resolve(root, "GoalPort", "electron", paths.profileKey));
-  const rel = relative(explicit, paths.browserStateDirectory);
+  assert.equal(paths.browserStateDirectory, resolve(realpathSync.native(root), "GoalPort", "electron", paths.profileKey));
+  const rel = relative(paths.durableDirectory, paths.browserStateDirectory);
   assert.ok(rel.startsWith("..") || isAbsolute(rel), "backing up the --data-dir can never capture Chromium state");
 });
 
@@ -374,6 +374,13 @@ test("Windows aliases share identity even for an absent database descendant", { 
   assert.equal(aliased.profileKey, spelled.profileKey);
   assert.equal(aliased.browserStateDirectory, spelled.browserStateDirectory);
   assert.equal(aliased.pipe, spelled.pipe);
+  // App-data itself can also arrive through an 8.3 alias (CI's RUNNER~1).
+  // Browser paths, like durable paths, are now canonical physical paths.
+  const shortAppData = resolve(alias, `goalport-no-write-appdata-${process.pid}-${Date.now()}`);
+  const normal = resolveProfilePaths({ appData: shortAppData, coreSha256: hash, args: { "--data-dir": appData } });
+  assert.equal(normal.browserStateDirectory, resolve(realpathSync.native(alias), shortAppData.slice(resolve(alias).length + 1), "GoalPort", "electron", normal.profileKey));
+  assert.notEqual(normal.browserStateDirectory, resolve(shortAppData, "GoalPort", "electron", normal.profileKey), "literal short-name expectation reproduces the CI60 assertion bug");
+  assert.equal(existsSync(shortAppData), false, "pure alias check never creates app-data");
   // Synthetic browser-state containment is derived from the CANONICAL durable
   // parent, never from the literal spelling. On a machine whose temp root is
   // an 8.3 alias (the GitHub runner's RUNNER~1 TEMP), a literal prefix
