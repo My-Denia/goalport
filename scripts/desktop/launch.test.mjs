@@ -47,9 +47,13 @@ test("a differently-built candidate shares the dev namespace instead of refusing
 
 test("path model: the default release profile splits the durable root from the browser-state namespace", (t) => {
   const root = fixture(t);
-  const release = resolveProfilePaths({ ...settings(root), channel: "release" });
-  assert.equal(release.durableDirectory, resolve(root, "GoalPort", "rc"));
-  assert.equal(release.browserStateDirectory, resolve(root, "GoalPort", "electron", release.profileKey));
+  // CI runners hand out 8.3-short-name temp paths (C:\Users\RUNNER~1\...):
+  // canonicalPath expands them, so every expectation is built on the
+  // expanded root — the same pattern as the channel test above.
+  const realRoot = realpathSync.native(root);
+  const release = resolveProfilePaths({ ...settings(realRoot), channel: "release" });
+  assert.equal(release.durableDirectory, resolve(realRoot, "GoalPort", "rc"));
+  assert.equal(release.browserStateDirectory, resolve(realRoot, "GoalPort", "electron", release.profileKey));
   assert.notEqual(normalizedPath(release.durableDirectory), normalizedPath(release.browserStateDirectory), "durable and browser roots are distinct paths");
   assert.equal(release.browserStateDirectory.endsWith(release.profileKey), true, "the browser identity is keyed by the durable profileKey");
   assert.equal(existsSync(release.browserStateDirectory), false, "path resolution stays pure: no directory is created");
@@ -57,14 +61,15 @@ test("path model: the default release profile splits the durable root from the b
 
 test("path model: the default dev profile splits durable and browser roots, distinguished by profileKey", (t) => {
   const root = fixture(t);
-  const dev = resolveProfilePaths({ ...settings(root), channel: "dev" });
-  const devCandidate = resolveProfilePaths({ ...settings(root), channel: "dev-candidate" });
-  const release = resolveProfilePaths({ ...settings(root), channel: "release" });
-  assert.equal(dev.durableDirectory, resolve(root, "GoalPort", "dev"));
-  assert.equal(devCandidate.durableDirectory, resolve(root, "GoalPort", "dev"));
+  const realRoot = realpathSync.native(root);
+  const dev = resolveProfilePaths({ ...settings(realRoot), channel: "dev" });
+  const devCandidate = resolveProfilePaths({ ...settings(realRoot), channel: "dev-candidate" });
+  const release = resolveProfilePaths({ ...settings(realRoot), channel: "release" });
+  assert.equal(dev.durableDirectory, resolve(realRoot, "GoalPort", "dev"));
+  assert.equal(devCandidate.durableDirectory, resolve(realRoot, "GoalPort", "dev"));
   for (const paths of [dev, devCandidate, release]) {
     assert.notEqual(normalizedPath(paths.durableDirectory), normalizedPath(paths.browserStateDirectory), "durable and browser roots are distinct paths");
-    assert.equal(paths.browserStateDirectory, resolve(root, "GoalPort", "electron", paths.profileKey));
+    assert.equal(paths.browserStateDirectory, resolve(realRoot, "GoalPort", "electron", paths.profileKey));
   }
   // dev and dev-candidate deliberately share the dev namespace (same durable
   // root, same browser identity); release is a different durable root and
@@ -97,14 +102,15 @@ test("path model: --data-dir owns ONLY the durable location; the browser namespa
 
 test("path model: a synthetic --test-profile keeps browser state inside the test-owned scratch", (t) => {
   const root = fixture(t);
-  const first = resolveProfilePaths({ ...settings(root, { "--test-profile": resolve(root, "t1", "profile") }) });
-  assert.equal(first.browserStateDirectory, resolve(root, "t1", "electron", first.profileKey), "browser state is a sibling of the synthetic durable root");
+  const realRoot = realpathSync.native(root); // CI temp roots may be 8.3 short names; canonicalPath expands them
+  const first = resolveProfilePaths({ ...settings(realRoot, { "--test-profile": resolve(realRoot, "t1", "profile") }) });
+  assert.equal(first.browserStateDirectory, resolve(realRoot, "t1", "electron", first.profileKey), "browser state is a sibling of the synthetic durable root");
   assert.notEqual(normalizedPath(first.browserStateDirectory), normalizedPath(first.durableDirectory));
-  const firstRel = relative(resolve(root, "t1"), first.browserStateDirectory);
+  const firstRel = relative(resolve(realRoot, "t1"), first.browserStateDirectory);
   assert.ok(!firstRel.startsWith("..") && !isAbsolute(firstRel), "browser state stays inside the test-owned root");
-  const elsewhere = resolveProfilePaths({ ...settings(resolve(root, "elsewhere"), { "--test-profile": resolve(root, "t1", "profile") }) });
+  const elsewhere = resolveProfilePaths({ ...settings(resolve(realRoot, "elsewhere"), { "--test-profile": resolve(realRoot, "t1", "profile") }) });
   assert.equal(elsewhere.browserStateDirectory, first.browserStateDirectory, "the synthetic browser root ignores the appData location entirely");
-  const second = resolveProfilePaths({ ...settings(root, { "--test-profile": resolve(root, "t2", "profile") }) });
+  const second = resolveProfilePaths({ ...settings(realRoot, { "--test-profile": resolve(realRoot, "t2", "profile") }) });
   assert.notEqual(first.browserStateDirectory, second.browserStateDirectory, "concurrent tests get distinct browser identities");
 });
 
@@ -199,7 +205,9 @@ test("the actual Electron entrypoint passes its packaged state to channel select
 
 test("the --user-data-dir switch relocates the application-data root before profile selection", (t) => {
   const root = fixture(t);
-  const home = resolve(root, "relocated-home");
+  // CI temp roots can be 8.3 short names; canonicalPath expands them, so the
+  // expectations below are built on the expanded spelling.
+  const home = resolve(realpathSync.native(root), "relocated-home");
   const mainFile = resolve("electron/main.cjs");
   const mainRequire = createRequire(mainFile);
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}
