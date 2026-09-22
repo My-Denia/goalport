@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
@@ -57,10 +57,15 @@ function appDataRoot(argv, electronAppData) {
 }
 
 let appVersion, profile, profileManager, launchChannel;
+let selectedCoreBinary, selectedLauncherBinary;
 let legacyIsolated = false;
 try {
   const launchArgs = launchArguments(process.argv);
   legacyIsolated = process.env.GOALPORT_REQUIRE_ISOLATED === "1" && !launchArgs["--data-dir"] && !launchArgs["--test-profile"];
+  // Resolve before sanitizing launch variables. Hashing one executable then
+  // selecting another after scrub breaks dev startup's identity contract.
+  selectedCoreBinary = resolveCoreBinary();
+  selectedLauncherBinary = resolveLauncherBinary();
   appVersion = app.isPackaged ? app.getVersion() : JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
   launchChannel = legacyIsolated ? null : resolveChannel();
   profile = legacyIsolated ? null : resolveProfilePaths({
@@ -76,7 +81,9 @@ try {
     // no longer race with transient session files. Nothing else is decided
     // here: every compatibility/ownership decision happens in the post-ready
     // bootstrap with a real window on screen, against the durable root only.
+    assertProfileStorageBoundary(profile);
     fs.mkdirSync(profile.browserStateDirectory, { recursive: true });
+    assertProfileStorageBoundary(profile);
     // Chromium itself needs a writable userData; probe now so an unwritable
     // browser-state directory produces an honest refusal instead of a silent
     // exit. (Durable-root writability is NOT probed here: the bootstrap's
@@ -286,6 +293,9 @@ function normalizeClosePayload(payload) {
 }
 
 function coreBinary() {
+  return selectedCoreBinary;
+}
+function resolveCoreBinary() {
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, "goalport-core.exe");
     return fs.existsSync(bundled) ? bundled : undefined;
@@ -301,6 +311,9 @@ function coreBinary() {
 }
 
 function launcherBinary() {
+  return selectedLauncherBinary;
+}
+function resolveLauncherBinary() {
   if (app.isPackaged) {
     const bundled = path.join(process.resourcesPath, "goalport-core-launcher.exe");
     return fs.existsSync(bundled) ? bundled : undefined;
@@ -521,9 +534,10 @@ function originalInspectTarget(args) {
   }
 }
 
-function beginOriginalInspectRecord(args) {
+function beginOriginalInspectRecord(args, purpose) {
   const record = {
     target: originalInspectTarget(args),
+    purpose: purpose === "post-core-open" ? "post-core-open" : "classification",
     status: "pending",
     startedAt: isoNow(),
     startedAtMs: Date.now(),
@@ -581,10 +595,10 @@ function originalInspectDiagnostics() {
   };
 }
 
-function runTracedCoreProfileCommand(args) {
+function runTracedCoreProfileCommand(args, context) {
   let record = null;
   try {
-    if (Array.isArray(args) && args[0] === "profile" && args[1] === "inspect") record = beginOriginalInspectRecord(args);
+    if (Array.isArray(args) && args[0] === "profile" && args[1] === "inspect") record = beginOriginalInspectRecord(args, context?.purpose);
   } catch { /* diagnostics must never break startup */ }
   const finish = (result) => {
     try { if (record) completeOriginalInspectRecord(record, result); } catch { /* swallow */ }
@@ -610,6 +624,7 @@ function waitForBootstrapAction() {
   return new Promise((resolve) => { bootstrapWaiter = resolve; });
 }
 let lastBootstrapState = { phase: "checking" };
+let profileDisposition = null;
 function pushBootstrap(state) {
   lastBootstrapState = state;
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -683,6 +698,7 @@ async function runProfileBootstrap() {
   let outcome;
   try {
     outcome = await profileManager.resolve();
+    profileDisposition = outcome.kind;
   } catch (error) {
     return (await bootstrapErrorScreen(classifyFsError(error), error?.message)) === "exit" ? "exit" : "exit";
   }
@@ -781,6 +797,7 @@ async function runSyntheticProfileBootstrap() {
   let outcome;
   try {
     outcome = await profileManager.resolve();
+    profileDisposition = outcome.kind;
   } catch (error) {
     return await bootstrapExitOnError(classifyFsError(error), error);
   }
@@ -1043,11 +1060,11 @@ async function createWindow() {
     if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
     profileReady = true;
     if (!(await startCoreWithCoordination())) { quitFromBootstrap(); return; }
-    // The marker's format.version records the schema fact the RESOLVED
-    // decision proved (reopen/adopt/resume carry inspection.schemaVersion), so
-    // one open with a known database commits it and a later database loss is
-    // an honest missing-database refusal.
-    try { profileManager.recordOpen(outcome.formatVersion); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    try { await profileManager.recordOpenedDatabase(); } catch (error) {
+      profileReady = false;
+      await bootstrapExitOnError("inspection-failed", error);
+      quitFromBootstrap(); return;
+    }
     pushBootstrap({ phase: "done" });
   } else if (profileManager && profile) {
     // Synthetic test profiles (--test-profile) pass the SAME ProfileManager
@@ -1060,7 +1077,11 @@ async function createWindow() {
     if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
     profileReady = true;
     await ensureCore();
-    try { profileManager.recordOpen(outcome.formatVersion); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    try { await profileManager.recordOpenedDatabase(); } catch (error) {
+      profileReady = false;
+      await bootstrapExitOnError("inspection-failed", error);
+      quitFromBootstrap(); return;
+    }
     pushBootstrap({ phase: "done" });
   } else {
     // Legacy isolated tooling (no profile; env-bound contract asserted
@@ -1095,7 +1116,7 @@ app.whenReady().then(() => {
     // unchanged, and the child is never stored into lastBootstrapState.
     if (!profileManager) return lastBootstrapState;
     try {
-      return { ...lastBootstrapState, diagnostics: { originalProfileInspect: originalInspectDiagnostics() } };
+      return { ...lastBootstrapState, diagnostics: { profileDisposition, originalProfileInspect: originalInspectDiagnostics() } };
     } catch {
       return lastBootstrapState;
     }

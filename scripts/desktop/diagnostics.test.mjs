@@ -482,6 +482,8 @@ test("startup diagnostics record the storage boundary: distinct redacted roots a
   assert.equal(boundary.available, true);
   assert.equal(boundary.kind, "storage-boundary");
   assert.equal(boundary.pathsDistinct, true, "samePath=false is verifiable in the record");
+  assert.equal(boundary.samePath, false);
+  assert.equal(boundary.disjoint, true);
   assert.match(boundary.durableProfileRoot, /<private-path>/, "durable root is redacted");
   assert.match(boundary.browserStateRoot, /<private-path>/, "browser root is redacted");
   const serialized = JSON.stringify(record);
@@ -493,6 +495,10 @@ test("startup diagnostics record the storage boundary: distinct redacted roots a
   // such, never smoothed over.
   const shared = await collectStartupDiagnostics({ ...common, browserStateDirectory: durable });
   assert.equal(shared.storageBoundary.pathsDistinct, false);
+  assert.equal(shared.storageBoundary.samePath, true);
+  const nested = await collectStartupDiagnostics({ ...common, browserStateDirectory: resolve(durable, "browser") });
+  assert.equal(nested.storageBoundary.disjoint, false);
+  assert.equal(nested.storageBoundary.browserInsideDurable, true);
   // An absent browser-state root reports itself honestly.
   const absent = await collectStartupDiagnostics({ ...common, browserStateDirectory: resolve(root, "never-created") });
   assert.equal(absent.storageBoundary.available, true);
@@ -600,7 +606,7 @@ test("a missing, empty or malformed diagnostics child degrades to honest unavail
   assert.equal(malformed.totalInspections, null);
   const overshoot = extractOriginalInspectTrace({ phase: "error", diagnostics: { originalProfileInspect: { records: [{ status: "completed", elapsedMs: Number.MAX_SAFE_INTEGER + 5, exitCode: 2.5, malformed: "yes" }] } } });
   assert.deepEqual(overshoot.records, [{
-    target: "unknown", status: "completed", startedAt: null, endedAt: null, elapsedMs: null, exitCode: null,
+    target: "unknown", purpose: "classification", status: "completed", startedAt: null, endedAt: null, elapsedMs: null, exitCode: null,
     execError: null, malformed: null, parseNote: null, facts: null
   }]);
 });

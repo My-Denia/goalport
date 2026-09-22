@@ -12,7 +12,7 @@ export const SUMMARY_MAX_BYTES = 65536;
 const SUMMARY_DROP_ORDER = ["stack", "diagnostics", "startup", "rescue", "cleanup", "observationAttempts", "steps"];
 
 const { MARKER_FILE, JOURNAL_FILE, BACKUP_DIR, STAGING_PREFIX, dirContentState } = profileManagerModule;
-const { normalizedPath } = launchConfigModule;
+const { normalizedPath, storagePathRelationship } = launchConfigModule;
 
 export function sanitizeDiagnostic(text, privatePaths = []) {
   let result = String(text);
@@ -301,7 +301,13 @@ function storageBoundarySection({ durableDirectory, browserStateDirectory, priva
       entries: entries.slice(0, PROFILE_ROOT_MAX_ENTRIES).map((entry) => ({ ...entry, name: sanitize(entry.name) }))
     };
   } catch (error) {
-    browserStateEntries = { available: false, code: error?.code || "UNAVAILABLE", error: String(error?.message || error) };
+    browserStateEntries = { available: false, code: error?.code || "UNAVAILABLE", error: sanitize(error?.message || error) };
+  }
+  let relationship;
+  try { relationship = storagePathRelationship(durableDirectory, browserStateDirectory); }
+  catch (error) {
+    return { available: false, durableProfileRoot: durableRoot, browserStateRoot: browserRoot,
+      reason: "physical storage relationship could not be examined", error: sanitize(error?.message || error), browserStateEntries };
   }
   return {
     available: true,
@@ -309,7 +315,8 @@ function storageBoundarySection({ durableDirectory, browserStateDirectory, priva
     note: "durable profile root vs Electron/Chromium browser-state root; the storage-boundary architecture requires two distinct paths (pathsDistinct=true, i.e. samePath=false)",
     durableProfileRoot: durableRoot,
     browserStateRoot: browserRoot,
-    pathsDistinct: normalizedPath(durableDirectory) !== normalizedPath(browserStateDirectory),
+    pathsDistinct: !relationship.samePath,
+    ...relationship,
     browserStateEntries
   };
 }
@@ -379,6 +386,7 @@ export function extractOriginalInspectTrace(bootstrapState, privatePaths = []) {
     } : null;
     return {
       target: ["own-database", "other-database", "unknown"].includes(record.target) ? record.target : "unknown",
+      purpose: record.purpose === "post-core-open" ? "post-core-open" : "classification",
       status: record.status === "pending" || record.status === "completed" ? record.status : "unknown",
       startedAt: typeof record.startedAt === "string" ? boundedText(record.startedAt) : null,
       endedAt: typeof record.endedAt === "string" ? boundedText(record.endedAt) : null,

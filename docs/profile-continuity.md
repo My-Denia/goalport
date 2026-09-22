@@ -45,6 +45,18 @@ new empty profile or a `--data-dir` incantation.
 
 ## Startup flow
 
+Path resolution verifies physical separation after canonicalizing existing
+ancestors, including Windows junctions and short names. Equal roots and either
+direction of nesting are refused before browser-state creation. Browser state
+must stay inside its relocated app-data or test-owned parent. An impossible
+explicit layout is refused with an explanation, never silently relocated.
+The check runs again around directory creation before the writable probe and
+Electron session binding.
+
+Development Core and launcher paths are resolved once before launch-variable
+sanitization. Inspection, hashing, launch and peer verification reuse those
+paths; sanitization cannot change the selected executable halfway through startup.
+
 The storage-boundary startup sequence, in order:
 
 1. Argument validation (`--data-dir` / `--test-profile` exclusivity,
@@ -70,6 +82,13 @@ The storage-boundary startup sequence, in order:
 12. `profileReady` becomes true only after a valid disposition.
 13. Core start/attach (launcher, receipt, pipe-peer verification).
 14. Core opens the durable SQLite path.
+    A separate read-only post-open inspection verifies the actual schema and
+    integrity before the marker records the successful open. The original
+    classification trace remains labelled `classification`; the subsequent
+    check is labelled `post-core-open`. Neither is the post-failure re-probe.
+    Missing, failed or unrecordable facts prevent `done`. A previously opened
+    profile whose database is lost is refused, including older markers whose
+    schema field was left null.
 15. The renderer begins snapshot polling only after the bootstrap reaches
     `done` (`coreReady` positive signal; hosts without a bootstrap channel
     are ready immediately). The profile-less legacy isolated branch also
@@ -101,5 +120,10 @@ screens that preserve the data and offer an explicit fresh-directory choice.
   verified (quick_check + schema version + row-count parity), checkpointed.
 - `import --source-db P --staging-dir D [--allow-source-recovery]` — verified
   copy + `IMPORTED_SNAPSHOT` epoch marking + provenance; source untouched.
+
+Import journal finalization checks the staging path before writing the marker
+or deleting anything: it must be a direct `.import-staging-*` child of this
+durable root and cannot be a redirected directory. Invalid recovery records are
+retained with an import refusal, rather than used as cleanup authority.
 
 Exit contract: one JSON line; success 0, failure 3 with `{ok:false, error}`.

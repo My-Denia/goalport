@@ -87,6 +87,14 @@ describe("bootstrap gating of Core polling", () => {
     expect(gated.startCore).not.toHaveBeenCalled();
   });
 
+  it.each(["importing", "backing-up", "coordination"])("does not poll during %s", async (phase) => {
+    const gated = mountGatedElectron({ ...DEMO_SNAPSHOT, preview: false });
+    gated.push({ phase });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    expect(gated.startCore).not.toHaveBeenCalled();
+  });
+
   it("starts polling immediately when the bootstrap reaches done, and keeps the interval", async () => {
     const base = { ...DEMO_SNAPSHOT, preview: false } as const;
     const gated = mountGatedElectron(base);

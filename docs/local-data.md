@@ -4,6 +4,9 @@ All GoalPort state stays on your machine. There is no GoalPort account, no GoalP
 
 ## Where data lives
 
+The layout below describes the current development candidate. Previously
+published rc.1 assets retain their original storage behavior.
+
 | How GoalPort was started | Durable profile directory | Electron/Chromium browser state |
 | --- | --- | --- |
 | Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` | `%APPDATA%\GoalPort\electron\<profile key>` |
@@ -31,18 +34,25 @@ To keep a separate normal profile:
 pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --data-dir C:\GoalPortData\rc1
 ```
 
-## Profiles are bound to a build
+## Profile identity and compatibility
 
-The first launch writes `goalport-profile.json` with the mode (normal or synthetic test), the RC version, the Core binary SHA-256 and a key derived from the canonical directory path. On later launches GoalPort refuses the profile, without rewriting anything, when:
+The marker identifies the canonical durable path and normal or synthetic mode.
+Build hashes record provenance; compatible builds can reopen the same data.
+GoalPort refuses unknown files in an unmarked directory, incompatible or corrupt
+data, a mismatched marker identity, and a missing database after a recorded open.
+Known Chromium leftovers from the former shared directory remain compatible and
+are preserved. See [profile continuity](profile-continuity.md) for backup and import behavior.
 
-- the directory is not empty and has no marker. Legacy databases are never adopted or imported;
-- the marker belongs to a different mode;
-- the marker belongs to another RC version or Core build;
-- the marker uses the earlier case-folded path identity format, or the directory was moved so its canonical key no longer matches.
+Durable and browser paths must be physically disjoint, including junction and
+short-name aliases. Neither may contain the other. For example, combining
+`--user-data-dir R` with `--data-dir R\GoalPort` is refused before browser setup;
+choose a separate durable directory. Redirecting the browser namespace outside
+the relocated app-data root or synthetic scratch root is also refused.
 
 The Core pipe name is derived from the same profile key and Core hash. Two different builds therefore cannot attach to each other's Core.
 
-**Database migration and import are not provided in this RC.** When you change builds, use a new data directory. Development runs do not import or migrate RC data.
+The previously published rc.1 package remains build-bound; these candidate
+changes do not alter its files or its behavior.
 
 ## Workspaces
 

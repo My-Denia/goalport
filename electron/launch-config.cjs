@@ -11,7 +11,8 @@ function canonicalPath(value) {
       // The native Windows API expands 8.3 aliases; the JS realpath fallback
       // can leave them intact. The database itself may not exist yet.
       return path.join(fs.realpathSync.native(ancestor), path.relative(ancestor, absolute));
-    } catch {
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
       const parent = path.dirname(ancestor);
       if (parent === ancestor) return absolute;
       ancestor = parent;
@@ -91,6 +92,29 @@ function browserStateDirectoryFor({ args, appData, canonical, key }) {
   return path.join(appData, "GoalPort", "electron", key);
 }
 
+// Physical namespace comparison, independent of profileKey's frozen spelling
+// contract. Windows directory aliases and case must not conceal containment.
+function storagePathRelationship(durableDirectory, browserStateDirectory) {
+  const durable = normalizedPath(durableDirectory).toLowerCase();
+  const browser = normalizedPath(browserStateDirectory).toLowerCase();
+  const inside = (parent, child) => child.startsWith(parent.replace(/\\+$/, "") + "\\");
+  const samePath = durable === browser;
+  const browserInsideDurable = inside(durable, browser);
+  const durableInsideBrowser = inside(browser, durable);
+  return { samePath, browserInsideDurable, durableInsideBrowser,
+    disjoint: !samePath && !browserInsideDurable && !durableInsideBrowser };
+}
+
+function assertProfileStorageBoundary({ durableDirectory, browserStateDirectory, browserStateOwnerDirectory }) {
+  if (!storagePathRelationship(durableDirectory, browserStateDirectory).disjoint) {
+    throw new Error("GoalPort durable data and Electron browser state must be separate, non-overlapping directories. Choose a different --data-dir or --user-data-dir root.");
+  }
+  const ownership = storagePathRelationship(browserStateOwnerDirectory, browserStateDirectory);
+  if (!ownership.browserInsideDurable || ownership.samePath) {
+    throw new Error("Electron browser state escapes its application or test-owned root. Remove the redirected browser-state path or choose a different root.");
+  }
+}
+
 // Pure path/identity computation for one profile. It never reads or writes
 // the marker, never validates builder identity, and never refuses on build
 // hash: those decisions belong to the profile manager's compatibility flow
@@ -106,12 +130,18 @@ function resolveProfilePaths({ args, appData, channel, coreSha256 }) {
   const canonical = canonicalPath(directory);
   const key = hash(normalizedPath(canonical)).slice(0, 20);
   const slug = `goalport-rc-${key}`;
+  const browserStateDirectory = canonicalPath(browserStateDirectoryFor({ args, appData, canonical, key }));
+  // Ownership comes from the requested scratch parent, not from the target of
+  // a redirected profile leaf. A junction must not redefine the test's owner.
+  const browserStateOwnerDirectory = canonicalPath(args["--test-profile"] ? path.dirname(directory) : appData);
+  assertProfileStorageBoundary({ durableDirectory: canonical, browserStateDirectory, browserStateOwnerDirectory });
   return {
     mode,
     channel: args["--test-profile"] || args["--data-dir"] ? null : channel,
     directory: canonical,
     durableDirectory: canonical,
-    browserStateDirectory: browserStateDirectoryFor({ args, appData, canonical, key }),
+    browserStateDirectory,
+    browserStateOwnerDirectory,
     marker: path.join(canonical, "goalport-profile.json"),
     database: path.join(canonical, "goalport.sqlite"),
     profileKey: key,
@@ -192,5 +222,5 @@ function childEnvironment(env, profile) {
 module.exports = {
   launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
   childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
-  CHANNEL_DIRECTORIES
+  CHANNEL_DIRECTORIES, canonicalPath, storagePathRelationship, assertProfileStorageBoundary
 };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -44,6 +44,69 @@ test("marker parsing: v1 is provenance, v2 is structured, junk is a problem", ()
   assert.equal(v2.format.authority, "schema_migrations");
   assert.equal(parseMarkerText("{").problem, "marker is not valid JSON");
   assert.equal(parseMarkerText('{"schemaVersion":9}').problem, "unknown marker schema version 9");
+});
+
+test("post-open schema commits fresh/imported/migrated facts and later database loss refuses", async (t) => {
+  for (const kind of ["fresh", "imported", "migrated"]) {
+    const root = fixture(t), dir = resolve(root, "profile");
+    let facts = inspect8({ schemaVersion: 9, currentSchemaVersion: 9 });
+    const contexts = [];
+    const manager = new ProfileManager({ directory: dir, appData: root, build: { ...currentBuild, channel: null },
+      deps: { execCore: async (_args, context) => { contexts.push(context); return { code: 0, stdout: JSON.stringify(facts) }; } } });
+    if (kind === "fresh") manager.beginFresh();
+    else manager.writeMarker(markerV2({ formatVersion: kind === "migrated" ? 8 : null,
+      importedFrom: kind === "imported" ? { path: "synthetic-source" } : null }));
+    const marker = await manager.recordOpenedDatabase();
+    assert.equal(marker.format.version, 9);
+    assert.equal(contexts[0].purpose, "post-core-open");
+    facts = inspect8({ exists: false, openable: false, schemaVersion: null });
+    assert.equal((await manager.resolve()).kind, "missing-database", kind);
+  }
+});
+
+test("post-open missing/malformed/newer/corrupt facts never advance marker", async (t) => {
+  const root = fixture(t), dir = resolve(root, "profile");
+  let facts;
+  const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild,
+    deps: { execCore: async () => ({ code: 0, stdout: JSON.stringify(facts) }) } });
+  manager.beginFresh();
+  const before = readFileSync(manager.markerPath(), "utf8");
+  for (const rejected of [inspect8({ exists: false, openable: false, schemaVersion: null }), {},
+    inspect8({ schemaVersion: 10, currentSchemaVersion: 9 }), inspect8({ quickCheck: "corrupt" }), inspect8({ openable: false })]) {
+    facts = rejected;
+    await assert.rejects(manager.recordOpenedDatabase(), /could not be verified/);
+    assert.equal(readFileSync(manager.markerPath(), "utf8"), before);
+  }
+  facts = inspect8();
+  manager.writeMarker = () => { throw new Error("read-only marker"); };
+  await assert.rejects(manager.recordOpenedDatabase(), /read-only marker/);
+});
+
+test("legacy opened markers with null schema cannot treat a lost DB as never-opened fresh", () => {
+  const marker = parseMarkerText(JSON.stringify(markerV2({ formatVersion: null })));
+  assert.equal(decideOwnProfile({ markerState: marker, dirContentState: { emptyish: false, databasePresent: false },
+    inspection: inspect8({ exists: false }), currentBuild }).kind, "missing-database");
+});
+
+test("journal staging outside/root/traversal/wrong-name/junction refuses before any finalize write or deletion", async (t) => {
+  const root = fixture(t), dir = resolve(root, "profile"), outside = resolve(root, "outside");
+  mkdirSync(dir); mkdirSync(outside);
+  writeFileSync(resolve(outside, "keep.txt"), "unrelated data");
+  writeFileSync(resolve(dir, "goalport.sqlite"), "synthetic database bytes");
+  const redirected = resolve(dir, ".import-staging-link");
+  symlinkSync(outside, redirected, "junction");
+  const manager = new ProfileManager({ directory: dir, appData: root, build: currentBuild,
+    deps: { execCore: async () => ({ code: 0, stdout: JSON.stringify(inspect8()) }) } });
+  for (const stagingDir of [outside, dir, `${dir}/../outside`, resolve(dir, "wrong-name"), redirected, ".import-staging-relative"]) {
+    const journal = { phase: "finalized", source: "synthetic", stagingDir };
+    const bytes = JSON.stringify(journal);
+    writeFileSync(manager.journalPath(), bytes);
+    assert.equal((await manager.resolve()).kind, "import-failed");
+    assert.throws(() => manager.finalizeImport(journal), /staging/);
+    assert.equal(existsSync(manager.markerPath()), false);
+    assert.equal(readFileSync(manager.journalPath(), "utf8"), bytes);
+    assert.equal(readFileSync(resolve(outside, "keep.txt"), "utf8"), "unrelated data");
+  }
 });
 
 test("decision matrix: fresh, discovery, reopen, v1 adopt", () => {
@@ -141,7 +204,7 @@ test("decision matrix: import incompatibility reasons and journal resume", () =>
   assert.equal(decideOwnProfile({
     markerState: null, dirContentState: { emptyish: false, databasePresent: false }, inspection: { exists: false },
     currentBuild, discovery: null, journal: { phase: "finalized", source: "s", stagingDir: "d" }
-  }).kind, "resume-import");
+  }).kind, "missing-database");
   // Journal copying WITHOUT the database in place is not a resume (re-offer)
   assert.equal(decideOwnProfile({
     markerState: null, dirContentState: { emptyish: true, databasePresent: false }, inspection: { exists: false },
@@ -494,17 +557,16 @@ test("successful inspections stay authoritative: WAL-tolerant reopen and missing
   const noDb = { ok: true, stage: "inspect", exists: false, openable: false, schemaVersion: null };
   assert.equal(decideOwnProfile({
     ...base, dirContentState: { emptyish: false, databasePresent: false },
-    markerState: parseMarkerText(JSON.stringify(markerV2({ formatVersion: null }))), inspection: noDb
+    markerState: parseMarkerText(JSON.stringify(markerV2({ formatVersion: null, lastOpenedBy: null }))), inspection: noDb
   }).kind, "reopen");
   assert.equal(decideOwnProfile({
     ...base, dirContentState: { emptyish: false, databasePresent: false }, markerState: v2, inspection: noDb
   }).kind, "missing-database");
-  // Journal resume on a genuinely successful missing-db report still resumes
-  // (finalized crash window with the database not yet renamed in place).
+  // Finalized is written after rename, so absence is lost import data.
   assert.equal(decideOwnProfile({
     markerState: null, dirContentState: { emptyish: false, databasePresent: false }, inspection: noDb,
     currentBuild, discovery: null, journal: { phase: "finalized", source: "s", stagingDir: "d" }
-  }).kind, "resume-import");
+  }).kind, "missing-database");
 });
 
 test("ProfileManager.resolve fails closed with zero side effects on failed or unopenable inspection", async (t) => {
@@ -768,7 +830,7 @@ test("journal fast path cannot bypass quickCheck: corrupt staged data refuses in
   // Positive control within the same scope: a genuinely healthy journal
   // database still resumes.
   const healthyRoot = fixture(t);
-  const healthyDir = ownProfileDir(healthyRoot, { marker: null, journal: { phase: "finalized", source: "s", stagingDir: "d" } });
+  const healthyDir = ownProfileDir(healthyRoot, { marker: null, journal: { phase: "finalized", source: "s", stagingDir: resolve(healthyRoot, "dev", ".import-staging-valid") } });
   const { manager: healthyManager } = refusingManager(healthyDir, healthyRoot, inspectOpenable());
   assert.equal((await healthyManager.resolve()).kind, "resume-import");
 });
@@ -837,7 +899,7 @@ test("positive controls: genuine inspection shapes keep their honest decisions",
   assert.equal((await committed.resolve()).kind, "missing-database");
   assert.deepEqual(c1, ["inspect"]);
   const uncommittedRoot = fixture(t);
-  const uncommittedDir = ownProfileDir(uncommittedRoot, { marker: JSON.stringify(markerV2Format9({ formatVersion: null })) });
+  const uncommittedDir = ownProfileDir(uncommittedRoot, { marker: JSON.stringify(markerV2Format9({ formatVersion: null, lastOpenedBy: null })) });
   rmSync(resolve(uncommittedDir, "goalport.sqlite"));
   const { manager: uncommitted } = refusingManager(uncommittedDir, uncommittedRoot, missing);
   assert.equal((await uncommitted.resolve()).kind, "reopen");

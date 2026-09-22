@@ -12,6 +12,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { canonicalPath, normalizedPath } = require("./launch-config.cjs");
 
 const MARKER_FILE = "goalport-profile.json";
 const JOURNAL_FILE = "import-journal.json";
@@ -103,6 +104,9 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   }
   const marker = markerState && !markerState.problem ? markerState : null;
   if (journal && (journal.phase === "finalized" || (journal.phase === "copying" && dirContentState.databasePresent))) {
+    // finalized is written only AFTER the verified database rename. A missing
+    // database is lost import data, not permission to create an empty profile.
+    if (!inspection.exists && !dirContentState.databasePresent) return { kind: "missing-database" };
     // The journal fast path still requires provable facts about a database
     // that is present: `profile import` checkpoints its verified copy, so a
     // present database that is not openable read-only — or whose format is
@@ -138,7 +142,7 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
     return { kind: "identity-mismatch", reason: "marker path identity does not match this directory" };
   }
   if (!inspection.exists) {
-    return marker.markerSchemaVersion === 2 && marker.format?.version == null
+    return marker.markerSchemaVersion === 2 && marker.format?.version == null && !marker.lastOpenedBy && !marker.importedFrom
       ? { kind: "reopen", needsBackup: false, note: "empty-database", formatVersion: inspection.schemaVersion ?? null }
       : { kind: "missing-database" };
   }
@@ -304,11 +308,11 @@ class ProfileManager {
     return parseMarkerText(raw);
   }
 
-  async inspectDatabase(database = this.databasePath()) {
+  async inspectDatabase(database = this.databasePath(), context) {
     if (!this.execCore) throw new Error("execCore dependency is required for inspection");
     let result;
     try {
-      result = await this.execCore(["profile", "inspect", "--db", database, "--quick-check"]);
+      result = await this.execCore(["profile", "inspect", "--db", database, "--quick-check"], context);
     } catch (error) {
       // A thrown exec (missing binary, timeout) is still a FAILED inspection,
       // never a fact set: report it in the fail-closed envelope.
@@ -390,6 +394,26 @@ class ProfileManager {
     try { return JSON.parse(raw); } catch { return { phase: "corrupt", raw: String(raw).slice(0, 200) }; }
   }
 
+  assertOwnedStaging(journal) {
+    const staging = journal?.stagingDir;
+    const refused = () => { throw new Error("Import journal staging must be a direct, non-redirected .import-staging-* directory inside this profile"); };
+    if (typeof staging !== "string" || !path.isAbsolute(staging)) refused();
+    const leaf = path.basename(staging);
+    if (!leaf.startsWith(STAGING_PREFIX) || leaf.length === STAGING_PREFIX.length) refused();
+    const root = normalizedPath(this.directory).toLowerCase();
+    if (normalizedPath(path.dirname(staging)).toLowerCase() !== root) refused();
+    // Resolve both existing staging and its nearest existing parent. A junction
+    // to another location (even another child) is never owned staging cleanup.
+    const physical = canonicalPath(staging);
+    if (normalizedPath(path.dirname(physical)).toLowerCase() !== root ||
+        path.basename(physical).toLowerCase() !== leaf.toLowerCase()) refused();
+    try {
+      const stat = this.fsApi.lstatSync(staging);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) refused();
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    return staging;
+  }
+
   // One consistency backup of OUR channel database (opened read-write when
   // needed: it is this channel's own data; WAL recovery is standard SQLite
   // behavior, and the copy is verified before anything irreversible).
@@ -419,7 +443,7 @@ class ProfileManager {
     if (this.build.channel && !markerState && content.emptyish && journal?.phase !== "finalized") {
       discovery = await this.discoverForeignProfiles();
     }
-    return decideOwnProfile({
+    const outcome = decideOwnProfile({
       markerState,
       dirContentState: content,
       inspection,
@@ -427,6 +451,11 @@ class ProfileManager {
       discovery,
       journal: journal && journal.phase !== "corrupt" ? journal : null
     });
+    if (outcome.kind === "resume-import") {
+      try { this.assertOwnedStaging(journal); }
+      catch (error) { return { kind: "import-failed", reason: error.message }; }
+    }
+    return outcome;
   }
 
   beginFresh() {
@@ -458,7 +487,9 @@ class ProfileManager {
 
   async runImport(source, { allowSourceRecovery, provenance } = {}) {
     const stagingDir = path.join(this.directory, `${STAGING_PREFIX}${this.now().toISOString().replace(/[:.]/g, "-")}`);
+    this.assertOwnedStaging({ stagingDir });
     this.fsApi.mkdirSync(stagingDir, { recursive: true });
+    this.assertOwnedStaging({ stagingDir });
     const journal = {
       phase: "copying",
       source: source.path,
@@ -472,6 +503,7 @@ class ProfileManager {
       "--staging-dir", stagingDir, "--provenance", JSON.stringify(provenance || { source: { path: source.path } })];
     if (allowSourceRecovery) args.push("--allow-source-recovery");
     const result = await this.execCore(args);
+    this.assertOwnedStaging(journal);
     if (result.code !== 0) {
       // Copying failed: source is untouched; discard staging and re-offer.
       this.fsApi.rmSync(stagingDir, { recursive: true, force: true });
@@ -485,6 +517,7 @@ class ProfileManager {
   }
 
   finalizeImport(journal) {
+    this.assertOwnedStaging(journal);
     const marker = buildMarkerV2({
       profileKey: this.build.profileKey,
       mode: this.build.mode,
@@ -522,6 +555,21 @@ class ProfileManager {
       formatVersion: formatVersion ?? source?.format?.version ?? null
     });
     this.writeMarker(marker);
+    return marker;
+  }
+
+  async recordOpenedDatabase() {
+    // Classification happens before Core can migrate/create the DB. This is a
+    // separate post-open fact, never a substitute for that original inspection.
+    const facts = await this.inspectDatabase(this.databasePath(), { purpose: "post-core-open" });
+    if (facts.failed || facts.ok !== true || facts.exists !== true || facts.openable !== true ||
+        !Number.isSafeInteger(facts.schemaVersion) || facts.schemaVersion < 0 ||
+        !Number.isSafeInteger(facts.currentSchemaVersion) || facts.currentSchemaVersion < facts.schemaVersion ||
+        facts.quickCheck !== "ok") {
+      throw new Error("The opened GoalPort database could not be verified; its profile record was not advanced");
+    }
+    const marker = this.recordOpen(facts.schemaVersion);
+    if (!marker) throw new Error("The opened GoalPort profile record is missing or invalid");
     return marker;
   }
 }

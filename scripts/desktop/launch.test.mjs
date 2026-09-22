@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -7,7 +7,7 @@ import test from "node:test";
 import { browserStateContainedIn, durableStorageEntryAllowed } from "./storage-boundary.mjs";
 import vm from "node:vm";
 const require = createRequire(import.meta.url);
-const { launchArguments, relaunchArguments, resolveProfilePaths, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, storagePathRelationship, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
@@ -18,6 +18,48 @@ function fixture(t) {
   return root;
 }
 const settings = (root, args = {}) => ({ appData: root, coreSha256: hash, args });
+
+test("storage boundary refuses explicit ancestors and real junction overlap or owner escape without writes", (t) => {
+  const root = fixture(t);
+  const home = resolve(root, "home");
+  for (const durable of [home, resolve(home, "GoalPort"), resolve(home, "GoalPort/electron")]) {
+    assert.throws(() => resolveProfilePaths(settings(home, { "--data-dir": durable })), /non-overlapping/);
+    assert.equal(existsSync(home), false, "refusal precedes mkdir and writable probe");
+  }
+  const durable = resolve(root, "durable");
+  mkdirSync(durable);
+  mkdirSync(resolve(home, "GoalPort"), { recursive: true });
+  const redirected = resolve(home, "GoalPort/electron");
+  symlinkSync(durable, redirected, "junction");
+  assert.throws(() => resolveProfilePaths(settings(home, { "--data-dir": durable })), /non-overlapping/);
+  assert.deepEqual(readdirSync(durable), []);
+  unlinkSync(redirected);
+  const outside = resolve(root, "outside");
+  mkdirSync(outside);
+  symlinkSync(outside, redirected, "junction");
+  assert.throws(() => resolveProfilePaths(settings(home, { "--data-dir": durable })), /escapes/);
+  assert.deepEqual(readdirSync(outside), []);
+  assert.equal(storagePathRelationship(durable, durable).samePath, true);
+  assert.equal(storagePathRelationship(resolve(durable, "child"), durable).durableInsideBrowser, true);
+});
+
+test("storage boundary recheck refuses an aliased browser root before session binding", (t) => {
+  const root = fixture(t);
+  const profile = resolveProfilePaths(settings(root, { "--test-profile": resolve(root, "profile") }));
+  mkdirSync(profile.durableDirectory);
+  mkdirSync(dirname(profile.browserStateDirectory), { recursive: true });
+  symlinkSync(profile.durableDirectory, profile.browserStateDirectory, "junction");
+  assert.throws(() => assertProfileStorageBoundary(profile), /non-overlapping/);
+  assert.deepEqual(readdirSync(profile.durableDirectory), []);
+});
+
+test("synthetic durable junction cannot redefine the test-owned scratch boundary", (t) => {
+  const root = fixture(t), scratch = resolve(root, "scratch"), outside = resolve(root, "outside");
+  mkdirSync(scratch); mkdirSync(resolve(outside, "profile"), { recursive: true });
+  symlinkSync(resolve(outside, "profile"), resolve(scratch, "profile"), "junction");
+  assert.throws(() => resolveProfilePaths(settings(root, { "--test-profile": resolve(scratch, "profile") })), /escapes/);
+  assert.deepEqual(readdirSync(outside), ["profile"]);
+});
 
 test("channel namespaces map to stable directories and never write during path resolution", (t) => {
   const root = fixture(t);
@@ -186,6 +228,14 @@ test("real Electron entrypoint still refuses truly invalid launch input pre-read
   }, { error: () => {} });
   assert.deepEqual(exits, [1]);
   assert.match(dialogs[0].message, /absolute path/);
+  // Explicit durable root containing the browser namespace must fail before
+  // mkdir, session binding, readiness, profile inspection or a Core launch.
+  main((name) => name === "electron" ? electron : mainRequire(name), { exports: {} }, {}, resolve("electron"), {
+    argv: ["GoalPort.exe", "--data-dir", root], resourcesPath: resources, env: {}
+  }, { error: () => {} });
+  assert.deepEqual(exits, [1, 1]);
+  assert.match(dialogs[1].message, /non-overlapping/);
+  assert.equal(existsSync(resolve(root, "GoalPort")), false);
 });
 
 test("the actual Electron entrypoint passes its packaged state to channel selection", (t) => {
@@ -812,13 +862,24 @@ const inspectNewerSchema = (callback) => setImmediate(() => callback(null, profi
   counts: {}, latestEpoch: null
 })));
 
-function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, pipeInitiallyUp = false, spawnOpensPipe = false, launcherPresent = false }) {
+function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, pipeInitiallyUp = false, spawnOpensPipe = false, launcherPresent = false, unpackagedOverrides = false }) {
   const root = fixture(t);
   const resources = resolve(root, "resources");
   mkdirSync(resources, { recursive: true });
   const coreBytes = "inert Core identity fixture; never a real provider";
   writeFileSync(resolve(resources, "goalport-core.exe"), coreBytes);
   if (launcherPresent) writeFileSync(resolve(resources, "goalport-core-launcher.exe"), "inert launcher fixture; never executed");
+  const selectedResources = unpackagedOverrides ? resolve(root, "configured") : resources;
+  if (unpackagedOverrides) {
+    mkdirSync(selectedResources);
+    writeFileSync(resolve(selectedResources, "goalport-core.exe"), coreBytes);
+    writeFileSync(resolve(resources, "goalport-core.exe"), "different fallback identity");
+    if (launcherPresent) writeFileSync(resolve(selectedResources, "goalport-core-launcher.exe"), "configured launcher identity");
+  }
+  const launchEnv = unpackagedOverrides ? {
+    GOALPORT_CORE_BIN: resolve(selectedResources, "goalport-core.exe"),
+    ...(launcherPresent ? { GOALPORT_CORE_LAUNCHER_BIN: resolve(selectedResources, "goalport-core-launcher.exe") } : {})
+  } : {};
   const coreSha256 = HarnessHash("sha256").update(coreBytes).digest("hex");
   const argv = ["GoalPort.exe", mode === "synthetic" ? "--test-profile" : "--data-dir", resolve(root, "profile")];
   const profile = resolveProfilePaths({ args: launchArguments(argv), appData: root, channel: "release", coreSha256 });
@@ -861,7 +922,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
       return { once: () => {}, unref: () => {} };
     },
     execFile: (file, args, options, callback) => {
-      assert.equal(file, resolve(resources, "goalport-core.exe"), "only the packaged Core identity may be executed");
+      assert.equal(file, resolve(selectedResources, "goalport-core.exe"), "only the originally selected Core identity may be executed");
       if (args[0] === "profile") {
         profileCommands.push(args.slice(0, 2).join(" "));
         if (args[1] === "inspect") { setImmediate(() => inspect(callback)); return; }
@@ -887,7 +948,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
   }
   const electron = {
     app: {
-      isPackaged: true, getVersion: () => "1.0.0-rc.1",
+      isPackaged: !unpackagedOverrides, getVersion: () => "1.0.0-rc.1",
       getPath: (name) => (name === "exe" ? resolve(root, "GoalPort.exe") : root),
       setPath: () => {}, exit: (code) => exits.push(code), whenReady: () => Promise.resolve(),
       commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}, quit: () => {}
@@ -900,7 +961,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
   const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
   const run = () => main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
-    argv, resourcesPath: resources, env: {}, pid: process.pid, platform: "win32", execPath: process.execPath
+    argv, resourcesPath: resources, env: launchEnv, pid: process.pid, platform: "win32", execPath: process.execPath
   }, { error: (...values) => dialogs.push(values.join(" ")) });
   const until = async (condition, label) => {
     const deadline = Date.now() + 15000;
@@ -917,7 +978,7 @@ function mainEntryHarness(t, { mode = "synthetic", inspect = inspectCompatible, 
     get log() { return log; }, get spawns() { return spawns; }, get profileCommands() { return profileCommands; },
     get states() { return states; }, get exits() { return exits; }, get dialogs() { return dialogs; },
     get handlers() { return handlers; }, get windows() { return windows; }, get destroyed() { return destroyed; },
-    get pipeProbes() { return pipeState.probes; }, coreSha256
+    get pipeProbes() { return pipeState.probes; }, coreSha256, launchEnv
   };
 }
 
@@ -1011,7 +1072,8 @@ test("real entrypoint: --test-profile refuses a newer database schema before Cor
 });
 
 test("real entrypoint: a fresh synthetic --test-profile bootstraps its marker and may launch Core", async (t) => {
-  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: inspectMissingDb, spawnOpensPipe: true, launcherPresent: true });
+  let inspections = 0;
+  const harness = mainEntryHarness(t, { mode: "synthetic", inspect: (callback) => (++inspections === 1 ? inspectMissingDb(callback) : inspectCompatible(callback)), spawnOpensPipe: true, launcherPresent: true });
   assert.equal(harness.directorySnapshot(), null, "the test profile directory starts absent");
   harness.run();
   await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "synthetic bootstrap completion");
@@ -1022,14 +1084,45 @@ test("real entrypoint: a fresh synthetic --test-profile bootstraps its marker an
   assert.equal(spawnArgs[1], "serve");
   assert.ok(spawnArgs.includes(harness.profile.database), "serve targets the synthetic profile database");
   assert.ok(spawnArgs.includes(harness.profile.pipe));
-  assert.deepEqual(harness.profileCommands, ["profile inspect"]);
+  assert.deepEqual(harness.profileCommands, ["profile inspect", "profile inspect"]);
   const marker = JSON.parse(readFileSync(resolve(harness.profile.directory, "goalport-profile.json"), "utf8"));
   assert.equal(marker.product, "GoalPort");
   assert.equal(marker.mode, "synthetic-test");
   assert.equal(marker.profileKey, harness.profile.profileKey);
   assert.equal(marker.lastOpenedBy.coreSha256, harness.coreSha256);
+  assert.equal(marker.format.version, 8, "fresh open persists the post-Core schema fact");
+  assert.equal((await bootstrapCurrent(harness)).diagnostics.profileDisposition, "fresh");
   assert.deepEqual(harness.dialogs, []);
   assert.ok(harness.log.includes("peer") && harness.log.includes("get_startup_receipt"), "attachment is verified after the permitted launch");
+});
+
+test("real entrypoint: dev keeps its selected Core and launcher after launch environment scrub", async (t) => {
+  let inspections = 0;
+  const harness = mainEntryHarness(t, { mode: "normal", unpackagedOverrides: true, launcherPresent: true, spawnOpensPipe: true,
+    inspect: (callback) => (++inspections === 1 ? inspectMissingDb(callback) : inspectCompatible(callback)) });
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "done"), "dev startup");
+  assert.equal(harness.launchEnv.GOALPORT_CORE_BIN, undefined);
+  assert.equal(harness.launchEnv.GOALPORT_CORE_LAUNCHER_BIN, undefined);
+  assert.equal(harness.spawns[0][0], resolve(harness.root, "configured/goalport-core-launcher.exe"));
+  assert.equal(harness.spawns[0][1][0], resolve(harness.root, "configured/goalport-core.exe"));
+  assert.deepEqual(harness.dialogs, []);
+});
+
+test("real entrypoint: failed post-open facts prevent done and preserve the fresh marker", async (t) => {
+  let inspections = 0;
+  const harness = mainEntryHarness(t, { mode: "synthetic", launcherPresent: true, spawnOpensPipe: true,
+    inspect: (callback) => (++inspections === 1 ? inspectMissingDb(callback) : setImmediate(() => callback(null, "malformed"))) });
+  harness.run();
+  await harness.until(() => harness.states.some((entry) => entry.state.phase === "error"), "post-open refusal");
+  assert.equal(harness.states.some((entry) => entry.state.phase === "done"), false);
+  const marker = JSON.parse(readFileSync(harness.profile.marker, "utf8"));
+  assert.equal(marker.lastOpenedBy, null);
+  assert.equal(marker.format.version, null);
+  const trace = (await bootstrapCurrent(harness)).diagnostics.originalProfileInspect;
+  assert.equal(trace.records[0].facts.exists, false);
+  assert.equal(trace.records[1].purpose, "post-core-open");
+  assert.equal(trace.records[1].malformed, true);
 });
 
 test("real entrypoint: a compatible synthetic reopen still attaches without any write-open", async (t) => {
@@ -1039,7 +1132,7 @@ test("real entrypoint: a compatible synthetic reopen still attaches without any 
   harness.run();
   await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "synthetic reopen completion");
   assert.deepEqual(harness.spawns, [], "an attached Core needs no second launch");
-  assert.deepEqual(harness.profileCommands, ["profile inspect"], "no backup write-open runs for synthetic data");
+  assert.deepEqual(harness.profileCommands, ["profile inspect", "profile inspect"], "classification and post-open are read-only; no backup write-open runs for synthetic data");
   assert.deepEqual(harness.log, ["peer", "get_startup_receipt", "snapshot"]);
   assert.deepEqual(harness.dialogs, []);
   const marker = JSON.parse(readFileSync(resolve(harness.profile.directory, "goalport-profile.json"), "utf8"));
@@ -1129,7 +1222,7 @@ test("real entrypoint: a fully-factored compatible inspection still completes a 
   harness.run();
   await harness.until(() => harness.states.some((entry) => entry.state.phase === "done") && harness.log.includes("snapshot"), "compatible reopen completion");
   assert.deepEqual(harness.spawns, [], "an attached Core needs no second launch");
-  assert.deepEqual(harness.profileCommands, ["profile inspect"], "no backup write-open may run when lastOpenedBy matches this build");
+  assert.deepEqual(harness.profileCommands, ["profile inspect", "profile inspect"], "no backup write-open may run when lastOpenedBy matches this build");
   assert.deepEqual(harness.log.slice(0, 3), ["peer", "get_startup_receipt", "snapshot"]);
   assert.deepEqual(harness.dialogs, []);
   const after = JSON.parse(readFileSync(resolve(dir, "goalport-profile.json"), "utf8"));
@@ -1144,7 +1237,7 @@ test("real entrypoint: a fully-factored compatible inspection still completes a 
 // the optional `diagnostics` child of the goalport:bootstrap-current result;
 // goalport:bootstrap-state events and the phase/kind contract stay untouched.
 
-const traceRecordKeys = ["target", "status", "startedAt", "endedAt", "elapsedMs", "exitCode", "execError", "malformed", "parseNote", "facts"].sort();
+const traceRecordKeys = ["target", "purpose", "status", "startedAt", "endedAt", "elapsedMs", "exitCode", "execError", "malformed", "parseNote", "facts"].sort();
 
 function bootstrapCurrent(harness) {
   return harness.handlers.get("goalport:bootstrap-current")();
@@ -1199,7 +1292,7 @@ test("real entrypoint: a completed original inspect exposes selected facts; stat
   assert.deepEqual(stateOnly, harness.states[harness.states.length - 1].state, "only an additive diagnostics child differs from the last pushed state");
   assert.ok(harness.states.every((entry) => entry.state.diagnostics === undefined), "no diagnostics child ever enters bootstrap-state events");
   const trace = diagnostics.originalProfileInspect;
-  assert.equal(trace.totalInspections, 1);
+  assert.equal(trace.totalInspections, 2);
   assert.equal(trace.droppedRecords, 0);
   const record = trace.records[0];
   assert.deepEqual(Object.keys(record).sort(), traceRecordKeys);
@@ -1214,9 +1307,8 @@ test("real entrypoint: a completed original inspect exposes selected facts; stat
     ok: true, exists: true, openable: true, needsRecovery: false, empty: null,
     schemaVersion: 9, currentSchemaVersion: 9, quickCheck: "ok", errorReason: null
   });
-  // The trace wrapper changes no profile behavior: the same single original
-  // inspection runs, no extra Core work happens, no dialogs appear.
-  assert.deepEqual(harness.profileCommands, ["profile inspect"]);
+  assert.deepEqual(trace.records.map((entry) => entry.purpose), ["classification", "post-core-open"]);
+  assert.deepEqual(harness.profileCommands, ["profile inspect", "profile inspect"]);
   assert.deepEqual(harness.spawns, []);
   assert.deepEqual(harness.dialogs, []);
 });

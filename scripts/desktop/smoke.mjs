@@ -396,7 +396,11 @@ async function smoke() {
       };
       throw failure;
     }
-    report.bootstrapObservation = { phase: bootstrapExit === "done" ? "done" : (lastBootstrapState?.phase ?? "connected"), waitedMs: Date.now() - bootstrapStartedAt };
+    report.bootstrapObservation = {
+      phase: bootstrapExit === "done" ? "done" : (lastBootstrapState?.phase ?? "connected"), waitedMs: Date.now() - bootstrapStartedAt,
+      classification: lastBootstrapState?.diagnostics?.profileDisposition ?? null,
+      originalProfileInspect: lastBootstrapState?.diagnostics?.originalProfileInspect ?? null
+    };
     // Structural renderer observation at the moment the bootstrap finished —
     // available whether the connect wait succeeds or not.
     try {
@@ -434,6 +438,8 @@ async function smoke() {
     const durableUnexpected = durableNames.filter((name) => !durableStorageEntryAllowed(name));
     assert.deepEqual(durableUnexpected, [], `durable profile root must contain only durable storage-contract entries; unexpected: ${JSON.stringify(durableUnexpected)}`);
     assert.notEqual(normalize(profile), normalize(browserStateDirectory), "durable and browser-state roots must be distinct paths");
+    const physicalBoundary = launchConfig.storagePathRelationship(profile, browserStateDirectory);
+    assert.equal(physicalBoundary.disjoint, true, "durable and browser roots must not physically overlap");
     const browserNames = readdirSync(browserStateDirectory).sort();
     assert.ok(browserNames.length > 0, "browser-state namespace exists and is non-empty");
     // Containment is judged against the SAME root the central path model
@@ -450,7 +456,7 @@ async function smoke() {
     const realGoalPortPost = realGoalPortEntries();
     assert.deepEqual(realGoalPortPost, realGoalPortPre, "the real %APPDATA% GoalPort folder must be untouched by this smoke");
     if (!report.storageBoundary) {
-      report.storageBoundary = { durableRoot: profile, browserStateRoot: browserStateDirectory, durableEntries: durableNames, browserEntries: browserNames, realAppDataTouched: false };
+      report.storageBoundary = { durableRoot: profile, browserStateRoot: browserStateDirectory, ...physicalBoundary, durableEntries: durableNames, browserEntries: browserNames, realAppDataTouched: false };
       marker("storage-boundary/durable-only-and-browser-state-separated", {
         durableEntries: durableNames.length, browserEntries: browserNames.length,
         browserNamespace: normal ? "app-data-root" : "test-owned-scratch", realAppDataUntouched: true
