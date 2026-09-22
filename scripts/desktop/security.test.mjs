@@ -74,11 +74,22 @@ test("renderer main/subframe navigation, redirects and webviews are denied befor
   assert.ok(main.indexOf("protectRenderer(mainWindow.webContents") < main.indexOf("await mainWindow.loadFile"));
 });
 
-test("one Windows app file matches across drive-letter case and rejects a different file", () => {
-  assert.equal(isAppDocument("file:///c:/GoalPort/dist/index.html", "file:///C:/goalport/dist/index.html"), true);
-  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html#anchor", "file:///c:/goalport/dist/index.html"), true);
-  assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", "file:///C:/GoalPort/dist/index.html"), false);
+test("app document identity folds only the Windows drive letter", () => {
+  const app = "file:///C:/GoalPort/dist/index.html";
+  assert.equal(isAppDocument("file:///c:/GoalPort/dist/index.html", app), true);
+  assert.equal(isAppDocument(`${app}#local-anchor`, app), true);
+  assert.equal(isAppDocument("file://localhost/C:/GoalPort/dist/index.html", app), true);
+  assert.equal(isAppDocument("file:///C:/goalport/dist/index.html", app), false);
+  assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", app), false);
+  assert.equal(isAppDocument(`${app}?next=1`, app), false);
+  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html%2Fsecret", app), false);
+  assert.equal(isAppDocument("file:///C:/foo%2Fbar", "file:///C:/foo/bar"), false);
+  assert.equal(isAppDocument("file://server/share/index.html", app), false);
+  assert.equal(isAppDocument("file://remote/C:/GoalPort/dist/index.html", app), false);
+  assert.equal(isAppDocument("https://evil.example/index.html", app), false);
   assert.equal(isAppDocument("file:///goalport/dist/Index.html", "file:///goalport/dist/index.html"), false);
+  assert.equal(isAppDocument("not a url", app), false);
+  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html", "://bad"), false);
 });
 
 test("preload exposes bridge only to exact main app document, never external/subframe", () => {
@@ -90,8 +101,14 @@ test("preload exposes bridge only to exact main app document, never external/sub
     [appUrl, true, true, true], [appUrl + "#anchor", true, true, true],
     [appUrl, false, true, false], ["https://evil.example/", true, true, false],
     ["file:///other.html", true, true, false], [appUrl, true, false, false],
-    ["file:///c:/goalport/dist/index.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/goalport/dist/other.html", true, true, false, "file:///C:/GoalPort/dist/index.html"]
+    ["file:///c:/GoalPort/dist/index.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/GoalPort/dist/index.html#anchor", true, true, true, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/goalport/dist/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/GoalPort/dist/index.html?next=1", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["file://server/share/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["file://remote/C:/GoalPort/dist/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["https://evil.example/", true, true, false, "file:///C:/GoalPort/dist/index.html"],
+    ["file:///C:/GoalPort/dist/other.html", true, true, false, "file:///C:/GoalPort/dist/index.html"]
   ]) {
     const exposed = [];
     const logs = [];

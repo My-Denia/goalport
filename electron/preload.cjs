@@ -3,17 +3,20 @@ const requestId = () => `desktop-snapshot-${Date.now()}-${Math.random().toString
 
 // Defense in depth: even an accidentally reused preload exposes nothing in a
 // popup/subframe or any document other than the main process's exact app file.
-// Same file, not a string-identical URL. Windows Chromium and Node disagree on
-// drive-letter case for one path; POSIX paths stay case-sensitive. Kept in
-// lockstep with appDocumentKey in security-policy.cjs (sandbox cannot require it).
+// Identity of one local app file. Fragment is ignored. Query is part of the
+// identity. Only an empty host is local: the URL parser already folds
+// localhost into that form, and any surviving host (UNC or remote) is rejected.
+// The only case fold is the Windows drive letter. The rest of the path,
+// including percent-encoded separators, stays as the URL serializer stored it.
+// Kept in lockstep with appDocumentKey in security-policy.cjs (sandbox cannot require it).
 function appDocumentKey(href) {
   const url = new URL(href);
   if (url.protocol !== "file:") return null;
+  if (url.username || url.password || url.hostname) return null;
   url.hash = "";
-  const pathname = decodeURIComponent(url.pathname);
-  const drive = pathname.match(/^\/([A-Za-z]):(\/.*)?$/);
-  if (!drive) return url.href;
-  return `file:///${drive[1].toLowerCase()}:${(drive[2] || "/").toLowerCase()}`;
+  const drive = url.pathname.match(/^\/([A-Za-z])(:.*)$/);
+  if (drive) url.pathname = `/${drive[1].toLowerCase()}${drive[2]}`;
+  return url.href;
 }
 const expectedHrefs = process.argv
   .filter((arg) => arg.startsWith("--goalport-app-document="))

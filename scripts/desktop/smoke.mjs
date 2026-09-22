@@ -725,7 +725,45 @@ async function smoke() {
         probe: "two concurrent raw select_runtime commands; the UI picker serializes and cannot issue two selections in one task",
         superseded: "old two-button one-task UI race"
       });
-      await until("race replacement visible in UI", async () => (await snapshot()).attempt.id === replacement);
+      // Core's snapshot can move to the replacement before React renders it.
+      // Send stays disabled until this window's attempt, runtime and canSend
+      // hint agree. A bare sleep would hide a turn that never becomes sendable.
+      let raceDiag = null;
+      const raceUi = `(() => {
+        const button = document.querySelector(".composer button.send-button");
+        return {
+          attemptId: document.querySelector(".goalport-shell")?.dataset.attemptId || null,
+          runtimeLabel: document.querySelector(".runtime-picker-button strong")?.textContent || "",
+          sendLabel: button?.getAttribute("aria-label") || null,
+          sendDisabled: button ? button.disabled : null,
+          sendText: button?.textContent || "",
+          hint: document.querySelector(".composer-hint")?.textContent || ""
+        };
+      })()`;
+      try {
+        await until("race replacement rendered and sendable", async () => {
+          const ui = await read(raceUi);
+          const core = await snapshot();
+          raceDiag = {
+            ui,
+            coreAttempt: core.attempt?.id ?? null,
+            coreProvider: core.attempt?.provider ?? null,
+            coreTurn: core.productConversation?.turn ?? null,
+            coreRuntime: core.productConversation?.runtime ?? null
+          };
+          // The picker shows Core's runtime name. Send stays disabled until the
+          // draft is non-empty; canSend is the hint, not the empty-draft button.
+          return ui.attemptId === replacement
+            && ui.runtimeLabel === "Scenario Runtime"
+            && ui.sendLabel === "Send message"
+            && ui.hint.includes("Draft stays with this goal")
+            && !ui.sendText.includes("Sending");
+        });
+      } catch (error) {
+        report.raceReplacementDiag = raceDiag;
+        save();
+        throw new Error(`${error.message}; diag=${JSON.stringify(raceDiag)}`);
+      }
       await send("RC new Attempt after terminal race");
 
       // --- Delayed duplicate send, current-goal switch and exact replay. ---
