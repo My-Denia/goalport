@@ -106,6 +106,17 @@ function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [chooserFocusSignal, setChooserFocusSignal] = useState(0);
   const [bootstrap, setBootstrap] = useState<BootstrapState | null>(null);
+  // Bootstrap gating of Core polling: while the main-process profile bootstrap
+  // is still deciding (checking / importing / backing-up / coordination /
+  // error), polling goalport:core-snapshot would only hit the profileReady
+  // gate ("Core start is gated") every cycle. Snapshot polling and the
+  // auto-start therefore begin on the positive "bootstrap done" signal only —
+  // nothing is swallowed. Hosts without a bootstrap channel (browser preview,
+  // tauri, older preload/test mounts) have no profile bootstrap and are ready
+  // immediately.
+  const [coreReady, setCoreReady] = useState(
+    () => client.mode !== "electron" || !window.goalportCore?.onBootstrapState
+  );
   // Browser preview starts from a complete snapshot; only the desktop app has a
   // real Core cold start that can take seconds to answer the first snapshot.
   const [booted, setBooted] = useState(() => client.mode === "browser-preview");
@@ -118,8 +129,12 @@ function App() {
     if (!api?.onBootstrapState) return undefined;
     void api.bootstrapCurrent?.().then((state) => {
       setBootstrap((current) => current ?? state);
+      if (state?.phase === "done") setCoreReady(true);
     });
-    const unsubscribe = api.onBootstrapState((state) => setBootstrap(state?.phase === "done" ? null : state));
+    const unsubscribe = api.onBootstrapState((state) => {
+      setBootstrap(state?.phase === "done" ? null : state);
+      if (state?.phase === "done") setCoreReady(true);
+    });
     return unsubscribe;
   }, []);
 
@@ -144,6 +159,9 @@ function App() {
   }
 
   useEffect(() => {
+    // Bootstrap not done yet: no snapshot poll, no Core auto-start. The effect
+    // re-runs with coreReady=true the moment the bootstrap reaches done.
+    if (!coreReady) return undefined;
     let mounted = true;
     let autoStartAttempted = false;
     const refresh = async (allowStart: boolean) => {
@@ -166,7 +184,7 @@ function App() {
       mounted = false;
       window.clearInterval(timer);
     };
-  }, [client]);
+  }, [client, coreReady]);
 
   // First-use recovery: if Core created (or moved to) a conversation while a
   // draft was open — including after a failed start whose delivery was

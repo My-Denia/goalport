@@ -457,7 +457,58 @@ test("startup diagnostics stay redacted and bounded inside failure summaries", a
   assert.ok(summary.startup.frozenChromiumAllowlist.unmatchedNames.length > 0 && summary.startup.frozenChromiumAllowlist.unmatchedNames.length <= PROFILE_ROOT_MAX_ENTRIES);
 });
 
-// ---------- Original startup inspection trace extraction ----------
+// ---------- Storage-boundary observation ----------
+
+test("startup diagnostics record the storage boundary: distinct redacted roots and a browser-state summary", async (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), "goalport-diagnostic-boundary-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const durable = resolve(root, "profile");
+  mkdirSync(durable, { recursive: true });
+  writeFileSync(resolve(durable, "goalport-profile.json"), "{}\n");
+  const browser = resolve(root, "electron", "k".repeat(20));
+  mkdirSync(browser, { recursive: true });
+  writeFileSync(resolve(browser, "Local State"), "{}\n");
+  mkdirSync(resolve(browser, "Cache"));
+  const common = {
+    profileDirectory: durable,
+    packageRoot: root,
+    coreExecutable: undefined,
+    privatePaths: [root],
+    queryBootstrap: async () => ({ phase: "checking" }),
+    runProcess: async () => ({ elapsedMs: 1, timedOut: false, exitCode: 0, signal: null, stdout: "", stderr: "" })
+  };
+  const record = await collectStartupDiagnostics({ ...common, browserStateDirectory: browser });
+  const boundary = record.storageBoundary;
+  assert.equal(boundary.available, true);
+  assert.equal(boundary.kind, "storage-boundary");
+  assert.equal(boundary.pathsDistinct, true, "samePath=false is verifiable in the record");
+  assert.match(boundary.durableProfileRoot, /<private-path>/, "durable root is redacted");
+  assert.match(boundary.browserStateRoot, /<private-path>/, "browser root is redacted");
+  const serialized = JSON.stringify(record);
+  assert.ok(!serialized.includes(root.replaceAll("\\", "\\\\")) && !serialized.includes(browser), "no private absolute path rides along");
+  assert.equal(boundary.browserStateEntries.available, true);
+  assert.equal(boundary.browserStateEntries.entryCount, 2);
+  assert.deepEqual(boundary.browserStateEntries.entries.map((entry) => entry.name).sort(), ["Cache", "Local State"]);
+  // A violated boundary (the two roots being the same path) is reported as
+  // such, never smoothed over.
+  const shared = await collectStartupDiagnostics({ ...common, browserStateDirectory: durable });
+  assert.equal(shared.storageBoundary.pathsDistinct, false);
+  // An absent browser-state root reports itself honestly.
+  const absent = await collectStartupDiagnostics({ ...common, browserStateDirectory: resolve(root, "never-created") });
+  assert.equal(absent.storageBoundary.available, true);
+  assert.equal(absent.storageBoundary.pathsDistinct, true);
+  assert.equal(absent.storageBoundary.browserStateEntries.available, false);
+  assert.equal(absent.storageBoundary.browserStateEntries.code, "ENOENT");
+  // The legacy caller without a browser-state directory gets an explicit
+  // unavailable record, and every pre-existing field stays untouched.
+  const legacy = await collectStartupDiagnostics(common);
+  assert.equal(legacy.storageBoundary.available, false);
+  assert.equal(legacy.profileRoot.available, true);
+  assert.equal(legacy.originalStartupInspection.available, false);
+  assert.equal(legacy.coreInspectReProbe.attempted, false);
+});
+
+
 
 test("collector extracts the selected original inspect trace a newer build supplies, capped and redacted", async (t) => {
   const root = mkdtempSync(resolve(tmpdir(), "goalport-diagnostic-original-"));

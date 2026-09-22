@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import {
   parseMarkerText, buildMarkerV2, decideOwnProfile, importableDiscovery, incompatibilityReason,
-  backupsToPrune, dirContentState, ProfileManager
+  backupsToPrune, dirContentState, ProfileManager, ELECTRON_SESSION_ARTIFACTS, isElectronArtifact
 } from "../../electron/profile-manager.cjs";
 import { resolveProfilePaths } from "../../electron/launch-config.cjs";
 
@@ -162,17 +163,116 @@ test("backup rotation never prunes the newest and staging content is not profile
   assert.equal(state.databasePresent, true);
 });
 
-test("electron session artifacts do not turn a fresh profile into not-a-profile", (t) => {
+// ---------- Storage boundary: fresh correctness without the Chromium allowlist ----------
+
+test("legacy: a durable root with only historical Chromium artifacts and no marker/database is fresh-compatible", async (t) => {
+  // The CI53 residue shape: a durable root left over from the pre-split era
+  // where Electron userData WAS the profile directory. Every entry below is a
+  // frozen historical Chromium name or regex shape; there is no marker and no
+  // database. This is the known legacy case and stays fresh-compatible.
   const root = fixture(t);
-  for (const name of ["Cache", "Code Cache", "GPUCache", "Local State", "Preferences", "DIPS", "DIPS-wal", "blob_storage", "declarative_performance_observer.db", "lockfile", "window-state.json"]) {
+  for (const name of ["Cache", "Code Cache", "GPUCache", "Local State", "Preferences", "DIPS", "DIPS-wal", "blob_storage", "declarative_performance_observer.db", "declarative_performance_observer.db-journal", "lockfile", "window-state.json"]) {
     const target = resolve(root, name);
     if (name.includes("/")) mkdirSync(target, { recursive: true });
     else writeFileSync(target, "x");
   }
   const state = dirContentState(root);
-  assert.equal(state.emptyish, true, "electron-owned files are not profile content");
+  assert.equal(state.emptyish, true, "historical electron-owned files are not durable profile content");
+  const manager = new ProfileManager({
+    directory: root, appData: resolve(root, ".."), build: { ...currentBuild, channel: null },
+    deps: { execCore: async () => ({ code: 0, stdout: `${JSON.stringify(inspect8({ exists: false, openable: false }))}\n` }) }
+  });
+  const outcome = await manager.resolve();
+  assert.equal(outcome.kind, "fresh", "the legacy Chromium-contaminated root resolves as fresh-compatible");
+  assert.equal(existsSync(resolve(root, "goalport-profile.json")), false, "resolve itself never writes the marker");
+});
+
+test("legacy: any unknown user file in the durable root keeps the honest not-a-profile refusal", async (t) => {
+  const root = fixture(t);
+  for (const name of ["Cache", "Local State"]) writeFileSync(resolve(root, name), "x");
   writeFileSync(resolve(root, "userfile.txt"), "x");
-  assert.equal(dirContentState(root).emptyish, false, "unknown user content keeps the honest not-a-profile refusal");
+  assert.equal(dirContentState(root).emptyish, false, "unknown user content is meaningful");
+  const manager = new ProfileManager({
+    directory: root, appData: resolve(root, ".."), build: { ...currentBuild, channel: null },
+    deps: { execCore: async () => ({ code: 0, stdout: `${JSON.stringify(inspect8({ exists: false, openable: false }))}\n` }) }
+  });
+  assert.equal((await manager.resolve()).kind, "not-a-profile");
+});
+
+test("fresh: an absent durable path classifies fresh even with a fully populated browser-state namespace", async (t) => {
+  const root = fixture(t);
+  const durable = resolve(root, "profile");
+  const browser = resolve(root, "electron", "k".repeat(20));
+  mkdirSync(browser, { recursive: true });
+  // Real Chromium shapes, INCLUDING a name no frozen list knows: after the
+  // storage-boundary split Chromium writes only here, so none of this can
+  // affect the durable classification.
+  for (const name of ["Cache", "Code Cache", "GPUCache", "Local State", "Preferences", "DIPS", "DIPS-wal", "blob_storage", "Network", "DevToolsActivePort", "SomeEntirelyNewBrowserStateFile"]) {
+    const target = resolve(browser, name);
+    if (name === "Cache" || name === "Network" || name === "blob_storage") mkdirSync(target, { recursive: true });
+    else writeFileSync(target, "x");
+  }
+  const manager = new ProfileManager({
+    directory: durable, appData: root, build: { ...currentBuild, channel: null },
+    deps: { execCore: async () => ({ code: 0, stdout: `${JSON.stringify(inspect8({ exists: false, openable: false }))}\n` }) }
+  });
+  const outcome = await manager.resolve();
+  assert.equal(outcome.kind, "fresh");
+  assert.equal(existsSync(durable), false, "resolve never creates or writes the durable root");
+});
+
+test("fresh: unknown Chromium filenames appearing DURING resolve have zero effect on the durable classification", async (t) => {
+  // The key anti-TOCTOU test. While the (mocked) Core inspection is in
+  // flight, a hypothetical next Chromium version writes brand-new userData
+  // files into the BROWSER namespace. Every filename is generated at RUN time
+  // and asserted NOT to be recognized by the product's frozen legacy set —
+  // the test cannot pass by growing an allowlist, because the names are
+  // different on every run and the durable root is never even looked at for
+  // them.
+  const root = fixture(t);
+  const durable = resolve(root, "profile");
+  const browser = resolve(root, "electron", "k".repeat(20));
+  mkdirSync(browser, { recursive: true });
+  const created = [];
+  let releaseInspection;
+  const inspectionGate = new Promise((resolveGate) => { releaseInspection = resolveGate; });
+  const manager = new ProfileManager({
+    directory: durable, appData: root, build: { ...currentBuild, channel: null },
+    deps: {
+      execCore: async () => {
+        for (let index = 0; index < 5; index += 1) {
+          const name = `SomeEntirelyNewBrowserStateFile-${index}-${randomUUID()}`;
+          assert.equal(ELECTRON_SESSION_ARTIFACTS.has(name), false, "fixture name must be outside the frozen legacy set");
+          assert.equal(isElectronArtifact(name), false, "fixture name must match neither the set nor the regexes");
+          writeFileSync(resolve(browser, name), "transient");
+          created.push(name);
+        }
+        await inspectionGate;
+        return { code: 0, stdout: `${JSON.stringify(inspect8({ exists: false, openable: false }))}\n` };
+      }
+    }
+  });
+  const resolving = manager.resolve();
+  assert.equal(created.length, 5, "the transient browser-state files exist while the inspection is in flight");
+  releaseInspection();
+  const outcome = await resolving;
+  assert.equal(outcome.kind, "fresh");
+  assert.equal(existsSync(durable), false, "the durable root is never created or written");
+  assert.ok(created.every((name) => existsSync(resolve(browser, name))), "the browser namespace keeps its transient files; nothing was deleted");
+});
+
+test("a foreign unmarked goalport.sqlite in the durable root refuses as not-a-profile (filesystem level)", async (t) => {
+  const root = fixture(t);
+  const dir = resolve(root, "foreign");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(resolve(dir, "goalport.sqlite"), "foreign database bytes");
+  const commands = [];
+  const manager = new ProfileManager({
+    directory: dir, appData: root, build: { ...currentBuild, channel: null },
+    deps: { execCore: async (args) => { commands.push(args[1]); return { code: 0, stdout: `${JSON.stringify(inspect8())}\n` }; } }
+  });
+  assert.equal((await manager.resolve()).kind, "not-a-profile");
+  assert.equal(existsSync(resolve(dir, "goalport-profile.json")), false, "no marker may be written over a foreign database");
 });
 
 test("ProfileManager: fresh, adopt, recordOpen against the real filesystem", async (t) => {
@@ -190,10 +290,11 @@ test("ProfileManager: fresh, adopt, recordOpen against the real filesystem", asy
   assert.equal(parseMarkerText(readFileSync(resolve(dir, "goalport-profile.json"), "utf8")).markerSchemaVersion, 2);
   const outcome = await manager.resolve();
   assert.equal(outcome.kind, "reopen");
-  manager.recordOpen(8);
+  assert.equal(outcome.formatVersion, 8, "a reopen outcome carries the inspection's proven schema version (P1)");
+  manager.recordOpen(outcome.formatVersion);
   const reopened = parseMarkerText(readFileSync(resolve(dir, "goalport-profile.json"), "utf8"));
   assert.equal(reopened.lastOpenedBy.coreSha256, hash);
-  assert.equal(reopened.format.version, 8);
+  assert.equal(reopened.format.version, 8, "recordOpen commits the proven format version");
   // v1 in-place adoption
   const explicit = resolve(root, "explicit");
   mkdirSync(explicit, { recursive: true });
@@ -202,7 +303,9 @@ test("ProfileManager: fresh, adopt, recordOpen against the real filesystem", asy
     directory: explicit, appData: root, build: { ...currentBuild, channel: null },
     deps: { execCore: async () => ({ code: 0, stdout: `${JSON.stringify(inspect8())}\n` }) }
   });
-  assert.equal((await adopter.resolve()).kind, "adopt-v1");
+  const adoption = await adopter.resolve();
+  assert.equal(adoption.kind, "adopt-v1");
+  assert.equal(adoption.formatVersion, 8, "an adopt outcome carries the inspection's proven schema version (P1)");
   const backedUp = adopter.backupOwnDatabase; // backup happens in main before adopt; marker upgrade itself:
   const upgraded = adopter.readMarker();
   assert.equal(upgraded.markerSchemaVersion, 1);
@@ -210,6 +313,11 @@ test("ProfileManager: fresh, adopt, recordOpen against the real filesystem", asy
   const after = parseMarkerText(readFileSync(resolve(explicit, "goalport-profile.json"), "utf8"));
   assert.equal(after.markerSchemaVersion, 2);
   assert.equal(after.createdBy.coreSha256, otherHash, "v1 provenance is preserved, not rewritten");
+  // P1: one open with a proven schema commits it (main's recordOpen(outcome.formatVersion)).
+  adopter.recordOpen(adoption.formatVersion);
+  const adoptedOpen = parseMarkerText(readFileSync(resolve(explicit, "goalport-profile.json"), "utf8"));
+  assert.equal(adoptedOpen.markerSchemaVersion, 2);
+  assert.equal(adoptedOpen.format.version, 8, "the adopted marker commits the proven format version after one open");
 });
 
 test("ProfileManager: runImport stages, journals, and writes the marker last", async (t) => {

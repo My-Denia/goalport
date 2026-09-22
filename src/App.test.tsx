@@ -48,6 +48,86 @@ function clickCloseWindow() {
 /** The Send path for an existing conversation now dispatches conversation_send. */
 const SEND_TYPE = "conversation_send";
 
+// Real-clock settling (no fake timers): each case sleeps past full polling
+// cycles, so the zero-call assertions cannot pass on an unscheduled timer.
+const settlePastCycles = () => new Promise((done) => setTimeout(done, 1700));
+
+function mountGatedElectron(snapshot: unknown) {
+  const snapshotMock = vi.fn(async () => snapshot);
+  const startCore = vi.fn(async () => snapshot);
+  let pushState: ((state: unknown) => void) | null = null;
+  window.__GOALPORT_ELECTRON__ = true;
+  window.goalportCore = {
+    snapshot: snapshotMock,
+    command: async () => snapshot,
+    startCore,
+    openInVsCode: async () => undefined,
+    bootstrapCurrent: async () => ({ phase: "checking" }),
+    onBootstrapState: (callback: (state: unknown) => void) => {
+      pushState = callback;
+      return () => { pushState = null; };
+    }
+  } as never;
+  const rendered = render(<App />);
+  return { snapshotMock, startCore, push: (state: unknown) => pushState?.(state), rendered };
+}
+
+describe("bootstrap gating of Core polling", () => {
+  it("does not poll Core or auto-start while the bootstrap is not done", async () => {
+    const base = { ...DEMO_SNAPSHOT, preview: false } as const;
+    const gated = mountGatedElectron(base);
+    gated.push({ phase: "checking" });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    expect(gated.startCore).not.toHaveBeenCalled();
+
+    gated.push({ phase: "import-offer", facts: { sourcePath: null, createdBy: null, markerSchema: 1, counts: null, schemaVersion: 1, bytes: null, needsRecovery: false, liveSource: false } });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    expect(gated.startCore).not.toHaveBeenCalled();
+  });
+
+  it("starts polling immediately when the bootstrap reaches done, and keeps the interval", async () => {
+    const base = { ...DEMO_SNAPSHOT, preview: false } as const;
+    const gated = mountGatedElectron(base);
+    gated.push({ phase: "checking" });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    gated.push({ phase: "done" });
+    await waitFor(() => expect(gated.snapshotMock.mock.calls.length).toBeGreaterThanOrEqual(1));
+    const afterFirst = gated.snapshotMock.mock.calls.length;
+    await new Promise((done) => setTimeout(done, 850));
+    expect(gated.snapshotMock.mock.calls.length).toBeGreaterThan(afterFirst);
+  });
+
+  it("stays silent on a bootstrap error with no gated-exception polling loop", async () => {
+    const base = { ...DEMO_SNAPSHOT, preview: false } as const;
+    const gated = mountGatedElectron(base);
+    gated.push({ phase: "error", kind: "not-a-profile", headline: "This data directory is not an empty or existing GoalPort profile.", message: "refused", canChooseDir: true, dataPath: null });
+    await settlePastCycles();
+    expect(gated.snapshotMock).not.toHaveBeenCalled();
+    expect(gated.startCore).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: /goalport data profile/i });
+    expect(within(dialog).getByText(/not an empty or existing GoalPort profile/i)).toBeTruthy();
+  });
+
+  it("an electron mount without a bootstrap channel is ready immediately and polls at once", async () => {
+    const base = { ...DEMO_SNAPSHOT, preview: false } as const;
+    const snapshotMock = vi.fn(async () => base);
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: snapshotMock,
+      command: async () => base,
+      startCore: async () => base,
+      openInVsCode: async () => undefined
+    } as never;
+    render(<App />);
+    await waitFor(() => expect(snapshotMock.mock.calls.length).toBeGreaterThanOrEqual(1));
+    expect(screen.getByRole("banner").textContent).toContain("GoalPort");
+    expect(screen.getByText(/Summarize the workspace/i)).toBeTruthy();
+  });
+});
+
 describe("GoalPort preview", () => {
   it("renders the three-column conversation workspace with campaign continuity", async () => {
     render(<App />);

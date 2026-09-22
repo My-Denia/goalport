@@ -3,6 +3,7 @@ import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync, st
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import profileManagerModule from "../../electron/profile-manager.cjs";
+import launchConfigModule from "../../electron/launch-config.cjs";
 
 export const TAIL_BYTES = 4096;
 export const TAIL_LINES = 40;
@@ -11,6 +12,7 @@ export const SUMMARY_MAX_BYTES = 65536;
 const SUMMARY_DROP_ORDER = ["stack", "diagnostics", "startup", "rescue", "cleanup", "observationAttempts", "steps"];
 
 const { MARKER_FILE, JOURNAL_FILE, BACKUP_DIR, STAGING_PREFIX, dirContentState } = profileManagerModule;
+const { normalizedPath } = launchConfigModule;
 
 export function sanitizeDiagnostic(text, privatePaths = []) {
   let result = String(text);
@@ -104,12 +106,18 @@ export const CORE_INSPECT_STDERR_BYTES = 2048;
 export const TERMINATION_GRACE_MS = 10000;
 export const PROFILE_ROOT_MAX_ENTRIES = 512;
 
-// MIRROR of the frozen compatibility-only Electron/Chromium exclusion set in
-// electron/profile-manager.cjs @ f372c50 (ELECTRON_SESSION_ARTIFACTS plus its
-// two regexes). The product does not export that set; this copy exists only
-// to NAME which captured profile-root entries the product's frozen list and
-// regexes do not accept. The authoritative empty-ish verdict recorded next to
-// the names always comes from the product's own exported dirContentState(); a
+// MIRROR of the frozen LEGACY-COMPATIBILITY-ONLY Electron/Chromium exclusion
+// set in electron/profile-manager.cjs @ f372c50 (ELECTRON_SESSION_ARTIFACTS
+// plus its two regexes). Since the storage-boundary split, Chromium writes
+// only to the separate browser-state namespace and cannot put anything into
+// a durable profile root: the product list (and this mirror of it) exist ONLY
+// to recognize the HISTORICAL leftovers of the pre-split shared-directory
+// era inside a legacy-contaminated durable root. Fresh-profile correctness
+// never depends on it, and the mirror must never grow a new Chromium file
+// name. The product does not export that set; this copy exists only to NAME
+// which captured profile-root entries the frozen legacy list and regexes do
+// not accept. The authoritative empty-ish verdict recorded next to the names
+// always comes from the product's own exported dirContentState(); a
 // disagreement between the mirror and that verdict is recorded as a
 // divergence instead of being trusted.
 const FROZEN_ELECTRON_SESSION_ARTIFACTS = new Set([
@@ -263,6 +271,49 @@ function entryPresence(directory) {
   return { marker: stat(MARKER_FILE), database: stat("goalport.sqlite"), journal: stat(JOURNAL_FILE), backupsDirectory: stat(BACKUP_DIR) };
 }
 
+// ---------- Storage-boundary observation (additive) ----------
+// Records that the durable profile root and the Electron/Chromium
+// browser-state root are distinct paths, plus a bounded summary of the
+// browser-state entries (the durable side's full entry list stays in
+// profileRoot above). Purely observational and additive: it never alters any
+// existing diagnostic field, an absent browser-state root reports itself as
+// unavailable instead of guessing, and every string is sanitized before it
+// is recorded so no private absolute path rides along into a public artifact.
+function storageBoundarySection({ durableDirectory, browserStateDirectory, privatePaths, readDirectory = defaultReadProfileRoot }) {
+  const sanitize = (value) => sanitizeDiagnostic(value, privatePaths);
+  const durableRoot = durableDirectory ? sanitize(durableDirectory) : null;
+  const browserRoot = browserStateDirectory ? sanitize(browserStateDirectory) : null;
+  if (!durableDirectory || !browserStateDirectory) {
+    return {
+      available: false,
+      reason: "storage-boundary observation requires both the durable profile root and the browser-state root",
+      durableProfileRoot: durableRoot,
+      browserStateRoot: browserRoot
+    };
+  }
+  let browserStateEntries;
+  try {
+    const entries = readDirectory(browserStateDirectory);
+    browserStateEntries = {
+      available: true,
+      entryCount: entries.length,
+      truncated: entries.length > PROFILE_ROOT_MAX_ENTRIES,
+      entries: entries.slice(0, PROFILE_ROOT_MAX_ENTRIES).map((entry) => ({ ...entry, name: sanitize(entry.name) }))
+    };
+  } catch (error) {
+    browserStateEntries = { available: false, code: error?.code || "UNAVAILABLE", error: String(error?.message || error) };
+  }
+  return {
+    available: true,
+    kind: "storage-boundary",
+    note: "durable profile root vs Electron/Chromium browser-state root; the storage-boundary architecture requires two distinct paths (pathsDistinct=true, i.e. samePath=false)",
+    durableProfileRoot: durableRoot,
+    browserStateRoot: browserRoot,
+    pathsDistinct: normalizedPath(durableDirectory) !== normalizedPath(browserStateDirectory),
+    browserStateEntries
+  };
+}
+
 // Bounded query of the renderer's bootstrap state through the existing
 // goalport:bootstrap-current IPC. A hung query resolves as an UNAVAILABLE
 // record after bootstrapTimeoutMs; it can never hang diagnostic collection.
@@ -362,6 +413,7 @@ export function extractOriginalInspectTrace(bootstrapState, privatePaths = []) {
 // failure that triggered collection.
 export async function collectStartupDiagnostics({
   profileDirectory,
+  browserStateDirectory,
   packageRoot,
   privatePaths = [],
   coreExecutable,
@@ -403,7 +455,7 @@ export async function collectStartupDiagnostics({
       available: productError === null,
       ...(productError ? { error: productError } : { productEmptyish }),
       unmatchedNames: unmatched,
-      note: "names the product's frozen compatibility-only Chromium exclusion list (electron/profile-manager.cjs @ f372c50 mirror) does not accept; the product's own dirContentState().emptyish is authoritative",
+      note: "LEGACY comparison frame: names the entries the frozen f372c50 Chromium exclusion list (legacy-contaminated-root compatibility layer, mirrored) does not accept. Since the storage-boundary split Chromium writes only to the separate browser-state namespace; fresh correctness never depends on this list. The product's own dirContentState().emptyish is authoritative",
       consistent: productError === null ? unmatched.length === 0 === (productEmptyish === true) : null
     };
   }
@@ -468,6 +520,7 @@ export async function collectStartupDiagnostics({
     originalStartupInspection: extractOriginalInspectTrace(bootstrap.state, privatePaths),
     bootstrap: { ...bootstrap, state: bootstrap.state === undefined ? bootstrap.state : sanitizeDeep(bootstrap.state, privatePaths) },
     profileRoot: { ...profileRoot, presence },
+    storageBoundary: storageBoundarySection({ durableDirectory: profileDirectory, browserStateDirectory, privatePaths, readDirectory: readProfileRoot }),
     frozenChromiumAllowlist: frozenAllowlist,
     coreInspectReProbe: inspection
   };

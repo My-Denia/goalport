@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { launchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
@@ -68,21 +68,28 @@ try {
     coreSha256: fileSha256(coreBinary() || "")
   });
   if (profile) {
-    // Create the profile directory before Electron initializes the session so
-    // userData/session caches of DIFFERENT profiles never share files. Nothing
-    // else is decided here: every compatibility/ownership decision happens in
-    // the post-ready bootstrap with a real window on screen.
-    fs.mkdirSync(profile.directory, { recursive: true });
+    // Storage-boundary startup sequence: Electron/Chromium userData points at
+    // the BROWSER-STATE namespace, a directory physically separate from the
+    // durable profile root and derived from the durable identity only. The
+    // durable root is NEVER created or written pre-ready — Chromium therefore
+    // cannot put anything into it, and "is this a fresh durable profile" can
+    // no longer race with transient session files. Nothing else is decided
+    // here: every compatibility/ownership decision happens in the post-ready
+    // bootstrap with a real window on screen, against the durable root only.
+    fs.mkdirSync(profile.browserStateDirectory, { recursive: true });
     // Chromium itself needs a writable userData; probe now so an unwritable
-    // directory produces an honest refusal instead of a silent exit.
+    // browser-state directory produces an honest refusal instead of a silent
+    // exit. (Durable-root writability is NOT probed here: the bootstrap's
+    // classifyFsError reports an unwritable durable location honestly once a
+    // window exists.)
     {
-      const probe = path.join(profile.directory, `.write-probe-${process.pid}`);
+      const probe = path.join(profile.browserStateDirectory, `.write-probe-${process.pid}`);
       fs.writeFileSync(probe, "writable-probe");
       fs.rmSync(probe, { force: true });
     }
-    app.setPath("userData", profile.directory);
+    app.setPath("userData", profile.browserStateDirectory);
     profileManager = new ProfileManager({
-      directory: profile.directory,
+      directory: profile.durableDirectory,
       appData: appDataRoot(process.argv, app.getPath("appData")),
       build: {
         version: appVersion,
@@ -595,6 +602,9 @@ function runTracedCoreProfileCommand(args) {
 // All profile compatibility/ownership decisions run here, after a real window
 // exists, with structured states pushed to the renderer. The renderer only
 // displays facts and forwards user actions; it never decides.
+// A bootstrap that may continue returns the structured outcome (its
+// `formatVersion` is the schema fact the resolved decision committed to);
+// every terminal path returns the string "exit".
 let bootstrapWaiter = null;
 function waitForBootstrapAction() {
   return new Promise((resolve) => { bootstrapWaiter = resolve; });
@@ -628,8 +638,10 @@ async function chooseFreshDirectoryAndRelaunch() {
     properties: ["openDirectory", "createDirectory", "dontAddToRecent"]
   });
   if (choice.canceled || !choice.filePaths[0]) return false;
-  const args = [...process.argv.slice(1).filter((arg) => arg !== "--"), "--data-dir", choice.filePaths[0]];
-  app.relaunch({ args });
+  // relaunchArguments strips the mutually-exclusive --data-dir/--test-profile
+  // pair (both spellings) and keeps every other switch — a --user-data-dir
+  // relocation or a debugging switch survives the relaunch.
+  app.relaunch({ args: relaunchArguments(process.argv.slice(1), choice.filePaths[0]) });
   quitFromBootstrap();
   return true;
 }
@@ -677,16 +689,16 @@ async function runProfileBootstrap() {
   switch (outcome.kind) {
     case "fresh":
       try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-      return "continue";
+      return outcome;
     case "resume-import":
       try { profileManager.finalizeImport(outcome.journal); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-      return "continue";
+      return outcome;
     case "reopen":
       if (outcome.needsBackup) {
         pushBootstrap({ phase: "backing-up" });
         try { await profileManager.backupOwnDatabase(); } catch (error) { return await bootstrapExitOnError("backup-failed", error); }
       }
-      return "continue";
+      return outcome;
     case "adopt-v1": {
       // Explicit --data-dir carrying a v1 marker: verified backup, then an
       // in-place marker upgrade (metadata only; the database never moves).
@@ -697,7 +709,7 @@ async function runProfileBootstrap() {
         if (!state || state.problem) throw new Error(state?.problem || "marker disappeared");
         profileManager.adoptV1Marker(state);
       } catch (error) { return await bootstrapExitOnError("internal-error", error); }
-      return "continue";
+      return outcome;
     }
     case "import-offer": {
       const facts = importFacts(outcome.discovery);
@@ -710,11 +722,11 @@ async function runProfileBootstrap() {
         } catch (error) {
           return await bootstrapExitOnError("import-failed", error);
         }
-        return "continue";
+        return outcome;
       }
       // Decline is an explicit choice recorded as a fresh profile.
       try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-      return "continue";
+      return outcome;
     }
     case "import-incompatible": {
       pushBootstrap({ phase: "import-incompatible", facts: importFacts(outcome.discovery), reason: outcome.reason });
@@ -722,7 +734,7 @@ async function runProfileBootstrap() {
         const action = await waitForBootstrapAction();
         if (action?.type === "fresh") {
           try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-          return "continue";
+          return outcome;
         }
         if (action?.type === "open-folder" && outcome.discovery?.path) { shell.openPath(outcome.discovery.path); continue; }
         if (action?.type === "exit") return "exit";
@@ -775,9 +787,9 @@ async function runSyntheticProfileBootstrap() {
   switch (outcome.kind) {
     case "fresh":
       try { profileManager.beginFresh(); } catch (error) { return await bootstrapExitOnError(classifyFsError(error), error); }
-      return "continue";
+      return outcome;
     case "reopen":
-      return "continue";
+      return outcome;
     default:
       return await bootstrapExitOnError(outcome.kind, outcome.reason || outcome.kind);
   }
@@ -1027,11 +1039,15 @@ async function createWindow() {
     promptRendererCloseChoice();
   });
   if (profileManager && profile && profile.mode === "normal" && !profile.testMode) {
-    const disposition = await runProfileBootstrap();
-    if (disposition !== "continue") { quitFromBootstrap(); return; }
+    const outcome = await runProfileBootstrap();
+    if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
     profileReady = true;
     if (!(await startCoreWithCoordination())) { quitFromBootstrap(); return; }
-    try { profileManager.recordOpen(null); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    // The marker's format.version records the schema fact the RESOLVED
+    // decision proved (reopen/adopt/resume carry inspection.schemaVersion), so
+    // one open with a known database commits it and a later database loss is
+    // an honest missing-database refusal.
+    try { profileManager.recordOpen(outcome.formatVersion); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
     pushBootstrap({ phase: "done" });
   } else if (profileManager && profile) {
     // Synthetic test profiles (--test-profile) pass the SAME ProfileManager
@@ -1040,17 +1056,21 @@ async function createWindow() {
     // no synthetic profileReady shortcut anymore — a damaged, foreign, newer
     // or unmarked directory refuses without spawning Core, and only a fresh
     // or compatible-reopen bootstrap reaches ensureCore.
-    const disposition = await runSyntheticProfileBootstrap();
-    if (disposition !== "continue") { quitFromBootstrap(); return; }
+    const outcome = await runSyntheticProfileBootstrap();
+    if (!outcome || outcome === "exit") { quitFromBootstrap(); return; }
     profileReady = true;
     await ensureCore();
-    try { profileManager.recordOpen(null); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
+    try { profileManager.recordOpen(outcome.formatVersion); } catch (error) { console.error("[profile] recordOpen failed:", error?.message || error); }
     pushBootstrap({ phase: "done" });
   } else {
     // Legacy isolated tooling (no profile; env-bound contract asserted
-    // pre-ready in assertIsolatedLaunch) keeps the direct path.
+    // pre-ready in assertIsolatedLaunch) keeps the direct path. It now also
+    // receives the bootstrap done signal: this branch is an active admission
+    // contract, and a renderer that subscribes to bootstrap states must not
+    // wait on "checking" forever (nothing else will ever push a state here).
     profileReady = true;
     await ensureCore();
+    pushBootstrap({ phase: "done" });
   }
   await refreshAttemptCache();
 }
@@ -1060,7 +1080,13 @@ app.whenReady().then(() => {
     version: appVersion,
     channel: profile?.testMode ? "Synthetic test" : (launchChannel === "release" || !launchChannel ? "Stable V1 RC" : channelLabel(launchChannel)),
     distribution: app.isPackaged ? (launchChannel || "release") : "dev",
-    testMode: isolatedRequired(), dataPath: app.getPath("userData")
+    testMode: isolatedRequired(),
+    // dataPath is the durable profile root (the user's backup/migration
+    // unit); browserStatePath is the separate Electron/Chromium namespace.
+    // Profile-less legacy isolated runs keep reporting their env-bound
+    // userData as both.
+    dataPath: profile?.durableDirectory ?? app.getPath("userData"),
+    browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData")
   }));
   ipcMain.handle("goalport:bootstrap-current", () => {
     // An additive optional diagnostics child exposes

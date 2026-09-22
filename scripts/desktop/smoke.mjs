@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -103,11 +103,38 @@ async function smoke() {
   const workspaceA = resolve(scratch, "workspace-a");
   const workspaceB = resolve(scratch, "workspace-b");
   const nativeHome = resolve(scratch, "empty-native-home");
+  // Browser-state namespace isolation: Windows known-folder resolution IGNORES
+  // the APPDATA environment variable, so the only supported way to keep the
+  // Electron/Chromium namespace out of the real %APPDATA% is the --user-data-dir
+  // switch (the documented application-root relocation, rule E). Both the
+  // durable root and the electron namespace then live inside this root but
+  // stay physically separate.
+  const appDataRoot = resolve(scratch, "appdata-root");
+  // The durable/browser path split is computed by the SAME central path model
+  // the app uses — the driver never assembles these paths itself.
+  const coreSha = identity.artifacts.find((entry) => entry.path === "resources/goalport-core.exe").sha256;
+  const launchPaths = launchConfig.resolveProfilePaths({
+    args: launchConfig.launchArguments([normal ? "--data-dir" : "--test-profile", profile, "--user-data-dir", appDataRoot]),
+    appData: appDataRoot,
+    channel: normal ? "release" : "release",
+    coreSha256: coreSha
+  });
+  const browserStateDirectory = launchPaths.browserStateDirectory;
+  // Pre-launch snapshot of the REAL %APPDATA% GoalPort folder (this driver
+  // process's own APPDATA, not the spawned app's redirected one): the smoke
+  // must leave it byte-identical.
+  const realAppData = process.env.APPDATA || null;
+  const realGoalPortEntries = () => {
+    if (!realAppData) return null;
+    try { return readdirSync(resolve(realAppData, "GoalPort")).sort(); } catch { return null; }
+  };
+  const realGoalPortPre = realGoalPortEntries();
   const report = {
     schemaVersion: 1, status: "RUNNING", mode: normal ? "normal" : "synthetic-test",
     driverRevision: "conversation-first-v1",
     startedAt: new Date().toISOString(), identity,
     originalPackage, packageRoot, scratch, profile, workspaceA, workspaceB,
+    appDataRoot, browserStateDirectory,
     boundaryStates: ["first-run", "concurrent", "error-path", "interrupted"],
     assertionMap: ASSERTION_MAP, selectorMap: SELECTOR_MAP, protocolMap: PROTOCOL_MAP,
     probeKinds: {
@@ -291,17 +318,111 @@ async function smoke() {
     env.USERPROFILE = nativeHome; env.HOME = nativeHome;
     env.APPDATA = resolve(nativeHome, "AppData/Roaming"); env.LOCALAPPDATA = resolve(nativeHome, "AppData/Local");
     env.PATH = [resolve(env.SystemRoot || "C:/Windows", "System32"), resolve(env.SystemRoot || "C:/Windows", "System32/WindowsPowerShell/v1.0")].join(";");
-    for (const dir of [env.APPDATA, env.LOCALAPPDATA]) mkdirSync(dir, { recursive: true });
+    for (const dir of [env.APPDATA, env.LOCALAPPDATA, appDataRoot]) mkdirSync(dir, { recursive: true });
     for (const folder of [packageRoot, ...env.PATH.split(";"), env.SystemRoot || "C:/Windows"]) {
       for (const provider of ["codex", "claude", "grok"]) for (const ext of [".exe", ".cmd", ".bat"]) assert.equal(existsSync(resolve(folder, provider + ext)), false, "native executable absent from smoke search path");
     }
     logFd = openSync(resolve(out, "electron.log"), "a");
     stage = "spawn-electron";
-    child = spawn(resolve(packageRoot, "GoalPort.exe"), [normal ? "--data-dir" : "--test-profile", profile, `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], { cwd: packageRoot, env, stdio: ["ignore", logFd, logFd], windowsHide: true });
+    child = spawn(resolve(packageRoot, "GoalPort.exe"), [normal ? "--data-dir" : "--test-profile", profile, "--user-data-dir", appDataRoot, `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], { cwd: packageRoot, env, stdio: ["ignore", logFd, logFd], windowsHide: true });
     child.once("error", (error) => { report.launchError = error.message; save(); });
     stage = "attach-cdp";
     page = await attachGoalPort(port);
+    // --- Phase-aware bootstrap observation ---------------------------------
+    // A startup classification bug must surface as the structured bootstrap
+    // refusal it is (phase/kind/headline/original inspect trace), never be
+    // compressed into a "Timed out: connected packaged UI". The observation
+    // watches the bootstrap state, the process state and the Core-connected
+    // signal in parallel: an error phase fails IMMEDIATELY with its facts, a
+    // process exit fails with the last observed state, and only after
+    // bootstrap done does the driver go on waiting for Core connected.
+    stage = "bootstrap-observe";
+    const bootstrapStartedAt = Date.now();
+    let lastBootstrapState = null;
+    let bootstrapExit = "timeout"; // "done" | "connected" | "timeout"
+    const bootstrapDeadline = bootstrapStartedAt + 30000;
+    while (Date.now() < bootstrapDeadline) {
+      if (child.exitCode !== null) {
+        const exited = new Error(`packaged app exited with code ${child.exitCode} during profile bootstrap`);
+        exited.bootstrapFailure = { phase: "exited", exitCode: child.exitCode, waitedMs: Date.now() - bootstrapStartedAt, lastBootstrapState: lastBootstrapState };
+        throw exited;
+      }
+      let state = null;
+      try { state = await read("window.goalportCore.bootstrapCurrent()"); } catch { /* renderer page not attached yet */ }
+      if (state) lastBootstrapState = state;
+      if (state?.phase === "error") {
+        const facts = {
+          phase: "error",
+          kind: state.kind ?? null,
+          headline: state.headline ?? null,
+          message: sanitizeDiagnostic(String(state.message ?? ""), [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]),
+          waitedMs: Date.now() - bootstrapStartedAt,
+          originalProfileInspect: state.diagnostics?.originalProfileInspect ?? null
+        };
+        const refused = new Error(`bootstrap refused: ${facts.kind ?? "unknown"} — ${facts.headline ?? ""} (${facts.waitedMs} ms after spawn)`);
+        refused.bootstrapFailure = facts;
+        throw refused;
+      }
+      if (state?.phase === "done") { bootstrapExit = "done"; break; }
+      // A build without a bootstrap channel still reports connected honestly;
+      // connected renderer work implies the profile was settled.
+      if ((await body().catch(() => "")).includes("Core connected")) { bootstrapExit = "connected"; break; }
+      await sleep(100);
+    }
+    if (bootstrapExit === "timeout") {
+      const waitedMs = Date.now() - bootstrapStartedAt;
+      const failure = new Error(
+        lastBootstrapState
+          ? `Timed out waiting for the profile bootstrap; phase=${lastBootstrapState.phase} after ${waitedMs} ms`
+          : "Timed out waiting for the profile bootstrap; no bootstrap state was ever observable"
+      );
+      // Still checking (or unobservable) after the window: report the elapsed
+      // time and the ORIGINAL startup inspection trace — the fact that matters.
+      failure.bootstrapFailure = {
+        phase: lastBootstrapState?.phase ?? "unobservable",
+        waitedMs,
+        lastBootstrapState,
+        originalProfileInspect: lastBootstrapState?.diagnostics?.originalProfileInspect ?? null
+      };
+      throw failure;
+    }
+    report.bootstrapObservation = { phase: bootstrapExit === "done" ? "done" : (lastBootstrapState?.phase ?? "connected"), waitedMs: Date.now() - bootstrapStartedAt };
+    stage = "connected packaged UI";
     await until("connected packaged UI", async () => (await body()).includes("Core connected"));
+    // --- Storage-boundary assertions (after connect) -----------------------
+    // The durable profile root carries ONLY durable storage-contract names; a
+    // Chromium entry of ANY name (known or brand new) here is a boundary
+    // violation. The allowed set is GoalPort-owned durable files only: the
+    // marker, the SQLite database and its sidecars, the Core-side logs and
+    // the launch-ready receipt (`goalport.sqlite.launch-ready`, the product
+    // receipt Core commits next to the database — product_receipts.rs
+    // `launch_ready_path`), plus the import journal/staging/backups. The
+    // browser-state namespace exists separately, inside the relocated app
+    // root (normal) or the test-owned scratch (synthetic), and the real
+    // %APPDATA% GoalPort folder is untouched.
+    stage = "storage-boundary";
+    const durableAllowed = (name) => name === "goalport-profile.json" || name === "goalport.sqlite" || name === "goalport.sqlite-wal" || name === "goalport.sqlite-shm"
+      || name === "goalport.sqlite.launcher.log" || name === "goalport.sqlite.core.log" || name === "goalport.sqlite.launch-ready"
+      || name === "import-journal.json" || name === "backups" || name.startsWith(".import-staging-");
+    const durableNames = readdirSync(profile).sort();
+    const durableUnexpected = durableNames.filter((name) => !durableAllowed(name));
+    assert.deepEqual(durableUnexpected, [], `durable profile root must contain only durable storage-contract entries; unexpected: ${JSON.stringify(durableUnexpected)}`);
+    assert.notEqual(normalize(profile), normalize(browserStateDirectory), "durable and browser-state roots must be distinct paths");
+    const browserNames = readdirSync(browserStateDirectory).sort();
+    assert.ok(browserNames.length > 0, "browser-state namespace exists and is non-empty");
+    assert.ok(
+      normal ? browserStateDirectory.toLowerCase().startsWith(appDataRoot.toLowerCase()) : browserStateDirectory.toLowerCase().startsWith(dirname(profile).toLowerCase()),
+      normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"
+    );
+    const realGoalPortPost = realGoalPortEntries();
+    assert.deepEqual(realGoalPortPost, realGoalPortPre, "the real %APPDATA% GoalPort folder must be untouched by this smoke");
+    if (!report.storageBoundary) {
+      report.storageBoundary = { durableRoot: profile, browserStateRoot: browserStateDirectory, durableEntries: durableNames, browserEntries: browserNames, realAppDataTouched: false };
+      marker("storage-boundary/durable-only-and-browser-state-separated", {
+        durableEntries: durableNames.length, browserEntries: browserNames.length,
+        browserNamespace: normal ? "app-data-root" : "test-owned-scratch", realAppDataUntouched: true
+      });
+    }
     const initialViewport = await viewport();
     await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);
     await until("desktop Runtime controls visible", async () => {
@@ -319,6 +440,7 @@ async function smoke() {
     assert.equal(info.version, identity.version);
     assert.equal(info.testMode, !normal);
     assert.equal(normalize(info.dataPath), normalize(profile));
+    assert.equal(normalize(info.browserStatePath), normalize(browserStateDirectory), "app-info reports the separate browser-state namespace (proves --user-data-dir relocation took effect)");
     const receipt = await command("get_startup_receipt", {});
     assert.equal(receipt.accepted, true);
     coreIdentity = receipt.receipt.core;
@@ -684,6 +806,7 @@ async function smoke() {
   } catch (error) {
     report.status = "FAIL";
     report.error = sanitizeDiagnostic(error.stack || error.message, [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]);
+    if (error.bootstrapFailure) report.bootstrapFailure = error.bootstrapFailure;
     report.diagnostics = collectFailureDiagnostics({
       stage, child,
       files: { electron: resolve(out, "electron.log"), launcher: resolve(profile, "goalport.sqlite.launcher.log"), core: resolve(profile, "goalport.sqlite.core.log") },
@@ -691,11 +814,12 @@ async function smoke() {
     });
     // Bounded read-only startup-failure profile
     // diagnostics, added to (never replacing) the original failure above.
-    // Each leg records its own unavailability or timeout; collection itself
-    // is additionally guarded so diagnostics can never mask the real error.
+    // Each leg records its own unavailability or timeout; collection itself is
+    // additionally guarded so diagnostics can never mask the real error.
     try {
       report.diagnostics.startup = await collectStartupDiagnostics({
         profileDirectory: profile,
+        browserStateDirectory,
         packageRoot,
         coreExecutable: resolve(packageRoot, "resources/goalport-core.exe"),
         privatePaths: [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS],

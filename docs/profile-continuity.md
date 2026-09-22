@@ -33,13 +33,53 @@ new empty profile or a `--data-dir` incantation.
    packaged dev candidates and unpackaged development share `GoalPort/dev`
    (stable across builds — no per-hash forks). `--test-profile` stays
    synthetic-test. `--user-data-dir` (the standard Chromium switch) relocates
-   the application-data root; the full default selection still runs inside the
-   relocated root.
+   the application-data root; the full default selection still runs inside
+   the relocated root. Inside every application-data root, the
+   **Electron/Chromium browser-state namespace** (`GoalPort/electron/
+   <profileKey>`) is a separate directory from the durable profile root; the
+   browser-state path is bound to the canonical durable `profileKey` only —
+   never to the Core hash — so a differently-built candidate reuses the same
+   browser identity. A synthetic `--test-profile` keeps its browser state in
+   a test-owned sibling (`<parent>/electron/<profileKey>`), never in the real
+   application-data root.
 
 ## Startup flow
 
-Module init (pre-ready): argument validation, channel/dir resolution, mkdir,
-writability probe, `app.setPath(userData)`. Nothing else refuses there.
+The storage-boundary startup sequence, in order:
+
+1. Argument validation (`--data-dir` / `--test-profile` exclusivity,
+   absolute paths).
+2. Canonical durable path resolution (channel directory, explicit
+   `--data-dir`, or the relocated root of `--user-data-dir`).
+3. `profileKey` derivation from the canonical durable identity alone.
+4. Derivation of the separate `browserStateDirectory`
+   (`GoalPort/electron/<profileKey>`, or the test-owned sibling for
+   `--test-profile`).
+5. Creation and writability probe of the **browser-state** directory only —
+   the durable root is never created or written pre-ready.
+6. `app.setPath(userData, browserStateDirectory)` — Chromium can from now on
+   only ever write inside the browser-state namespace.
+7. Free Electron/Chromium initialization.
+8. BrowserWindow creation.
+9. ProfileManager inspects **only the durable root** (marker, journal,
+   directory content, read-only `profile inspect`).
+10. The compatibility decision: fresh / reopen / import offer / refusal /
+    coordination — fail-closed first.
+11. On fresh, only the ProfileManager creates the durable marker and profile
+    state; `beginFresh` is the single writer.
+12. `profileReady` becomes true only after a valid disposition.
+13. Core start/attach (launcher, receipt, pipe-peer verification).
+14. Core opens the durable SQLite path.
+15. The renderer begins snapshot polling only after the bootstrap reaches
+    `done` (`coreReady` positive signal; hosts without a bootstrap channel
+    are ready immediately). The profile-less legacy isolated branch also
+    pushes `done` after its Core attach, so a gating renderer never waits on
+    a permanent `checking`.
+
+The durable root's writability is classified honestly by the bootstrap
+(`readonly-dir` / `disk-full` error screens with a window on screen) instead
+of a pre-ready probe; a read-only or full durable location therefore never
+produces a pre-ready death.
 
 Post-ready bootstrap (`profile-manager.cjs` + boot-shell screens): fresh init →
 marker v2; compatible reopen (any build of the channel) → silent, with a

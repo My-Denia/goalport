@@ -89,6 +89,10 @@ function buildMarkerV2({ profileKey, mode, channel, createdBy, lastOpenedBy, imp
 // `inspection` is the JSON of `goalport-core profile inspect` (read-only).
 // `discovery` is {path, marker, inspection} of a foreign-channel profile or
 // null. Returns a structured outcome; no error-string matching anywhere.
+// Continuation outcomes (resume-import / reopen / adopt-v1) carry
+// `formatVersion`: the database schema fact the decision actually PROVED
+// (inspection.schemaVersion), so the caller's recordOpen commits it to the
+// marker instead of recording null over data whose format was just verified.
 function decideOwnProfile({ markerState, dirContentState, inspection, currentBuild, discovery, journal }) {
   // Fail closed FIRST: an inspection that itself failed (process error,
   // nonzero exit, malformed/unreadable output, ok:false) supplies no facts at
@@ -113,7 +117,7 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
       // resuming would finalize the marker over data that failed quick_check.
       if (inspection.quickCheck && inspection.quickCheck !== "ok") return { kind: "corrupt", reason: inspection.quickCheck };
     }
-    return { kind: "resume-import", journal };
+    return { kind: "resume-import", journal, formatVersion: inspection.schemaVersion ?? null };
   }
   if (!marker) {
     if (markerState && markerState.problem) return { kind: "corrupt-marker", reason: markerState.problem };
@@ -135,7 +139,7 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   }
   if (!inspection.exists) {
     return marker.markerSchemaVersion === 2 && marker.format?.version == null
-      ? { kind: "reopen", needsBackup: false, note: "empty-database" }
+      ? { kind: "reopen", needsBackup: false, note: "empty-database", formatVersion: inspection.schemaVersion ?? null }
       : { kind: "missing-database" };
   }
   // A database that exists but cannot be opened read-only (missing WAL
@@ -147,7 +151,7 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   }
   if (inspection.schemaVersion == null && inspection.openable) {
     return inspection.empty
-      ? { kind: "reopen", needsBackup: false, note: "empty-database" }
+      ? { kind: "reopen", needsBackup: false, note: "empty-database", formatVersion: inspection.schemaVersion ?? null }
       : { kind: "unsupported-legacy", foreignTables: inspection.foreignTables };
   }
   if (inspection.schemaVersion > inspection.currentSchemaVersion) {
@@ -164,7 +168,7 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   if (prior === "live-exact") {
     const epochSha = String(inspection.latestEpoch?.coreExecutableSha256 || "").toLowerCase();
     if (epochSha && epochSha === String(currentBuild.coreSha256).toLowerCase()) {
-      return { kind: "reopen", needsBackup, note: "attach-to-living-core" };
+      return { kind: "reopen", needsBackup, note: "attach-to-living-core", formatVersion: inspection.schemaVersion };
     }
     return { kind: "live-core", epoch: inspection.latestEpoch };
   }
@@ -172,7 +176,8 @@ function decideOwnProfile({ markerState, dirContentState, inspection, currentBui
   return {
     kind: marker.markerSchemaVersion === 1 ? "adopt-v1" : "reopen",
     needsBackup,
-    note: inspection.needsRecovery ? "readonly-open-needs-recovery" : undefined
+    note: inspection.needsRecovery ? "readonly-open-needs-recovery" : undefined,
+    formatVersion: inspection.schemaVersion
   };
 }
 
@@ -210,12 +215,19 @@ function backupsToPrune(names, keep = KEEP_BACKUPS) {
   return sorted.length <= keep ? [] : sorted.slice(0, sorted.length - keep);
 }
 
-// Electron writes its own session artifacts into userData (= the profile
-// directory) as soon as the app becomes ready — BEFORE the bootstrap decides
-// fresh-vs-existing. Those files are never user data, so "is this a fresh
-// profile directory" must ignore them: what matters is the presence of a
-// marker, database, journal, staging directory or anything else the user or a
-// previous GoalPort put here.
+// LEGACY-CONTAMINATED-ROOT COMPATIBILITY LAYER — not a mechanism of fresh
+// profile correctness. Before the storage-boundary split, Electron's userData
+// WAS the profile directory, so real user machines carry durable roots filled
+// with the Chromium session files of that era. This frozen set recognizes
+// exactly those HISTORICAL leftovers so a legacy-contaminated root without a
+// marker/database still reads as a fresh-compatible directory instead of
+// not-a-profile. It must NEVER grow a new Chromium file name: since the split,
+// Chromium writes only to the separate browser-state namespace and cannot put
+// anything into a durable profile root, so fresh correctness no longer depends
+// on this list at all. When pre-split durable roots are no longer supported,
+// this set (and its use in dirContentState) can be deleted without affecting
+// new-profile correctness. Unknown user files, foreign databases, corrupt
+// markers and newer schemas are still refused exactly as before.
 const ELECTRON_SESSION_ARTIFACTS = new Set([
   "blob_storage", "Cache", "Code Cache", "DawnGraphiteCache", "DawnWebGPUCache", "Dictionaries",
   "GPUCache", "Local Storage", "Network", "Session Storage", "Shared Dictionary", "SharedDic",
@@ -517,5 +529,9 @@ class ProfileManager {
 module.exports = {
   MARKER_FILE, JOURNAL_FILE, BACKUP_DIR, STAGING_PREFIX, KEEP_BACKUPS,
   parseMarkerText, buildMarkerV2, decideOwnProfile, importableDiscovery, incompatibilityReason,
-  backupsToPrune, dirContentState, ProfileManager
+  backupsToPrune, dirContentState, ProfileManager,
+  // Exported ONLY so tests can prove a dynamically generated Chromium-style
+  // filename is NOT recognized by the frozen legacy set (anti-self-certification
+  // for the storage-boundary tests); product code never imports these.
+  ELECTRON_SESSION_ARTIFACTS, isElectronArtifact
 };

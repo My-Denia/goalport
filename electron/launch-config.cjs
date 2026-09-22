@@ -33,6 +33,31 @@ function launchArguments(argv) {
   return result;
 }
 
+// Rebuilds a relaunch argv whose EXCLUSIVE profile location is newDataDir:
+// strips any existing mutually-exclusive --data-dir/--test-profile pair (both
+// the two-token and --flag=value spellings, including their values) and
+// appends the new --data-dir. Every other argument — the --user-data-dir
+// application-root relocation, Chromium/CDP switches, positional arguments —
+// survives untouched, so a relaunch after "choose a fresh directory" can never
+// drop a relocation or debugging flag, and a synthetic --test-profile refusal
+// screen can relaunch into a normal --data-dir without a dead repeat.
+function relaunchArguments(argv, newDataDir) {
+  const kept = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    if (arg === "--data-dir" || arg === "--test-profile") {
+      const value = argv[index + 1];
+      if (value !== undefined && !String(value).startsWith("--")) index += 1; // drop the consumed value too
+      continue;
+    }
+    if (arg.startsWith("--data-dir=") || arg.startsWith("--test-profile=")) continue;
+    if (arg === "--") continue; // argument separator has no meaning in a rebuilt argv
+    kept.push(arg);
+  }
+  kept.push("--data-dir", newDataDir);
+  return kept;
+}
+
 // Channel namespaces own separate profile directories under the product root.
 // `release` keeps the historical `rc` directory; every development build
 // (packaged dev candidates and unpackaged dev) shares `dev`, so development
@@ -47,11 +72,33 @@ function profileDirectoryFor({ args, appData, channel }) {
   return path.join(appData, "GoalPort", leaf);
 }
 
-// Pure path/identity computation for one profile directory. It never reads or
-// writes the marker, never validates builder identity, and never refuses on
-// build hash: those decisions belong to the profile manager's compatibility
-// flow (data-format authority is the schema_migrations table, inspected
-// read-only by the Core binary).
+// The Electron/Chromium browser-state namespace (caches, Local State,
+// Preferences, Network, session storage…) is DERIVED from the canonical
+// durable identity and is PHYSICALLY SEPARATE from the durable profile root:
+//   * normal profiles (default channel directory or an explicit --data-dir)
+//     use <appData>/GoalPort/electron/<profileKey> — inside the same
+//     application-data root (so a --user-data-dir relocation keeps both
+//     namespaces inside the relocated boundary) but never inside the durable
+//     directory, not even for --data-dir;
+//   * a synthetic --test-profile uses a test-owned sibling
+//     dirname(<test-profile>)/electron/<profileKey>, so packaged tests never
+//     write into the real application-data root.
+// The browser identity deliberately does NOT include the Core hash: a
+// differently-built candidate reuses the same durable AND browser identity
+// (only the runtime pipe stays per-build).
+function browserStateDirectoryFor({ args, appData, canonical, key }) {
+  if (args["--test-profile"]) return path.join(path.dirname(canonical), "electron", key);
+  return path.join(appData, "GoalPort", "electron", key);
+}
+
+// Pure path/identity computation for one profile. It never reads or writes
+// the marker, never validates builder identity, and never refuses on build
+// hash: those decisions belong to the profile manager's compatibility flow
+// (data-format authority is the schema_migrations table, inspected read-only
+// by the Core binary). `directory` and `durableDirectory` are the same
+// durable profile root (the user's backup/migration unit: marker, SQLite
+// database, backups, import journal); `browserStateDirectory` is the separate
+// Electron/Chromium userData root — the two are never the same path.
 function resolveProfilePaths({ args, appData, channel, coreSha256 }) {
   if (!/^[a-f0-9]{64}$/.test(coreSha256)) throw new Error("Packaged Core identity is unavailable");
   const mode = args["--test-profile"] ? "synthetic-test" : "normal";
@@ -63,6 +110,8 @@ function resolveProfilePaths({ args, appData, channel, coreSha256 }) {
     mode,
     channel: args["--test-profile"] || args["--data-dir"] ? null : channel,
     directory: canonical,
+    durableDirectory: canonical,
+    browserStateDirectory: browserStateDirectoryFor({ args, appData, canonical, key }),
     marker: path.join(canonical, "goalport-profile.json"),
     database: path.join(canonical, "goalport.sqlite"),
     profileKey: key,
@@ -141,7 +190,7 @@ function childEnvironment(env, profile) {
 }
 
 module.exports = {
-  launchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
+  launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
   childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
   CHANNEL_DIRECTORIES
 };

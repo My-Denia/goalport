@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 import vm from "node:vm";
 const require = createRequire(import.meta.url);
-const { launchArguments, resolveProfilePaths, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
@@ -43,6 +43,78 @@ test("a differently-built candidate shares the dev namespace instead of refusing
   assert.equal(second.testMode, false);
 });
 
+// ---------- Storage-boundary path model ----------
+
+test("path model: the default release profile splits the durable root from the browser-state namespace", (t) => {
+  const root = fixture(t);
+  const release = resolveProfilePaths({ ...settings(root), channel: "release" });
+  assert.equal(release.durableDirectory, resolve(root, "GoalPort", "rc"));
+  assert.equal(release.browserStateDirectory, resolve(root, "GoalPort", "electron", release.profileKey));
+  assert.notEqual(normalizedPath(release.durableDirectory), normalizedPath(release.browserStateDirectory), "durable and browser roots are distinct paths");
+  assert.equal(release.browserStateDirectory.endsWith(release.profileKey), true, "the browser identity is keyed by the durable profileKey");
+  assert.equal(existsSync(release.browserStateDirectory), false, "path resolution stays pure: no directory is created");
+});
+
+test("path model: the default dev profile splits durable and browser roots, distinguished by profileKey", (t) => {
+  const root = fixture(t);
+  const dev = resolveProfilePaths({ ...settings(root), channel: "dev" });
+  const devCandidate = resolveProfilePaths({ ...settings(root), channel: "dev-candidate" });
+  const release = resolveProfilePaths({ ...settings(root), channel: "release" });
+  assert.equal(dev.durableDirectory, resolve(root, "GoalPort", "dev"));
+  assert.equal(devCandidate.durableDirectory, resolve(root, "GoalPort", "dev"));
+  for (const paths of [dev, devCandidate, release]) {
+    assert.notEqual(normalizedPath(paths.durableDirectory), normalizedPath(paths.browserStateDirectory), "durable and browser roots are distinct paths");
+    assert.equal(paths.browserStateDirectory, resolve(root, "GoalPort", "electron", paths.profileKey));
+  }
+  // dev and dev-candidate deliberately share the dev namespace (same durable
+  // root, same browser identity); release is a different durable root and
+  // therefore a different browser identity.
+  assert.equal(devCandidate.browserStateDirectory, dev.browserStateDirectory, "dev candidates reuse the dev browser identity");
+  assert.notEqual(release.browserStateDirectory, dev.browserStateDirectory, "browser identities follow their durable profileKeys");
+  assert.notEqual(release.profileKey, dev.profileKey);
+});
+
+test("path model: a differently-built candidate keeps the SAME browser-state identity across Core hashes", (t) => {
+  const root = fixture(t);
+  const first = resolveProfilePaths({ ...settings(root), channel: "dev-candidate" });
+  const second = resolveProfilePaths({ ...settings(root), channel: "dev-candidate", coreSha256: otherHash });
+  assert.equal(second.durableDirectory, first.durableDirectory);
+  assert.equal(second.profileKey, first.profileKey);
+  assert.equal(second.browserStateDirectory, first.browserStateDirectory, "a Core hash change must not fork the browser profile identity");
+  assert.notEqual(second.pipe, first.pipe, "the runtime pipe stays per-build");
+});
+
+test("path model: --data-dir owns ONLY the durable location; the browser namespace never lands inside it", (t) => {
+  const root = fixture(t);
+  const explicit = resolve(root, "explicit-data");
+  const paths = resolveProfilePaths({ ...settings(root, { "--data-dir": explicit }), channel: "release" });
+  assert.equal(paths.durableDirectory, resolve(realpathSync.native(root), "explicit-data"), "the durable root is exactly the user's explicit path");
+  assert.notEqual(normalizedPath(paths.durableDirectory), normalizedPath(paths.browserStateDirectory));
+  assert.equal(paths.browserStateDirectory, resolve(root, "GoalPort", "electron", paths.profileKey));
+  const rel = relative(explicit, paths.browserStateDirectory);
+  assert.ok(rel.startsWith("..") || isAbsolute(rel), "backing up the --data-dir can never capture Chromium state");
+});
+
+test("path model: a synthetic --test-profile keeps browser state inside the test-owned scratch", (t) => {
+  const root = fixture(t);
+  const first = resolveProfilePaths({ ...settings(root, { "--test-profile": resolve(root, "t1", "profile") }) });
+  assert.equal(first.browserStateDirectory, resolve(root, "t1", "electron", first.profileKey), "browser state is a sibling of the synthetic durable root");
+  assert.notEqual(normalizedPath(first.browserStateDirectory), normalizedPath(first.durableDirectory));
+  const firstRel = relative(resolve(root, "t1"), first.browserStateDirectory);
+  assert.ok(!firstRel.startsWith("..") && !isAbsolute(firstRel), "browser state stays inside the test-owned root");
+  const elsewhere = resolveProfilePaths({ ...settings(resolve(root, "elsewhere"), { "--test-profile": resolve(root, "t1", "profile") }) });
+  assert.equal(elsewhere.browserStateDirectory, first.browserStateDirectory, "the synthetic browser root ignores the appData location entirely");
+  const second = resolveProfilePaths({ ...settings(root, { "--test-profile": resolve(root, "t2", "profile") }) });
+  assert.notEqual(first.browserStateDirectory, second.browserStateDirectory, "concurrent tests get distinct browser identities");
+});
+
+test("relaunchArguments replaces the exclusive profile location and keeps every other switch", () => {
+  assert.deepEqual(relaunchArguments(["--data-dir", "C:/old", "--user-data-dir=D:/p"], "C:/new"), ["--user-data-dir=D:/p", "--data-dir", "C:/new"]);
+  assert.deepEqual(relaunchArguments(["--test-profile", "C:/t", "--remote-debugging-port=9222"], "C:/new"), ["--remote-debugging-port=9222", "--data-dir", "C:/new"]);
+  assert.deepEqual(relaunchArguments(["--user-data-dir=D:/p"], "C:/new"), ["--user-data-dir=D:/p", "--data-dir", "C:/new"]);
+  assert.deepEqual(relaunchArguments(["--data-dir=C:/eqold", "--", "positional"], "C:/new"), ["positional", "--data-dir", "C:/new"]);
+});
+
 test("explicit normal and synthetic profile paths keep precedence over channels", (t) => {
   const root = fixture(t);
   const args = { "--data-dir": resolve(root, "explicit") };
@@ -59,6 +131,11 @@ test("real Electron entrypoint no longer dies pre-ready on an existing foreign-b
   const mainRequire = createRequire(mainFile);
   const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
   const data = resolve(root, "profile");
+  // The application-data root must be a SEPARATE directory from the durable
+  // profile: under the storage-boundary split the browser-state namespace
+  // (<appData>/GoalPort/electron/<key>) is created pre-ready, and the durable
+  // root must stay byte-identical through it.
+  const appData = resolve(root, "appdata");
   mkdirSync(data, { recursive: true });
   writeFileSync(resolve(data, "goalport-profile.json"), JSON.stringify({ schemaVersion: 1, product: "GoalPort", mode: "normal", identityVersion: 2, profileKey: "x".repeat(20), version: "1.0.0-rc.1", coreSha256: otherHash }));
   const preimage = readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]);
@@ -69,7 +146,7 @@ test("real Electron entrypoint no longer dies pre-ready on an existing foreign-b
   let readySubscribers = [];
   const electron = {
     app: {
-      isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => data, exit: (code) => exits.push(code),
+      isPackaged: true, getVersion: () => "1.0.0-rc.1", getPath: () => appData, exit: (code) => exits.push(code),
       setPath: () => {}, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {},
       whenReady: () => new Promise(() => { /* fixture keeps the ready boundary pending forever */ })
     },
@@ -81,6 +158,7 @@ test("real Electron entrypoint no longer dies pre-ready on an existing foreign-b
   assert.deepEqual(exits, [], "the historical 'another RC build' pre-ready death is gone");
   assert.equal(dialogs.length, 0);
   assert.deepEqual(readdirSync(data).map((name) => [name, readFileSync(resolve(data, name), "utf8")]), preimage);
+  assert.equal(existsSync(resolve(appData, "GoalPort", "electron")), true, "the pre-ready write-probe targets the browser-state namespace");
 });
 
 test("real Electron entrypoint still refuses truly invalid launch input pre-ready", (t) => {
@@ -129,18 +207,25 @@ test("the --user-data-dir switch relocates the application-data root before prof
   mkdirSync(resolve(root, "resources"), { recursive: true });
   writeFileSync(resolve(root, "resources", "goalport-core.exe"), "inert identity fixture, never executed");
   let seenPath;
+  const setPathCalls = [];
+  const dialogs = [];
   const electron = {
     app: {
       isPackaged: true, getVersion: () => "1.0.0-rc.1",
       getPath: (name) => { seenPath = name; return resolve(root, "real-appData"); },
-      setPath: () => {}, exit: () => {}, whenReady: () => assert.fail("fixture stops before readiness"),
+      setPath: (name, value) => {
+        setPathCalls.push([name, value]);
+        if (name === "userData") throw new Error("fixture stops after userData setPath");
+      },
+      exit: () => {}, whenReady: () => assert.fail("fixture stops before readiness"),
       commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}
     },
-    dialog: { showErrorBox: () => {} }
+    dialog: { showErrorBox: (title, message) => dialogs.push(String(message)) }
   };
+  const realResolveProfilePaths = mainRequire("./launch-config.cjs").resolveProfilePaths;
   let captured;
   const fakeRequire = (name) => name === "electron" ? electron : name === "./launch-config.cjs" ? {
-    ...mainRequire(name), resolveProfilePaths: (options) => { captured = options; throw new Error("fixture stops after path capture"); }
+    ...mainRequire(name), resolveProfilePaths: (options) => { captured = options; return realResolveProfilePaths(options); }
   } : mainRequire(name);
   main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
     argv: ["GoalPort.exe", `--user-data-dir=${home}`], resourcesPath: resolve(root, "resources"),
@@ -148,6 +233,18 @@ test("the --user-data-dir switch relocates the application-data root before prof
   }, { error: () => {} });
   assert.equal(captured.appData, home, "profile selection runs inside the relocated root");
   assert.equal(seenPath, "appData");
+  // Storage boundary inside the relocation: the durable root stays the channel
+  // directory inside the relocated root, and app.setPath(userData) targets the
+  // SEPARATE electron namespace — overriding whatever the native Chromium
+  // switch would have picked on its own. (The fixture sentinel stops the entry
+  // point right after the userData setPath, inside the pre-ready try block.)
+  const model = realResolveProfilePaths({ args: {}, appData: home, channel: "release", coreSha256: "a".repeat(64) });
+  assert.equal(model.durableDirectory, resolve(home, "GoalPort", "rc"));
+  const userDataSet = setPathCalls.filter(([name]) => name === "userData");
+  assert.equal(userDataSet.length, 1, `exactly one userData setPath; saw ${JSON.stringify(setPathCalls)}`);
+  assert.equal(userDataSet[0][1], resolve(home, "GoalPort", "electron", model.profileKey));
+  assert.notEqual(normalizedPath(userDataSet[0][1]), normalizedPath(model.durableDirectory));
+  assert.match(dialogs.join(" "), /fixture stops after userData setPath/);
 });
 
 test("distinct canonical profile identities cannot share a pipe or accept another database", () => {
@@ -207,6 +304,17 @@ test("Windows aliases share identity even for an absent database descendant", { 
   assert.doesNotThrow(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child), pipeIdentity: profile.pipe }, profile));
   assert.throws(() => assertCoreIdentity({ startupState: "READY_COMMITTED", core: { executableSha256: hash }, databaseIdentity: resolve(canonical, child + "-other"), pipeIdentity: profile.pipe }, profile), /attachment refused/);
   assert.equal(existsSync(database), false);
+  // Path-model identity: two spellings of the SAME durable directory (8.3
+  // alias vs canonical) export the identical durable canonical path,
+  // profileKey and browser-state identity. Pure path computation; nothing is
+  // created under the read-only alias location.
+  const appData = resolve(tmpdir(), `goalport-alias-appdata-${process.pid}-${Date.now()}`);
+  const aliased = resolveProfilePaths({ appData, coreSha256: hash, args: { "--data-dir": resolve(alias, child).replace(/goalport\.sqlite$/, "") } });
+  const spelled = resolveProfilePaths({ appData, coreSha256: hash, args: { "--data-dir": resolve(canonical, child).replace(/goalport\.sqlite$/, "") } });
+  assert.equal(aliased.durableDirectory, spelled.durableDirectory);
+  assert.equal(aliased.profileKey, spelled.profileKey);
+  assert.equal(aliased.browserStateDirectory, spelled.browserStateDirectory);
+  assert.equal(aliased.pipe, spelled.pipe);
 });
 
 test("a lost mutation acknowledgement does not retry or launch another Core", async () => {
@@ -1161,4 +1269,102 @@ test("real entrypoint: refused and malformed original inspects record honest exi
     assert.ok(!serialized.includes(secret), "non-selected stdout fields never ride along");
     assert.ok(!serialized.includes(rawDb) && !serialized.includes(JSON.stringify(rawDb).slice(1, -1)), "the raw private database path does not ride along");
   }
+});
+
+// ---- B1: the profile-less legacy isolated branch emits bootstrap done ----
+// Legacy isolated tooling (GOALPORT_REQUIRE_ISOLATED with an env-bound Core
+// contract and no profile flags) is an ACTIVE admission contract, not a
+// leftover. Its renderer subscribes to bootstrap states like any other; before
+// the storage-boundary work nothing ever pushed a state there, so a gating
+// renderer would wait on "checking" forever. The done signal must arrive after
+// the Core attach, and goalport:bootstrap-current must answer done (not a
+// permanently stale "checking").
+
+test("real entrypoint: a profile-less legacy isolated run receives bootstrap done and attaches its Core", async (t) => {
+  const root = fixture(t);
+  const slug = `goalport-isolated-done-${process.pid}`;
+  const runRoot = resolve(root, "goal-runs", slug);
+  const db = resolve(runRoot, "run", "goalport.sqlite");
+  mkdirSync(dirname(db), { recursive: true });
+  const resources = resolve(root, "resources");
+  mkdirSync(resources, { recursive: true });
+  writeFileSync(resolve(resources, "goalport-core.exe"), "inert Core identity fixture; never executed");
+  const log = [], states = [], setPathCalls = [];
+  const handlers = new Map();
+  const windows = [];
+  const pipeUp = { probes: 0 };
+  const net = {
+    createConnection: () => {
+      pipeUp.probes += 1;
+      const socket = new HarnessEventEmitter();
+      socket.setTimeout = () => {};
+      socket.destroy = () => {};
+      socket.end = () => socket.emit("close");
+      socket.write = (frame) => {
+        const request = JSON.parse(frame.subarray(4).toString("utf8"));
+        log.push(request.messageType);
+        setImmediate(() => {
+          const payload = Buffer.from(JSON.stringify({ ok: true, requestId: request.requestId, payload: { snapshot: { attempt: { id: "attempt-1", state: "active", provider: "scenario" } } } }));
+          const reply = Buffer.alloc(4 + payload.length);
+          reply.writeUInt32LE(payload.length, 0);
+          payload.copy(reply, 4);
+          socket.emit("data", reply);
+        });
+      };
+      setImmediate(() => socket.emit("connect"));
+      return socket;
+    }
+  };
+  const childProcess = {
+    spawn: () => assert.fail("an attached Core must not be launched"),
+    execFile: () => assert.fail("no profile command or pipe-peer runs in the profile-less branch")
+  };
+  class IsolatedWindow {
+    constructor() {
+      this.webContents = { send: (channel, state) => states.push({ channel, state }), executeJavaScript: async () => {} };
+      windows.push(this);
+    }
+    static fromWebContents() { return windows[0]; }
+    loadFile() { return Promise.resolve(); }
+    on() {}
+    isDestroyed() { return false; }
+    destroy() {}
+  }
+  const electron = {
+    app: {
+      isPackaged: true, getVersion: () => "1.0.0-rc.1",
+      getPath: (name) => (name === "exe" ? resolve(root, "GoalPort.exe") : root),
+      setPath: (name, value) => setPathCalls.push([name, value]), exit: (code) => log.push(`exit:${code}`), whenReady: () => Promise.resolve(),
+      commandLine: { appendSwitch: () => {} }, setAppUserModelId: () => {}, requestSingleInstanceLock: () => true, on: () => {}, quit: () => {}
+    },
+    BrowserWindow: IsolatedWindow, ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
+    Notification: { isSupported: () => false }, shell: {}, dialog: { showErrorBox: () => log.push("dialog") }
+  };
+  const mainFile = resolve("electron/main.cjs");
+  const mainRequire = createRequire(mainFile);
+  const main = vm.runInThisContext(`(function(require,module,exports,__dirname,process,console){${readFileSync(mainFile, "utf8")}\n})`, { filename: mainFile });
+  const fakeRequire = (name) => name === "electron" ? electron : name === "node:net" ? net : name === "node:child_process" ? childProcess : mainRequire(name);
+  main(fakeRequire, { exports: {} }, {}, resolve("electron"), {
+    argv: ["GoalPort.exe"], resourcesPath: resources,
+    env: {
+      GOALPORT_REQUIRE_ISOLATED: "1",
+      GOALPORT_RUN_SLUG: slug,
+      GOALPORT_CORE_DB: db,
+      GOALPORT_CORE_PIPE: `goalport-${slug}-core`,
+      GOALPORT_SYNTHETIC_ROOT: resolve(runRoot, "synthetic")
+    },
+    pid: process.pid, platform: "win32", execPath: process.execPath
+  }, { error: (...values) => log.push(`error:${values.join(" ")}`) });
+  const deadline = Date.now() + 15000;
+  while (!(states.some((entry) => entry.state.phase === "done") && log.includes("snapshot"))) {
+    assert.ok(Date.now() < deadline, `timed out; states=${JSON.stringify(states.map((entry) => entry.state))}; log=${log.join(",")}`);
+    await new Promise((done) => setTimeout(done, 5));
+  }
+  assert.ok(states.some((entry) => entry.state.phase === "done"), "the profile-less branch pushes the bootstrap done signal");
+  const current = await handlers.get("goalport:bootstrap-current")();
+  assert.equal(current.phase, "done", "bootstrap-current answers done, not a permanent checking");
+  assert.equal(current.diagnostics, undefined, "the profile-less branch has no profile-inspect diagnostics child");
+  assert.ok(log.includes("snapshot"), "the Core attach serves snapshots as usual");
+  const userData = setPathCalls.filter(([name]) => name === "userData");
+  assert.deepEqual(userData, [["userData", resolve(dirname(db), "electron-userData")]], "isolated userData stays the run-owned electron-userData directory");
 });

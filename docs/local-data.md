@@ -4,14 +4,14 @@ All GoalPort state stays on your machine. There is no GoalPort account, no GoalP
 
 ## Where data lives
 
-| How GoalPort was started | Profile directory |
-| --- | --- |
-| Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` |
-| Unpackaged development (`pnpm electron:dev`) | `%APPDATA%\GoalPort\dev` |
-| `--data-dir <absolute path>` | that directory |
-| `--test-profile <absolute path>` | that directory, synthetic Scenario only (see [testing](testing.md)) |
+| How GoalPort was started | Durable profile directory | Electron/Chromium browser state |
+| --- | --- | --- |
+| Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` | `%APPDATA%\GoalPort\electron\<profile key>` |
+| Unpackaged development (`pnpm electron:dev`) | `%APPDATA%\GoalPort\dev` | `%APPDATA%\GoalPort\electron\<profile key>` |
+| `--data-dir <absolute path>` | that directory | the separate `electron\<profile key>` namespace next to the app-data root, never inside the `--data-dir` |
+| `--test-profile <absolute path>` | that directory, synthetic Scenario only (see [testing](testing.md)) | `<parent of the test directory>\electron\<profile key>` (test-owned scratch) |
 
-A profile directory contains:
+A durable profile directory contains only data you would back up, migrate or restore:
 
 | File | Purpose |
 | --- | --- |
@@ -19,7 +19,9 @@ A profile directory contains:
 | `goalport.sqlite` (plus WAL files) | All Campaign, Task, Attempt, event, decision and receipt records |
 | `goalport.sqlite.launcher.log` | How Core was launched, including breakaway or inherited-job mode |
 | `goalport.sqlite.core.log` | Core diagnostics |
-| Electron profile data | Window/browser state for this profile |
+| `backups/`, `import-journal.json`, `.import-staging-*` | Consistency backups and crash-safe import staging |
+
+The Electron/Chromium browser state (caches, `Local State`, `Preferences`, `Network`, session storage, `window-state.json`) lives in its own namespace keyed by the durable profile identity. It is never written into the durable profile directory, so backing up a `--data-dir` gives you pure GoalPort data, and a fresh profile decision can never race Chromium session files. Browser-state identity follows the canonical durable profile path (not the Core build), and deleting it only resets window geometry and caches. A `--user-data-dir <absolute path>` (the standard Chromium switch) relocates the application-data root: both the durable channel directories and the `electron` namespace move inside the relocated root and stay physically separate; combined with `--data-dir`, the `--data-dir` keeps owning the durable location. Historical Chromium files left in an older profile directory are ignored, never deleted, and no longer used.
 
 The RC profile is separate from data folders used by earlier GoalPort development builds and from historical acceptance databases. Explicit `--data-dir` and `--test-profile` paths take precedence over the defaults. A normal profile and a test profile cannot share a directory, and the two flags cannot be combined.
 
