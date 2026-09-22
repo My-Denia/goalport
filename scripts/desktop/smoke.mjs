@@ -387,8 +387,27 @@ async function smoke() {
       throw failure;
     }
     report.bootstrapObservation = { phase: bootstrapExit === "done" ? "done" : (lastBootstrapState?.phase ?? "connected"), waitedMs: Date.now() - bootstrapStartedAt };
+    // Structural renderer observation at the moment the bootstrap finished —
+    // available whether the connect wait succeeds or not.
+    try {
+      report.bootstrapObservation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.title-bar')?.innerText?.slice(0, 160) ?? null }))()");
+    } catch { /* an early observation is best-effort */ }
     stage = "connected packaged UI";
-    await until("connected packaged UI", async () => (await body()).includes("Core connected"));
+    try {
+      await until("connected packaged UI", async () => (await body()).includes("Core connected"));
+    } catch (error) {
+      // A bare timeout is exactly how a renderer-side runner difference got
+      // compressed away before. Attach the page's actual state so the next
+      // look sees WHERE the renderer is stuck instead of guessing.
+      const observation = {};
+      try { observation.bodyPreview = sanitizeDiagnostic(((await body()) || "").slice(0, 500), [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]); } catch (observationError) { observation.bodyPreview = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
+      try { observation.bootstrapCurrent = await read("window.goalportCore.bootstrapCurrent()"); } catch (observationError) { observation.bootstrapCurrent = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
+      try { observation.directSnapshot = await read("(async () => { const s = await window.goalportCore.snapshot(); return { connection: s?.connection ?? null, notice: s?.notices?.[0] ?? null }; })()"); } catch (observationError) { observation.directSnapshot = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
+      try { observation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), bootstrapScreen: Boolean(document.querySelector('.bootstrap-screen')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.title-bar')?.innerText?.slice(0, 160) ?? null }))()"); } catch (observationError) { observation.renderer = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
+      const structured = new Error(`${error.message}; renderer observation: ${JSON.stringify(observation).slice(0, 2000)}`);
+      structured.bootstrapFailure = { phase: "connected-timeout", waitedMs: Date.now() - bootstrapStartedAt, rendererObservation: observation };
+      throw structured;
+    }
     // --- Storage-boundary assertions (after connect) -----------------------
     // The durable profile root carries ONLY durable storage-contract names; a
     // Chromium entry of ANY name (known or brand new) here is a boundary
