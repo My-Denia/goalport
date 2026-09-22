@@ -83,6 +83,7 @@ test("app document identity folds Windows drive-path case only", () => {
   assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", app), false);
   assert.equal(isAppDocument(`${app}?next=1`, app), false);
   assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html%2Fsecret", app), false);
+  assert.equal(isAppDocument("file:///C:/GoalPort/My%20App/index.html", "file:///C:/GoalPort/My App/index.html"), true);
   assert.equal(isAppDocument("file:///C:/foo%2Fbar", "file:///C:/foo/bar"), false);
   assert.equal(isAppDocument("file://server/share/index.html", app), false);
   assert.equal(isAppDocument("file://remote/C:/GoalPort/dist/index.html", app), false);

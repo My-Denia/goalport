@@ -16,7 +16,9 @@ function appDocumentKey(href) {
   if (url.username || url.password) return null;
   const host = url.hostname.toLowerCase();
   if (host && host !== "localhost") return null;
-  let pathname = url.pathname;
+  let pathname = url.pathname.replace(/%(?!2[fF]|5[cC])[0-9a-fA-F]{2}/g, (token) => {
+    try { return decodeURIComponent(token); } catch { return token; }
+  });
   const drive = pathname.match(/^\/([A-Za-z])(:.*)$/);
   if (drive) pathname = `/${drive[1].toLowerCase()}${drive[2].toLowerCase()}`;
   return `file://${pathname}${url.search}`;
