@@ -438,9 +438,17 @@ async function smoke() {
     assert.notEqual(normalize(profile), normalize(browserStateDirectory), "durable and browser-state roots must be distinct paths");
     const browserNames = readdirSync(browserStateDirectory).sort();
     assert.ok(browserNames.length > 0, "browser-state namespace exists and is non-empty");
+    // Containment is judged against the SAME root the central path model
+    // derived the browser namespace from. For a synthetic profile that is the
+    // CANONICAL durable parent (realpathSync.native expands 8.3 aliases such
+    // as the GitHub runner's RUNNER~1 TEMP), never the literal spelling: a
+    // literal prefix compare fails on the runner even though the browser root
+    // is exactly where the model puts it.
+    const browserOwnerRoot = normal ? appDataRoot : dirname(launchPaths.durableDirectory);
+    const browserRel = relative(browserOwnerRoot, browserStateDirectory);
     assert.ok(
-      normal ? browserStateDirectory.toLowerCase().startsWith(appDataRoot.toLowerCase()) : browserStateDirectory.toLowerCase().startsWith(dirname(profile).toLowerCase()),
-      normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"
+      browserRel !== "" && !browserRel.startsWith("..") && !isAbsolute(browserRel),
+      `${normal ? "normal browser state stays inside the relocated app-data root" : "synthetic browser state stays inside the test-owned scratch"} (owner=${browserOwnerRoot}, browser=${browserStateDirectory}, relative=${browserRel})`
     );
     const realGoalPortPost = realGoalPortEntries();
     assert.deepEqual(realGoalPortPost, realGoalPortPre, "the real %APPDATA% GoalPort folder must be untouched by this smoke");

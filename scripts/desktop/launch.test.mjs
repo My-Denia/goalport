@@ -323,6 +323,18 @@ test("Windows aliases share identity even for an absent database descendant", { 
   assert.equal(aliased.profileKey, spelled.profileKey);
   assert.equal(aliased.browserStateDirectory, spelled.browserStateDirectory);
   assert.equal(aliased.pipe, spelled.pipe);
+  // Synthetic browser-state containment is derived from the CANONICAL durable
+  // parent, never from the literal spelling. On a machine whose temp root is
+  // an 8.3 alias (the GitHub runner's RUNNER~1 TEMP), a literal prefix
+  // comparison would fail even though the browser root is exactly where the
+  // central path model puts it (the run-57 synthetic smoke failure).
+  const aliasedSynthetic = resolveProfilePaths({ appData, coreSha256: hash, args: { "--test-profile": resolve(alias, child).replace(/goalport\.sqlite$/, "") } });
+  const canonicalParent = dirname(aliasedSynthetic.durableDirectory);
+  assert.ok(canonicalParent.toLowerCase().startsWith(canonical.toLowerCase()), "the synthetic browser owner root is the canonical durable parent");
+  const browserRel = relative(canonicalParent, aliasedSynthetic.browserStateDirectory);
+  assert.ok(browserRel !== "" && !browserRel.startsWith("..") && !isAbsolute(browserRel), `browser state stays inside the canonical scratch root (relative=${browserRel})`);
+  const literalRel = relative(dirname(resolve(alias, child).replace(/goalport\.sqlite$/, "")), aliasedSynthetic.browserStateDirectory);
+  assert.ok(literalRel.startsWith("..") || isAbsolute(literalRel) || literalRel === "", "the LITERAL alias spelling does NOT match the canonical browser root on an aliased machine");
 });
 
 test("a lost mutation acknowledgement does not retry or launch another Core", async () => {
