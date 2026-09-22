@@ -11,6 +11,7 @@ import { verifyPackage } from "./verify-package.mjs";
 import { attachGoalPort } from "../connected/v1-cdp.mjs";
 import launchConfig from "../../electron/launch-config.cjs";
 import { boundedFailureSummary, collectFailureDiagnostics, collectStartupDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
+import { connectedUiExpression } from "./connect-probe.mjs";
 import { clickPointFor } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
@@ -178,6 +179,14 @@ async function smoke() {
   const snapshot = () => read("window.goalportCore.snapshot()");
   const command = (messageType, payload, requestId = randomUUID()) => read(`window.goalportCore.command(${JSON.stringify({ protocolVersion: "goalport.ipc.v2", requestId, entityVersion: 0, messageType, payload })})`);
   const body = () => read("document.body.innerText");
+  // Connect wait contract: the app's PUBLISHED state (data-connection on
+  // .goalport-shell) decides; the visible "Core connected" text is only a
+  // fallback — CSS hides it below 1020px-wide viewports (the GitHub runner
+  // virtual display), where innerText never carries it. Never a bare
+  // text wait again.
+  const connectedUi = async () => {
+    try { return Boolean(await read(connectedUiExpression())); } catch { return false; }
+  };
   const uiAttempt = () => read("document.querySelector('[data-attempt-id]')?.dataset.attemptId");
   const desktopViewport = { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false };
   const viewport = () => read("(() => { const nav = document.querySelector('.campaign-nav'); const picker = document.querySelector('.runtime-picker-button'); const rect = picker?.getBoundingClientRect(); return { width: innerWidth, height: innerHeight, devicePixelRatio, navDisplay: nav ? getComputedStyle(nav).display : null, runtimePicker: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null }; })()");
@@ -366,7 +375,7 @@ async function smoke() {
       if (state?.phase === "done") { bootstrapExit = "done"; break; }
       // A build without a bootstrap channel still reports connected honestly;
       // connected renderer work implies the profile was settled.
-      if ((await body().catch(() => "")).includes("Core connected")) { bootstrapExit = "connected"; break; }
+      if (await connectedUi()) { bootstrapExit = "connected"; break; }
       await sleep(100);
     }
     if (bootstrapExit === "timeout") {
@@ -390,11 +399,11 @@ async function smoke() {
     // Structural renderer observation at the moment the bootstrap finished —
     // available whether the connect wait succeeds or not.
     try {
-      report.bootstrapObservation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.title-bar')?.innerText?.slice(0, 160) ?? null }))()");
+      report.bootstrapObservation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.titlebar')?.innerText?.slice(0, 160) ?? null }))()");
     } catch { /* an early observation is best-effort */ }
     stage = "connected packaged UI";
     try {
-      await until("connected packaged UI", async () => (await body()).includes("Core connected"));
+      await until("connected packaged UI", connectedUi);
     } catch (error) {
       // A bare timeout is exactly how a renderer-side runner difference got
       // compressed away before. Attach the page's actual state so the next
@@ -403,7 +412,7 @@ async function smoke() {
       try { observation.bodyPreview = sanitizeDiagnostic(((await body()) || "").slice(0, 500), [scratch, profile, out, ...WORKSPACE_PRIVATE_PATHS]); } catch (observationError) { observation.bodyPreview = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
       try { observation.bootstrapCurrent = await read("window.goalportCore.bootstrapCurrent()"); } catch (observationError) { observation.bootstrapCurrent = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
       try { observation.directSnapshot = await read("(async () => { const s = await window.goalportCore.snapshot(); return { connection: s?.connection ?? null, notice: s?.notices?.[0] ?? null }; })()"); } catch (observationError) { observation.directSnapshot = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
-      try { observation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), bootstrapScreen: Boolean(document.querySelector('.bootstrap-screen')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.title-bar')?.innerText?.slice(0, 160) ?? null }))()"); } catch (observationError) { observation.renderer = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
+      try { observation.renderer = await read("(() => ({ readyState: document.readyState, rootChildren: document.getElementById('root')?.childElementCount ?? null, electronFlag: window.__GOALPORT_ELECTRON__ === true, bootstrapChannel: typeof window.goalportCore?.onBootstrapState === 'function', bootShell: Boolean(document.querySelector('.boot-shell')), bootstrapScreen: Boolean(document.querySelector('.bootstrap-screen')), shellConnection: document.querySelector('.goalport-shell')?.dataset.connection ?? null, titleBar: document.querySelector('.titlebar')?.innerText?.slice(0, 160) ?? null }))()"); } catch (observationError) { observation.renderer = `unavailable: ${String(observationError.message || observationError).slice(0, 120)}`; }
       const structured = new Error(`${error.message}; renderer observation: ${JSON.stringify(observation).slice(0, 2000)}`);
       structured.bootstrapFailure = { phase: "connected-timeout", waitedMs: Date.now() - bootstrapStartedAt, rendererObservation: observation };
       throw structured;

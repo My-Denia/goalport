@@ -38,7 +38,7 @@
     "electron:package": "node scripts/connected/package-electron.mjs",
     "electron:start": "node scripts/desktop/start.mjs",
     "electron:verify": "node scripts/desktop/verify-package.mjs",
-    "test:desktop": "node --test scripts/desktop/package.test.mjs scripts/desktop/launch.test.mjs scripts/desktop/profile-manager.test.mjs scripts/desktop/docs-ci.test.mjs scripts/desktop/diagnostics.test.mjs scripts/desktop/click-target.test.mjs scripts/desktop/process-observer.test.mjs scripts/desktop/owned-core-cleanup.test.mjs scripts/desktop/verify-early-cleanup.test.mjs scripts/connected/v1-cdp.test.mjs",
+    "test:desktop": "node --test scripts/desktop/package.test.mjs scripts/desktop/launch.test.mjs scripts/desktop/profile-manager.test.mjs scripts/desktop/docs-ci.test.mjs scripts/desktop/diagnostics.test.mjs scripts/desktop/click-target.test.mjs scripts/desktop/connect-probe.test.mjs scripts/desktop/process-observer.test.mjs scripts/desktop/owned-core-cleanup.test.mjs scripts/desktop/verify-early-cleanup.test.mjs scripts/connected/v1-cdp.test.mjs",
     "test:release": "node --test scripts/release/third-party-notices.test.mjs scripts/release/build-release-bundle.test.mjs",
     "release:third-party-notices": "node scripts/release/generate-third-party-notices.mjs",
     "release:authenticode": "node scripts/release/authenticode-inventory.mjs",
