@@ -1417,6 +1417,82 @@ mod tests {
     };
     use std::io::Cursor;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_lock_waits_for_a_brief_competing_opener() {
+        use std::os::fd::AsRawFd;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("first.sock.lock");
+        let creator = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let metadata = creator.metadata().unwrap();
+        let worker_path = path.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            acquire_or_remove_new_lock(&creator, &worker_path, &metadata, true, || {
+                observed_tx.send(()).unwrap()
+            })
+        });
+        observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!worker.is_finished(), "creator must wait while contender holds lock");
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_UN) }, 0);
+        worker.join().unwrap().unwrap();
+        assert!(path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timed_out_new_lock_removes_its_empty_path() {
+        use std::os::fd::AsRawFd;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("first.sock.lock");
+        let creator = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let metadata = creator.metadata().unwrap();
+        let worker_path = path.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            acquire_or_remove_new_lock(&creator, &worker_path, &metadata, true, || {
+                observed_tx.send(()).unwrap()
+            })
+        });
+        observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("already owned"), "{error}");
+        assert!(!path.exists(), "timed-out creator must not strand an empty lock");
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_UN) }, 0);
+    }
+
     fn command() -> CoreCommand {
         CoreCommand::new(
             "cmd-1",
@@ -2076,12 +2152,62 @@ fn bind_restricted_unix_listener(
 }
 
 #[cfg(target_os = "linux")]
+fn acquire_unix_endpoint_lock(
+    lock: &std::fs::File,
+    created: bool,
+    on_contention: impl FnOnce(),
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    // A second starter can open a just-created lock before its creator flocks
+    // it. Give that reader time to reject the still-empty marker and release.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut on_contention = Some(on_contention);
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !created || error.kind() != io::ErrorKind::WouldBlock || Instant::now() >= deadline {
+            return Err(error);
+        }
+        if let Some(callback) = on_contention.take() {
+            callback();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn acquire_or_remove_new_lock(
+    lock: &std::fs::File,
+    lock_path: &std::path::Path,
+    lock_metadata: &std::fs::Metadata,
+    created: bool,
+    on_contention: impl FnOnce(),
+) -> Result<(), IpcError> {
+    if let Err(error) = acquire_unix_endpoint_lock(lock, created, on_contention) {
+        if created {
+            remove_matching_lock(lock_path, lock_metadata).map_err(|cleanup_error| {
+                IpcError::Invalid(format!(
+                    "Unix socket lock acquisition failed ({error}); lock cleanup failed ({cleanup_error})"
+                ))
+            })?;
+        }
+        return Err(IpcError::Invalid(format!(
+            "Unix socket endpoint is already owned; refusing to replace it ({error})"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn bind_unix_socket(
     path: &std::path::Path,
     tighten_managed: bool,
 ) -> Result<OwnedUnixSocket, IpcError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-    use std::os::unix::io::AsRawFd;
 
     validate_unix_socket_path_capacity(path)?;
     require_owner_umask_bits()?;
@@ -2116,12 +2242,7 @@ fn bind_unix_socket(
             "Unix socket lock must be an owned, single-link 0o600 regular file".into(),
         ));
     }
-    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if locked != 0 {
-        return Err(IpcError::Invalid(
-            "Unix socket endpoint is already owned; refusing to replace it".into(),
-        ));
-    }
+    acquire_or_remove_new_lock(&lock, &lock_path, &lock_metadata, created, || {})?;
     let path_metadata = std::fs::symlink_metadata(&lock_path)?;
     if !path_metadata.file_type().is_file()
         || path_metadata.uid() != current_uid()
