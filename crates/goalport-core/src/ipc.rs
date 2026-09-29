@@ -1904,7 +1904,7 @@ fn bind_unix_socket(
     path: &std::path::Path,
     tighten_managed: bool,
 ) -> Result<OwnedUnixSocket, IpcError> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::io::AsRawFd;
 
     validate_unix_socket_path_capacity(path)?;
@@ -1914,17 +1914,36 @@ fn bind_unix_socket(
         .create(true)
         .read(true)
         .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)
         .map_err(IpcError::Io)?;
+    let lock_metadata = lock.metadata()?;
+    if !lock_metadata.file_type().is_file()
+        || lock_metadata.uid() != current_uid()
+        || lock_metadata.nlink() != 1
+        || lock_metadata.permissions().mode() & 0o7777 != 0o600
     {
-        let mut perms = lock.metadata()?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&lock_path, perms)?;
+        return Err(IpcError::Invalid(
+            "Unix socket lock must be an owned, single-link 0o600 regular file".into(),
+        ));
     }
     let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if locked != 0 {
         return Err(IpcError::Invalid(
             "Unix socket endpoint is already owned; refusing to replace it".into(),
+        ));
+    }
+    let path_metadata = std::fs::symlink_metadata(&lock_path)?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.uid() != current_uid()
+        || path_metadata.nlink() != 1
+        || path_metadata.permissions().mode() & 0o7777 != 0o600
+        || path_metadata.dev() != lock_metadata.dev()
+        || path_metadata.ino() != lock_metadata.ino()
+    {
+        return Err(IpcError::Invalid(
+            "Unix socket lock path changed while acquiring ownership".into(),
         ));
     }
 

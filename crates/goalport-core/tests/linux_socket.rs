@@ -202,6 +202,71 @@ fn non_socket_endpoint_inodes_are_refused_and_preserved() {
 }
 
 #[test]
+fn lock_symlink_is_refused_without_changing_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let lock = PathBuf::from(format!("{}.lock", sock.display()));
+    let victim = dir.path().join("important-script");
+    std::fs::write(&victim, b"important contents").unwrap();
+    let mut permissions = std::fs::metadata(&victim).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&victim, permissions).unwrap();
+    symlink(&victim, &lock).unwrap();
+    let before = std::fs::metadata(&victim).unwrap();
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_unix_socket_at(&sock).is_err());
+    let after = std::fs::metadata(&victim).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.permissions().mode() & 0o777, 0o755);
+    assert_eq!(std::fs::read(&victim).unwrap(), b"important contents");
+    assert!(std::fs::symlink_metadata(&lock).unwrap().file_type().is_symlink());
+    assert!(!sock.exists());
+}
+
+#[test]
+fn existing_nonprivate_lock_is_refused_without_chmod() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let lock = PathBuf::from(format!("{}.lock", sock.display()));
+    std::fs::write(&lock, b"existing lock contents").unwrap();
+    let mut permissions = std::fs::metadata(&lock).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&lock, permissions).unwrap();
+    let before = std::fs::metadata(&lock).unwrap();
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_unix_socket_at(&sock).is_err());
+    let after = std::fs::metadata(&lock).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.permissions().mode() & 0o777, 0o755);
+    assert_eq!(std::fs::read(&lock).unwrap(), b"existing lock contents");
+    assert!(!sock.exists());
+}
+
+#[test]
+fn lock_hardlink_is_refused_without_changing_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("core.sock");
+    let lock = PathBuf::from(format!("{}.lock", sock.display()));
+    let victim = dir.path().join("important-file");
+    std::fs::write(&victim, b"important contents").unwrap();
+    std::fs::hard_link(&victim, &lock).unwrap();
+    let before = std::fs::metadata(&victim).unwrap();
+    assert_eq!(before.nlink(), 2);
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_unix_socket_at(&sock).is_err());
+    let after = std::fs::metadata(&victim).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.nlink(), 2);
+    assert_eq!(std::fs::read(&victim).unwrap(), b"important contents");
+    assert!(!sock.exists());
+}
+
+#[test]
 fn blackbox_serve_refuses_regular_file_without_changing_contents_or_inode() {
     let dir = tempfile::tempdir().unwrap();
     let pipe = dir.path().join("important.sock");
