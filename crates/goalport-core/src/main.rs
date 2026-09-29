@@ -59,11 +59,32 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn serve(args: &[String]) -> Result<(), String> {
-    let pipe = option(args, "--pipe").unwrap_or_else(|| "goalport-core-v1".into());
+    let pipe_arg = option(args, "--pipe").unwrap_or_else(|| "goalport-core-v1".into());
+    #[cfg(windows)]
+    let pipe = pipe_arg;
+    #[cfg(target_os = "linux")]
+    let resolved =
+        goalport_core::ipc::resolve_unix_socket(&pipe_arg).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let pipe = resolved.path.display().to_string();
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let pipe = pipe_arg;
     let db = PathBuf::from(option(args, "--db").unwrap_or_else(|| "goalport.sqlite".into()));
     let store = Store::open(&db).map_err(|error| error.to_string())?;
     let epoch = product_receipts::begin_startup_epoch(&store, &pipe, &db)?;
     let server = CoreServer::new(store.clone());
+
+    // Linux: bind and hold the socket BEFORE READY_COMMITTED so a failed bind
+    // (endpoint occupied) never leaves a launch-ready file advertising ready.
+    #[cfg(target_os = "linux")]
+    let owned = match server.bind_resolved_unix_socket(&resolved) {
+        Ok(owned) => owned,
+        Err(error) => {
+            let message = error.to_string();
+            return Err(abort_startup_after_failure(&store, &epoch, &db, message));
+        }
+    };
+
     let reconciled = (|| {
         let commands_unknown = server
             .reconcile_after_restart()
@@ -91,8 +112,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         Ok::<(), String>(())
     })();
     if let Err(error) = reconciled {
-        let _ = product_receipts::fail_startup_epoch(&store, &epoch, &error);
-        return Err(error);
+        return Err(abort_startup_after_failure(&store, &epoch, &db, error));
     }
     #[cfg(windows)]
     {
@@ -100,15 +120,37 @@ fn serve(args: &[String]) -> Result<(), String> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
-                let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
-                Err(message)
+                Err(abort_startup_after_failure(&store, &epoch, &db, message))
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = (pipe, server);
-        Err("serve requires Windows Named Pipe support".into())
+        match server.serve_owned_unix_socket(owned) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                Err(abort_startup_after_failure(&store, &epoch, &db, message))
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pipe;
+        let message = goalport_core::ipc::IpcError::UnixSocketUnsupported.to_string();
+        Err(abort_startup_after_failure(&store, &epoch, &db, message))
+    }
+}
+
+fn abort_startup_after_failure(
+    store: &Store,
+    epoch: &product_receipts::StartupEpochClaim,
+    db: &std::path::Path,
+    message: String,
+) -> String {
+    match product_receipts::fail_startup_epoch_clearing_ready(store, epoch, &message, Some(db)) {
+        Ok(()) => message,
+        Err(cleanup_error) => format!("{message}; startup cleanup failed: {cleanup_error}"),
     }
 }
 

@@ -360,6 +360,8 @@ pub enum IpcError {
     Store(#[from] StoreError),
     #[error("named pipes are unavailable on this platform")]
     UnsupportedPlatform,
+    #[error("local Unix socket Core serve is only supported on Linux")]
+    UnixSocketUnsupported,
     /// Security setup or verification of a named pipe failed. The message is
     /// bounded: it carries a fixed stage name and an OS code, never a SID,
     /// security descriptor or path.
@@ -735,6 +737,69 @@ impl CoreServer {
     #[cfg(not(windows))]
     pub fn serve_named_pipe_once(&self, _name: &str) -> Result<usize, IpcError> {
         Err(IpcError::UnsupportedPlatform)
+    }
+
+    /// Linux local socket. Named pipes stay unsupported. Peer uid must match;
+    /// a missing `SO_PEERCRED` fails closed. `endpoint` is resolved the same
+    /// way as serve receipts (`resolve_unix_socket`).
+    #[cfg(target_os = "linux")]
+    pub fn serve_unix_socket(&self, endpoint: &str) -> Result<(), IpcError> {
+        let resolved = resolve_unix_socket(endpoint)?;
+        let owned = self.bind_resolved_unix_socket(&resolved)?;
+        self.serve_owned_unix_socket(owned)
+    }
+
+    /// Bind and own a resolved Linux socket path (lock + listen) without
+    /// entering the accept loop. Production `serve` binds before writing
+    /// `READY_COMMITTED` so a failed bind never leaves a ready file behind.
+    #[cfg(target_os = "linux")]
+    pub fn bind_resolved_unix_socket(
+        &self,
+        resolved: &ResolvedUnixSocketPath,
+    ) -> Result<OwnedUnixSocket, IpcError> {
+        bind_unix_socket(&resolved.path, resolved.managed_runtime_parent)
+    }
+
+    /// Bind an explicit filesystem path. Does not chmod parents (explicit /
+    /// test paths). Prefer [`Self::bind_resolved_unix_socket`] for named
+    /// endpoints so the default managed runtime dir can be tightened.
+    #[cfg(target_os = "linux")]
+    pub fn bind_unix_socket_at(&self, path: &std::path::Path) -> Result<OwnedUnixSocket, IpcError> {
+        bind_unix_socket(path, false)
+    }
+
+    /// Accept-loop on an already-owned listener. The caller must have bound
+    /// successfully before advertising launch-ready.
+    #[cfg(target_os = "linux")]
+    pub fn serve_owned_unix_socket(&self, owned: OwnedUnixSocket) -> Result<(), IpcError> {
+        self.start_runtime_flusher();
+        loop {
+            let (mut stream, _) = owned.listener.accept().map_err(IpcError::Io)?;
+            if !unix_peer_uid_matches(&stream, current_uid())? {
+                continue;
+            }
+            let mut reader = stream.try_clone().map_err(IpcError::Io)?;
+            let _ = self.serve_stream(&mut reader, &mut stream);
+        }
+    }
+
+    /// Test and production seam: serve an already-resolved socket path.
+    /// Callers must pass an explicit path; tests must not mutate `HOME`.
+    /// Explicit paths do not chmod parents.
+    #[cfg(target_os = "linux")]
+    pub fn serve_unix_socket_at(&self, path: &std::path::Path) -> Result<(), IpcError> {
+        let owned = self.bind_unix_socket_at(path)?;
+        self.serve_owned_unix_socket(owned)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pub fn serve_unix_socket(&self, _endpoint: &str) -> Result<(), IpcError> {
+        Err(IpcError::UnixSocketUnsupported)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pub fn serve_unix_socket_at(&self, _path: &std::path::Path) -> Result<(), IpcError> {
+        Err(IpcError::UnixSocketUnsupported)
     }
 
     #[cfg(windows)]
@@ -1352,6 +1417,82 @@ mod tests {
     };
     use std::io::Cursor;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_lock_waits_for_a_brief_competing_opener() {
+        use std::os::fd::AsRawFd;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("first.sock.lock");
+        let creator = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let metadata = creator.metadata().unwrap();
+        let worker_path = path.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            acquire_or_remove_new_lock(&creator, &worker_path, &metadata, true, || {
+                observed_tx.send(()).unwrap()
+            })
+        });
+        observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!worker.is_finished(), "creator must wait while contender holds lock");
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_UN) }, 0);
+        worker.join().unwrap().unwrap();
+        assert!(path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timed_out_new_lock_removes_its_empty_path() {
+        use std::os::fd::AsRawFd;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("first.sock.lock");
+        let creator = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let metadata = creator.metadata().unwrap();
+        let worker_path = path.clone();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            acquire_or_remove_new_lock(&creator, &worker_path, &metadata, true, || {
+                observed_tx.send(()).unwrap()
+            })
+        });
+        observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("already owned"), "{error}");
+        assert!(!path.exists(), "timed-out creator must not strand an empty lock");
+        assert_eq!(unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_UN) }, 0);
+    }
+
     fn command() -> CoreCommand {
         CoreCommand::new(
             "cmd-1",
@@ -1584,4 +1725,698 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+/// Usable byte length for a Linux `sockaddr_un.sun_path` path.
+///
+/// On Linux, `sun_path` is typically 108 bytes **including** the terminating
+/// NUL, so the absolute socket path may be at most 107 bytes. This constant is
+/// conservative and matches `sizeof(((struct sockaddr_un *)0)->sun_path) - 1`.
+#[cfg(target_os = "linux")]
+pub const LINUX_UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+
+/// Hex length of the collision-resistant truncated sha256 endpoint suffix.
+#[cfg(target_os = "linux")]
+const ENDPOINT_NAME_HASH_HEX_LEN: usize = 16;
+
+/// Separator between the readable ASCII prefix and the stable hash suffix.
+#[cfg(target_os = "linux")]
+const ENDPOINT_NAME_HASH_SEP: &str = "--";
+
+/// Resolved Linux Core socket path plus whether the parent is the default
+/// managed runtime directory (`$HOME/.goalport/runtime`).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnixSocketPath {
+    pub path: std::path::PathBuf,
+    /// When true, bind may create the parent with mode `0700` and chmod it.
+    /// Explicit absolute endpoints leave this false so shared parents are not
+    /// mutated.
+    pub managed_runtime_parent: bool,
+}
+
+/// Resolve a Linux Core socket endpoint identity to a filesystem path.
+///
+/// - Absolute path → used as-is (no chmod of parents on bind).
+/// - Otherwise → `~/.goalport/runtime/<hashed-leaf>.sock` (managed parent).
+///
+/// Clients may still override with `GOALPORT_SOCK`; the server always binds
+/// the path resolved from `--pipe` (or an explicit path passed to
+/// [`CoreServer::serve_unix_socket_at`]).
+#[cfg(target_os = "linux")]
+pub fn resolve_unix_socket_path(endpoint: &str) -> Result<std::path::PathBuf, IpcError> {
+    Ok(resolve_unix_socket(endpoint)?.path)
+}
+
+/// Resolve a Linux socket endpoint, including whether the parent is managed.
+#[cfg(target_os = "linux")]
+pub fn resolve_unix_socket(endpoint: &str) -> Result<ResolvedUnixSocketPath, IpcError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(IpcError::Invalid("Unix socket endpoint is empty".into()));
+    }
+    let path = std::path::Path::new(endpoint);
+    if path.is_absolute() {
+        validate_unix_socket_path_capacity(path)?;
+        return Ok(ResolvedUnixSocketPath {
+            path: path.to_path_buf(),
+            managed_runtime_parent: false,
+        });
+    }
+    let home = std::env::var("HOME").map_err(|_| IpcError::Invalid("HOME is required".into()))?;
+    resolve_named_unix_socket(std::path::Path::new(&home), endpoint)
+}
+
+/// Test seam: resolve a named (non-absolute) endpoint under an explicit home
+/// without mutating the process `HOME` environment variable.
+#[cfg(target_os = "linux")]
+pub fn resolve_named_unix_socket(
+    home: &std::path::Path,
+    endpoint: &str,
+) -> Result<ResolvedUnixSocketPath, IpcError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(IpcError::Invalid("Unix socket endpoint is empty".into()));
+    }
+    if std::path::Path::new(endpoint).is_absolute() {
+        return Err(IpcError::Invalid(
+            "resolve_named_unix_socket requires a non-absolute endpoint".into(),
+        ));
+    }
+    let dir = home.join(".goalport").join("runtime");
+    let leaf = endpoint_socket_leaf_name(endpoint, &dir)?;
+    let path = dir.join(leaf);
+    validate_unix_socket_path_capacity(&path)?;
+    Ok(ResolvedUnixSocketPath {
+        path,
+        managed_runtime_parent: true,
+    })
+}
+
+/// Build the collision-resistant sock leaf name (`{ascii-prefix}--{sha256[:16]}.sock`).
+///
+/// The prefix is ASCII-only (`is_ascii_alphanumeric` or `-_."); other code
+/// points become `_`. The hash is over the original endpoint UTF-8 bytes so
+/// `a/b` and `a?b` never collide even when prefixes match. The prefix is
+/// shortened only enough for the full absolute path to fit
+/// [`LINUX_UNIX_SOCKET_PATH_MAX_BYTES`]; exceeding capacity is an error.
+#[cfg(target_os = "linux")]
+pub fn endpoint_socket_leaf_name(
+    endpoint: &str,
+    parent_dir: &std::path::Path,
+) -> Result<String, IpcError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+
+    let digest = Sha256::digest(endpoint.as_bytes());
+    let hash = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let hash = &hash[..ENDPOINT_NAME_HASH_HEX_LEN];
+    let suffix = format!("{ENDPOINT_NAME_HASH_SEP}{hash}.sock");
+    let parent_len = parent_dir.as_os_str().as_bytes().len().saturating_add(1);
+    let max_leaf = LINUX_UNIX_SOCKET_PATH_MAX_BYTES.saturating_sub(parent_len);
+    if suffix.len() > max_leaf {
+        return Err(IpcError::Invalid(format!(
+            "Unix socket path would exceed Linux sun_path capacity ({LINUX_UNIX_SOCKET_PATH_MAX_BYTES} bytes)"
+        )));
+    }
+    let max_prefix = max_leaf - suffix.len();
+    let mut prefix: String = endpoint
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if prefix.is_empty() {
+        prefix.push_str("endpoint");
+    }
+    if prefix.len() > max_prefix {
+        prefix.truncate(max_prefix);
+    }
+    Ok(format!("{prefix}{suffix}"))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_unix_socket_path_capacity(path: &std::path::Path) -> Result<(), IpcError> {
+    use std::os::unix::ffi::OsStrExt;
+    let len = path.as_os_str().as_bytes().len();
+    if len > LINUX_UNIX_SOCKET_PATH_MAX_BYTES {
+        return Err(IpcError::Invalid(format!(
+            "Unix socket path is {len} bytes; Linux sun_path capacity is {LINUX_UNIX_SOCKET_PATH_MAX_BYTES} bytes"
+        )));
+    }
+    if len == 0 {
+        return Err(IpcError::Invalid("Unix socket path is empty".into()));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_owner_umask_bits() -> Result<(), IpcError> {
+    let status = std::fs::read_to_string("/proc/thread-self/status")?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .ok_or_else(|| IpcError::Invalid("Linux thread umask is unavailable".into()))?;
+    let mask = u32::from_str_radix(value.trim(), 8)
+        .map_err(|_| IpcError::Invalid("Linux thread umask is invalid".into()))?;
+    if mask & 0o700 != 0 {
+        return Err(IpcError::Invalid(
+            "Unix socket startup requires a umask that preserves owner permissions".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn adjacent_lock_path(socket: &std::path::Path) -> std::path::PathBuf {
+    let mut lock = socket.as_os_str().to_owned();
+    lock.push(".lock");
+    std::path::PathBuf::from(lock)
+}
+
+/// Open or create one managed directory component without following a symlink.
+#[cfg(target_os = "linux")]
+fn open_or_create_managed_dir_at(
+    parent: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> Result<std::fs::File, IpcError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if raw < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+        let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+        if created != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(IpcError::Io(error));
+            }
+        }
+        raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    }
+    if raw < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+            return Err(IpcError::Invalid(
+                "managed Unix socket directory component must not be a symlink".into(),
+            ));
+        }
+        return Err(IpcError::Io(error));
+    }
+    let directory = unsafe { std::fs::File::from_raw_fd(raw) };
+    if directory.metadata()?.uid() != current_uid() {
+        return Err(IpcError::Invalid(
+            "managed Unix socket directory must be owned by the current user".into(),
+        ));
+    }
+    Ok(directory)
+}
+
+/// Ensure the socket parent directory exists. Managed components are opened
+/// relative to directory fds with `O_NOFOLLOW`; only the owned runtime fd is
+/// chmodded. Explicit absolute paths never chmod an existing parent.
+#[cfg(target_os = "linux")]
+fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result<(), IpcError> {
+    use std::os::fd::AsRawFd;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if tighten_managed {
+        let managed_root = parent.parent().ok_or_else(|| {
+            IpcError::Invalid("managed Unix socket path has no .goalport parent".into())
+        })?;
+        if parent.file_name() != Some(std::ffi::OsStr::new("runtime"))
+            || managed_root.file_name() != Some(std::ffi::OsStr::new(".goalport"))
+        {
+            return Err(IpcError::Invalid(
+                "managed Unix socket path must end in .goalport/runtime".into(),
+            ));
+        }
+        let home = managed_root.parent().ok_or_else(|| {
+            IpcError::Invalid("managed Unix socket path has no home directory".into())
+        })?;
+        let home_dir = std::fs::File::open(home)?;
+        let managed = open_or_create_managed_dir_at(
+            &home_dir,
+            std::ffi::CStr::from_bytes_with_nul(b".goalport\0").expect("static component"),
+        )?;
+        let runtime = open_or_create_managed_dir_at(
+            &managed,
+            std::ffi::CStr::from_bytes_with_nul(b"runtime\0").expect("static component"),
+        )?;
+        if unsafe { libc::fchmod(runtime.as_raw_fd(), 0o700) } != 0 {
+            return Err(IpcError::Io(io::Error::last_os_error()));
+        }
+    } else if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+/// Exclusive ownership of a Linux Unix-socket endpoint for the server lifetime.
+/// The flock on `_lock` is held until this value is dropped; the sock file is
+/// not unlinked on drop (marked stale files are recovered on the next bind).
+#[cfg(target_os = "linux")]
+pub struct OwnedUnixSocket {
+    _lock: std::fs::File,
+    listener: std::os::unix::net::UnixListener,
+}
+
+#[cfg(target_os = "linux")]
+const UNIX_SOCKET_LOCK_MAGIC: &str = "goalport-unix-socket-lock-v1";
+
+#[cfg(target_os = "linux")]
+fn unix_socket_lock_marker(
+    path: &std::path::Path,
+    socket: Option<&std::fs::Metadata>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let digest = Sha256::digest(path.as_os_str().as_bytes());
+    let (dev, ino, ctime, ctime_nsec) = socket
+        .map(|metadata| {
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        })
+        .unwrap_or((0, 0, 0, 0));
+    format!("{UNIX_SOCKET_LOCK_MAGIC} {digest:x} {dev} {ino} {ctime} {ctime_nsec}\n")
+}
+
+#[cfg(target_os = "linux")]
+fn valid_unix_socket_lock_marker(path: &std::path::Path, marker: &str) -> bool {
+    let unclaimed = unix_socket_lock_marker(path, None);
+    let parts = marker.split_whitespace().collect::<Vec<_>>();
+    let expected = unclaimed.split_whitespace().collect::<Vec<_>>();
+    parts.len() == 6
+        && parts[0] == expected[0]
+        && parts[1] == expected[1]
+        && parts[2].parse::<u64>().is_ok()
+        && parts[3].parse::<u64>().is_ok()
+        && parts[4].parse::<i64>().is_ok()
+        && parts[5].parse::<i64>().is_ok()
+        && marker.ends_with('\n')
+}
+
+#[cfg(target_os = "linux")]
+fn write_unix_socket_lock_marker(lock: &mut std::fs::File, marker: &str) -> Result<(), IpcError> {
+    use std::io::{Seek, SeekFrom};
+
+    lock.seek(SeekFrom::Start(0))?;
+    lock.write_all(marker.as_bytes())?;
+    lock.set_len(marker.len() as u64)?;
+    lock.sync_all()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_matching_bound_socket(
+    path: &std::path::Path,
+    expected: &std::fs::Metadata,
+) -> Result<(), IpcError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let actual = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(IpcError::Io(error)),
+    };
+    if !actual.file_type().is_socket()
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+        || actual.ctime() != expected.ctime()
+        || actual.ctime_nsec() != expected.ctime_nsec()
+    {
+        return Err(IpcError::Invalid(
+            "new Unix socket path changed before cleanup; refusing to unlink it".into(),
+        ));
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_matching_lock(
+    path: &std::path::Path,
+    expected: &std::fs::Metadata,
+) -> Result<(), IpcError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let actual = std::fs::symlink_metadata(path)?;
+    if !actual.file_type().is_file()
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+    {
+        return Err(IpcError::Invalid(
+            "Unix socket lock path changed before cleanup; refusing to unlink it".into(),
+        ));
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Linux copies the socket fd's mode (masked by the current umask) when it
+/// creates a pathname socket. Restrict the fd before bind so no process-wide
+/// umask change or briefly accessible pathname is needed.
+#[cfg(target_os = "linux")]
+fn bind_restricted_unix_listener(
+    path: &std::path::Path,
+) -> Result<(std::os::unix::net::UnixListener, std::fs::Metadata), IpcError> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    validate_unix_socket_path_capacity(path)?;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(IpcError::Invalid("Unix socket path contains NUL".into()));
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if raw < 0 {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::fchmod(fd.as_raw_fd(), 0o600) } != 0 {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+        as libc::socklen_t;
+    if unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            &address as *const _ as *const libc::sockaddr,
+            address_len,
+        )
+    } != 0
+    {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+    let bound_metadata = std::fs::symlink_metadata(path)?;
+    if unsafe { libc::listen(fd.as_raw_fd(), 128) } != 0 {
+        let listen_error = IpcError::Io(io::Error::last_os_error());
+        drop(fd);
+        remove_matching_bound_socket(path, &bound_metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket listen failed ({listen_error}); socket cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        return Err(listen_error);
+    }
+    Ok((std::os::unix::net::UnixListener::from(fd), bound_metadata))
+}
+
+#[cfg(target_os = "linux")]
+fn acquire_unix_endpoint_lock(
+    lock: &std::fs::File,
+    created: bool,
+    on_contention: impl FnOnce(),
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::time::Instant;
+
+    // A second starter can open a just-created lock before its creator flocks
+    // it. Give that reader time to reject the still-empty marker and release.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut on_contention = Some(on_contention);
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if !created || error.kind() != io::ErrorKind::WouldBlock || Instant::now() >= deadline {
+            return Err(error);
+        }
+        if let Some(callback) = on_contention.take() {
+            callback();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn acquire_or_remove_new_lock(
+    lock: &std::fs::File,
+    lock_path: &std::path::Path,
+    lock_metadata: &std::fs::Metadata,
+    created: bool,
+    on_contention: impl FnOnce(),
+) -> Result<(), IpcError> {
+    if let Err(error) = acquire_unix_endpoint_lock(lock, created, on_contention) {
+        if created {
+            remove_matching_lock(lock_path, lock_metadata).map_err(|cleanup_error| {
+                IpcError::Invalid(format!(
+                    "Unix socket lock acquisition failed ({error}); lock cleanup failed ({cleanup_error})"
+                ))
+            })?;
+        }
+        return Err(IpcError::Invalid(format!(
+            "Unix socket endpoint is already owned; refusing to replace it ({error})"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bind_unix_socket(
+    path: &std::path::Path,
+    tighten_managed: bool,
+) -> Result<OwnedUnixSocket, IpcError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    validate_unix_socket_path_capacity(path)?;
+    require_owner_umask_bits()?;
+    ensure_socket_parent(path, tighten_managed)?;
+    let lock_path = adjacent_lock_path(path);
+    let (mut lock, created) = match std::fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)
+    {
+        Ok(lock) => (lock, true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&lock_path)?,
+            false,
+        ),
+        Err(error) => return Err(IpcError::Io(error)),
+    };
+    let lock_metadata = lock.metadata()?;
+    if !lock_metadata.file_type().is_file()
+        || lock_metadata.uid() != current_uid()
+        || lock_metadata.nlink() != 1
+        || lock_metadata.permissions().mode() & 0o7777 != 0o600
+    {
+        return Err(IpcError::Invalid(
+            "Unix socket lock must be an owned, single-link 0o600 regular file".into(),
+        ));
+    }
+    acquire_or_remove_new_lock(&lock, &lock_path, &lock_metadata, created, || {})?;
+    let path_metadata = std::fs::symlink_metadata(&lock_path)?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.uid() != current_uid()
+        || path_metadata.nlink() != 1
+        || path_metadata.permissions().mode() & 0o7777 != 0o600
+        || path_metadata.dev() != lock_metadata.dev()
+        || path_metadata.ino() != lock_metadata.ino()
+    {
+        return Err(IpcError::Invalid(
+            "Unix socket lock path changed while acquiring ownership".into(),
+        ));
+    }
+    let marker = if created {
+        let marker = unix_socket_lock_marker(path, None);
+        let initial_write = if std::env::var("GOALPORT_REQUIRE_ISOLATED").ok().as_deref()
+            == Some("1")
+            && std::env::var("GOALPORT_TEST_SOCKET_MARKER_FAILURE")
+                .ok()
+                .as_deref()
+                == Some("initial")
+        {
+            write_unix_socket_lock_marker(&mut lock, "partial-marker\n").and_then(|_| {
+                Err(IpcError::Invalid(
+                    "injected initial Unix socket marker failure".into(),
+                ))
+            })
+        } else {
+            write_unix_socket_lock_marker(&mut lock, &marker)
+        };
+        if let Err(marker_error) = initial_write {
+            remove_matching_lock(&lock_path, &lock_metadata).map_err(|cleanup_error| {
+                IpcError::Invalid(format!(
+                    "initial Unix socket marker failed ({marker_error}); lock cleanup failed ({cleanup_error})"
+                ))
+            })?;
+            return Err(marker_error);
+        }
+        marker
+    } else {
+        if lock.metadata()?.len() > 256 {
+            return Err(IpcError::Invalid(
+                "Unix socket lock has no valid GoalPort ownership marker".into(),
+            ));
+        }
+        use std::io::{Seek, SeekFrom};
+        lock.seek(SeekFrom::Start(0))?;
+        let mut marker = String::new();
+        lock.read_to_string(&mut marker)?;
+        if !valid_unix_socket_lock_marker(path, &marker) {
+            return Err(IpcError::Invalid(
+                "Unix socket lock has no valid GoalPort ownership marker".into(),
+            ));
+        }
+        marker
+    };
+
+    // Only an ECONNREFUSED socket with the exact inode recorded by a prior
+    // GoalPort bind may be reclaimed. A failed stream connect alone cannot
+    // distinguish stale streams from live datagram or seqpacket endpoints.
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(stream) => {
+            if unix_peer_uid_matches(&stream, current_uid())? {
+                return Err(IpcError::Invalid(
+                    "Unix socket is already served by this user; refusing to replace it".into(),
+                ));
+            }
+            return Err(IpcError::Invalid(
+                "Unix socket is already served; refusing to replace it".into(),
+            ));
+        }
+        Err(connect_error) => match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                if connect_error.raw_os_error() != Some(libc::ECONNREFUSED)
+                    || marker != unix_socket_lock_marker(path, Some(&metadata))
+                {
+                    return Err(IpcError::Invalid(
+                        "Unix socket endpoint is not a proven stale GoalPort stream; refusing to replace it"
+                            .into(),
+                    ));
+                }
+                std::fs::remove_file(path)?;
+            }
+            Ok(_) => {
+                return Err(IpcError::Invalid(
+                    "Unix socket endpoint exists but is not a Unix socket; refusing to replace it"
+                        .into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(IpcError::Io(error)),
+        },
+    }
+
+    let (listener, bound_metadata) = bind_restricted_unix_listener(path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(listener);
+            remove_matching_bound_socket(path, &bound_metadata)?;
+            return Err(IpcError::Io(error));
+        }
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    let is_bound_inode = metadata.file_type().is_socket()
+        && metadata.dev() == bound_metadata.dev()
+        && metadata.ino() == bound_metadata.ino()
+        && metadata.ctime() == bound_metadata.ctime()
+        && metadata.ctime_nsec() == bound_metadata.ctime_nsec();
+    if !is_bound_inode || mode != 0o600 {
+        drop(listener);
+        if is_bound_inode {
+            remove_matching_bound_socket(path, &bound_metadata)?;
+        }
+        return Err(IpcError::Invalid(format!(
+            "Unix socket endpoint is not the newly bound 0o600 socket (mode {mode:#o})"
+        )));
+    }
+    let persist_marker = if std::env::var("GOALPORT_REQUIRE_ISOLATED").ok().as_deref() == Some("1")
+        && std::env::var("GOALPORT_TEST_SOCKET_MARKER_FAILURE")
+            .ok()
+            .as_deref()
+            == Some("after-bind")
+    {
+        // Leave invalid marker bytes before the injected error so the test
+        // proves cleanup handles a partially published lock record.
+        write_unix_socket_lock_marker(&mut lock, "partial-marker\n").and_then(|_| {
+            Err(IpcError::Invalid(
+                "injected post-bind Unix socket marker failure".into(),
+            ))
+        })
+    } else {
+        write_unix_socket_lock_marker(&mut lock, &unix_socket_lock_marker(path, Some(&metadata)))
+    };
+    if let Err(marker_error) = persist_marker {
+        drop(listener);
+        remove_matching_bound_socket(path, &metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket marker persistence failed ({marker_error}); socket cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        remove_matching_lock(&lock_path, &lock_metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket marker persistence failed ({marker_error}); lock cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        return Err(marker_error);
+    }
+    Ok(OwnedUnixSocket {
+        _lock: lock,
+        listener,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn unix_peer_uid_matches(
+    stream: &std::os::unix::net::UnixStream,
+    expected: u32,
+) -> Result<bool, IpcError> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(IpcError::Invalid(
+            "SO_PEERCRED unavailable; refusing connection".into(),
+        ));
+    }
+    Ok(cred.uid == expected)
 }
