@@ -494,6 +494,18 @@ pub fn fail_startup_epoch(
     claim: &StartupEpochClaim,
     reason: &str,
 ) -> Result<(), String> {
+    fail_startup_epoch_clearing_ready(store, claim, reason, None)
+}
+
+/// Abort a launch epoch in the store and, when `db` is provided, remove any
+/// on-disk `.launch-ready` file so a failed serve cannot leave
+/// `READY_COMMITTED` visible to launchers.
+pub fn fail_startup_epoch_clearing_ready(
+    store: &Store,
+    claim: &StartupEpochClaim,
+    reason: &str,
+    db: Option<&Path>,
+) -> Result<(), String> {
     let abort = json!({"status":"aborted","reason":reason,"atUtc":store::utc_now_iso()});
     let startup = store
         .get_product_receipt_by_id(&format!("startup:{}", claim.launch_nonce))
@@ -520,7 +532,28 @@ pub fn fail_startup_epoch(
             startup.as_ref(),
             ready.as_ref(),
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Some(db) = db {
+        let ready_path = launch_ready_path(db);
+        if ready_path.exists() {
+            let aborted = json!({
+                "kind": "launch-ready",
+                "readyState": "ABORTED",
+                "launchNonce": claim.launch_nonce,
+                "coreEpochId": claim.epoch_id,
+                "abort": abort,
+            });
+            match serde_json::to_vec_pretty(&aborted) {
+                Ok(bytes) => {
+                    let _ = replace_with_synced(&ready_path, &bytes);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&ready_path);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

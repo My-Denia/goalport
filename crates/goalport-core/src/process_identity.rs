@@ -73,15 +73,7 @@ pub fn observe_process(pid: u32) -> ProcessObservation {
     }
     #[cfg(target_os = "linux")]
     {
-        if pid == std::process::id() {
-            ProcessObservation::Live(current_identity())
-        } else if Path::new(&format!("/proc/{pid}")).is_dir() {
-            ProcessObservation::Unknown(
-                "Linux /proc shows the pid, but executable identity is not proven".into(),
-            )
-        } else {
-            ProcessObservation::NotRunning
-        }
+        linux_observe_process(pid)
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -90,6 +82,48 @@ pub fn observe_process(pid: u32) -> ProcessObservation {
             "process observation is not implemented on this platform".into(),
         )
     }
+}
+
+/// Classify a Linux `kill(pid, 0)` probe result without treating observation
+/// failure as proof the process ended.
+///
+/// - `Ok(())` (rc == 0): process exists; executable identity is still unproven → `Unknown`
+/// - `Err(ESRCH)`: clearly nonexistent → `NotRunning`
+/// - `Err(EPERM)` / other errno: observation failure → `Unknown` (fail-closed)
+#[cfg(target_os = "linux")]
+pub fn classify_linux_kill0_result(pid: u32, result: Result<(), i32>) -> ProcessObservation {
+    match result {
+        Ok(()) => ProcessObservation::Unknown(format!(
+            "Linux process {pid} exists (kill 0), but executable identity is not proven"
+        )),
+        Err(errno) if errno == libc::ESRCH => ProcessObservation::NotRunning,
+        Err(errno) if errno == libc::EPERM => ProcessObservation::Unknown(format!(
+            "Linux kill(0) EPERM for pid {pid}; refusing to treat as NotRunning"
+        )),
+        Err(errno) => ProcessObservation::Unknown(format!(
+            "Linux kill(0) failed for pid {pid} with errno {errno}"
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_observe_process(pid: u32) -> ProcessObservation {
+    if pid == 0 {
+        return ProcessObservation::Unknown("pid 0 is not observable".into());
+    }
+    if pid == std::process::id() {
+        return ProcessObservation::Live(current_identity());
+    }
+    // kill(pid, 0) probes existence without delivering a signal.
+    // ESRCH → NotRunning; EPERM / other errno / IO → Unknown (observation
+    // failure must not gate prior-Core as Ended). A zero return only proves
+    // the pid exists, not executable identity — keep Unknown.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return classify_linux_kill0_result(pid, Ok(()));
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+    classify_linux_kill0_result(pid, Err(errno))
 }
 
 pub fn display_path(path: &Path) -> String {

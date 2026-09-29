@@ -106,7 +106,7 @@ jobs:
           export HOME="$WORK"
           PIPE="ci-linux-sock-$$"
           DB="$WORK/core.sqlite"
-          SOCK="$HOME/.goalport/runtime/${PIPE}.sock"
+          SOCK="$(python3 "$ROOT/scripts/connected/unix-client.py" --resolve-only "$PIPE")"
           NONCE="ci-linux-$(date +%s%N)"
           env -u GOALPORT_SOCK \
             GOALPORT_REQUIRE_ISOLATED=1 \

@@ -1,8 +1,13 @@
 #![cfg(target_os = "linux")]
 
-use goalport_core::ipc::resolve_unix_socket_path;
+use goalport_core::ipc::{
+    LINUX_UNIX_SOCKET_PATH_MAX_BYTES, ResolvedUnixSocketPath, endpoint_socket_leaf_name,
+    resolve_named_unix_socket, resolve_unix_socket_path,
+};
+use goalport_core::process_identity::{ProcessObservation, classify_linux_kill0_result};
 use goalport_core::{CoreServer, IpcError, Store};
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -49,6 +54,59 @@ fn unique_sock(label: &str) -> PathBuf {
 fn spawn_server_at(path: PathBuf) -> std::thread::JoinHandle<Result<(), IpcError>> {
     let server = CoreServer::new(Store::open_in_memory().unwrap());
     std::thread::spawn(move || server.serve_unix_socket_at(&path))
+}
+
+fn python_resolve(home: &Path, endpoint: &str) -> String {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/connected/unix-client.py");
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("--resolve-only")
+        .arg(endpoint)
+        .env("HOME", home)
+        .env_remove("GOALPORT_SOCK")
+        .env_remove("GOALPORT_PIPE")
+        .output()
+        .expect("python resolve");
+    assert!(
+        output.status.success(),
+        "python resolve failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> SpawnedCore {
+    let core = env!("CARGO_BIN_EXE_goalport-core");
+    let child = Command::new(core)
+        .args(["serve", "--pipe", pipe, "--db"])
+        .arg(db)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GOALPORT_REQUIRE_ISOLATED", "1")
+        .env("GOALPORT_LAUNCH_NONCE", nonce)
+        .env("GOALPORT_RUN_SLUG", "goalport-linux-socket-bb")
+        .env("GOALPORT_ELECTRON_PID", std::process::id().to_string())
+        .env("GOALPORT_ELECTRON_CREATED_MS", "1")
+        .env("GOALPORT_ELECTRON_EXE", "linux-socket-bb")
+        .env("GOALPORT_ELECTRON_SHA256", "test-only")
+        .env("GOALPORT_LAUNCHER_PID", std::process::id().to_string())
+        .env("GOALPORT_LAUNCHER_CREATED_MS", "1")
+        .env("GOALPORT_LAUNCHER_EXE", "linux-socket-bb")
+        .env("GOALPORT_LAUNCHER_SHA256", "test-only")
+        .env(
+            "GOALPORT_LAUNCHER_PARENT_PID",
+            std::process::id().to_string(),
+        )
+        .env("GOALPORT_LAUNCH_REQUESTED_AT", "2026-09-29T00:00:00.000Z")
+        .env("GOALPORT_LAUNCHER_STARTED_AT", "2026-09-29T00:00:00.001Z")
+        .env("GOALPORT_CORE_SPAWNED_AT", "2026-09-29T00:00:00.002Z")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    SpawnedCore(child)
 }
 
 #[test]
@@ -137,20 +195,182 @@ fn distinct_endpoints_coexist() {
 }
 
 #[test]
-fn resolve_sanitizes_named_endpoints_under_runtime() {
-    let path = resolve_unix_socket_path("goalport-core-v1").unwrap();
+fn resolve_uses_injective_leaf_under_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    let resolved = resolve_named_unix_socket(home.path(), "goalport-core-v1").unwrap();
+    assert!(resolved.managed_runtime_parent);
+    let leaf = resolved
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     assert!(
-        path.ends_with("goalport-core-v1.sock"),
-        "{}",
-        path.display()
+        leaf.starts_with("goalport-core-v1--") && leaf.ends_with(".sock"),
+        "{leaf}"
     );
     assert!(
-        path.to_string_lossy().contains(".goalport/runtime/"),
+        resolved
+            .path
+            .starts_with(home.path().join(".goalport").join("runtime")),
         "{}",
-        path.display()
+        resolved.path.display()
     );
     let abs = resolve_unix_socket_path("/tmp/explicit.sock").unwrap();
     assert_eq!(abs, PathBuf::from("/tmp/explicit.sock"));
+}
+
+#[test]
+fn injective_mapping_separates_slash_and_question() {
+    let parent = PathBuf::from("/home/user/.goalport/runtime");
+    let a = endpoint_socket_leaf_name("a/b", &parent).unwrap();
+    let b = endpoint_socket_leaf_name("a?b", &parent).unwrap();
+    assert_ne!(a, b);
+    assert!(a.starts_with("a_b--"));
+    assert!(b.starts_with("a_b--"));
+}
+
+#[test]
+fn unicode_endpoint_rust_and_python_agree() {
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = "café";
+    let rust = resolve_named_unix_socket(home.path(), endpoint).unwrap();
+    let py = python_resolve(home.path(), endpoint);
+    assert_eq!(rust.path.display().to_string(), py);
+    let leaf = rust.path.file_name().unwrap().to_string_lossy();
+    assert!(leaf.starts_with("caf_--"), "{leaf}");
+}
+
+#[test]
+fn long_endpoint_fits_or_rejects_without_silent_collision() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".goalport").join("runtime");
+    let short = "ok-endpoint";
+    let leaf = endpoint_socket_leaf_name(short, &dir).unwrap();
+    let path = dir.join(&leaf);
+    assert!(path.as_os_str().as_bytes().len() <= LINUX_UNIX_SOCKET_PATH_MAX_BYTES);
+
+    let long = "x".repeat(300);
+    let long_leaf = endpoint_socket_leaf_name(&long, &dir).unwrap();
+    let long_path = dir.join(&long_leaf);
+    assert!(long_path.as_os_str().as_bytes().len() <= LINUX_UNIX_SOCKET_PATH_MAX_BYTES);
+    // Distinct originals must not collapse to the same leaf.
+    let other = format!("{long}y");
+    let other_leaf = endpoint_socket_leaf_name(&other, &dir).unwrap();
+    assert_ne!(long_leaf, other_leaf);
+
+    // Absolute path over capacity is rejected (no silent truncate).
+    let oversized = format!("/{}", "p".repeat(LINUX_UNIX_SOCKET_PATH_MAX_BYTES));
+    assert!(oversized.as_bytes().len() > LINUX_UNIX_SOCKET_PATH_MAX_BYTES);
+    let err = resolve_unix_socket_path(&oversized).unwrap_err();
+    assert!(err.to_string().contains("sun_path capacity"), "{err}");
+}
+
+#[test]
+fn explicit_absolute_goalport_parent_perms_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root
+        .path()
+        .join("srv")
+        .join("shared")
+        .join(".goalport")
+        .join("runtime");
+    std::fs::create_dir_all(&parent).unwrap();
+    let mut perms = std::fs::metadata(&parent).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&parent, perms).unwrap();
+    let mode_before = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+
+    let sock = parent.join("core.sock");
+    let resolved = ResolvedUnixSocketPath {
+        path: sock.clone(),
+        managed_runtime_parent: false,
+    };
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    let owned = server.bind_resolved_unix_socket(&resolved).unwrap();
+    let mode_after = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode_before, mode_after,
+        "explicit .goalport parent must not be chmod'd"
+    );
+    assert!(sock.exists());
+    drop(owned);
+}
+
+#[test]
+fn occupied_endpoint_does_not_leave_ready_committed() {
+    let home = tempfile::tempdir().unwrap();
+    let pipe = format!("occupy-{}-{}", std::process::id(), unique_suffix());
+    let db1 = home.path().join("first.sqlite");
+    let db2 = home.path().join("second.sqlite");
+    let nonce1 = format!("occupy-first-{}", unique_suffix());
+    let nonce2 = format!("occupy-second-{}", unique_suffix());
+    let sock = resolve_named_unix_socket(home.path(), &pipe).unwrap().path;
+
+    let mut first = spawn_core_binary(home.path(), &pipe, &db1, &nonce1);
+    let ready1 = PathBuf::from(format!("{}.launch-ready", db1.display()));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&ready1) {
+            if text.contains(&nonce1) && text.contains("READY_COMMITTED") {
+                break;
+            }
+        }
+        if let Some(status) = first.0.try_wait().unwrap() {
+            panic!("first Core exited before ready: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "first Core did not write launch-ready"
+        );
+        std::thread::yield_now();
+    }
+    assert!(wait_until(|| sock.exists()));
+
+    let mut second = spawn_core_binary(home.path(), &pipe, &db2, &nonce2);
+    let ready2 = PathBuf::from(format!("{}.launch-ready", db2.display()));
+    let exit_deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = second.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "second Core should exit after bind refusal"
+        );
+        std::thread::yield_now();
+    };
+    assert!(
+        !status.success(),
+        "second Core must fail when endpoint occupied"
+    );
+    if ready2.exists() {
+        let text = std::fs::read_to_string(&ready2).unwrap();
+        assert!(
+            !text.contains("READY_COMMITTED"),
+            "occupied bind must not leave READY_COMMITTED: {text}"
+        );
+    }
+}
+
+#[test]
+fn linux_kill0_classification_fail_closed() {
+    assert!(matches!(
+        classify_linux_kill0_result(42, Ok(())),
+        ProcessObservation::Unknown(_)
+    ));
+    assert_eq!(
+        classify_linux_kill0_result(42, Err(libc::ESRCH)),
+        ProcessObservation::NotRunning
+    );
+    assert!(matches!(
+        classify_linux_kill0_result(42, Err(libc::EPERM)),
+        ProcessObservation::Unknown(_)
+    ));
+    assert!(matches!(
+        classify_linux_kill0_result(42, Err(libc::EIO)),
+        ProcessObservation::Unknown(_)
+    ));
 }
 
 struct SpawnedCore(Child);
@@ -168,45 +388,12 @@ impl Drop for SpawnedCore {
 /// request over the Unix socket. This is not a CoreServer-internal call.
 #[test]
 fn blackbox_serve_binary_round_trip() {
-    let core = env!("CARGO_BIN_EXE_goalport-core");
     let dir = tempfile::tempdir().unwrap();
     let pipe = format!("bb-{}-{}", std::process::id(), unique_suffix());
     let db = dir.path().join("core.sqlite");
-    let sock = dir
-        .path()
-        .join(".goalport")
-        .join("runtime")
-        .join(format!("{pipe}.sock"));
+    let sock = resolve_named_unix_socket(dir.path(), &pipe).unwrap().path;
     let nonce = format!("linux-bb-{}", unique_suffix());
-    let child = Command::new(core)
-        .args(["serve", "--pipe", &pipe, "--db"])
-        .arg(&db)
-        .env_clear()
-        .env("HOME", dir.path())
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("GOALPORT_REQUIRE_ISOLATED", "1")
-        .env("GOALPORT_LAUNCH_NONCE", &nonce)
-        .env("GOALPORT_RUN_SLUG", "goalport-linux-socket-bb")
-        .env("GOALPORT_ELECTRON_PID", std::process::id().to_string())
-        .env("GOALPORT_ELECTRON_CREATED_MS", "1")
-        .env("GOALPORT_ELECTRON_EXE", "linux-socket-bb")
-        .env("GOALPORT_ELECTRON_SHA256", "test-only")
-        .env("GOALPORT_LAUNCHER_PID", std::process::id().to_string())
-        .env("GOALPORT_LAUNCHER_CREATED_MS", "1")
-        .env("GOALPORT_LAUNCHER_EXE", "linux-socket-bb")
-        .env("GOALPORT_LAUNCHER_SHA256", "test-only")
-        .env(
-            "GOALPORT_LAUNCHER_PARENT_PID",
-            std::process::id().to_string(),
-        )
-        .env("GOALPORT_LAUNCH_REQUESTED_AT", "2026-09-29T00:00:00.000Z")
-        .env("GOALPORT_LAUNCHER_STARTED_AT", "2026-09-29T00:00:00.001Z")
-        .env("GOALPORT_CORE_SPAWNED_AT", "2026-09-29T00:00:00.002Z")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let mut core = SpawnedCore(child);
+    let mut core = spawn_core_binary(dir.path(), &pipe, &db, &nonce);
     let ready = PathBuf::from(format!("{}.launch-ready", db.display()));
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {

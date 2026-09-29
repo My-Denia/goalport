@@ -63,16 +63,34 @@ fn serve(args: &[String]) -> Result<(), String> {
     #[cfg(windows)]
     let pipe = pipe_arg;
     #[cfg(target_os = "linux")]
-    let pipe = goalport_core::ipc::resolve_unix_socket_path(&pipe_arg)
-        .map_err(|error| error.to_string())?
-        .display()
-        .to_string();
+    let resolved =
+        goalport_core::ipc::resolve_unix_socket(&pipe_arg).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let pipe = resolved.path.display().to_string();
     #[cfg(not(any(windows, target_os = "linux")))]
     let pipe = pipe_arg;
     let db = PathBuf::from(option(args, "--db").unwrap_or_else(|| "goalport.sqlite".into()));
     let store = Store::open(&db).map_err(|error| error.to_string())?;
     let epoch = product_receipts::begin_startup_epoch(&store, &pipe, &db)?;
     let server = CoreServer::new(store.clone());
+
+    // Linux: bind and hold the socket BEFORE READY_COMMITTED so a failed bind
+    // (endpoint occupied) never leaves a launch-ready file advertising ready.
+    #[cfg(target_os = "linux")]
+    let owned = match server.bind_resolved_unix_socket(&resolved) {
+        Ok(owned) => owned,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = product_receipts::fail_startup_epoch_clearing_ready(
+                &store,
+                &epoch,
+                &message,
+                Some(&db),
+            );
+            return Err(message);
+        }
+    };
+
     let reconciled = (|| {
         let commands_unknown = server
             .reconcile_after_restart()
@@ -100,7 +118,8 @@ fn serve(args: &[String]) -> Result<(), String> {
         Ok::<(), String>(())
     })();
     if let Err(error) = reconciled {
-        let _ = product_receipts::fail_startup_epoch(&store, &epoch, &error);
+        let _ =
+            product_receipts::fail_startup_epoch_clearing_ready(&store, &epoch, &error, Some(&db));
         return Err(error);
     }
     #[cfg(windows)]
@@ -109,18 +128,28 @@ fn serve(args: &[String]) -> Result<(), String> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
-                let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
+                let _ = product_receipts::fail_startup_epoch_clearing_ready(
+                    &store,
+                    &epoch,
+                    &message,
+                    Some(&db),
+                );
                 Err(message)
             }
         }
     }
     #[cfg(target_os = "linux")]
     {
-        match server.serve_unix_socket_at(std::path::Path::new(&pipe)) {
+        match server.serve_owned_unix_socket(owned) {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
-                let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
+                let _ = product_receipts::fail_startup_epoch_clearing_ready(
+                    &store,
+                    &epoch,
+                    &message,
+                    Some(&db),
+                );
                 Err(message)
             }
         }
@@ -129,7 +158,12 @@ fn serve(args: &[String]) -> Result<(), String> {
     {
         let _ = pipe;
         let message = goalport_core::ipc::IpcError::UnixSocketUnsupported.to_string();
-        let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
+        let _ = product_receipts::fail_startup_epoch_clearing_ready(
+            &store,
+            &epoch,
+            &message,
+            Some(&db),
+        );
         Err(message)
     }
 }

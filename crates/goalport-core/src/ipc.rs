@@ -741,19 +741,38 @@ impl CoreServer {
 
     /// Linux local socket. Named pipes stay unsupported. Peer uid must match;
     /// a missing `SO_PEERCRED` fails closed. `endpoint` is resolved the same
-    /// way as serve receipts (`resolve_unix_socket_path`).
+    /// way as serve receipts (`resolve_unix_socket`).
     #[cfg(target_os = "linux")]
     pub fn serve_unix_socket(&self, endpoint: &str) -> Result<(), IpcError> {
-        let path = resolve_unix_socket_path(endpoint)?;
-        self.serve_unix_socket_at(&path)
+        let resolved = resolve_unix_socket(endpoint)?;
+        let owned = self.bind_resolved_unix_socket(&resolved)?;
+        self.serve_owned_unix_socket(owned)
     }
 
-    /// Test and production seam: serve an already-resolved socket path.
-    /// Callers must pass an explicit path; tests must not mutate `HOME`.
+    /// Bind and own a resolved Linux socket path (lock + listen) without
+    /// entering the accept loop. Production `serve` binds before writing
+    /// `READY_COMMITTED` so a failed bind never leaves a ready file behind.
     #[cfg(target_os = "linux")]
-    pub fn serve_unix_socket_at(&self, path: &std::path::Path) -> Result<(), IpcError> {
+    pub fn bind_resolved_unix_socket(
+        &self,
+        resolved: &ResolvedUnixSocketPath,
+    ) -> Result<OwnedUnixSocket, IpcError> {
+        bind_unix_socket(&resolved.path, resolved.managed_runtime_parent)
+    }
+
+    /// Bind an explicit filesystem path. Does not chmod parents (explicit /
+    /// test paths). Prefer [`Self::bind_resolved_unix_socket`] for named
+    /// endpoints so the default managed runtime dir can be tightened.
+    #[cfg(target_os = "linux")]
+    pub fn bind_unix_socket_at(&self, path: &std::path::Path) -> Result<OwnedUnixSocket, IpcError> {
+        bind_unix_socket(path, false)
+    }
+
+    /// Accept-loop on an already-owned listener. The caller must have bound
+    /// successfully before advertising launch-ready.
+    #[cfg(target_os = "linux")]
+    pub fn serve_owned_unix_socket(&self, owned: OwnedUnixSocket) -> Result<(), IpcError> {
         self.start_runtime_flusher();
-        let owned = bind_unix_socket(path)?;
         loop {
             let (mut stream, _) = owned.listener.accept().map_err(IpcError::Io)?;
             if !unix_peer_uid_matches(&stream, current_uid())? {
@@ -762,6 +781,15 @@ impl CoreServer {
             let mut reader = stream.try_clone().map_err(IpcError::Io)?;
             let _ = self.serve_stream(&mut reader, &mut stream);
         }
+    }
+
+    /// Test and production seam: serve an already-resolved socket path.
+    /// Callers must pass an explicit path; tests must not mutate `HOME`.
+    /// Explicit paths do not chmod parents.
+    #[cfg(target_os = "linux")]
+    pub fn serve_unix_socket_at(&self, path: &std::path::Path) -> Result<(), IpcError> {
+        let owned = self.bind_unix_socket_at(path)?;
+        self.serve_owned_unix_socket(owned)
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -1628,34 +1656,123 @@ fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// Usable byte length for a Linux `sockaddr_un.sun_path` path.
+///
+/// On Linux, `sun_path` is typically 108 bytes **including** the terminating
+/// NUL, so the absolute socket path may be at most 107 bytes. This constant is
+/// conservative and matches `sizeof(((struct sockaddr_un *)0)->sun_path) - 1`.
+#[cfg(target_os = "linux")]
+pub const LINUX_UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+
+/// Hex length of the sha256 suffix that keeps endpoint→leaf mapping injective.
+#[cfg(target_os = "linux")]
+const ENDPOINT_NAME_HASH_HEX_LEN: usize = 16;
+
+/// Separator between the readable ASCII prefix and the stable hash suffix.
+#[cfg(target_os = "linux")]
+const ENDPOINT_NAME_HASH_SEP: &str = "--";
+
+/// Resolved Linux Core socket path plus whether the parent is the default
+/// managed runtime directory (`$HOME/.goalport/runtime`).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedUnixSocketPath {
+    pub path: std::path::PathBuf,
+    /// When true, bind may create the parent with mode `0700` and chmod it.
+    /// Explicit absolute endpoints leave this false so shared parents are not
+    /// mutated.
+    pub managed_runtime_parent: bool,
+}
+
 /// Resolve a Linux Core socket endpoint identity to a filesystem path.
 ///
-/// - Absolute path → used as-is.
-/// - Otherwise → `~/.goalport/runtime/<sanitized-endpoint>.sock`.
+/// - Absolute path → used as-is (no chmod of parents on bind).
+/// - Otherwise → `~/.goalport/runtime/<injective-leaf>.sock` (managed parent).
 ///
 /// Clients may still override with `GOALPORT_SOCK`; the server always binds
 /// the path resolved from `--pipe` (or an explicit path passed to
 /// [`CoreServer::serve_unix_socket_at`]).
 #[cfg(target_os = "linux")]
 pub fn resolve_unix_socket_path(endpoint: &str) -> Result<std::path::PathBuf, IpcError> {
+    Ok(resolve_unix_socket(endpoint)?.path)
+}
+
+/// Resolve a Linux socket endpoint, including whether the parent is managed.
+#[cfg(target_os = "linux")]
+pub fn resolve_unix_socket(endpoint: &str) -> Result<ResolvedUnixSocketPath, IpcError> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
         return Err(IpcError::Invalid("Unix socket endpoint is empty".into()));
     }
     let path = std::path::Path::new(endpoint);
     if path.is_absolute() {
-        return Ok(path.to_path_buf());
+        validate_unix_socket_path_capacity(path)?;
+        return Ok(ResolvedUnixSocketPath {
+            path: path.to_path_buf(),
+            managed_runtime_parent: false,
+        });
     }
     let home = std::env::var("HOME").map_err(|_| IpcError::Invalid("HOME is required".into()))?;
-    let dir = std::path::PathBuf::from(home)
-        .join(".goalport")
-        .join("runtime");
-    Ok(dir.join(format!("{}.sock", sanitize_endpoint_name(endpoint))))
+    resolve_named_unix_socket(std::path::Path::new(&home), endpoint)
 }
 
+/// Test seam: resolve a named (non-absolute) endpoint under an explicit home
+/// without mutating the process `HOME` environment variable.
 #[cfg(target_os = "linux")]
-fn sanitize_endpoint_name(endpoint: &str) -> String {
-    let mut out: String = endpoint
+pub fn resolve_named_unix_socket(
+    home: &std::path::Path,
+    endpoint: &str,
+) -> Result<ResolvedUnixSocketPath, IpcError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(IpcError::Invalid("Unix socket endpoint is empty".into()));
+    }
+    if std::path::Path::new(endpoint).is_absolute() {
+        return Err(IpcError::Invalid(
+            "resolve_named_unix_socket requires a non-absolute endpoint".into(),
+        ));
+    }
+    let dir = home.join(".goalport").join("runtime");
+    let leaf = endpoint_socket_leaf_name(endpoint, &dir)?;
+    let path = dir.join(leaf);
+    validate_unix_socket_path_capacity(&path)?;
+    Ok(ResolvedUnixSocketPath {
+        path,
+        managed_runtime_parent: true,
+    })
+}
+
+/// Build the injective sock leaf name (`{ascii-prefix}--{sha256[:16]}.sock`).
+///
+/// The prefix is ASCII-only (`is_ascii_alphanumeric` or `-_."); other code
+/// points become `_`. The hash is over the original endpoint UTF-8 bytes so
+/// `a/b` and `a?b` never collide even when prefixes match. The prefix is
+/// shortened only enough for the full absolute path to fit
+/// [`LINUX_UNIX_SOCKET_PATH_MAX_BYTES`]; exceeding capacity is an error.
+#[cfg(target_os = "linux")]
+pub fn endpoint_socket_leaf_name(
+    endpoint: &str,
+    parent_dir: &std::path::Path,
+) -> Result<String, IpcError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+
+    let digest = Sha256::digest(endpoint.as_bytes());
+    let hash = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let hash = &hash[..ENDPOINT_NAME_HASH_HEX_LEN];
+    let suffix = format!("{ENDPOINT_NAME_HASH_SEP}{hash}.sock");
+    let parent_len = parent_dir.as_os_str().as_bytes().len().saturating_add(1);
+    let max_leaf = LINUX_UNIX_SOCKET_PATH_MAX_BYTES.saturating_sub(parent_len);
+    if suffix.len() > max_leaf {
+        return Err(IpcError::Invalid(format!(
+            "Unix socket path would exceed Linux sun_path capacity ({LINUX_UNIX_SOCKET_PATH_MAX_BYTES} bytes)"
+        )));
+    }
+    let max_prefix = max_leaf - suffix.len();
+    let mut prefix: String = endpoint
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
@@ -1665,13 +1782,28 @@ fn sanitize_endpoint_name(endpoint: &str) -> String {
             }
         })
         .collect();
-    if out.is_empty() {
-        out.push_str("endpoint");
+    if prefix.is_empty() {
+        prefix.push_str("endpoint");
     }
-    if out.len() > 200 {
-        out.truncate(200);
+    if prefix.len() > max_prefix {
+        prefix.truncate(max_prefix);
     }
-    out
+    Ok(format!("{prefix}{suffix}"))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_unix_socket_path_capacity(path: &std::path::Path) -> Result<(), IpcError> {
+    use std::os::unix::ffi::OsStrExt;
+    let len = path.as_os_str().as_bytes().len();
+    if len > LINUX_UNIX_SOCKET_PATH_MAX_BYTES {
+        return Err(IpcError::Invalid(format!(
+            "Unix socket path is {len} bytes; Linux sun_path capacity is {LINUX_UNIX_SOCKET_PATH_MAX_BYTES} bytes"
+        )));
+    }
+    if len == 0 {
+        return Err(IpcError::Invalid("Unix socket path is empty".into()));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1681,22 +1813,32 @@ fn adjacent_lock_path(socket: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(lock)
 }
 
+/// Ensure the socket parent directory exists.
+///
+/// When `tighten_managed` is true (default managed `$HOME/.goalport/runtime`),
+/// create with mode `0700` and chmod the parent. Explicit absolute paths only
+/// `create_dir_all` and never chmod an existing parent.
 #[cfg(target_os = "linux")]
-fn ensure_socket_parent(path: &std::path::Path) -> Result<(), IpcError> {
-    use std::os::unix::fs::PermissionsExt;
+fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result<(), IpcError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let Some(parent) = path.parent() else {
         return Ok(());
     };
     if parent.as_os_str().is_empty() {
         return Ok(());
     }
-    std::fs::create_dir_all(parent)?;
-    // Only tighten directories we create under `.goalport` (never chmod `/tmp`).
-    let under_goalport = parent.components().any(|c| c.as_os_str() == ".goalport");
-    if under_goalport {
+    if tighten_managed {
+        if !parent.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
         let mut perms = std::fs::metadata(parent)?.permissions();
         perms.set_mode(0o700);
         std::fs::set_permissions(parent, perms)?;
+    } else if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
     }
     Ok(())
 }
@@ -1705,17 +1847,21 @@ fn ensure_socket_parent(path: &std::path::Path) -> Result<(), IpcError> {
 /// The flock on `_lock` is held until this value is dropped; the sock file is
 /// not unlinked on drop (stale files are recovered on the next bind).
 #[cfg(target_os = "linux")]
-struct OwnedUnixSocket {
+pub struct OwnedUnixSocket {
     _lock: std::fs::File,
     listener: std::os::unix::net::UnixListener,
 }
 
 #[cfg(target_os = "linux")]
-fn bind_unix_socket(path: &std::path::Path) -> Result<OwnedUnixSocket, IpcError> {
+fn bind_unix_socket(
+    path: &std::path::Path,
+    tighten_managed: bool,
+) -> Result<OwnedUnixSocket, IpcError> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::AsRawFd;
 
-    ensure_socket_parent(path)?;
+    validate_unix_socket_path_capacity(path)?;
+    ensure_socket_parent(path, tighten_managed)?;
     let lock_path = adjacent_lock_path(path);
     let lock = std::fs::OpenOptions::new()
         .create(true)
