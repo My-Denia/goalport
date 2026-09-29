@@ -1813,14 +1813,51 @@ fn adjacent_lock_path(socket: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(lock)
 }
 
-/// Ensure the socket parent directory exists.
-///
-/// When `tighten_managed` is true (default managed `$HOME/.goalport/runtime`),
-/// create with mode `0700` and chmod the parent. Explicit absolute paths only
-/// `create_dir_all` and never chmod an existing parent.
+/// Open or create one managed directory component without following a symlink.
+#[cfg(target_os = "linux")]
+fn open_or_create_managed_dir_at(
+    parent: &std::fs::File,
+    name: &std::ffi::CStr,
+) -> Result<std::fs::File, IpcError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if raw < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+        let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+        if created != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EEXIST) {
+                return Err(IpcError::Io(error));
+            }
+        }
+        raw = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    }
+    if raw < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+            return Err(IpcError::Invalid(
+                "managed Unix socket directory component must not be a symlink".into(),
+            ));
+        }
+        return Err(IpcError::Io(error));
+    }
+    let directory = unsafe { std::fs::File::from_raw_fd(raw) };
+    if directory.metadata()?.uid() != current_uid() {
+        return Err(IpcError::Invalid(
+            "managed Unix socket directory must be owned by the current user".into(),
+        ));
+    }
+    Ok(directory)
+}
+
+/// Ensure the socket parent directory exists. Managed components are opened
+/// relative to directory fds with `O_NOFOLLOW`; only the owned runtime fd is
+/// chmodded. Explicit absolute paths never chmod an existing parent.
 #[cfg(target_os = "linux")]
 fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result<(), IpcError> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::fd::AsRawFd;
     let Some(parent) = path.parent() else {
         return Ok(());
     };
@@ -1828,15 +1865,31 @@ fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result
         return Ok(());
     }
     if tighten_managed {
-        if !parent.exists() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
+        let managed_root = parent.parent().ok_or_else(|| {
+            IpcError::Invalid("managed Unix socket path has no .goalport parent".into())
+        })?;
+        if parent.file_name() != Some(std::ffi::OsStr::new("runtime"))
+            || managed_root.file_name() != Some(std::ffi::OsStr::new(".goalport"))
+        {
+            return Err(IpcError::Invalid(
+                "managed Unix socket path must end in .goalport/runtime".into(),
+            ));
         }
-        let mut perms = std::fs::metadata(parent)?.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(parent, perms)?;
+        let home = managed_root.parent().ok_or_else(|| {
+            IpcError::Invalid("managed Unix socket path has no home directory".into())
+        })?;
+        let home_dir = std::fs::File::open(home)?;
+        let managed = open_or_create_managed_dir_at(
+            &home_dir,
+            std::ffi::CStr::from_bytes_with_nul(b".goalport\0").expect("static component"),
+        )?;
+        let runtime = open_or_create_managed_dir_at(
+            &managed,
+            std::ffi::CStr::from_bytes_with_nul(b"runtime\0").expect("static component"),
+        )?;
+        if unsafe { libc::fchmod(runtime.as_raw_fd(), 0o700) } != 0 {
+            return Err(IpcError::Io(io::Error::last_os_error()));
+        }
     } else if !parent.exists() {
         std::fs::create_dir_all(parent)?;
     }

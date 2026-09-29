@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::UNIX_EPOCH,
 };
 
@@ -182,10 +183,16 @@ fn process_created_ms() -> u64 {
 }
 
 fn fallback_created_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+    // This is a process-local identity token when the OS creation time is
+    // unavailable. Resampling would falsely classify this live process as a
+    // different, ended process on its next observation.
+    static PROCESS_FALLBACK_CREATED_MS: OnceLock<u64> = OnceLock::new();
+    *PROCESS_FALLBACK_CREATED_MS.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0)
+    })
 }
 
 pub fn in_any_job() -> Option<bool> {

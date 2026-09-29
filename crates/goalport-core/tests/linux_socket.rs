@@ -4,7 +4,9 @@ use goalport_core::ipc::{
     LINUX_UNIX_SOCKET_PATH_MAX_BYTES, ResolvedUnixSocketPath, endpoint_socket_leaf_name,
     resolve_named_unix_socket, resolve_unix_socket_path,
 };
-use goalport_core::process_identity::{ProcessObservation, classify_linux_kill0_result};
+use goalport_core::process_identity::{
+    ProcessObservation, classify_linux_kill0_result, current_identity, observe_process,
+};
 use goalport_core::{CoreServer, IpcError, Store};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -440,6 +442,52 @@ fn explicit_absolute_goalport_parent_perms_unchanged() {
 }
 
 #[test]
+fn managed_runtime_symlink_does_not_chmod_shared_target() {
+    use std::os::unix::fs::symlink;
+
+    let home = tempfile::tempdir().unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let managed = home.path().join(".goalport");
+    std::fs::create_dir(&managed).unwrap();
+    let mut permissions = std::fs::metadata(shared.path()).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(shared.path(), permissions).unwrap();
+    symlink(shared.path(), managed.join("runtime")).unwrap();
+    let before = std::fs::metadata(shared.path()).unwrap();
+
+    let resolved = resolve_named_unix_socket(home.path(), "managed-symlink").unwrap();
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_resolved_unix_socket(&resolved).is_err());
+    let after = std::fs::metadata(shared.path()).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.permissions().mode() & 0o777, 0o755);
+    assert!(!shared.path().join(resolved.path.file_name().unwrap()).exists());
+}
+
+#[test]
+fn managed_root_symlink_does_not_chmod_shared_runtime() {
+    use std::os::unix::fs::symlink;
+
+    let home = tempfile::tempdir().unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let runtime = shared.path().join("runtime");
+    std::fs::create_dir(&runtime).unwrap();
+    let mut permissions = std::fs::metadata(&runtime).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&runtime, permissions).unwrap();
+    symlink(shared.path(), home.path().join(".goalport")).unwrap();
+    let before = std::fs::metadata(&runtime).unwrap();
+
+    let resolved = resolve_named_unix_socket(home.path(), "managed-root-symlink").unwrap();
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_resolved_unix_socket(&resolved).is_err());
+    let after = std::fs::metadata(&runtime).unwrap();
+    assert_eq!(before.ino(), after.ino());
+    assert_eq!(after.permissions().mode() & 0o777, 0o755);
+    assert!(!runtime.join(resolved.path.file_name().unwrap()).exists());
+}
+
+#[test]
 fn occupied_endpoint_does_not_leave_ready_committed() {
     let home = tempfile::tempdir().unwrap();
     let pipe = format!("occupy-{}-{}", std::process::id(), unique_suffix());
@@ -513,6 +561,17 @@ fn linux_kill0_classification_fail_closed() {
         classify_linux_kill0_result(42, Err(libc::EIO)),
         ProcessObservation::Unknown(_)
     ));
+}
+
+#[test]
+fn linux_self_process_identity_remains_stable_between_observations() {
+    let first = current_identity();
+    std::thread::sleep(Duration::from_millis(2));
+    let ProcessObservation::Live(second) = observe_process(first.pid) else {
+        panic!("current process must remain observable as live");
+    };
+    assert_eq!(first.created_ms, second.created_ms);
+    assert_eq!(first.executable_path, second.executable_path);
 }
 
 struct SpawnedCore(Child);
