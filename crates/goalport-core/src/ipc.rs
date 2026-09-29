@@ -22,8 +22,6 @@ use std::{
     thread,
     time::Duration,
 };
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use thiserror::Error;
 
 pub const IPC_PROTOCOL_VERSION: &str = "goalport.ipc.v1";
@@ -362,6 +360,8 @@ pub enum IpcError {
     Store(#[from] StoreError),
     #[error("named pipes are unavailable on this platform")]
     UnsupportedPlatform,
+    #[error("local Unix socket Core serve is only supported on Linux")]
+    UnixSocketUnsupported,
     /// Security setup or verification of a named pipe failed. The message is
     /// bounded: it carries a fixed stage name and an OS code, never a SID,
     /// security descriptor or path.
@@ -739,21 +739,39 @@ impl CoreServer {
         Err(IpcError::UnsupportedPlatform)
     }
 
-    /// Linux/iSH local socket. Named pipes stay unsupported. Peer uid must
-    /// match; a missing `SO_PEERCRED` fails closed.
-    #[cfg(unix)]
-    pub fn serve_unix_socket(&self) -> Result<(), IpcError> {
+    /// Linux local socket. Named pipes stay unsupported. Peer uid must match;
+    /// a missing `SO_PEERCRED` fails closed. `endpoint` is resolved the same
+    /// way as serve receipts (`resolve_unix_socket_path`).
+    #[cfg(target_os = "linux")]
+    pub fn serve_unix_socket(&self, endpoint: &str) -> Result<(), IpcError> {
+        let path = resolve_unix_socket_path(endpoint)?;
+        self.serve_unix_socket_at(&path)
+    }
+
+    /// Test and production seam: serve an already-resolved socket path.
+    /// Callers must pass an explicit path; tests must not mutate `HOME`.
+    #[cfg(target_os = "linux")]
+    pub fn serve_unix_socket_at(&self, path: &std::path::Path) -> Result<(), IpcError> {
         self.start_runtime_flusher();
-        let path = unix_socket_path()?;
-        let listener = bind_unix_socket(&path)?;
+        let owned = bind_unix_socket(path)?;
         loop {
-            let (mut stream, _) = listener.accept().map_err(IpcError::Io)?;
+            let (mut stream, _) = owned.listener.accept().map_err(IpcError::Io)?;
             if !unix_peer_uid_matches(&stream, current_uid())? {
                 continue;
             }
             let mut reader = stream.try_clone().map_err(IpcError::Io)?;
             let _ = self.serve_stream(&mut reader, &mut stream);
         }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pub fn serve_unix_socket(&self, _endpoint: &str) -> Result<(), IpcError> {
+        Err(IpcError::UnixSocketUnsupported)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    pub fn serve_unix_socket_at(&self, _path: &std::path::Path) -> Result<(), IpcError> {
+        Err(IpcError::UnixSocketUnsupported)
     }
 
     #[cfg(windows)]
@@ -1605,48 +1623,155 @@ mod tests {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn current_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-#[cfg(unix)]
-fn unix_socket_path() -> Result<std::path::PathBuf, IpcError> {
+/// Resolve a Linux Core socket endpoint identity to a filesystem path.
+///
+/// - Absolute path → used as-is.
+/// - Otherwise → `~/.goalport/runtime/<sanitized-endpoint>.sock`.
+///
+/// Clients may still override with `GOALPORT_SOCK`; the server always binds
+/// the path resolved from `--pipe` (or an explicit path passed to
+/// [`CoreServer::serve_unix_socket_at`]).
+#[cfg(target_os = "linux")]
+pub fn resolve_unix_socket_path(endpoint: &str) -> Result<std::path::PathBuf, IpcError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(IpcError::Invalid("Unix socket endpoint is empty".into()));
+    }
+    let path = std::path::Path::new(endpoint);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
     let home = std::env::var("HOME").map_err(|_| IpcError::Invalid("HOME is required".into()))?;
-    let dir = std::path::PathBuf::from(home).join(".goalport").join("runtime");
-    std::fs::create_dir_all(&dir)?;
-    let mut perms = std::fs::metadata(&dir)?.permissions();
-    perms.set_mode(0o700);
-    std::fs::set_permissions(&dir, perms)?;
-    Ok(dir.join("core.sock"))
+    let dir = std::path::PathBuf::from(home)
+        .join(".goalport")
+        .join("runtime");
+    Ok(dir.join(format!("{}.sock", sanitize_endpoint_name(endpoint))))
 }
 
-#[cfg(unix)]
-fn bind_unix_socket(path: &std::path::Path) -> Result<std::os::unix::net::UnixListener, IpcError> {
-    if let Ok(stream) = std::os::unix::net::UnixStream::connect(path) {
-        if unix_peer_uid_matches(&stream, current_uid())? {
-            return Err(IpcError::Invalid(
-                "Unix socket is already served by this user; refusing to replace it".into(),
-            ));
-        }
+#[cfg(target_os = "linux")]
+fn sanitize_endpoint_name(endpoint: &str) -> String {
+    let mut out: String = endpoint
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push_str("endpoint");
+    }
+    if out.len() > 200 {
+        out.truncate(200);
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn adjacent_lock_path(socket: &std::path::Path) -> std::path::PathBuf {
+    let mut lock = socket.as_os_str().to_owned();
+    lock.push(".lock");
+    std::path::PathBuf::from(lock)
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_socket_parent(path: &std::path::Path) -> Result<(), IpcError> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(parent)?;
+    // Only tighten directories we create under `.goalport` (never chmod `/tmp`).
+    let under_goalport = parent.components().any(|c| c.as_os_str() == ".goalport");
+    if under_goalport {
+        let mut perms = std::fs::metadata(parent)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(parent, perms)?;
+    }
+    Ok(())
+}
+
+/// Exclusive ownership of a Linux Unix-socket endpoint for the server lifetime.
+/// The flock on `_lock` is held until this value is dropped; the sock file is
+/// not unlinked on drop (stale files are recovered on the next bind).
+#[cfg(target_os = "linux")]
+struct OwnedUnixSocket {
+    _lock: std::fs::File,
+    listener: std::os::unix::net::UnixListener,
+}
+
+#[cfg(target_os = "linux")]
+fn bind_unix_socket(path: &std::path::Path) -> Result<OwnedUnixSocket, IpcError> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    ensure_socket_parent(path)?;
+    let lock_path = adjacent_lock_path(path);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(IpcError::Io)?;
+    {
+        let mut perms = lock.metadata()?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&lock_path, perms)?;
+    }
+    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if locked != 0 {
         return Err(IpcError::Invalid(
-            "Unix socket is already served; refusing to replace it".into(),
+            "Unix socket endpoint is already owned; refusing to replace it".into(),
         ));
     }
-    if path.exists() {
-        std::fs::remove_file(path)?;
+
+    // Probe only for information. A live peer with our uid means refuse; never
+    // unlink without holding the lock (already held), and never unlink a live
+    // endpoint.
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(stream) => {
+            if unix_peer_uid_matches(&stream, current_uid())? {
+                return Err(IpcError::Invalid(
+                    "Unix socket is already served by this user; refusing to replace it".into(),
+                ));
+            }
+            return Err(IpcError::Invalid(
+                "Unix socket is already served; refusing to replace it".into(),
+            ));
+        }
+        Err(_) => {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
     }
+
     let previous = unsafe { libc::umask(0o177) };
     let listener = std::os::unix::net::UnixListener::bind(path);
-    unsafe { libc::umask(previous); }
+    unsafe {
+        libc::umask(previous);
+    }
     let listener = listener?;
     let mut perms = std::fs::metadata(path)?.permissions();
     perms.set_mode(0o600);
     std::fs::set_permissions(path, perms)?;
-    Ok(listener)
+    Ok(OwnedUnixSocket {
+        _lock: lock,
+        listener,
+    })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn unix_peer_uid_matches(
     stream: &std::os::unix::net::UnixStream,
     expected: u32,

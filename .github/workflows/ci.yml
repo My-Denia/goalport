@@ -120,3 +120,67 @@ jobs:
             artifacts/electron-rc/ci-early-cleanup/failure-summary.json
           if-no-files-found: ignore
           retention-days: 7
+
+  # Linux Core/Unix-socket slice only. Scenario/dev socket checks are not
+  # native Runtime acceptance and do not expand the Windows product platform.
+  linux-unix-socket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master (2026-09-12); toolchain pinned via `with:` below
+        with:
+          toolchain: 1.96.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Focused Linux Unix socket tests
+        run: cargo test --locked -p goalport-core --test linux_socket -- --nocapture
+      - name: Build goalport-core
+        run: cargo build --locked -p goalport-core
+      - name: Black-box serve + UnixStream client round-trip
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          WORK="$(mktemp -d)"
+          cleanup() { kill "$CORE_PID" 2>/dev/null || true; rm -rf "$WORK"; }
+          trap cleanup EXIT
+          export HOME="$WORK"
+          PIPE="ci-linux-sock-$$"
+          DB="$WORK/core.sqlite"
+          SOCK="$HOME/.goalport/runtime/${PIPE}.sock"
+          NONCE="ci-linux-$(date +%s%N)"
+          env -u GOALPORT_SOCK \
+            GOALPORT_REQUIRE_ISOLATED=1 \
+            GOALPORT_LAUNCH_NONCE="$NONCE" \
+            GOALPORT_RUN_SLUG=goalport-linux-ci \
+            GOALPORT_ELECTRON_PID=1 \
+            GOALPORT_ELECTRON_CREATED_MS=1 \
+            GOALPORT_ELECTRON_EXE=linux-ci \
+            GOALPORT_ELECTRON_SHA256=test-only \
+            GOALPORT_LAUNCHER_PID=1 \
+            GOALPORT_LAUNCHER_CREATED_MS=1 \
+            GOALPORT_LAUNCHER_EXE=linux-ci \
+            GOALPORT_LAUNCHER_SHA256=test-only \
+            GOALPORT_LAUNCHER_PARENT_PID=1 \
+            GOALPORT_LAUNCH_REQUESTED_AT=2026-09-29T00:00:00.000Z \
+            GOALPORT_LAUNCHER_STARTED_AT=2026-09-29T00:00:00.001Z \
+            GOALPORT_CORE_SPAWNED_AT=2026-09-29T00:00:00.002Z \
+            "$ROOT/target/debug/goalport-core" serve --pipe "$PIPE" --db "$DB" &
+          CORE_PID=$!
+          READY="${DB}.launch-ready"
+          for _ in $(seq 1 150); do
+            if [ -f "$READY" ] && grep -q READY_COMMITTED "$READY" && grep -q "$NONCE" "$READY"; then
+              break
+            fi
+            if ! kill -0 "$CORE_PID" 2>/dev/null; then
+              echo "Core exited before launch-ready" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+          test -S "$SOCK"
+          python3 "$ROOT/scripts/connected/unix-client.py" "$PIPE" | tee "$WORK/response.json"
+          grep -q '"ok": *true\|"ok":true' "$WORK/response.json"
+          PIPE_ID="$(python3 -c "import json; print(json.load(open('$READY'))['pipeIdentity'])")"
+          test "$PIPE_ID" = "$SOCK"

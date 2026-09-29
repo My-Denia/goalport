@@ -59,7 +59,16 @@ fn run(args: Vec<String>) -> Result<(), String> {
 }
 
 fn serve(args: &[String]) -> Result<(), String> {
-    let pipe = option(args, "--pipe").unwrap_or_else(|| "goalport-core-v1".into());
+    let pipe_arg = option(args, "--pipe").unwrap_or_else(|| "goalport-core-v1".into());
+    #[cfg(windows)]
+    let pipe = pipe_arg;
+    #[cfg(target_os = "linux")]
+    let pipe = goalport_core::ipc::resolve_unix_socket_path(&pipe_arg)
+        .map_err(|error| error.to_string())?
+        .display()
+        .to_string();
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let pipe = pipe_arg;
     let db = PathBuf::from(option(args, "--db").unwrap_or_else(|| "goalport.sqlite".into()));
     let store = Store::open(&db).map_err(|error| error.to_string())?;
     let epoch = product_receipts::begin_startup_epoch(&store, &pipe, &db)?;
@@ -105,10 +114,9 @@ fn serve(args: &[String]) -> Result<(), String> {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        let _ = pipe;
-        match server.serve_unix_socket() {
+        match server.serve_unix_socket_at(std::path::Path::new(&pipe)) {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
@@ -116,6 +124,13 @@ fn serve(args: &[String]) -> Result<(), String> {
                 Err(message)
             }
         }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pipe;
+        let message = goalport_core::ipc::IpcError::UnixSocketUnsupported.to_string();
+        let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
+        Err(message)
     }
 }
 

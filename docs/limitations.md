@@ -5,7 +5,7 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 ## Distribution and platform
 
 - **Windows x64 only.**
-- Linux Unix socket is Scenario/dev-only. It is not Windows acceptance and not a product platform expansion. It serves one connection at a time, checks socket mode and peer uid, and refuses to replace a live socket. It does not prove that a world-writable parent is safe. A stale socket file can remain after exit. It serves one connection at a time, checks socket mode and peer uid, and refuses to replace a live socket. It does not prove that a world-writable parent is safe. A stale socket file can remain after exit.
+- Linux Unix socket is Scenario/dev-only. It is not Windows acceptance and not a product platform expansion. It serves one connection at a time, checks socket mode and peer uid, and refuses to replace a live socket. It does not prove that a world-writable parent is safe. A stale socket file can remain after exit.
 - **No downloadable release.** You build the package from source ([building](building.md)).
 - **Unsigned package.** Windows may warn before running it.
 - **Tauri** is a bounded regression target, not a second product.
