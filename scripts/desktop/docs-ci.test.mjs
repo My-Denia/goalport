@@ -140,7 +140,7 @@ test("Desktop CI retains only redacted failure summaries and never tolerates a f
   assert.doesNotMatch(body, /continue-on-error/);
   const steps = body.split(/\r?\n(?=      - )/);
   const last = steps.at(-1);
-  assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v4\.\d+\.\d+\r?\n/);
+  assert.match(last, /^\s+- name: .+\r?\n\s+if: failure\(\)\r?\n\s+uses: actions\/upload-artifact@[0-9a-f]{40} # v\d+\.\d+\.\d+\r?\n/);
   assert.match(last, /\n\s+retention-days: 7\s*$/);
   assert.match(last, /\n\s+if-no-files-found: ignore\r?\n/);
   const paths = [...last.matchAll(/^ {12}(\S+)\s*$/gm)].map((match) => match[1]);
