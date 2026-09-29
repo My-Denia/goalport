@@ -497,9 +497,44 @@ pub fn fail_startup_epoch(
     fail_startup_epoch_clearing_ready(store, claim, reason, None)
 }
 
-/// Abort a launch epoch in the store and, when `db` is provided, remove any
-/// on-disk `.launch-ready` file so a failed serve cannot leave
-/// `READY_COMMITTED` visible to launchers.
+fn clear_launch_ready_file(
+    db: &Path,
+    epoch_id: &str,
+    launch_nonce: &str,
+    abort: &Value,
+) -> Result<(), String> {
+    let ready_path = launch_ready_path(db);
+    match fs::symlink_metadata(&ready_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("unable to inspect launch-ready file: {error}")),
+    }
+    let aborted = json!({
+        "kind": "launch-ready",
+        "readyState": "ABORTED",
+        "launchNonce": launch_nonce,
+        "coreEpochId": epoch_id,
+        "abort": abort,
+    });
+    let rewritten = serde_json::to_vec_pretty(&aborted)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| replace_with_synced(&ready_path, &bytes));
+    if let Err(rewrite_error) = rewritten {
+        match fs::remove_file(&ready_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "unable to invalidate launch-ready file: rewrite failed ({rewrite_error}); unlink failed ({error})"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Invalidate the on-disk launch-ready file before aborting the store epoch.
+/// An aborted sidecar is preferred; a failed rewrite falls back to unlink.
 pub fn fail_startup_epoch_clearing_ready(
     store: &Store,
     claim: &StartupEpochClaim,
@@ -507,58 +542,88 @@ pub fn fail_startup_epoch_clearing_ready(
     db: Option<&Path>,
 ) -> Result<(), String> {
     let abort = json!({"status":"aborted","reason":reason,"atUtc":store::utc_now_iso()});
-    let startup = store
-        .get_product_receipt_by_id(&format!("startup:{}", claim.launch_nonce))
-        .map_err(|error| error.to_string())?
-        .map(|mut value| {
-            value["startupState"] = json!("ABORTED");
-            value["epochState"] = json!("ABORTED");
-            value["abort"] = abort.clone();
-            value
-        });
-    let ready = store
-        .get_product_receipt_by_id(&format!("launch-ready:{}", claim.launch_nonce))
-        .map_err(|error| error.to_string())?
-        .map(|mut value| {
-            value["readyState"] = json!("ABORTED");
-            value["abort"] = abort.clone();
-            value
-        });
-    store
-        .abort_core_launch_epoch(
-            &claim.epoch_id,
-            &claim.launch_nonce,
-            &abort,
-            startup.as_ref(),
-            ready.as_ref(),
-        )
-        .map_err(|error| error.to_string())?;
-    if let Some(db) = db {
-        let ready_path = launch_ready_path(db);
-        if ready_path.exists() {
-            let aborted = json!({
-                "kind": "launch-ready",
-                "readyState": "ABORTED",
-                "launchNonce": claim.launch_nonce,
-                "coreEpochId": claim.epoch_id,
-                "abort": abort,
+    let ready_cleanup = db
+        .map(|db| clear_launch_ready_file(db, &claim.epoch_id, &claim.launch_nonce, &abort));
+    let store_abort = (|| {
+        let startup = store
+            .get_product_receipt_by_id(&format!("startup:{}", claim.launch_nonce))
+            .map_err(|error| error.to_string())?
+            .map(|mut value| {
+                value["startupState"] = json!("ABORTED");
+                value["epochState"] = json!("ABORTED");
+                value["abort"] = abort.clone();
+                value
             });
-            match serde_json::to_vec_pretty(&aborted) {
-                Ok(bytes) => {
-                    let _ = replace_with_synced(&ready_path, &bytes);
-                }
-                Err(_) => {
-                    let _ = fs::remove_file(&ready_path);
-                }
-            }
-        }
+        let ready = store
+            .get_product_receipt_by_id(&format!("launch-ready:{}", claim.launch_nonce))
+            .map_err(|error| error.to_string())?
+            .map(|mut value| {
+                value["readyState"] = json!("ABORTED");
+                value["abort"] = abort.clone();
+                value
+            });
+        store
+            .abort_core_launch_epoch(
+                &claim.epoch_id,
+                &claim.launch_nonce,
+                &abort,
+                startup.as_ref(),
+                ready.as_ref(),
+            )
+            .map_err(|error| error.to_string())
+    })();
+    match (store_abort, ready_cleanup.unwrap_or(Ok(()))) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(store_error), Ok(())) => Err(store_error),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(store_error), Err(cleanup_error)) => Err(format!(
+            "{store_error}; launch-ready cleanup failed: {cleanup_error}"
+        )),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abort_after_ready_unlinks_when_aborted_rewrite_cannot_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("core.sqlite");
+        let ready_path = launch_ready_path(&db);
+        fs::write(&ready_path, br#"{"readyState":"READY_COMMITTED"}"#).unwrap();
+        let staging = PathBuf::from(format!(
+            "{}.commit-{}",
+            ready_path.display(),
+            std::process::id()
+        ));
+        fs::create_dir(&staging).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let claim = StartupEpochClaim {
+            epoch_id: "synthetic-epoch".into(),
+            launch_nonce: "synthetic-nonce".into(),
+            previous_epoch_id: None,
+            core: process_identity::current_identity(),
+        };
+
+        fail_startup_epoch_clearing_ready(&store, &claim, "listener failed", Some(&db)).unwrap();
+        assert!(!ready_path.exists(), "failed Core must not leave READY_COMMITTED");
+    }
+
+    #[test]
+    fn abort_ready_cleanup_reports_failed_rewrite_and_unlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("core.sqlite");
+        fs::create_dir(launch_ready_path(&db)).unwrap();
+        let error = clear_launch_ready_file(
+            &db,
+            "synthetic-epoch",
+            "synthetic-nonce",
+            &json!({"status":"aborted"}),
+        )
+        .unwrap_err();
+        assert!(error.contains("unlink failed"), "{error}");
+    }
 
     #[test]
     fn imported_snapshot_epoch_reads_as_prior_ended_even_while_source_core_runs() {

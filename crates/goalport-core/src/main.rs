@@ -81,13 +81,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         Ok(owned) => owned,
         Err(error) => {
             let message = error.to_string();
-            let _ = product_receipts::fail_startup_epoch_clearing_ready(
-                &store,
-                &epoch,
-                &message,
-                Some(&db),
-            );
-            return Err(message);
+            return Err(abort_startup_after_failure(&store, &epoch, &db, message));
         }
     };
 
@@ -118,9 +112,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         Ok::<(), String>(())
     })();
     if let Err(error) = reconciled {
-        let _ =
-            product_receipts::fail_startup_epoch_clearing_ready(&store, &epoch, &error, Some(&db));
-        return Err(error);
+        return Err(abort_startup_after_failure(&store, &epoch, &db, error));
     }
     #[cfg(windows)]
     {
@@ -128,13 +120,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
-                let _ = product_receipts::fail_startup_epoch_clearing_ready(
-                    &store,
-                    &epoch,
-                    &message,
-                    Some(&db),
-                );
-                Err(message)
+                Err(abort_startup_after_failure(&store, &epoch, &db, message))
             }
         }
     }
@@ -144,13 +130,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             Ok(()) => Ok(()),
             Err(error) => {
                 let message = error.to_string();
-                let _ = product_receipts::fail_startup_epoch_clearing_ready(
-                    &store,
-                    &epoch,
-                    &message,
-                    Some(&db),
-                );
-                Err(message)
+                Err(abort_startup_after_failure(&store, &epoch, &db, message))
             }
         }
     }
@@ -158,13 +138,19 @@ fn serve(args: &[String]) -> Result<(), String> {
     {
         let _ = pipe;
         let message = goalport_core::ipc::IpcError::UnixSocketUnsupported.to_string();
-        let _ = product_receipts::fail_startup_epoch_clearing_ready(
-            &store,
-            &epoch,
-            &message,
-            Some(&db),
-        );
-        Err(message)
+        Err(abort_startup_after_failure(&store, &epoch, &db, message))
+    }
+}
+
+fn abort_startup_after_failure(
+    store: &Store,
+    epoch: &product_receipts::StartupEpochClaim,
+    db: &std::path::Path,
+    message: String,
+) -> String {
+    match product_receipts::fail_startup_epoch_clearing_ready(store, epoch, &message, Some(db)) {
+        Ok(()) => message,
+        Err(cleanup_error) => format!("{message}; startup cleanup failed: {cleanup_error}"),
     }
 }
 
