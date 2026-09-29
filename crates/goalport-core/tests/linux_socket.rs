@@ -140,7 +140,7 @@ fn production_socket_round_trip_and_mode() {
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(format!("{}.lock", sock.display()));
     let thread = spawn_server_at(sock.clone());
-    assert!(wait_until(|| sock.exists()));
+    assert!(wait_until(|| UnixStream::connect(&sock).is_ok()));
     let sock_mode = std::fs::metadata(&sock).unwrap().permissions().mode();
     assert_eq!(sock_mode & 0o077, 0, "sock mode {sock_mode:#o}");
     assert_eq!(sock_mode & 0o600, 0o600);
@@ -672,6 +672,64 @@ fn linux_self_process_identity_remains_stable_between_observations() {
     };
     assert_eq!(first.created_ms, second.created_ms);
     assert_eq!(first.executable_path, second.executable_path);
+}
+
+#[test]
+fn restrictive_umask_refuses_before_creating_socket_state() {
+    use std::os::unix::process::CommandExt;
+
+    const CHILD: &str = "GOALPORT_RESTRICTIVE_UMASK_CHILD";
+    const ROOT: &str = "GOALPORT_RESTRICTIVE_UMASK_ROOT";
+    if std::env::var_os(CHILD).is_some() {
+        let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+        let server = CoreServer::new(Store::open_in_memory().unwrap());
+        for path in [root.join("fresh.sock"), root.join("existing.sock")] {
+            let error = match server.bind_unix_socket_at(&path) {
+                Ok(_) => panic!("restrictive umask unexpectedly bound {}", path.display()),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("umask"), "{error}");
+        }
+        let named = resolve_named_unix_socket(&root, "named").unwrap();
+        let error = match server.bind_resolved_unix_socket(&named) {
+            Ok(_) => panic!("restrictive umask unexpectedly bound named endpoint"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("umask"), "{error}");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let existing = root.path().join("existing.sock");
+    let lock = PathBuf::from(format!("{}.lock", existing.display()));
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    drop(server.bind_unix_socket_at(&existing).unwrap());
+    let inode_before = std::fs::symlink_metadata(&existing).unwrap().ino();
+    let lock_before = std::fs::read(&lock).unwrap();
+
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "restrictive_umask_refuses_before_creating_socket_state"])
+        .env(CHILD, "1")
+        .env(ROOT, root.path());
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0o777);
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.path().join("fresh.sock").exists());
+    assert!(!root.path().join("fresh.sock.lock").exists());
+    assert!(!root.path().join(".goalport").exists());
+    assert_eq!(std::fs::symlink_metadata(&existing).unwrap().ino(), inode_before);
+    assert_eq!(std::fs::read(&lock).unwrap(), lock_before);
 }
 
 struct SpawnedCore(Child);

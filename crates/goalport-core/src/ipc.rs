@@ -1807,6 +1807,23 @@ fn validate_unix_socket_path_capacity(path: &std::path::Path) -> Result<(), IpcE
 }
 
 #[cfg(target_os = "linux")]
+fn require_owner_umask_bits() -> Result<(), IpcError> {
+    let status = std::fs::read_to_string("/proc/thread-self/status")?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .ok_or_else(|| IpcError::Invalid("Linux thread umask is unavailable".into()))?;
+    let mask = u32::from_str_radix(value.trim(), 8)
+        .map_err(|_| IpcError::Invalid("Linux thread umask is invalid".into()))?;
+    if mask & 0o700 != 0 {
+        return Err(IpcError::Invalid(
+            "Unix socket startup requires a umask that preserves owner permissions".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn adjacent_lock_path(socket: &std::path::Path) -> std::path::PathBuf {
     let mut lock = socket.as_os_str().to_owned();
     lock.push(".lock");
@@ -2009,7 +2026,7 @@ fn remove_matching_lock(
 #[cfg(target_os = "linux")]
 fn bind_restricted_unix_listener(
     path: &std::path::Path,
-) -> Result<std::os::unix::net::UnixListener, IpcError> {
+) -> Result<(std::os::unix::net::UnixListener, std::fs::Metadata), IpcError> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
 
@@ -2044,10 +2061,18 @@ fn bind_restricted_unix_listener(
     {
         return Err(IpcError::Io(io::Error::last_os_error()));
     }
+    let bound_metadata = std::fs::symlink_metadata(path)?;
     if unsafe { libc::listen(fd.as_raw_fd(), 128) } != 0 {
-        return Err(IpcError::Io(io::Error::last_os_error()));
+        let listen_error = IpcError::Io(io::Error::last_os_error());
+        drop(fd);
+        remove_matching_bound_socket(path, &bound_metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket listen failed ({listen_error}); socket cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        return Err(listen_error);
     }
-    Ok(std::os::unix::net::UnixListener::from(fd))
+    Ok((std::os::unix::net::UnixListener::from(fd), bound_metadata))
 }
 
 #[cfg(target_os = "linux")]
@@ -2059,6 +2084,7 @@ fn bind_unix_socket(
     use std::os::unix::io::AsRawFd;
 
     validate_unix_socket_path_capacity(path)?;
+    require_owner_umask_bits()?;
     ensure_socket_parent(path, tighten_managed)?;
     let lock_path = adjacent_lock_path(path);
     let (mut lock, created) = match std::fs::OpenOptions::new()
@@ -2167,12 +2193,28 @@ fn bind_unix_socket(
         },
     }
 
-    let listener = bind_restricted_unix_listener(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
+    let (listener, bound_metadata) = bind_restricted_unix_listener(path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(listener);
+            remove_matching_bound_socket(path, &bound_metadata)?;
+            return Err(IpcError::Io(error));
+        }
+    };
     let mode = metadata.permissions().mode() & 0o777;
-    if !metadata.file_type().is_socket() || mode != 0o600 {
+    let is_bound_inode = metadata.file_type().is_socket()
+        && metadata.dev() == bound_metadata.dev()
+        && metadata.ino() == bound_metadata.ino()
+        && metadata.ctime() == bound_metadata.ctime()
+        && metadata.ctime_nsec() == bound_metadata.ctime_nsec();
+    if !is_bound_inode || mode != 0o600 {
+        drop(listener);
+        if is_bound_inode {
+            remove_matching_bound_socket(path, &bound_metadata)?;
+        }
         return Err(IpcError::Invalid(format!(
-            "Unix socket endpoint is not a 0o600 socket (mode {mode:#o})"
+            "Unix socket endpoint is not the newly bound 0o600 socket (mode {mode:#o})"
         )));
     }
     let persist_marker = if std::env::var("GOALPORT_REQUIRE_ISOLATED").ok().as_deref() == Some("1")
