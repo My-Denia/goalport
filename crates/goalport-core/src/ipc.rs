@@ -1664,7 +1664,7 @@ fn current_uid() -> u32 {
 #[cfg(target_os = "linux")]
 pub const LINUX_UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
 
-/// Hex length of the sha256 suffix that keeps endpoint→leaf mapping injective.
+/// Hex length of the collision-resistant truncated sha256 endpoint suffix.
 #[cfg(target_os = "linux")]
 const ENDPOINT_NAME_HASH_HEX_LEN: usize = 16;
 
@@ -1687,7 +1687,7 @@ pub struct ResolvedUnixSocketPath {
 /// Resolve a Linux Core socket endpoint identity to a filesystem path.
 ///
 /// - Absolute path → used as-is (no chmod of parents on bind).
-/// - Otherwise → `~/.goalport/runtime/<injective-leaf>.sock` (managed parent).
+/// - Otherwise → `~/.goalport/runtime/<hashed-leaf>.sock` (managed parent).
 ///
 /// Clients may still override with `GOALPORT_SOCK`; the server always binds
 /// the path resolved from `--pipe` (or an explicit path passed to
@@ -1742,7 +1742,7 @@ pub fn resolve_named_unix_socket(
     })
 }
 
-/// Build the injective sock leaf name (`{ascii-prefix}--{sha256[:16]}.sock`).
+/// Build the collision-resistant sock leaf name (`{ascii-prefix}--{sha256[:16]}.sock`).
 ///
 /// The prefix is ASCII-only (`is_ascii_alphanumeric` or `-_."); other code
 /// points become `_`. The hash is over the original endpoint UTF-8 bytes so
@@ -1857,7 +1857,7 @@ fn bind_unix_socket(
     path: &std::path::Path,
     tighten_managed: bool,
 ) -> Result<OwnedUnixSocket, IpcError> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::os::unix::io::AsRawFd;
 
     validate_unix_socket_path_capacity(path)?;
@@ -1883,7 +1883,7 @@ fn bind_unix_socket(
 
     // Probe only for information. A live peer with our uid means refuse; never
     // unlink without holding the lock (already held), and never unlink a live
-    // endpoint.
+    // endpoint. A failed connect does not establish that the inode is a socket.
     match std::os::unix::net::UnixStream::connect(path) {
         Ok(stream) => {
             if unix_peer_uid_matches(&stream, current_uid())? {
@@ -1895,11 +1895,19 @@ fn bind_unix_socket(
                 "Unix socket is already served; refusing to replace it".into(),
             ));
         }
-        Err(_) => {
-            if path.exists() {
+        Err(_) => match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
                 std::fs::remove_file(path)?;
             }
-        }
+            Ok(_) => {
+                return Err(IpcError::Invalid(
+                    "Unix socket endpoint exists but is not a Unix socket; refusing to replace it"
+                        .into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(IpcError::Io(error)),
+        },
     }
 
     let previous = unsafe { libc::umask(0o177) };

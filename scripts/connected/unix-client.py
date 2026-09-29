@@ -6,7 +6,7 @@ Endpoint resolution mirrors Core (`resolve_unix_socket` / `endpoint_socket_leaf_
   ~/.goalport/runtime/<ascii-prefix>--<sha256[:16]>.sock
 
 ASCII sanitize matches Rust `char::is_ascii_alphanumeric` (not Unicode isalnum).
-The sha256 suffix keeps the mapping injective (`a/b` ≠ `a?b`).
+The truncated sha256 suffix makes endpoint collisions unlikely (`a/b` ≠ `a?b` in this case).
 """
 import hashlib
 import json

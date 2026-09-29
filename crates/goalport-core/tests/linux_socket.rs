@@ -8,8 +8,8 @@ use goalport_core::process_identity::{ProcessObservation, classify_linux_kill0_r
 use goalport_core::{CoreServer, IpcError, Store};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -146,17 +146,84 @@ fn stale_endpoint_recovers_when_lock_is_free() {
     let lock = PathBuf::from(format!("{}.lock", sock.display()));
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(&lock);
-    // Orphan sock file with no live owner and no held lock.
-    std::fs::write(&sock, b"dead-sock-placeholder").unwrap();
+    // A real orphan socket inode with no live listener or held endpoint lock.
+    drop(UnixListener::bind(&sock).unwrap());
     assert!(sock.exists());
     let thread = spawn_server_at(sock.clone());
-    assert!(wait_until(|| {
-        std::fs::metadata(&sock)
-            .ok()
-            .is_some_and(|meta| meta.file_type().is_socket())
-    }));
+    assert!(wait_until(|| UnixStream::connect(&sock).is_ok()));
     snapshot_round_trip(&sock);
     let _ = thread;
+}
+
+#[test]
+fn non_socket_endpoint_inodes_are_refused_and_preserved() {
+    use std::ffi::CString;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let regular = dir.path().join("regular.sock");
+    let directory = dir.path().join("directory.sock");
+    let fifo = dir.path().join("fifo.sock");
+    let link = dir.path().join("symlink.sock");
+    std::fs::write(&regular, b"important contents").unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    symlink(&regular, &link).unwrap();
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    for path in [&regular, &directory, &fifo, &link] {
+        let before = std::fs::symlink_metadata(path).unwrap();
+        let error = match server.bind_unix_socket_at(path) {
+            Ok(_) => panic!("non-socket endpoint was bound: {}", path.display()),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not a Unix socket"),
+            "{}: {error}",
+            path.display()
+        );
+        let after = std::fs::symlink_metadata(path).unwrap();
+        assert_eq!(before.ino(), after.ino(), "{} inode changed", path.display());
+        assert_eq!(before.file_type(), after.file_type());
+    }
+    assert_eq!(std::fs::read(&regular).unwrap(), b"important contents");
+    assert_eq!(std::fs::read_link(&link).unwrap(), regular);
+}
+
+#[test]
+fn blackbox_serve_refuses_regular_file_without_changing_contents_or_inode() {
+    let dir = tempfile::tempdir().unwrap();
+    let pipe = dir.path().join("important.sock");
+    let db = dir.path().join("core.sqlite");
+    std::fs::write(&pipe, b"important contents").unwrap();
+    let inode_before = std::fs::symlink_metadata(&pipe).unwrap().ino();
+    let mut core = spawn_core_binary(
+        dir.path(),
+        pipe.to_str().unwrap(),
+        &db,
+        "refuse-regular-file",
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = core.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "Core did not refuse regular file");
+        std::thread::yield_now();
+    };
+    assert!(!status.success(), "Core must refuse a regular-file endpoint");
+    assert_eq!(std::fs::read(&pipe).unwrap(), b"important contents");
+    assert_eq!(std::fs::symlink_metadata(&pipe).unwrap().ino(), inode_before);
+    let ready = PathBuf::from(format!("{}.launch-ready", db.display()));
+    if ready.exists() {
+        assert!(
+            !std::fs::read_to_string(&ready)
+                .unwrap()
+                .contains("READY_COMMITTED"),
+            "refused bind must not advertise readiness"
+        );
+    }
 }
 
 #[test]
@@ -195,7 +262,7 @@ fn distinct_endpoints_coexist() {
 }
 
 #[test]
-fn resolve_uses_injective_leaf_under_runtime() {
+fn resolve_uses_collision_resistant_leaf_under_runtime() {
     let home = tempfile::tempdir().unwrap();
     let resolved = resolve_named_unix_socket(home.path(), "goalport-core-v1").unwrap();
     assert!(resolved.managed_runtime_parent);
@@ -221,7 +288,7 @@ fn resolve_uses_injective_leaf_under_runtime() {
 }
 
 #[test]
-fn injective_mapping_separates_slash_and_question() {
+fn hashed_mapping_separates_slash_and_question() {
     let parent = PathBuf::from("/home/user/.goalport/runtime");
     let a = endpoint_socket_leaf_name("a/b", &parent).unwrap();
     let b = endpoint_socket_leaf_name("a?b", &parent).unwrap();
