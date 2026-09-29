@@ -47,6 +47,7 @@
     "tauri:build:release": "cargo build --release -p goalport-core -p goalport-core-launcher && tauri build --ci"
   },
   "dependencies": {
+    "@base-ui/react": "^1.8.0",
     "@tauri-apps/api": "2.11.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",

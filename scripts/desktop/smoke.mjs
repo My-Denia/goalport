@@ -213,7 +213,9 @@ async function smoke() {
   const pickRuntime = async (name, scope = "composer") => {
     const root = scope === "draft" ? ".draft-runtime-picker" : ".composer-dock .runtime-picker";
     await click(`${root} button[aria-label='Select Runtime']`);
-    const finder = `Array.from(document.querySelectorAll('${root} .runtime-picker-item')).find(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)})`;
+    // The picker popup is portaled to document.body (Base UI), so options are
+    // looked up document-wide under the open list, not under the trigger root.
+    const finder = `Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).find(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)})`;
     await until(`${name} runtime option visible`, () => read(`Boolean(${finder})`));
     await clickFound(finder);
   };
