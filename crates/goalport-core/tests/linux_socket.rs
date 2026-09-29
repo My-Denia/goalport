@@ -11,7 +11,7 @@ use goalport_core::{CoreServer, IpcError, Store};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -158,13 +158,44 @@ fn stale_endpoint_recovers_when_lock_is_free() {
     let lock = PathBuf::from(format!("{}.lock", sock.display()));
     let _ = std::fs::remove_file(&sock);
     let _ = std::fs::remove_file(&lock);
-    // A real orphan socket inode with no live listener or held endpoint lock.
-    drop(UnixListener::bind(&sock).unwrap());
+    // A real GoalPort-owned orphan socket inode with a matching lock marker.
+    let first = CoreServer::new(Store::open_in_memory().unwrap());
+    drop(first.bind_unix_socket_at(&sock).unwrap());
     assert!(sock.exists());
     let thread = spawn_server_at(sock.clone());
     assert!(wait_until(|| UnixStream::connect(&sock).is_ok()));
     snapshot_round_trip(&sock);
     let _ = thread;
+}
+
+#[test]
+fn foreign_stale_stream_socket_is_preserved_without_goalport_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("foreign-stale.sock");
+    drop(UnixListener::bind(&sock).unwrap());
+    let before = std::fs::symlink_metadata(&sock).unwrap().ino();
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_unix_socket_at(&sock).is_err());
+    assert_eq!(std::fs::symlink_metadata(&sock).unwrap().ino(), before);
+}
+
+#[test]
+fn live_foreign_datagram_socket_keeps_its_inode_and_connectivity() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("foreign-datagram.sock");
+    let live = UnixDatagram::bind(&sock).unwrap();
+    live.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let before = std::fs::symlink_metadata(&sock).unwrap().ino();
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    assert!(server.bind_unix_socket_at(&sock).is_err());
+    assert_eq!(std::fs::symlink_metadata(&sock).unwrap().ino(), before);
+    let client = UnixDatagram::unbound().unwrap();
+    client.send_to(b"still-live", &sock).unwrap();
+    let mut received = [0u8; 32];
+    let (count, _) = live.recv_from(&mut received).unwrap();
+    assert_eq!(&received[..count], b"still-live");
 }
 
 #[test]

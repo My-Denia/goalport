@@ -1905,6 +1905,58 @@ pub struct OwnedUnixSocket {
     listener: std::os::unix::net::UnixListener,
 }
 
+#[cfg(target_os = "linux")]
+const UNIX_SOCKET_LOCK_MAGIC: &str = "goalport-unix-socket-lock-v1";
+
+#[cfg(target_os = "linux")]
+fn unix_socket_lock_marker(
+    path: &std::path::Path,
+    socket: Option<&std::fs::Metadata>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let digest = Sha256::digest(path.as_os_str().as_bytes());
+    let (dev, ino, ctime, ctime_nsec) = socket
+        .map(|metadata| {
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        })
+        .unwrap_or((0, 0, 0, 0));
+    format!("{UNIX_SOCKET_LOCK_MAGIC} {digest:x} {dev} {ino} {ctime} {ctime_nsec}\n")
+}
+
+#[cfg(target_os = "linux")]
+fn valid_unix_socket_lock_marker(path: &std::path::Path, marker: &str) -> bool {
+    let unclaimed = unix_socket_lock_marker(path, None);
+    let parts = marker.split_whitespace().collect::<Vec<_>>();
+    let expected = unclaimed.split_whitespace().collect::<Vec<_>>();
+    parts.len() == 6
+        && parts[0] == expected[0]
+        && parts[1] == expected[1]
+        && parts[2].parse::<u64>().is_ok()
+        && parts[3].parse::<u64>().is_ok()
+        && parts[4].parse::<i64>().is_ok()
+        && parts[5].parse::<i64>().is_ok()
+        && marker.ends_with('\n')
+}
+
+#[cfg(target_os = "linux")]
+fn write_unix_socket_lock_marker(lock: &mut std::fs::File, marker: &str) -> Result<(), IpcError> {
+    use std::io::{Seek, SeekFrom};
+
+    lock.seek(SeekFrom::Start(0))?;
+    lock.write_all(marker.as_bytes())?;
+    lock.set_len(marker.len() as u64)?;
+    lock.sync_all()?;
+    Ok(())
+}
+
 /// Linux copies the socket fd's mode (masked by the current umask) when it
 /// creates a pathname socket. Restrict the fd before bind so no process-wide
 /// umask change or briefly accessible pathname is needed.
@@ -1963,14 +2015,25 @@ fn bind_unix_socket(
     validate_unix_socket_path_capacity(path)?;
     ensure_socket_parent(path, tighten_managed)?;
     let lock_path = adjacent_lock_path(path);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
+    let (mut lock, created) = match std::fs::OpenOptions::new()
+        .create_new(true)
         .read(true)
         .write(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)
-        .map_err(IpcError::Io)?;
+    {
+        Ok(lock) => (lock, true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&lock_path)?,
+            false,
+        ),
+        Err(error) => return Err(IpcError::Io(error)),
+    };
     let lock_metadata = lock.metadata()?;
     if !lock_metadata.file_type().is_file()
         || lock_metadata.uid() != current_uid()
@@ -1999,10 +2062,31 @@ fn bind_unix_socket(
             "Unix socket lock path changed while acquiring ownership".into(),
         ));
     }
+    let marker = if created {
+        let marker = unix_socket_lock_marker(path, None);
+        write_unix_socket_lock_marker(&mut lock, &marker)?;
+        marker
+    } else {
+        if lock.metadata()?.len() > 256 {
+            return Err(IpcError::Invalid(
+                "Unix socket lock has no valid GoalPort ownership marker".into(),
+            ));
+        }
+        use std::io::{Seek, SeekFrom};
+        lock.seek(SeekFrom::Start(0))?;
+        let mut marker = String::new();
+        lock.read_to_string(&mut marker)?;
+        if !valid_unix_socket_lock_marker(path, &marker) {
+            return Err(IpcError::Invalid(
+                "Unix socket lock has no valid GoalPort ownership marker".into(),
+            ));
+        }
+        marker
+    };
 
-    // Probe only for information. A live peer with our uid means refuse; never
-    // unlink without holding the lock (already held), and never unlink a live
-    // endpoint. A failed connect does not establish that the inode is a socket.
+    // Only an ECONNREFUSED socket with the exact inode recorded by a prior
+    // GoalPort bind may be reclaimed. A failed stream connect alone cannot
+    // distinguish stale streams from live datagram or seqpacket endpoints.
     match std::os::unix::net::UnixStream::connect(path) {
         Ok(stream) => {
             if unix_peer_uid_matches(&stream, current_uid())? {
@@ -2014,8 +2098,16 @@ fn bind_unix_socket(
                 "Unix socket is already served; refusing to replace it".into(),
             ));
         }
-        Err(_) => match std::fs::symlink_metadata(path) {
+        Err(connect_error) => match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_socket() => {
+                if connect_error.raw_os_error() != Some(libc::ECONNREFUSED)
+                    || marker != unix_socket_lock_marker(path, Some(&metadata))
+                {
+                    return Err(IpcError::Invalid(
+                        "Unix socket endpoint is not a proven stale GoalPort stream; refusing to replace it"
+                            .into(),
+                    ));
+                }
                 std::fs::remove_file(path)?;
             }
             Ok(_) => {
@@ -2037,6 +2129,7 @@ fn bind_unix_socket(
             "Unix socket endpoint is not a 0o600 socket (mode {mode:#o})"
         )));
     }
+    write_unix_socket_lock_marker(&mut lock, &unix_socket_lock_marker(path, Some(&metadata)))?;
     Ok(OwnedUnixSocket {
         _lock: lock,
         listener,
