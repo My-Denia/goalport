@@ -1852,6 +1852,53 @@ pub struct OwnedUnixSocket {
     listener: std::os::unix::net::UnixListener,
 }
 
+/// Linux copies the socket fd's mode (masked by the current umask) when it
+/// creates a pathname socket. Restrict the fd before bind so no process-wide
+/// umask change or briefly accessible pathname is needed.
+#[cfg(target_os = "linux")]
+fn bind_restricted_unix_listener(
+    path: &std::path::Path,
+) -> Result<std::os::unix::net::UnixListener, IpcError> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    validate_unix_socket_path_capacity(path)?;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.contains(&0) {
+        return Err(IpcError::Invalid("Unix socket path contains NUL".into()));
+    }
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if raw < 0 {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    if unsafe { libc::fchmod(fd.as_raw_fd(), 0o600) } != 0 {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+        as libc::socklen_t;
+    if unsafe {
+        libc::bind(
+            fd.as_raw_fd(),
+            &address as *const _ as *const libc::sockaddr,
+            address_len,
+        )
+    } != 0
+    {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+    if unsafe { libc::listen(fd.as_raw_fd(), 128) } != 0 {
+        return Err(IpcError::Io(io::Error::last_os_error()));
+    }
+    Ok(std::os::unix::net::UnixListener::from(fd))
+}
+
 #[cfg(target_os = "linux")]
 fn bind_unix_socket(
     path: &std::path::Path,
@@ -1910,15 +1957,14 @@ fn bind_unix_socket(
         },
     }
 
-    let previous = unsafe { libc::umask(0o177) };
-    let listener = std::os::unix::net::UnixListener::bind(path);
-    unsafe {
-        libc::umask(previous);
+    let listener = bind_restricted_unix_listener(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.file_type().is_socket() || mode != 0o600 {
+        return Err(IpcError::Invalid(format!(
+            "Unix socket endpoint is not a 0o600 socket (mode {mode:#o})"
+        )));
     }
-    let listener = listener?;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)?;
     Ok(OwnedUnixSocket {
         _lock: lock,
         listener,

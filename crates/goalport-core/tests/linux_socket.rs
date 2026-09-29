@@ -77,8 +77,11 @@ fn python_resolve(home: &Path, endpoint: &str) -> String {
 }
 
 fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> SpawnedCore {
+    use std::os::unix::process::CommandExt;
+
     let core = env!("CARGO_BIN_EXE_goalport-core");
-    let child = Command::new(core)
+    let mut command = Command::new(core);
+    command
         .args(["serve", "--pipe", pipe, "--db"])
         .arg(db)
         .env_clear()
@@ -103,9 +106,16 @@ fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> Spawned
         .env("GOALPORT_LAUNCHER_STARTED_AT", "2026-09-29T00:00:00.001Z")
         .env("GOALPORT_CORE_SPAWNED_AT", "2026-09-29T00:00:00.002Z")
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    // The child's permissive mask proves the socket's 0600 mode comes from
+    // the bind implementation rather than an inherited restrictive mask.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0);
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
     SpawnedCore(child)
 }
 
@@ -479,6 +489,11 @@ fn blackbox_serve_binary_round_trip() {
         wait_until(|| sock.exists()),
         "socket missing at {}",
         sock.display()
+    );
+    assert_eq!(
+        std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777,
+        0o600,
+        "socket mode must stay private even with child umask 000"
     );
     let ready_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&ready).unwrap()).unwrap();
