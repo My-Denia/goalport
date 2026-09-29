@@ -93,7 +93,9 @@ jobs:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Focused Linux Unix socket tests
-        run: cargo test --locked -p goalport-core --test linux_socket -- --nocapture
+        # bind_unix_socket temporarily sets process-wide umask while binding.
+        # Keep filesystem-creating cases from racing that shared process state.
+        run: cargo test --locked -p goalport-core --test linux_socket -- --nocapture --test-threads=1
       - name: Build goalport-core
         run: cargo build --locked -p goalport-core
       - name: Black-box serve + UnixStream client round-trip
