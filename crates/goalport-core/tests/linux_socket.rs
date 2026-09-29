@@ -79,7 +79,7 @@ fn python_resolve(home: &Path, endpoint: &str) -> String {
 }
 
 fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> SpawnedCore {
-    spawn_core_binary_with_marker_fault(home, pipe, db, nonce, false)
+    spawn_core_binary_with_marker_fault(home, pipe, db, nonce, None)
 }
 
 fn spawn_core_binary_with_marker_fault(
@@ -87,7 +87,7 @@ fn spawn_core_binary_with_marker_fault(
     pipe: &str,
     db: &Path,
     nonce: &str,
-    marker_fault: bool,
+    marker_fault: Option<&str>,
 ) -> SpawnedCore {
     use std::os::unix::process::CommandExt;
 
@@ -119,8 +119,8 @@ fn spawn_core_binary_with_marker_fault(
         .env("GOALPORT_CORE_SPAWNED_AT", "2026-09-29T00:00:00.002Z")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if marker_fault {
-        command.env("GOALPORT_TEST_SOCKET_MARKER_FAILURE", "after-bind");
+    if let Some(fault) = marker_fault {
+        command.env("GOALPORT_TEST_SOCKET_MARKER_FAILURE", fault);
     }
     // The child's permissive mask proves the socket's 0600 mode comes from
     // the bind implementation rather than an inherited restrictive mask.
@@ -358,7 +358,7 @@ fn blackbox_post_bind_marker_failure_removes_own_socket_and_lock() {
         sock.to_str().unwrap(),
         &db,
         "marker-failure",
-        true,
+        Some("after-bind"),
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
@@ -375,6 +375,37 @@ fn blackbox_post_bind_marker_failure_removes_own_socket_and_lock() {
     if ready.exists() {
         assert!(!std::fs::read_to_string(&ready).unwrap().contains("READY_COMMITTED"));
     }
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    let owned = server.bind_unix_socket_at(&sock).unwrap();
+    assert!(std::fs::symlink_metadata(&sock).unwrap().file_type().is_socket());
+    drop(owned);
+}
+
+#[test]
+fn blackbox_initial_marker_failure_removes_partial_lock_and_allows_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("initial-marker-failure.sock");
+    let lock = PathBuf::from(format!("{}.lock", sock.display()));
+    let db = dir.path().join("core.sqlite");
+    let mut core = spawn_core_binary_with_marker_fault(
+        dir.path(),
+        sock.to_str().unwrap(),
+        &db,
+        "initial-marker-failure",
+        Some("initial"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = core.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "Core did not fail after initial marker fault");
+        std::thread::yield_now();
+    };
+    assert!(!status.success());
+    assert!(!sock.exists(), "initial marker failure must not bind a socket");
+    assert!(!lock.exists(), "partial initial lock marker must be removed");
 
     let server = CoreServer::new(Store::open_in_memory().unwrap());
     let owned = server.bind_unix_socket_at(&sock).unwrap();

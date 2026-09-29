@@ -2136,7 +2136,29 @@ fn bind_unix_socket(
     }
     let marker = if created {
         let marker = unix_socket_lock_marker(path, None);
-        write_unix_socket_lock_marker(&mut lock, &marker)?;
+        let initial_write = if std::env::var("GOALPORT_REQUIRE_ISOLATED").ok().as_deref()
+            == Some("1")
+            && std::env::var("GOALPORT_TEST_SOCKET_MARKER_FAILURE")
+                .ok()
+                .as_deref()
+                == Some("initial")
+        {
+            write_unix_socket_lock_marker(&mut lock, "partial-marker\n").and_then(|_| {
+                Err(IpcError::Invalid(
+                    "injected initial Unix socket marker failure".into(),
+                ))
+            })
+        } else {
+            write_unix_socket_lock_marker(&mut lock, &marker)
+        };
+        if let Err(marker_error) = initial_write {
+            remove_matching_lock(&lock_path, &lock_metadata).map_err(|cleanup_error| {
+                IpcError::Invalid(format!(
+                    "initial Unix socket marker failed ({marker_error}); lock cleanup failed ({cleanup_error})"
+                ))
+            })?;
+            return Err(marker_error);
+        }
         marker
     } else {
         if lock.metadata()?.len() > 256 {
