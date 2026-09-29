@@ -1,6 +1,6 @@
-import { CompositionEvent, KeyboardEvent, useEffect, useRef, useState, type FormEvent } from "react";
+import { CompositionEvent, KeyboardEvent, useEffect, useRef, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
-import { supportStatusLabel } from "../lib/display";
+import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
 
 export interface GoalDraftValue {
   workspace: string;
@@ -17,74 +17,32 @@ interface DraftRuntimePickerProps {
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
 function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRuntimePickerProps) {
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement | null>(null);
   const selected = runtimes.find((candidate) => candidate.id === provider);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDocClick = (event: MouseEvent) => {
-      if (boxRef.current && !boxRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   return (
-    <div className="runtime-picker draft-runtime-picker" ref={boxRef}>
-      <button
-        className="runtime-picker-button"
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label="Select Runtime"
-        title="Choose the Runtime for this goal"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className={`provider-avatar provider-${provider || "none"}`} aria-hidden="true">
-          {selected ? selected.name[0] : "–"}
-        </span>
-        <span className="runtime-picker-copy">
-          <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
-          <small>{selected ? "will run this goal" : "pick before sending"}</small>
-        </span>
-        <span aria-hidden="true">⌄</span>
-      </button>
-      {open ? (
-        <div className="runtime-picker-list" role="listbox" aria-label="Runtimes">
-          {runtimes.length === 0 ? <p className="runtime-picker-empty">No Runtime information from Core yet.</p> : null}
-          {runtimes.map((candidate) => (
-            <button
-              key={candidate.id}
-              className="runtime-picker-item"
-              type="button"
-              role="option"
-              aria-selected={candidate.id === provider}
-              disabled={candidate.support === "unsupported" || !connected}
-              onClick={() => {
-                setOpen(false);
-                onSelect(candidate.id);
-              }}
-            >
-              <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
-              <span className="runtime-picker-copy">
-                <strong>{candidate.name}</strong>
-                <small>{candidate.subtitle}</small>
-              </span>
-              <span className={`support-chip support-${candidate.support}`}>
-                {supportStatusLabel(candidate)}
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : null}
+    <div className="runtime-picker draft-runtime-picker">
+      <RuntimePickerMenu
+        runtimes={runtimes}
+        selectedId={provider}
+        triggerClassName="runtime-picker-button"
+        triggerAriaLabel="Select Runtime"
+        triggerTitle="Choose the Runtime for this goal"
+        emptyText="No Runtime information from Core yet."
+        blockedHint={!connected ? "Reconnect Core to select." : null}
+        isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}
+        onSelect={onSelect}
+        triggerContent={(
+          <>
+            <span className={`provider-avatar provider-${provider || "none"}`} aria-hidden="true">
+              {selected ? selected.name[0] : "–"}
+            </span>
+            <span className="runtime-picker-copy">
+              <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
+              <small>{selected ? "will run this goal" : "pick before sending"}</small>
+            </span>
+            <span aria-hidden="true">⌄</span>
+          </>
+        )}
+      />
     </div>
   );
 }

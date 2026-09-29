@@ -1,6 +1,7 @@
-import { CompositionEvent, KeyboardEvent, useEffect, useRef, useState, type FormEvent } from "react";
+import { CompositionEvent, KeyboardEvent, useEffect, useRef, type FormEvent } from "react";
 import type { CoreSnapshot, ProductRuntimeSelection, ProductTurn, RuntimeProfile } from "../types";
-import { runtimeSelectionDisplay, supportStatusLabel } from "../lib/display";
+import { runtimeSelectionDisplay } from "../lib/display";
+import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
 
 interface RuntimePickerProps {
   runtimes: RuntimeProfile[];
@@ -17,89 +18,38 @@ interface RuntimePickerProps {
  * Runtime chooser attached to the composer, so the destination of the next
  * message is visible before sending. The chip label comes from the product
  * Runtime selection (which survives stopped/unavailable states) — never from
- * `attempt.state`.
+ * `attempt.state`. Behavior (positioning, outside-press/Escape close) lives in
+ * the shared RuntimePickerMenu.
  */
 export function RuntimePicker({ runtimes, runtime, blocked, blockedReason, connected, onSelect, focusSignal }: RuntimePickerProps) {
-  const [open, setOpen] = useState(false);
   const display = runtimeSelectionDisplay(runtime);
   const selectBlocked = blocked || !connected;
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDocClick = (event: MouseEvent) => {
-      if (boxRef.current && !boxRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (focusSignal <= 0) return;
-    setOpen(true);
-    buttonRef.current?.focus();
-  }, [focusSignal]);
-
   return (
-    <div className="runtime-picker" ref={boxRef}>
-      <button
-        className="runtime-picker-button"
-        type="button"
-        ref={buttonRef}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label="Select Runtime"
-        title="Choose the Runtime for your next message"
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className={`provider-avatar provider-${runtime.provider.toLowerCase() || "none"}`} aria-hidden="true">{display.glyph}</span>
-        <span className="runtime-picker-copy">
-          <strong>{display.label}</strong>
-          <small>{display.detail}</small>
-        </span>
-        <span aria-hidden="true">⌄</span>
-      </button>
-      {open ? (
-        <div className="runtime-picker-list" role="listbox" aria-label="Runtimes">
-          {runtimes.length === 0 ? <p className="runtime-picker-empty">No Runtime information from Core yet.</p> : null}
-          {runtimes.map((candidate) => (
-            <button
-              key={candidate.id}
-              className="runtime-picker-item"
-              type="button"
-              role="option"
-              aria-selected={runtime.provider.toLowerCase() === candidate.id.toLowerCase()}
-              disabled={candidate.support === "unsupported" || selectBlocked}
-              onClick={() => {
-                setOpen(false);
-                onSelect(candidate.id);
-              }}
-            >
-              <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
-              <span className="runtime-picker-copy">
-                <strong>{candidate.name}</strong>
-                <small>{candidate.subtitle}</small>
-              </span>
-              <span className={`support-chip support-${candidate.support}`}>
-                {supportStatusLabel(candidate)}
-              </span>
-            </button>
-          ))}
-          {selectBlocked ? (
-            <p className="runtime-picker-hint">
-              {!connected ? "Reconnect Core to select." : (blockedReason ?? "Selection is blocked while a hold governs this workspace.")}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
+    <div className="runtime-picker">
+      <RuntimePickerMenu
+        runtimes={runtimes}
+        selectedId={runtime.provider}
+        triggerClassName="runtime-picker-button"
+        triggerAriaLabel="Select Runtime"
+        triggerTitle="Choose the Runtime for your next message"
+        emptyText="No Runtime information from Core yet."
+        blockedHint={selectBlocked
+          ? (!connected ? "Reconnect Core to select." : (blockedReason ?? "Selection is blocked while a hold governs this workspace."))
+          : null}
+        isItemDisabled={(candidate) => candidate.support === "unsupported" || selectBlocked}
+        onSelect={onSelect}
+        focusSignal={focusSignal}
+        triggerContent={(
+          <>
+            <span className={`provider-avatar provider-${runtime.provider.toLowerCase() || "none"}`} aria-hidden="true">{display.glyph}</span>
+            <span className="runtime-picker-copy">
+              <strong>{display.label}</strong>
+              <small>{display.detail}</small>
+            </span>
+            <span aria-hidden="true">⌄</span>
+          </>
+        )}
+      />
     </div>
   );
 }

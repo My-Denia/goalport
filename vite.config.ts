@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -13,5 +14,9 @@ export default defineConfig({
     watch: { ignored: ["**/src-tauri/**", "**/goal-runs/**"] }
   },
   envPrefix: ["VITE_", "TAURI_ENV_"],
-  build: { target: "es2022", sourcemap: true }
+  build: { target: "es2022", sourcemap: true },
+  test: {
+    // jsdom lacks ResizeObserver; the stub keeps Base UI popovers mountable.
+    setupFiles: ["./src/test-setup.ts"]
+  }
 });

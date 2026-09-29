@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(import.meta.dirname, "../..");
 const require = createRequire(resolve(ROOT, "package.json"));
 
-function readPackageJson(name) {
-  const path = require.resolve(`${name}/package.json`);
+function readPackageJson(name, searchPaths) {
+  const path = require.resolve(`${name}/package.json`, { paths: searchPaths });
   return { path, json: JSON.parse(readFileSync(path, "utf8")) };
 }
 
@@ -21,14 +21,20 @@ export function npmShippedClosure(root = ROOT) {
   const roots = Object.keys(pkg.dependencies || {});
   const seen = new Map();
   const queue = [...roots];
+  // pnpm's isolated node_modules keeps transitive deps (e.g. @babel/runtime
+  // via @base-ui/react) out of the root. Resolve each package from every
+  // already-found package's directory as well, so the closure walk can reach
+  // nested-store siblings.
+  const searchPaths = [ROOT];
   while (queue.length) {
     const name = queue.shift();
     if (seen.has(name)) continue;
-    const { path, json } = readPackageJson(name);
+    const { path, json } = readPackageJson(name, searchPaths);
     const licenseFilePath = ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENSE-MIT", "License"]
       .map((candidate) => resolve(path, "..", candidate))
       .find((candidate) => existsSync(candidate)) || null;
     seen.set(name, { name, version: json.version, license: json.license || null, licenseFilePath, manifestPath: path });
+    searchPaths.push(resolve(path, ".."));
     for (const dep of Object.keys(json.dependencies || {})) queue.push(dep);
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
