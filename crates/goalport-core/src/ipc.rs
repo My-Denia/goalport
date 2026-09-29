@@ -22,6 +22,8 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use thiserror::Error;
 
 pub const IPC_PROTOCOL_VERSION: &str = "goalport.ipc.v1";
@@ -735,6 +737,23 @@ impl CoreServer {
     #[cfg(not(windows))]
     pub fn serve_named_pipe_once(&self, _name: &str) -> Result<usize, IpcError> {
         Err(IpcError::UnsupportedPlatform)
+    }
+
+    /// Linux/iSH local socket. Named pipes stay unsupported. Peer uid must
+    /// match; a missing `SO_PEERCRED` fails closed.
+    #[cfg(unix)]
+    pub fn serve_unix_socket(&self) -> Result<(), IpcError> {
+        self.start_runtime_flusher();
+        let path = unix_socket_path()?;
+        let listener = bind_unix_socket(&path)?;
+        loop {
+            let (mut stream, _) = listener.accept().map_err(IpcError::Io)?;
+            if !unix_peer_uid_matches(&stream, current_uid())? {
+                continue;
+            }
+            let mut reader = stream.try_clone().map_err(IpcError::Io)?;
+            let _ = self.serve_stream(&mut reader, &mut stream);
+        }
     }
 
     #[cfg(windows)]
@@ -1584,4 +1603,70 @@ mod tests {
             );
         }
     }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(unix)]
+fn unix_socket_path() -> Result<std::path::PathBuf, IpcError> {
+    let home = std::env::var("HOME").map_err(|_| IpcError::Invalid("HOME is required".into()))?;
+    let dir = std::path::PathBuf::from(home).join(".goalport").join("runtime");
+    std::fs::create_dir_all(&dir)?;
+    let mut perms = std::fs::metadata(&dir)?.permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(&dir, perms)?;
+    Ok(dir.join("core.sock"))
+}
+
+#[cfg(unix)]
+fn bind_unix_socket(path: &std::path::Path) -> Result<std::os::unix::net::UnixListener, IpcError> {
+    if let Ok(stream) = std::os::unix::net::UnixStream::connect(path) {
+        if unix_peer_uid_matches(&stream, current_uid())? {
+            return Err(IpcError::Invalid(
+                "Unix socket is already served by this user; refusing to replace it".into(),
+            ));
+        }
+        return Err(IpcError::Invalid(
+            "Unix socket is already served; refusing to replace it".into(),
+        ));
+    }
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    let previous = unsafe { libc::umask(0o177) };
+    let listener = std::os::unix::net::UnixListener::bind(path);
+    unsafe { libc::umask(previous); }
+    let listener = listener?;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(path, perms)?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn unix_peer_uid_matches(
+    stream: &std::os::unix::net::UnixStream,
+    expected: u32,
+) -> Result<bool, IpcError> {
+    use std::os::unix::io::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(IpcError::Invalid(
+            "SO_PEERCRED unavailable; refusing connection".into(),
+        ));
+    }
+    Ok(cred.uid == expected)
 }

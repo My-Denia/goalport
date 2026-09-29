@@ -107,8 +107,15 @@ fn serve(args: &[String]) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (pipe, server);
-        Err("serve requires Windows Named Pipe support".into())
+        let _ = pipe;
+        match server.serve_unix_socket() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let message = error.to_string();
+                let _ = product_receipts::fail_startup_epoch(&store, &epoch, &message);
+                Err(message)
+            }
+        }
     }
 }
 

@@ -71,13 +71,24 @@ pub fn observe_process(pid: u32) -> ProcessObservation {
     {
         windows_process_identity(pid)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
         if pid == std::process::id() {
             ProcessObservation::Live(current_identity())
+        } else if Path::new(&format!("/proc/{pid}")).is_dir() {
+            ProcessObservation::Unknown(
+                "Linux /proc shows the pid, but executable identity is not proven".into(),
+            )
         } else {
-            ProcessObservation::Unknown("process observation is only implemented on Windows".into())
+            ProcessObservation::NotRunning
         }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        ProcessObservation::Unknown(
+            "process observation is not implemented on this platform".into(),
+        )
     }
 }
 
