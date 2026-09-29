@@ -1898,7 +1898,7 @@ fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result
 
 /// Exclusive ownership of a Linux Unix-socket endpoint for the server lifetime.
 /// The flock on `_lock` is held until this value is dropped; the sock file is
-/// not unlinked on drop (stale files are recovered on the next bind).
+/// not unlinked on drop (marked stale files are recovered on the next bind).
 #[cfg(target_os = "linux")]
 pub struct OwnedUnixSocket {
     _lock: std::fs::File,
@@ -1954,6 +1954,52 @@ fn write_unix_socket_lock_marker(lock: &mut std::fs::File, marker: &str) -> Resu
     lock.write_all(marker.as_bytes())?;
     lock.set_len(marker.len() as u64)?;
     lock.sync_all()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_matching_bound_socket(
+    path: &std::path::Path,
+    expected: &std::fs::Metadata,
+) -> Result<(), IpcError> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let actual = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(IpcError::Io(error)),
+    };
+    if !actual.file_type().is_socket()
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+        || actual.ctime() != expected.ctime()
+        || actual.ctime_nsec() != expected.ctime_nsec()
+    {
+        return Err(IpcError::Invalid(
+            "new Unix socket path changed before cleanup; refusing to unlink it".into(),
+        ));
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_matching_lock(
+    path: &std::path::Path,
+    expected: &std::fs::Metadata,
+) -> Result<(), IpcError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let actual = std::fs::symlink_metadata(path)?;
+    if !actual.file_type().is_file()
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+    {
+        return Err(IpcError::Invalid(
+            "Unix socket lock path changed before cleanup; refusing to unlink it".into(),
+        ));
+    }
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -2129,7 +2175,36 @@ fn bind_unix_socket(
             "Unix socket endpoint is not a 0o600 socket (mode {mode:#o})"
         )));
     }
-    write_unix_socket_lock_marker(&mut lock, &unix_socket_lock_marker(path, Some(&metadata)))?;
+    let persist_marker = if std::env::var("GOALPORT_REQUIRE_ISOLATED").ok().as_deref() == Some("1")
+        && std::env::var("GOALPORT_TEST_SOCKET_MARKER_FAILURE")
+            .ok()
+            .as_deref()
+            == Some("after-bind")
+    {
+        // Leave invalid marker bytes before the injected error so the test
+        // proves cleanup handles a partially published lock record.
+        write_unix_socket_lock_marker(&mut lock, "partial-marker\n").and_then(|_| {
+            Err(IpcError::Invalid(
+                "injected post-bind Unix socket marker failure".into(),
+            ))
+        })
+    } else {
+        write_unix_socket_lock_marker(&mut lock, &unix_socket_lock_marker(path, Some(&metadata)))
+    };
+    if let Err(marker_error) = persist_marker {
+        drop(listener);
+        remove_matching_bound_socket(path, &metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket marker persistence failed ({marker_error}); socket cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        remove_matching_lock(&lock_path, &lock_metadata).map_err(|cleanup_error| {
+            IpcError::Invalid(format!(
+                "Unix socket marker persistence failed ({marker_error}); lock cleanup failed ({cleanup_error})"
+            ))
+        })?;
+        return Err(marker_error);
+    }
     Ok(OwnedUnixSocket {
         _lock: lock,
         listener,

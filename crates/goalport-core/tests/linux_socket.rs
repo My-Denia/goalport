@@ -10,7 +10,7 @@ use goalport_core::process_identity::{
 use goalport_core::{CoreServer, IpcError, Store};
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -79,6 +79,16 @@ fn python_resolve(home: &Path, endpoint: &str) -> String {
 }
 
 fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> SpawnedCore {
+    spawn_core_binary_with_marker_fault(home, pipe, db, nonce, false)
+}
+
+fn spawn_core_binary_with_marker_fault(
+    home: &Path,
+    pipe: &str,
+    db: &Path,
+    nonce: &str,
+    marker_fault: bool,
+) -> SpawnedCore {
     use std::os::unix::process::CommandExt;
 
     let core = env!("CARGO_BIN_EXE_goalport-core");
@@ -109,6 +119,9 @@ fn spawn_core_binary(home: &Path, pipe: &str, db: &Path, nonce: &str) -> Spawned
         .env("GOALPORT_CORE_SPAWNED_AT", "2026-09-29T00:00:00.002Z")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
+    if marker_fault {
+        command.env("GOALPORT_TEST_SOCKET_MARKER_FAILURE", "after-bind");
+    }
     // The child's permissive mask proves the socket's 0600 mode comes from
     // the bind implementation rather than an inherited restrictive mask.
     unsafe {
@@ -335,6 +348,41 @@ fn blackbox_serve_refuses_regular_file_without_changing_contents_or_inode() {
 }
 
 #[test]
+fn blackbox_post_bind_marker_failure_removes_own_socket_and_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("marker-failure.sock");
+    let lock = PathBuf::from(format!("{}.lock", sock.display()));
+    let db = dir.path().join("core.sqlite");
+    let mut core = spawn_core_binary_with_marker_fault(
+        dir.path(),
+        sock.to_str().unwrap(),
+        &db,
+        "marker-failure",
+        true,
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = core.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "Core did not fail after marker fault");
+        std::thread::yield_now();
+    };
+    assert!(!status.success());
+    assert!(!sock.exists(), "failed bind must remove its own socket");
+    assert!(!lock.exists(), "failed bind must remove its owned lock");
+    let ready = PathBuf::from(format!("{}.launch-ready", db.display()));
+    if ready.exists() {
+        assert!(!std::fs::read_to_string(&ready).unwrap().contains("READY_COMMITTED"));
+    }
+
+    let server = CoreServer::new(Store::open_in_memory().unwrap());
+    let owned = server.bind_unix_socket_at(&sock).unwrap();
+    assert!(std::fs::symlink_metadata(&sock).unwrap().file_type().is_socket());
+    drop(owned);
+}
+
+#[test]
 fn ownership_lock_refuses_second_starter_without_unlinking_live() {
     let sock = unique_sock("race");
     let _ = std::fs::remove_file(&sock);
@@ -414,6 +462,27 @@ fn unicode_endpoint_rust_and_python_agree() {
     assert_eq!(rust.path.display().to_string(), py);
     let leaf = rust.path.file_name().unwrap().to_string_lossy();
     assert!(leaf.starts_with("caf_--"), "{leaf}");
+}
+
+#[test]
+fn python_client_rejects_explicit_empty_endpoint_even_with_overrides() {
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/connected/unix-client.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--resolve-only")
+        .arg("")
+        .env("GOALPORT_SOCK", "/tmp/wrong-core.sock")
+        .env("GOALPORT_PIPE", "wrong-core")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Unix socket endpoint is empty"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -54,10 +54,14 @@ def sanitize(endpoint: str) -> str:
 
 
 def resolve(endpoint: str | None = None) -> str:
+    if endpoint is not None and not endpoint.strip():
+        raise ValueError("Unix socket endpoint is empty")
     override = os.environ.get("GOALPORT_SOCK")
     if override:
         return override
-    name = (endpoint or os.environ.get("GOALPORT_PIPE") or "goalport-core-v1").strip()
+    name = (
+        endpoint if endpoint is not None else os.environ.get("GOALPORT_PIPE") or "goalport-core-v1"
+    ).strip()
     if not name:
         raise ValueError("Unix socket endpoint is empty")
     if os.path.isabs(name):
