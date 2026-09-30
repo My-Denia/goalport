@@ -9,8 +9,6 @@ import {
   type CoreCommand
 } from "./ipc";
 import {
-  DEMO_SNAPSHOT,
-  EMPTY_SNAPSHOT,
   HISTORY_WINDOW_ADVANCED_NOTICE,
   resolvePermission,
   withConnection,
@@ -32,8 +30,10 @@ import { HandoffDialog } from "./dialog/HandoffDialog";
 import { BootstrapScreen } from "./dialog/BootstrapScreen";
 import type { BootstrapState } from "./ipc";
 import { conversationTitle, headlineState } from "./lib/display";
-import { useModalFocus } from "./lib/useModalFocus";
+import { GoalDialog } from "./ui/GoalDialog";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
+import { useCoreSnapshot } from "./lib/useCoreSnapshot";
+import { useConversationDrafts } from "./lib/useConversationDrafts";
 import {
   canExplicitlyRetry,
   conversationSendIntent,
@@ -104,10 +104,13 @@ interface GoalDraft extends GoalDraftValue {
 
 function App() {
   const client = useMemo(() => getCoreClient(), []);
-  const [snapshot, setSnapshot] = useState<CoreSnapshot>(() => client.mode === "browser-preview" ? DEMO_SNAPSHOT : EMPTY_SNAPSHOT);
+  const [coreReady, setCoreReady] = useState(
+    () => client.mode !== "electron" || !window.goalportCore?.onBootstrapState
+  );
+  const [snapshot, setSnapshot, booted] = useCoreSnapshot(client, coreReady);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
-  const [campaignDrafts, setCampaignDrafts] = useState<Record<string, string>>({});
+  const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<ActiveNotice | null>(null);
@@ -117,12 +120,11 @@ function App() {
   const [targetNotices, setTargetNotices] = useState<Record<string, ActiveNotice>>({});
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
-  const [sendIntents, setSendIntents] = useState<Record<string, SendIntent>>({});
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
-  const [navCollapsed, setNavCollapsed] = useState(false);
+  const [navCollapsed, setNavCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 860);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -136,16 +138,16 @@ function App() {
   // nothing is swallowed. Hosts without a bootstrap channel (browser preview,
   // tauri, older preload/test mounts) have no profile bootstrap and are ready
   // immediately.
-  const [coreReady, setCoreReady] = useState(
-    () => client.mode !== "electron" || !window.goalportCore?.onBootstrapState
-  );
-  // Browser preview starts from a complete snapshot; only the desktop app has a
-  // real Core cold start that can take seconds to answer the first snapshot.
-  const [booted, setBooted] = useState(() => client.mode === "browser-preview");
   const selectionIntent = useRef(0);
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
   const historyRequest = useRef(0);
+
+  useEffect(() => {
+    const onResize = () => { if (window.innerWidth <= 860) setNavCollapsed(true); };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     const api = window.goalportCore;
@@ -196,44 +198,8 @@ function App() {
     // Selection is authoritative only after Core returns its projection. While a
     // selection is pending, the visible composer remains bound to the campaign
     // still on screen, so keystrokes cannot silently move to the requested one.
-    if (!draftCampaignId) return;
-    setCampaignDrafts((current) => ({ ...current, [draftCampaignId]: value }));
-    setSendIntents((current) => {
-      const intent = current[draftCampaignId];
-      if (!intent || intent.message === value.trim()) return current;
-      const next = { ...current };
-      delete next[draftCampaignId];
-      return next;
-    });
+    updateCampaignDraft(draftCampaignId, value);
   }
-
-  useEffect(() => {
-    // Bootstrap not done yet: no snapshot poll, no Core auto-start. The effect
-    // re-runs with coreReady=true the moment the bootstrap reaches done.
-    if (!coreReady) return undefined;
-    let mounted = true;
-    let autoStartAttempted = false;
-    const refresh = async (allowStart: boolean) => {
-      const next = await client.snapshot();
-      if (!mounted) return;
-      setSnapshot((current) => current.loadedHistory ? mergeSnapshotHistory(current, next) : next);
-      setBooted(true);
-      if (allowStart && !autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview") {
-        autoStartAttempted = true;
-        const started = await client.startCore();
-        if (mounted) setSnapshot(started);
-      }
-    };
-    void refresh(true);
-    const timer = window.setInterval(() => {
-      if (!mounted) return;
-      void refresh(false);
-    }, 750);
-    return () => {
-      mounted = false;
-      window.clearInterval(timer);
-    };
-  }, [client, coreReady]);
 
   // First-use recovery: if Core created (or moved to) a conversation while a
   // draft was open — including after a failed start whose delivery was
@@ -350,7 +316,7 @@ function App() {
       ? crypto.randomUUID()
       : `close-${Date.now()}`;
     const continueClickIssuedAtUtc = new Date().toISOString();
-    window.__goalportCloseRequestId = requestId;
+    if (import.meta.env.DEV && window.__GOALPORT_ISOLATED === 1) window.__goalportCloseRequestId = requestId;
     try {
       const result = await window.goalportCore?.confirmCloseChoice?.({
         requestId,
@@ -452,6 +418,7 @@ function App() {
   }
 
   function handleNewGoal() {
+    if (window.innerWidth <= 860) setNavCollapsed(true);
     setDraftDismissed(false);
     setDraftError(null);
     setDraftBlocked(false);
@@ -712,7 +679,9 @@ function App() {
     if (capacityBlocksNewWork("change the Runtime transport state")) return;
     const next = client.mode === "browser-preview" ? withConnection(snapshot, "disconnected") : await client.setConnection("disconnected");
     setSnapshot(next);
-    setActiveNotice({ sentence: "UI is offline. Core keeps committed task state; uncommitted input remains in this window." });
+    setActiveNotice({ sentence: client.mode === "browser-preview"
+      ? "Browser preview is offline. Your local draft stays in this page."
+      : "UI is offline. Core keeps committed task state; uncommitted input remains in this window." });
   }
 
   // Stop appears only for a proven cancellable live turn (product turn
@@ -731,6 +700,41 @@ function App() {
     if (failure) setActiveNotice(failure);
   }
 
+  async function handleCloseSession() {
+    const attemptId = persistedAttemptId(snapshot.attempt.id);
+    if (!client.closeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
+      || !attemptId || !product?.turn.actions?.includes("close-session")) {
+      setActiveNotice({ sentence: "This Runtime session cannot be closed right now." });
+      return;
+    }
+    const viewIntent = selectionIntent.current;
+    const next = await client.closeSession(attemptId);
+    if (viewIntent === selectionIntent.current) setSnapshot(next);
+    const failure = commandFailure(next, "close_session");
+    if (failure) setActiveNotice(failure);
+    else setActiveNotice({ sentence: "Runtime session closed. This goal remains available." });
+  }
+
+  async function handleResumeSession() {
+    const attemptId = persistedAttemptId(snapshot.attempt.id);
+    if (!client.resumeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
+      || !attemptId || !product?.turn.actions?.includes("resume-session")) {
+      setActiveNotice({ sentence: "This session cannot be resumed right now. Check its status in details." });
+      return;
+    }
+    const viewIntent = selectionIntent.current;
+    const next = await client.resumeSession(attemptId);
+    if (viewIntent !== selectionIntent.current) return;
+    setSnapshot(next);
+    const failure = commandFailure(next, "resume_native_session");
+    if (failure) setActiveNotice(failure);
+    else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
+      setActiveNotice({ sentence: "Runtime session resumed. You can continue this goal." });
+    } else {
+      setActiveNotice({ sentence: next.productConversation?.turn.reason || "Session resume was not confirmed. Check its status in details." });
+    }
+  }
+
   async function handleReconnect() {
     const next = client.mode === "browser-preview" ? withConnection(snapshot, "connected") : await client.startCore();
     setSnapshot(next);
@@ -738,6 +742,7 @@ function App() {
       ? null
       : { sentence: "Core connection remains unavailable. Nothing was re-sent.", technical: next.commandOutcome?.error };
     if (failure) setActiveNotice(failure);
+    else setActiveNotice(null);
   }
 
   function handleKeepWaiting() {
@@ -752,7 +757,7 @@ function App() {
     }
     const next = await client.renameConversation(campaignId, title);
     setSnapshot(next);
-    const failure = commandFailure(next, "rename_conversation");
+    const failure = client.mode === "browser-preview" ? null : commandFailure(next, "rename_conversation");
     if (failure) setActiveNotice(failure);
     // Quiet success: the sidebar shows the new title.
   }
@@ -760,6 +765,7 @@ function App() {
   async function selectCampaign(campaignId: string) {
     const selected = snapshot.campaigns.find((campaign) => campaign.id === campaignId);
     if (!selected || selected.id === snapshot.activeCampaignId) return;
+    if (window.innerWidth <= 860) setNavCollapsed(true);
     // Explicit navigation closes a pending draft; it is not a submission.
     if (draftGoal) {
       setDraftGoal(null);
@@ -772,7 +778,7 @@ function App() {
       const next = await client.selectCampaign(campaignId);
       if (intent !== selectionIntent.current) return;
       setSnapshot(next);
-      const failure = commandFailure(next, "select_campaign");
+      const failure = client.mode === "browser-preview" ? null : commandFailure(next, "select_campaign");
       setActiveNotice(failure);
       return;
     }
@@ -786,11 +792,12 @@ function App() {
 
   async function selectProject(projectId: string) {
     if (!client.selectProject || projectId === snapshot.selectedProjectId) return;
+    if (window.innerWidth <= 860) setNavCollapsed(true);
     const intent = ++selectionIntent.current;
     const next = await client.selectProject(projectId);
     if (intent !== selectionIntent.current) return;
     setSnapshot(next);
-    const failure = commandFailure(next, "select_project");
+    const failure = client.mode === "browser-preview" ? null : commandFailure(next, "select_project");
     setActiveNotice(failure);
   }
 
@@ -809,7 +816,7 @@ function App() {
       : await client.selectRuntime(provider, campaignId, taskId);
     if (intent !== selectionIntent.current) return;
     setSnapshot(next);
-    setActiveNotice((current) => noticeAfterRuntimeSelect(next, current));
+    setActiveNotice((current) => client.mode === "browser-preview" ? null : noticeAfterRuntimeSelect(next, current));
     if (typeof window !== "undefined" && window.__GOALPORT_ISOLATED === 1) {
       window.__goalportLastSelectResult = next;
       window.__goalportLastSnapshot = next;
@@ -899,6 +906,7 @@ function App() {
     <div className="goalport-shell" data-connection={snapshot.connection} data-preview={snapshot.preview}
       data-attempt-id={snapshot.attempt.id} data-campaign-id={snapshot.activeCampaignId} data-core-build-id={snapshot.buildId}>
       <TitleBar
+        browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal ? title : null}
         appInfo={appInfo}
@@ -914,6 +922,7 @@ function App() {
       />
 
       <div className={`workspace-grid${navCollapsed ? " nav-collapsed" : ""}`}>
+        {!navCollapsed ? <button className="mobile-nav-backdrop" type="button" aria-label="Close navigation" onClick={() => setNavCollapsed(true)} /> : null}
         <CampaignNav
           snapshot={snapshot}
           collapsed={navCollapsed}
@@ -924,6 +933,7 @@ function App() {
 
         <main className="conversation-column" aria-label="Goal conversation">
           <StatusBanners
+            browserPreview={client.mode === "browser-preview"}
             snapshot={snapshot}
             activeNotice={displayedNotice}
             onDismissNotice={() => {
@@ -994,6 +1004,8 @@ function App() {
                   product={product}
                   loadingEarlier={historyLoading}
                   onLoadEarlier={client.historyPage ? () => { void loadEarlierConversation(); } : undefined}
+                  onChooseRuntime={() => setChooserFocusSignal((value) => value + 1)}
+                  onDiagnose={() => setDiagnosticsOpen(true)}
                 />
                 {anchor.unseenCount > 0 ? (
                   <button className="jump-latest" type="button" onClick={() => anchor.scrollToBottom()}>
@@ -1021,6 +1033,7 @@ function App() {
               ))}
 
               <Composer
+                focusKey={snapshot.activeCampaignId}
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
@@ -1039,6 +1052,7 @@ function App() {
           )}
 
           <SessionDetails
+            browserPreview={client.mode === "browser-preview"}
             open={detailsOpen}
             onClose={() => setDetailsOpen(false)}
             snapshot={snapshot}
@@ -1048,6 +1062,8 @@ function App() {
               setChooserFocusSignal((value) => value + 1);
             }}
             onOpenHandoff={openHandoffDialog}
+            onCloseSession={() => { void handleCloseSession(); }}
+            onResumeSession={() => { void handleResumeSession(); }}
             onOpenWorkspaceFolder={() => {
               void client.openInVsCode(snapshot.project.workspaceRoot).catch(() => {
                 setActiveNotice({ sentence: "The workspace folder could not be opened." });
@@ -1094,15 +1110,13 @@ function App() {
 }
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {
-  const dialogRef = useModalFocus(onClose);
   const development = appInfo?.testMode === true || appInfo?.distribution === "dev";
   const rows: Array<[string, string]> = [
     ["Version", appInfo?.version ? appInfo.version : "unknown"],
     ["Build", development ? "Development build" : (appInfo?.channel || "Release")]
   ];
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section ref={dialogRef} className="first-run-dialog about-dialog" role="dialog" aria-modal="true" aria-label="About GoalPort">
+    <GoalDialog label="About GoalPort" className="about-dialog" onDismiss={onClose}>
         <button className="dialog-close" type="button" aria-label="Close about" onClick={onClose}>×</button>
         <p className="eyebrow">ABOUT</p>
         <h2>GoalPort</h2>
@@ -1117,8 +1131,7 @@ function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: (
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onClose}>Close</button>
         </div>
-      </section>
-    </div>
+    </GoalDialog>
   );
 }
 

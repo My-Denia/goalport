@@ -127,6 +127,12 @@ fn recorded_status(
         ProcessObservation::NotRunning => PriorCoreStatus::Ended,
         ProcessObservation::Unknown(_) => PriorCoreStatus::Unknown,
         ProcessObservation::Live(live) => {
+            // Older Linux receipts used a wall-clock-derived /Date token. The
+            // sampled /proc/stat btime can move, so a live PID cannot prove
+            // that such a legacy binding ended. Require explicit recovery.
+            if live.creation_token.is_some() && recorded_creation_date.starts_with("/Date(") {
+                return PriorCoreStatus::Unknown;
+            }
             let creation_matches = live.creation_date() == recorded_creation_date;
             let path_matches =
                 normalized_path(&live.executable_path) == normalized_path(recorded_path);
@@ -661,6 +667,7 @@ mod tests {
             executable_path: r"C:\pkg\goalport-core.exe".into(),
             executable_sha256: "aa".into(),
             created_ms: 1000,
+            creation_token: None,
         };
         assert_eq!(
             recorded_status(
@@ -676,9 +683,29 @@ mod tests {
                 10,
                 "/Date(999)/",
                 r"C:\pkg\goalport-core.exe",
-                ProcessObservation::Live(live)
+                ProcessObservation::Live(live.clone())
             ),
             PriorCoreStatus::Ended
+        );
+        let mut linux_live = live.clone();
+        linux_live.creation_token = Some("/LinuxStart(593fc108-0000-0000-0000-000000000000:42)/".into());
+        assert_eq!(
+            recorded_status(
+                10,
+                "/Date(1000)/",
+                r"C:\pkg\goalport-core.exe",
+                ProcessObservation::Live(linux_live.clone())
+            ),
+            PriorCoreStatus::Unknown
+        );
+        assert_eq!(
+            recorded_status(
+                10,
+                &linux_live.creation_date(),
+                r"C:\pkg\goalport-core.exe",
+                ProcessObservation::Live(linux_live)
+            ),
+            PriorCoreStatus::LiveExact
         );
         assert_eq!(
             recorded_status(

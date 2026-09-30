@@ -267,6 +267,29 @@ impl std::fmt::Debug for Store {
     }
 }
 
+fn last_result_excerpt(text: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let characters = text.chars().collect::<Vec<_>>();
+    if characters.len() <= MAX_CHARS {
+        return text.to_owned();
+    }
+    let raw_start = characters.len() - (MAX_CHARS - 1);
+    let mut start = raw_start;
+    let ascii_word = |character: char| character.is_ascii_alphanumeric() || character == '_';
+    if ascii_word(characters[start - 1]) && ascii_word(characters[start]) {
+        if let Some(offset) = characters[start..].iter().position(|character| !ascii_word(*character)) {
+            start += offset + 1;
+            while start < characters.len() && characters[start].is_ascii_whitespace() {
+                start += 1;
+            }
+        }
+    }
+    if start >= characters.len() {
+        start = raw_start;
+    }
+    format!("…{}", characters[start..].iter().collect::<String>())
+}
+
 impl Store {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Self::open(path)
@@ -2382,6 +2405,29 @@ impl Store {
         Ok(())
     }
 
+    /// An optional native title may fill only an unnamed conversation. A manual
+    /// rename that won the race remains authoritative without a second status
+    /// table or a naming request in the task conversation.
+    pub fn set_generated_conversation_title_if_unnamed(
+        &self,
+        campaign_id: &str,
+        title: &str,
+    ) -> Result<bool, StoreError> {
+        let title = title.trim();
+        if campaign_id.trim().is_empty() || title.is_empty() || title.chars().count() > 80 {
+            return Err(StoreError::InvalidState("generated conversation title is invalid".into()));
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let changed = connection.execute(
+            "INSERT INTO conversation_preferences(campaign_id, selected_provider, title)
+             VALUES (?1, NULL, ?2)
+             ON CONFLICT(campaign_id) DO UPDATE SET title=excluded.title
+             WHERE conversation_preferences.title IS NULL",
+            params![campaign_id, title],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// The campaign's full event journal in durable cross-attempt order: events of
     /// every attempt of every task of the campaign, ordered by the explicit,
     /// VACUUM-stable product_event_order sequence (R3), never by timestamps.
@@ -3085,6 +3131,19 @@ impl Store {
         Ok(self.get_attempt(attempt_id)?.last_event_seq)
     }
 
+    /// A cheap observation of this Core's committed SQLite writes and journal
+    /// position. The Core is the sole live writer of its profile connection.
+    pub fn mutation_revision(&self) -> Result<(i64, i64), StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        connection
+            .query_row(
+                "SELECT total_changes(), (SELECT COALESCE(MAX(order_seq),0) FROM product_event_order)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn event_count(&self, attempt_id: &str) -> Result<usize, StoreError> {
         let connection = self.inner.lock().expect("store mutex poisoned");
         let count: i64 = connection.query_row(
@@ -3119,6 +3178,120 @@ impl Store {
         Ok(connection
             .query_row(&sql, values.as_slice(), |row| row.get(0))
             .optional()?)
+    }
+
+    /// The last matching committed event, including its bounded payload.
+    pub fn latest_event_record_in(
+        &self,
+        attempt_id: &str,
+        kinds: &[&str],
+    ) -> Result<Option<EventRecord>, StoreError> {
+        if kinds.is_empty() {
+            return Ok(None);
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let placeholders = std::iter::repeat("?")
+            .take(kinds.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, attempt_id, seq, kind, payload_ref, payload_json, created_at \
+             FROM events WHERE attempt_id=? AND kind IN ({placeholders}) ORDER BY seq DESC LIMIT 1"
+        );
+        let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(kinds.len() + 1);
+        values.push(&attempt_id);
+        for kind in kinds {
+            values.push(kind);
+        }
+        connection
+            .query_row(&sql, values.as_slice(), |row| {
+                let payload_json: Option<String> = row.get(5)?;
+                let payload = payload_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .map_err(|error| to_sql_error(DomainError::InvalidEntity(error.to_string())))?;
+                Ok(EventRecord {
+                    event: Event {
+                        id: row.get(0)?,
+                        attempt_id: row.get(1)?,
+                        seq: row.get(2)?,
+                        kind: row.get(3)?,
+                        payload_ref: row.get(4)?,
+                    },
+                    payload,
+                    created_at: row.get(6)?,
+                })
+            })
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Short excerpt from the assistant text actually committed during the
+    /// latest completed turn. No tool or test success is inferred from it.
+    pub fn latest_completed_turn_reply(&self, attempt_id: &str) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let completed: Option<i64> = connection
+            .query_row(
+                "SELECT seq FROM events WHERE attempt_id=?1 AND kind='runtime.turn.completed' ORDER BY seq DESC LIMIT 1",
+                params![attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(completed) = completed else { return Ok(None) };
+        let started: Option<i64> = connection
+            .query_row(
+                "SELECT seq FROM events WHERE attempt_id=?1 AND kind='runtime.turn.started' AND seq<?2 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id, completed],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(started) = started else { return Ok(None) };
+        let completed_message: Option<String> = connection
+            .query_row(
+                "SELECT json_extract(payload_json,'$.text') FROM events
+                 WHERE attempt_id=?1 AND kind='runtime.reply.delta' AND seq>?2 AND seq<?3
+                   AND json_type(payload_json,'$.text')='text'
+                   AND json_extract(payload_json,'$.status')='completed'
+                 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id, started, completed],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(message) = completed_message {
+            let message = message.trim();
+            if !message.is_empty() {
+                return Ok(Some(last_result_excerpt(message)));
+            }
+        }
+        let last_tool: Option<i64> = connection
+            .query_row(
+                "SELECT seq FROM events WHERE attempt_id=?1 AND kind='runtime.tool.activity'
+                 AND seq>?2 AND seq<?3 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id, started, completed],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let reply_after = last_tool.unwrap_or(started);
+        let mut statement = connection.prepare(
+            "SELECT json_extract(payload_json,'$.text') FROM events
+             WHERE attempt_id=?1 AND kind='runtime.reply.delta' AND seq>?2 AND seq<?3
+               AND json_type(payload_json,'$.text')='text' ORDER BY seq",
+        )?;
+        let mut rows = statement.query(params![attempt_id, reply_after, completed])?;
+        let mut excerpt = std::collections::VecDeque::new();
+        while let Some(row) = rows.next()? {
+            let delta: String = row.get(0)?;
+            for character in delta.chars() {
+                excerpt.push_back(character);
+                if excerpt.len() > 480 {
+                    excerpt.pop_front();
+                }
+            }
+        }
+        let excerpt = excerpt.into_iter().collect::<String>();
+        let excerpt = excerpt.trim();
+        Ok((!excerpt.is_empty()).then(|| last_result_excerpt(excerpt)))
     }
 
     pub fn latest_runtime_session_version(
@@ -5511,6 +5684,17 @@ fn ensure_command_result_json(tx: &Transaction<'_>) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_result_excerpt_keeps_ascii_words_and_unicode_boundaries() {
+        let text = format!("{} changed add(left, right) and all tests passed", "a".repeat(400));
+        let excerpt = last_result_excerpt(&text);
+        assert!(excerpt.starts_with("…changed add("), "{excerpt}");
+        assert!(excerpt.chars().count() <= 240);
+        let unicode = last_result_excerpt(&"汉".repeat(300));
+        assert_eq!(unicode.chars().count(), 240);
+        assert!(unicode.starts_with('…'));
+    }
 
     #[test]
     fn workspace_matcher_refuses_distinct_canonical_identities_with_one_conservative_key() {

@@ -283,6 +283,22 @@ describe("modal focus never fights the snapshot poll (RC1 regression)", () => {
 });
 
 describe("empty-state and goal creation (HARD-02/03)", () => {
+  it("opens a narrow first-use form without the navigation covering it", async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 560 });
+    try {
+      const empty = { ...DEMO_SNAPSHOT, campaigns: [], activeCampaignId: "", productConversation: null };
+      mountElectron(empty);
+      expect(await screen.findByRole("textbox", { name: /project folder/i })).toBeTruthy();
+      expect(document.querySelector(".workspace-grid")?.classList.contains("nav-collapsed")).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: /expand navigation/i }));
+      fireEvent.click(screen.getByRole("button", { name: /close navigation/i }));
+      expect(document.querySelector(".workspace-grid")?.classList.contains("nav-collapsed")).toBe(true);
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
+    }
+  });
+
   it("offers an editable draft before any goal exists, without naming", async () => {
     const empty = { ...DEMO_SNAPSHOT, campaigns: [], activeCampaignId: "", activeTask: { ...DEMO_SNAPSHOT.activeTask, id: "", title: "No task selected" }, timeline: [], decisions: [] };
     mountElectron(empty);
@@ -308,6 +324,38 @@ describe("empty-state and goal creation (HARD-02/03)", () => {
     expect(screen.getByText(/choose a runtime above before sending/i)).toBeTruthy();
     // Honest headline state — not "in progress" with nothing running.
     expect(screen.queryByText("Working")).toBeNull();
+  });
+});
+
+describe("goal draft and focus lifecycle", () => {
+  it("keeps each goal's text and caret through polling and focuses a newly selected goal", async () => {
+    let live = { ...DEMO_SNAPSHOT, preview: false };
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => ({ ...live, campaigns: [...live.campaigns] }),
+      command: async (request: CoreCommand) => {
+        if (request.messageType === "select_campaign") live = { ...live, activeCampaignId: String(request.payload.campaignId) };
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: live };
+      },
+      startCore: async () => live,
+      openInVsCode: async () => undefined
+    } as never;
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "draft A" } });
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-evidence-loop"));
+    expect(document.activeElement).toBe(composer);
+    fireEvent.change(composer, { target: { value: "draft B" } });
+    composer.setSelectionRange(3, 3);
+    await new Promise((done) => setTimeout(done, 850));
+    expect(composer.value).toBe("draft B");
+    expect(composer.selectionStart).toBe(3);
+    expect(document.activeElement).toBe(composer);
+    fireEvent.click(screen.getByRole("button", { name: /build a durable preview/i }));
+    await waitFor(() => expect(composer.value).toBe("draft A"));
+    fireEvent.click(screen.getByRole("button", { name: /evidence loop/i }));
+    await waitFor(() => expect(composer.value).toBe("draft B"));
   });
 });
 

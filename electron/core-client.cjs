@@ -1,6 +1,22 @@
 // Mutating commands are never retried automatically after a lost acknowledgement.
 // Snapshot retries are safe and still verify the Core attachment through ensureCore.
 // In the Electron main process the injected transport is the verified request gate.
+function createPendingDecisionNotifier(show) {
+  const announced = new Set();
+  return (snapshot) => {
+    const fresh = (Array.isArray(snapshot?.decisions) ? snapshot.decisions : []).filter((decision) =>
+      decision?.state === "pending" && typeof decision.id === "string" && decision.id.trim() && !announced.has(decision.id));
+    if (!fresh.length) return;
+    const body = fresh.length === 1 ? fresh[0].title || "A permission request needs your answer."
+      : `${fresh.length} permission requests need your answer.`;
+    try {
+      // Optional desktop notifications must never turn an accepted Core
+      // command into a transport error. Remember only a delivered toast.
+      if (show("GoalPort decision", body) !== false) fresh.forEach((decision) => announced.add(decision.id));
+    } catch { /* The conversation still contains the pending decisions. */ }
+  };
+}
+
 async function invokeCoreRequest(request, { exchange, ensureCore, delay, onResult }) {
   async function attempt() {
     const response = await exchange(request);
@@ -139,4 +155,4 @@ function createCoreGate({ verify, now = Date.now, setTimer = setTimeout, clearTi
   return { verify: verifyNow, send, needsVerification: () => failures > cleared };
 }
 
-module.exports = { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, VERIFY_DEADLINE_MS, SERVER_REFUSAL };
+module.exports = { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier, VERIFY_DEADLINE_MS, SERVER_REFUSAL };

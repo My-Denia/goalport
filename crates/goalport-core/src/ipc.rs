@@ -9,7 +9,7 @@
 
 use crate::{
     commands::{CommandError, CommandExecution, CommandProcessor, CoreCommand, CoreOperation},
-    projection::UiController,
+    projection::{UiCommandResult, UiController},
     response_bounds::{MAX_RESPONSE_BYTES, bound_error, bound_result_metadata, bound_ui_response},
     store::{Store, StoreError},
 };
@@ -168,6 +168,7 @@ fn supported_ui_message(value: &str) -> bool {
     matches!(
         value,
         "snapshot"
+            | "snapshot_if_changed"
             | "select_project"
             | "select_campaign"
             | "create_campaign"
@@ -192,6 +193,7 @@ fn supported_ui_message(value: &str) -> bool {
             | "continue_in_isolated_workspace"
             | "recheck_stop_responsibility"
             | "classify_recovery"
+            | "close_session"
             | "close_adapter_transport"
             | "mark_runtime_exit"
             | "observe_workspace_edit"
@@ -551,6 +553,57 @@ impl CoreServer {
         response
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn execute_ui_request(&self, request: &UiCommandRequest) -> Result<UiCommandResult, String> {
+        self.ui.lock().expect("ui projection poisoned").handle(request.clone())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_ui_request(&self, request: &UiCommandRequest) -> Result<UiCommandResult, String> {
+        if matches!(request.message_type.as_str(), "interrupt" | "safe_stop" | "cancel") {
+            let control = self.ui.lock().expect("ui projection poisoned").startup_control_for(request);
+            if let Some((attempt_id, control)) = control {
+                let requested = control.request_cancel();
+                if requested == Ok(false) {
+                    return Err("Runtime startup already passed the no-send boundary; check the turn before stopping it.".into());
+                }
+                let mut detail = requested.err();
+                let mut confirmed = control.wait_finished(Duration::from_millis(650));
+                if !confirmed {
+                    if let Err(error) = control.force_if_stalled() { detail = Some(error); }
+                    confirmed = control.wait_finished(Duration::from_millis(650));
+                }
+                let mut ui = self.ui.lock().expect("ui projection poisoned");
+                return ui.record_startup_cancel(request, &attempt_id, confirmed, detail.as_deref());
+            }
+        }
+        let worker = {
+            let mut ui = self.ui.lock().expect("ui projection poisoned");
+            match ui.native_worker_plan(request) {
+                Some(plan) => Some(
+                    ui.fork_native_worker(&plan)
+                        .map(|(worker, baseline)| (plan, worker, baseline)),
+                ),
+                None => return ui.handle(request.clone()),
+            }
+        };
+        let Some(worker) = worker else { unreachable!() };
+        let (plan, mut worker, baseline) = worker?;
+        // Native initialization and its protocol waits run on this connection
+        // worker, outside the shared projection lock. Other connections can
+        // still snapshot and operate on different sessions.
+        let outcome = worker.handle(request.clone());
+        let mut ui = self.ui.lock().expect("ui projection poisoned");
+        ui.merge_native_worker(&plan, worker, baseline)?;
+        outcome.map(|mut result| {
+            // A user may have selected another conversation during startup.
+            // Answer with the merged current snapshot instead of the worker's
+            // private selection.
+            result.snapshot = ui.snapshot(None)?;
+            Ok(result)
+        })?
+    }
+
     pub fn serve_stream<R: Read, W: Write>(
         &self,
         reader: &mut R,
@@ -576,6 +629,24 @@ impl CoreServer {
                 let request =
                     serde_json::from_slice::<UiCommandRequest>(payload).map_err(|_| typed_error)?;
                 request.validate()?;
+                if request.message_type == "snapshot_if_changed" {
+                    if request.protocol_version != CONNECTED_UI_PROTOCOL_VERSION {
+                        return Err(IpcError::Invalid("snapshot_if_changed requires UI protocol v2".into()));
+                    }
+                    let known = request.payload.get("revision").and_then(Value::as_str);
+                    let outcome = self.ui.lock().expect("ui projection poisoned").snapshot_if_changed(known);
+                    let (ok, payload, error) = match outcome {
+                        Ok(payload) => (true, payload, None),
+                        Err(message) => (false, Value::Null, Some(bound_error(&message))),
+                    };
+                    let value = serde_json::to_value(UiCommandResponse {
+                        protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                        request_id: request.request_id,
+                        entity_version: request.entity_version,
+                        ok, payload, error,
+                    })?;
+                    return bound_ui_response(value).map_err(IpcError::Invalid);
+                }
                 if request.message_type == "snapshot"
                     && request.protocol_version == IPC_PROTOCOL_VERSION
                 {
@@ -640,10 +711,7 @@ impl CoreServer {
                         };
                         return bound_ui_response(value).map_err(IpcError::Invalid);
                     }
-                    let outcome = {
-                        let mut ui = self.ui.lock().expect("ui projection poisoned");
-                        ui.handle(request.clone())
-                    };
+                    let outcome = self.execute_ui_request(&request);
                     match outcome {
                         Ok(mut result) => {
                             if std::env::var_os("GOALPORT_DEBUG").is_some() {
@@ -772,14 +840,44 @@ impl CoreServer {
     /// successfully before advertising launch-ready.
     #[cfg(target_os = "linux")]
     pub fn serve_owned_unix_socket(&self, owned: OwnedUnixSocket) -> Result<(), IpcError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const MAX_CLIENTS: usize = 32;
+        const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(10);
         self.start_runtime_flusher();
+        let active = Arc::new(AtomicUsize::new(0));
         loop {
-            let (mut stream, _) = owned.listener.accept().map_err(IpcError::Io)?;
+            let (stream, _) = owned.listener.accept().map_err(IpcError::Io)?;
             if !unix_peer_uid_matches(&stream, current_uid())? {
                 continue;
             }
-            let mut reader = stream.try_clone().map_err(IpcError::Io)?;
-            let _ = self.serve_stream(&mut reader, &mut stream);
+            if active
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    (count < MAX_CLIENTS).then_some(count + 1)
+                })
+                .is_err()
+            {
+                continue;
+            }
+            let server = self.clone();
+            let workers = active.clone();
+            if thread::Builder::new()
+                .name("goalport-unix-client".into())
+                .spawn(move || {
+                    let _permit = UnixConnectionPermit(workers);
+                    if stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT)).is_err()
+                        || stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT)).is_err()
+                    {
+                        return;
+                    }
+                    let Ok(mut reader) = stream.try_clone() else { return };
+                    let mut writer = stream;
+                    let _ = server.serve_stream(&mut reader, &mut writer);
+                })
+                .is_err()
+            {
+                active.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 
@@ -1992,6 +2090,16 @@ fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result
 /// Exclusive ownership of a Linux Unix-socket endpoint for the server lifetime.
 /// The flock on `_lock` is held until this value is dropped; the sock file is
 /// not unlinked on drop (marked stale files are recovered on the next bind).
+#[cfg(target_os = "linux")]
+struct UnixConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(target_os = "linux")]
+impl Drop for UnixConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub struct OwnedUnixSocket {
     _lock: std::fs::File,

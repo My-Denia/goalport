@@ -1,5 +1,5 @@
 import type { CoreSnapshot } from "../types";
-import { useModalFocus } from "../lib/useModalFocus";
+import { GoalDialog } from "../ui/GoalDialog";
 
 interface HandoffDialogProps {
   snapshot: CoreSnapshot;
@@ -14,11 +14,9 @@ interface HandoffDialogProps {
  * selectable, so the reason stays visible instead of hidden behind a filter.
  */
 export function HandoffDialog({ snapshot, onCancel, onConfirm }: HandoffDialogProps) {
-  const dialogRef = useModalFocus(onCancel);
   const candidates = snapshot.runtimes.filter((runtime) => runtime.id !== snapshot.attempt.provider.toLowerCase());
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section ref={dialogRef} className="first-run-dialog handoff-dialog" role="dialog" aria-modal="true" aria-label="Assign the next step">
+    <GoalDialog label="Assign the next step" className="handoff-dialog" onDismiss={onCancel}>
         <p className="eyebrow">HANDOFF</p>
         <h2>Assign the next step</h2>
         <p className="dialog-lead">
@@ -57,7 +55,6 @@ export function HandoffDialog({ snapshot, onCancel, onConfirm }: HandoffDialogPr
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onCancel}>Cancel</button>
         </div>
-      </section>
-    </div>
+    </GoalDialog>
   );
 }

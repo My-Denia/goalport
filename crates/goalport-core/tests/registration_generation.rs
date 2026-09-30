@@ -809,8 +809,8 @@ fn g2_restart_then_rejected_resume_is_still_refused() {
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(
-        resumed["ok"], true,
-        "the command records the rejection and returns ok: {resumed}"
+        resumed["ok"], false,
+        "the command records the rejection and refuses it: {resumed}"
     );
     assert!(
         is_live(second.pid),
@@ -894,7 +894,7 @@ fn g3_a_foreign_success_record_does_not_lift_the_refusal_across_a_restart() {
     );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
-    assert_eq!(resumed["ok"], true, "{resumed}");
+    assert_eq!(resumed["ok"], false, "{resumed}");
     append_constructed_established(server, &r.attempt, "constructed-other:1");
     let before_select = events(server, &r.attempt);
 
@@ -942,11 +942,11 @@ fn g3b_same_lifetime_a_foreign_success_record_does_not_lift_the_failed_registrat
 }
 
 // ---------------------------------------------------------------------------------------------
-// G4: Core restart, the send_message re-select re-establishes, then reusable
+// G4: Core restart requires explicit resume before send, then reusable
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable() {
+fn g4_restart_requires_explicit_resume_before_send() {
     let _lock = lock();
     assert_env_pinned();
     let (case, r) = restart_after_kept_failure("g4", "resume_ok");
@@ -968,14 +968,29 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
     );
 
     r.appdata.assert_armed();
-    let sent = call(
+    let premature = call(
         server,
         "g4-send",
         "send_message",
         json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "hello after restart" }),
     );
+    assert_eq!(premature["ok"], false, "{premature}");
+    assert!(error_of(&premature).contains("Resume"), "{premature}");
+    let resumed = call(
+        server,
+        "g4-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
+    assert_eq!(resumed["ok"], true, "{resumed}");
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
+    let sent = call(
+        server,
+        "g4-send-after-resume",
+        "send_message",
+        json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "hello after restart" }),
+    );
     assert_eq!(sent["ok"], true, "{sent}");
     assert!(is_live(second.pid));
     let after_send = events(server, &r.attempt);
@@ -984,14 +999,14 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
     let selected = select_codex(server, "g4-select", &case, None);
     assert_eq!(
         selected["ok"], true,
-        "a registration re-established through the send path must not be refused by the old kept record: {selected}"
+        "a registration re-established through explicit resume must not be refused by the old kept record: {selected}"
     );
     let established: Vec<Value> = records_of(&after_send, ESTABLISHED_KIND)
         .into_iter()
         .cloned()
         .collect();
     assert_eq!(established.len(), 1, "{after_send:?}");
-    assert_eq!(established[0]["entry"], "send_message");
+    assert_eq!(established[0]["entry"], "resume_native_session");
     assert_ne!(
         established[0]["registration_identity"].as_str().unwrap(),
         r.kept_before["registration_identity"].as_str().unwrap()
@@ -1629,8 +1644,8 @@ fn h3a_resume_stream_closed_before_answer_is_unsupported_and_recorded() {
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(
-        resumed["ok"], true,
-        "the command records the failure and returns ok: {resumed}"
+        resumed["ok"], false,
+        "the command records the failure and refuses it: {resumed}"
     );
     let after = events(server, &r.attempt);
     let resumed_rec = records_of(&after, "runtime.session.resumed")

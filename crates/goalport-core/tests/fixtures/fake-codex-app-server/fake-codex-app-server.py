@@ -10,7 +10,7 @@ speaks and writes the same per-pid files, so the increment-5/6 test helpers read
 
   initialize (id)    -> {id, result: {}}
   thread/start (id)  -> {id, result: {thread: {id: "fake-thread-1"}}}    (then per scenario)
-  thread/resume (id) -> {id, result: {}}                                  (then per scenario)
+  thread/resume (id) -> {id, result: {thread: {id: "fake-thread-1"}}}      (then per scenario)
   turn/start (id)    -> {id, result: {turn: {id: "fake-turn-1"}}}
                         + item/agentMessage/delta (`echo:<text>`) + turn/completed   (or per scenario)
 
@@ -143,7 +143,7 @@ def handle(message):
         if SCENARIO == "stdout_closed_before_resume":
             close_stdout()
             return
-        send({"id": mid, "result": {}})
+        send({"id": mid, "result": {"thread": {"id": "fake-thread-1"}}})
         if SCENARIO == "stdout_closed_after_resume":
             close_stdout()
         return

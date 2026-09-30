@@ -9,7 +9,7 @@ const { pathToFileURL } = require("node:url");
 const { createTrustedIpcHandler, protectRenderer, isAppDocument } = require("./security-policy.cjs");
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
-const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate } = require("./core-client.cjs");
+const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
@@ -345,9 +345,11 @@ function dbPath() {
 }
 
 function showToast(title, body) {
-  if (!Notification.isSupported()) return false;
-  new Notification({ title, body }).show();
-  return true;
+  try {
+    if (!Notification.isSupported()) return false;
+    new Notification({ title, body }).show();
+    return true;
+  } catch { return false; }
 }
 
 function pipeAvailable() {
@@ -998,18 +1000,17 @@ async function invokeCore(request) {
   });
 }
 
+const notifyPendingDecisions = createPendingDecisionNotifier(showToast);
+
 function maybeNotify(request, result) {
   const type = request?.messageType;
   if (type === "send_message") {
     const attemptState = result?.attempt?.state;
     if (attemptState === "completed" || attemptState === "failed") {
-      showToast("GoalPort task", `Attempt ${attemptState}.`);
+      showToast("GoalPort task", `Task ${attemptState}.`);
     }
   }
-  const pending = Array.isArray(result?.decisions) ? result.decisions.filter((item) => item?.state === "pending") : [];
-  if (pending.length > 0 && (type === "send_message" || type === "snapshot" || type === "permission_response")) {
-    showToast("GoalPort decision", pending[0].title || "A blocking decision is waiting.");
-  }
+  notifyPendingDecisions(result);
 }
 
 // Integrated title bar (Windows): keep the native window controls via the

@@ -96,6 +96,12 @@ jobs:
         run: cargo test --locked -p goalport-core --lib
       - name: Focused Linux Unix socket tests
         run: cargo test --locked -p goalport-core --test linux_socket -- --nocapture
+      - name: Linux native protocol and responsiveness tests
+        run: cargo test --locked -p goalport-core --test linux_provider_errors --test linux_responsiveness --test async_title
+      - name: Linux launcher tests
+        run: cargo test --locked -p goalport-core-launcher
+      - name: Unix operator client and native verifier tests
+        run: python3 -B -m unittest discover -s scripts/connected -p 'test_*.py'
       - name: Build goalport-core
         run: cargo build --locked -p goalport-core
       - name: Black-box serve + UnixStream client round-trip

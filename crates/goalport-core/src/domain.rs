@@ -63,7 +63,9 @@ impl AttemptState {
         matches!(
             (self, next),
             (Self::Queued, Self::Active)
+                | (Self::Queued, Self::Cancelled)
                 | (Self::Active, Self::AwaitingReview)
+                | (Self::Active, Self::Closed)
                 | (Self::Active, Self::Failed)
                 | (Self::Active, Self::Cancelled)
                 | (Self::AwaitingReview, Self::Active)

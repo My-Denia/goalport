@@ -1,17 +1,17 @@
 # GoalPort
 
-**One Windows desktop for the coding agents you already use.**
+**Keep your coding agents working after you close the window.**
 
-GoalPort drives Codex, Claude Code and Grok through their own installed CLIs, so subscriptions, logins, skills, hooks, MCP servers and permission rules stay native. It adds durable Campaigns, Runtime switching, recovery and safety controls, all stored locally.
+GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start a goal, answer permission requests, and return to see what happened. Your CLI login and configuration stay with the Runtime; GoalPort stores conversation history locally.
 
 [![CI](https://github.com/My-Denia/goalport/actions/workflows/ci.yml/badge.svg)](https://github.com/My-Denia/goalport/actions/workflows/ci.yml)
 ![Version](https://img.shields.io/badge/version-1.0.0--rc.1-blue)
 ![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 
-![GoalPort showing a Campaign conversation, the Runtime support list and the active Attempt](docs/assets/screenshots/campaign-conversation.png)
+![GoalPort showing the New goal form and Runtime picker](docs/assets/screenshots/campaign-conversation.png)
 
-<sub>GoalPort 1.0.0-rc.1 on the built-in synthetic Scenario runtime (no real agent account involved).</sub>
+<sub>Current source in synthetic browser preview. No Core or Runtime is connected.</sub>
 
 ## Why GoalPort
 
@@ -40,9 +40,9 @@ Agent CLIs work well inside one terminal session. Long tasks outgrow it: the ter
 - **Local-first.** No GoalPort account, server or telemetry.
 - **Traceable build.** Locked dependencies, a hashed package manifest, and packaged GUI smoke tests in CI.
 
-| Permission decisions | Runtime support |
+| Permission decisions | Runtime picker |
 | --- | --- |
-| ![A pending permission Decision with Allow once, Decline permission and Keep waiting](docs/assets/screenshots/permission-decision.png) | ![The Codex Runtime row expanded, showing capability status](docs/assets/screenshots/runtime-support.png) |
+| ![A pending permission Decision with Allow once, Decline permission and Keep waiting](docs/assets/screenshots/permission-decision.png) | ![The shared Runtime picker, with Available and Limited labels](docs/assets/screenshots/runtime-support.png) |
 
 ## Quick start
 
@@ -56,10 +56,12 @@ pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 ```
 
 1. Install and sign in to a Runtime CLI: Codex, Claude Code or Grok.
-2. In GoalPort, choose a workspace folder and enter a Campaign goal.
-3. Select a Runtime and send a message. Keep the window wider than 1020 px, or the right rail (Runtimes, Decision Inbox, Stop) is hidden.
+2. Choose **New goal**, select a workspace folder and a Runtime, then describe the task.
+3. Send the message. Permission requests appear in the conversation; Stop is beside the composer. These controls work in narrow windows too.
 
 Data lives in `%APPDATA%\GoalPort\rc`. Electron/Chromium browser shell state (caches, preferences, window geometry) is stored separately under `%APPDATA%\GoalPort\electron\<profile key>`, so the profile directory holds only durable GoalPort data. The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
+
+Linux developers can run Core and operate it through the [Unix command client](docs/linux-development.md), including native Codex tasks and diagnostics. This is a backend development entry, separate from the Windows desktop package. The browser preview is synthetic and clearly labelled; it does not send work to a Runtime.
 
 ## How it works
 
@@ -85,7 +87,8 @@ Details: [runtime integration](docs/runtimes.md).
 
 GoalPort **1.0.0-rc.1** is a **Stable V1 RC**: a release candidate, not Stable V1.
 
-- Windows only, built from source, unsigned. No database migration between builds.
+- The desktop package targets Windows x64 and is built from source, unsigned. Linux Core has a Unix socket development entry.
+- Current source can reopen compatible profiles and offers supported imports with backups. The previously built RC package retains its original behavior; see [profile continuity](docs/profile-continuity.md).
 - Admission differs per Runtime (Codex partial, Claude Code partially admitted, Grok admitted), recorded for specific builds, not re-checked for builds from current source.
 - After a Claude Code Stop, residual execution is unproven, and held workspaces cannot be released yet.
 

@@ -7,7 +7,7 @@
 //   initialize (id)      -> {id, result: {}}
 //   initialized          -> ignored (notification)
 //   thread/start (id)    -> {id, result: {thread: {id: "fake-thread-1"}}}
-//   thread/resume (id)   -> {id, result: {}}            (scenario resume_ok)
+//   thread/resume (id)   -> {id, result: {thread: {id: "fake-thread-1"}}} (scenario resume_ok)
 //                        -> {id, error: {...}}          (scenario resume_rejected)
 // The scenario travels in `.fake-codex-scenario` in the cwd (one workspace per test case):
 //   exit_after_thread_start  (default) exit 0 300 ms after answering thread/start
@@ -96,7 +96,7 @@ reader.on("line", (line) => {
     if (scenario === "resume_rejected") {
       send({ id: message.id, error: { code: -1, message: "fake app-server rejects thread/resume" } });
     } else {
-      send({ id: message.id, result: {} });
+      send({ id: message.id, result: { thread: { id: "fake-thread-1" } } });
     }
     return;
   }

@@ -149,6 +149,28 @@ fn production_socket_round_trip_and_mode() {
 }
 
 #[test]
+fn idle_partial_frame_client_does_not_block_another_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("parallel.sock");
+    let thread = spawn_server_at(sock.clone());
+    assert!(wait_until(|| sock.exists()));
+    let mut idle = UnixStream::connect(&sock).unwrap();
+    idle.write_all(&[8, 0]).unwrap();
+
+    let started = Instant::now();
+    let mut second = UnixStream::connect(&sock).unwrap();
+    second.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let payload = br#"{"protocol_version":"goalport.ipc.v2","message_type":"snapshot","request_id":"parallel","entity_version":1,"payload":{}}"#;
+    second.write_all(&frame(payload)).unwrap();
+    let mut header = [0u8; 4];
+    second.read_exact(&mut header).unwrap();
+    assert!(u32::from_le_bytes(header) > 0);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(idle);
+    let _ = thread;
+}
+
+#[test]
 fn live_endpoint_is_refused() {
     let sock = unique_sock("live");
     let _ = std::fs::remove_file(&sock);
@@ -701,8 +723,61 @@ fn linux_self_process_identity_remains_stable_between_observations() {
     let ProcessObservation::Live(second) = observe_process(first.pid) else {
         panic!("current process must remain observable as live");
     };
-    assert_eq!(first.created_ms, second.created_ms);
+    assert_eq!(first.creation_date(), second.creation_date());
+    assert!(first.creation_date().starts_with("/LinuxStart("));
     assert_eq!(first.executable_path, second.executable_path);
+}
+
+#[test]
+fn linux_child_identity_is_observable_and_exit_is_distinct_from_unknown() {
+    let mut child = SpawnedCore(Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn local sleep fixture"));
+    let pid = child.0.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let first = loop {
+        let observed = observe_process(pid);
+        if let ProcessObservation::Live(identity) = observed {
+            if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
+                break identity;
+            }
+        }
+        assert!(Instant::now() < deadline, "spawned sleep did not finish exec");
+        std::thread::yield_now();
+    };
+    assert_eq!(first.parent_pid, std::process::id());
+    assert!(first.created_ms > 0);
+    assert!(!first.executable_sha256.is_empty());
+    let second = match observe_process(pid) {
+        ProcessObservation::Live(identity) => identity,
+        observed => panic!("same child must still be live: {observed:?}"),
+    };
+    assert_eq!(first.pid, second.pid);
+    assert_eq!(first.parent_pid, second.parent_pid);
+    assert_eq!(first.creation_date(), second.creation_date());
+    assert_eq!(first.executable_path, second.executable_path);
+    assert_eq!(first.executable_sha256, second.executable_sha256);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert_eq!(observe_process(pid), ProcessObservation::NotRunning);
+}
+
+#[test]
+fn linux_zombie_is_not_reported_as_live() {
+    let mut child = SpawnedCore(Command::new("true").spawn().expect("spawn local true fixture"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if observe_process(child.0.id()) == ProcessObservation::NotRunning {
+            break;
+        }
+        assert!(Instant::now() < deadline, "child did not reach zombie state");
+        std::thread::yield_now();
+    }
+    child.0.wait().unwrap();
 }
 
 #[test]

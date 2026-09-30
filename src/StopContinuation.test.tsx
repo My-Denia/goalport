@@ -82,9 +82,9 @@ describe("a pre-revision hold still blocks everything", () => {
     // is rendered and the assertion was always writable -- it was simply missing.
     const allow = screen.getByRole("button", { name: /allow once/i }) as HTMLButtonElement;
     expect(allow.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
     const select = screen.getByRole("option", { name: /claude code/i }) as HTMLButtonElement;
-    expect(select.disabled).toBe(true);
+    expect(select.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("leaves the handler guards unreachable, which is the stronger property", async () => {

@@ -28,7 +28,7 @@ describe("Core client preview transport", () => {
     const snapshot = await client.snapshot();
 
     expect(client.mode).toBe("browser-preview");
-    expect(snapshot.protocolVersion).toBe("goalport.ipc.v1");
+    expect(snapshot.protocolVersion).toBe("goalport.ipc.v2");
     expect(snapshot.preview).toBe(true);
     expect(snapshot.runtimes.find((runtime) => runtime.id === "grok")?.support).toBe("partial");
   });
@@ -98,6 +98,35 @@ describe("Core client preview transport", () => {
     expect(snapshot?.timelinePageInfo).toEqual(expect.objectContaining({ olderCursor: "older", contentBytes: 99 }));
     expect(snapshot?.productConversation?.items[0]).toEqual(expect.objectContaining({ logicalItemId: "answer", fragmentIndex: 2 }));
     expect(snapshot?.bounds).toEqual(expect.objectContaining({ projectionUnavailable: true, omittedCounts: { conversationItems: 7 } }));
+  });
+
+  it("keeps session lifetime and typed provider actions separate from turn state", () => {
+    const snapshot = resolveCoreSnapshot({
+      ...DEMO_SNAPSHOT,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation,
+        session: { state: "attached", native_id_known: true },
+        turn: { state: "failed", can_send: false, can_stop: false, reason_code: "provider-quota", actions: ["diagnose"] }
+      }
+    });
+    expect(snapshot?.productConversation?.session).toEqual({ state: "attached", nativeIdKnown: true });
+    expect(snapshot?.productConversation?.turn).toEqual(expect.objectContaining({ state: "failed", canSend: false, reasonCode: "provider-quota", actions: ["diagnose"] }));
+  });
+
+  it("retains the conversation and cancellation capability during native startup", () => {
+    const snapshot = resolveCoreSnapshot({
+      ...DEMO_SNAPSHOT,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation,
+        runtime: { state: "starting", provider: "codex", name: "Codex" },
+        session: { state: "starting", nativeIdKnown: false },
+        turn: { state: "starting", canSend: false, canStop: true, reason: "Codex is starting." }
+      }
+    });
+    expect(snapshot?.productConversation?.runtime.state).toBe("starting");
+    expect(snapshot?.productConversation?.session).toEqual({ state: "starting", nativeIdKnown: false });
+    expect(snapshot?.productConversation?.items).toEqual(DEMO_SNAPSHOT.productConversation!.items);
+    expect(snapshot?.productConversation?.turn).toEqual(expect.objectContaining({ canSend: false, canStop: true }));
   });
 
   it("keeps a normal empty projection empty instead of inheriting demo identities", () => {

@@ -5,7 +5,8 @@
 //! a host cannot create an id or maintain a second recovery state machine.
 
 use crate::{
-    adapters::{PermissionResponse, PromptRequest, SessionRequest},
+    async_title::{TitleRequest, TitleResult, spawn_title},
+    adapters::{AdapterError, PermissionResponse, PromptRequest, SessionRequest},
     assurance::{ActionAuthority, ApprovalContext},
     commands::{CoreCommand, CoreOperation, sha256_hex},
     domain::{
@@ -19,10 +20,11 @@ use crate::{
     },
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, UiCommandRequest},
     product_conversation::{
-        ProductConversation, ProductConversationContext, ProductRuntimeSelection, ProductTurn,
+        ProductConversation, ProductConversationContext, ProductRuntimeSelection, ProductSession,
+        ProductTurn,
         product_conversation,
     },
-    runtime_manager::{RegistrationWithdrawal, RuntimeManager, TransportState},
+    runtime_manager::{RegistrationWithdrawal, RuntimeManager, StartupControl, TransportState},
     store::{
         self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ConfirmedStopSuccessor,
         ConversationPrepareOutcome, ConversationRequestPhase, ConversationRequestRow,
@@ -36,11 +38,18 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, mpsc::{Receiver, TryRecvError}},
 };
 
 /// Display-only Attempt identity used when a task has no persisted row.
 /// Admission must never persist or register this string.
 const UNASSIGNED_ATTEMPT_ID: &str = "attempt-unassigned";
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeWorkerPlan {
+    attempt_ids: Vec<String>,
+    startup_target: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,6 +277,8 @@ pub struct UiController {
     selected_attempt_id: Option<String>,
     notices: Vec<String>,
     build_id: String,
+    pending_titles: Vec<Receiver<TitleResult>>,
+    selection_revision: u64,
 }
 
 impl UiController {
@@ -307,6 +318,8 @@ impl UiController {
             selected_attempt_id: None,
             notices: Vec::new(),
             build_id: current_executable_build_id(),
+            pending_titles: Vec::new(),
+            selection_revision: 0,
         };
         if let Some(workspace_root) = seed_workspace {
             controller.ensure_seed(&workspace_root)?;
@@ -330,9 +343,271 @@ impl UiController {
         &self.store
     }
 
+    pub(crate) fn snapshot_if_changed(&mut self, known_revision: Option<&str>) -> Result<Value, String> {
+        self.flush_runtime_events()?;
+        // Capture this BEFORE building the snapshot. A write arriving during
+        // projection changes the next revision and prompts one more fetch.
+        let revision = self.current_view_revision()?;
+        if known_revision == Some(revision.as_str()) {
+            return Ok(json!({"unchanged":true,"revision":revision}));
+        }
+        let snapshot = self.snapshot(None)?;
+        Ok(json!({"unchanged":false,"revision":revision,"snapshot":snapshot}))
+    }
+
+    fn current_view_revision(&mut self) -> Result<String, String> {
+        let (changes, journal_order) = self.store.mutation_revision().map_err(store_message)?;
+        let view = json!({
+            "storeChanges": changes,
+            "journalOrder": journal_order,
+            "selectionRevision": self.selection_revision,
+            "selectedProject": self.selected_project_id,
+            "selectedCampaign": self.selected_campaign_id,
+            "selectedTask": self.selected_task_id,
+            "selectedAttempt": self.selected_attempt_id,
+            "runtime": self.runtime_manager.view_revision_facts(),
+        });
+        Ok(sha256_hex(view.to_string().as_bytes()))
+    }
+
+    pub(crate) fn native_worker_target(&self, request: &UiCommandRequest) -> Option<String> {
+        match request.message_type.as_str() {
+            "start_conversation" => {
+                let provider = request.payload.get("provider")?.as_str()?.trim().to_ascii_lowercase();
+                if !matches!(provider.as_str(), "codex" | "claude" | "grok") {
+                    return None;
+                }
+                Some(format!("attempt-{}", sha256_hex(request.request_id.as_bytes())))
+            }
+            "select_runtime" | "select_attempt" => {
+                if payload_bool(&request.payload, "resourcePressure") {
+                    return None;
+                }
+                let provider = request.payload.get("provider")?.as_str()?.trim().to_ascii_lowercase();
+                if !matches!(provider.as_str(), "codex" | "claude" | "grok") {
+                    return None;
+                }
+                let campaign_id = request.payload.get("campaignId")?.as_str()?;
+                let campaign = self.store.get_campaign(campaign_id).ok()?;
+                let task_id = request
+                    .payload
+                    .get("taskId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&campaign.root_task_id);
+                resolve_admission_attempt_id(
+                    &self.store,
+                    &self.runtime_manager,
+                    &request.payload,
+                    task_id,
+                    &provider,
+                    &request.request_id,
+                    true,
+                    false,
+                )
+                .ok()
+            }
+            "send_message" | "resume_native_session" | "interrupt" | "safe_stop"
+            | "cancel" | "close_session" => {
+                let attempt_id = request
+                    .payload
+                    .get("attemptId")
+                    .and_then(Value::as_str)
+                    .or(self.selected_attempt_id.as_deref())?;
+                let attempt = self.store.get_attempt(attempt_id).ok()?;
+                matches!(attempt.provider.as_str(), "codex" | "claude" | "grok")
+                    .then(|| attempt.id)
+            }
+            "conversation_send" => {
+                let campaign_id = request.payload.get("campaignId")?.as_str()?;
+                let campaign = self.store.get_campaign(campaign_id).ok()?;
+                let attempts = self.store.attempts_for_task(&campaign.root_task_id).ok()?;
+                let attempt_id = request
+                    .payload
+                    .get("attemptId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| attempts.last().map(|attempt| attempt.id.clone()))?;
+                let attempt = self.store.get_attempt(&attempt_id).ok()?;
+                if !matches!(attempt.provider.as_str(), "codex" | "claude" | "grok") {
+                    return None;
+                }
+                if attempt.state == AttemptState::Cancelled {
+                    let hash = sha256_hex(format!("{}:confirmed-stop-successor", request.request_id).as_bytes());
+                    Some(format!("attempt-{hash}"))
+                } else {
+                    Some(attempt_id)
+                }
+            }
+            "resolve_decision" | "permission_response" => {
+                let decision_id = request.payload.get("decisionId")?.as_str()?;
+                let decision = self.store.get_decision(decision_id).ok()?;
+                let attempt = self.store.get_attempt(&decision.attempt_id).ok()?;
+                matches!(attempt.provider.as_str(), "codex" | "claude" | "grok")
+                    .then(|| attempt.id)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn native_worker_plan(&self, request: &UiCommandRequest) -> Option<NativeWorkerPlan> {
+        match request.message_type.as_str() {
+            "handoff" | "reassign" => {
+                let source = request.payload.get("oldAttemptId")
+                    .and_then(Value::as_str)
+                    .or(self.selected_attempt_id.as_deref())?;
+                let old = self.store.get_attempt(source).ok()?;
+                let provider = request.payload.get("provider")?.as_str()?.trim().to_ascii_lowercase();
+                let old_native = matches!(old.provider.as_str(), "codex" | "claude" | "grok");
+                let new_native = matches!(provider.as_str(), "codex" | "claude" | "grok");
+                if !old_native && !new_native {
+                    return None;
+                }
+                let target = format!("attempt-handoff-{}", stable_suffix(&request.request_id));
+                Some(NativeWorkerPlan {
+                    attempt_ids: vec![old.id, target.clone()],
+                    startup_target: new_native.then_some(target),
+                })
+            }
+            "queue_override" => {
+                let queue_id = request.payload.get("queueId")?.as_str()?;
+                let queued = self.store.get_admission(queue_id).ok()?;
+                let payload: Value = serde_json::from_str(queued.request_json.as_deref()?).ok()?;
+                let provider = payload.get("provider")?.as_str()?.trim().to_ascii_lowercase();
+                if !matches!(provider.as_str(), "codex" | "claude" | "grok") {
+                    return None;
+                }
+                let target = queued.attempt_id
+                    .or_else(|| payload.get("attemptId").and_then(Value::as_str).map(str::to_owned))?;
+                Some(NativeWorkerPlan {
+                    attempt_ids: vec![target.clone()],
+                    startup_target: Some(target),
+                })
+            }
+            _ => {
+                let target = self.native_worker_target(request)?;
+                let startup = matches!(request.message_type.as_str(),
+                    "select_runtime" | "select_attempt" | "start_conversation");
+                Some(NativeWorkerPlan {
+                    attempt_ids: vec![target.clone()],
+                    startup_target: startup.then_some(target),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn startup_control_for(
+        &self,
+        request: &UiCommandRequest,
+    ) -> Option<(String, Arc<StartupControl>)> {
+        let attempt_id = request
+            .payload
+            .get("attemptId")
+            .and_then(Value::as_str)
+            .or(self.selected_attempt_id.as_deref())?;
+        self.runtime_manager
+            .startup_control(attempt_id)
+            .map(|control| (attempt_id.to_owned(), control))
+    }
+
+    pub(crate) fn record_startup_cancel(
+        &mut self,
+        request: &UiCommandRequest,
+        attempt_id: &str,
+        confirmed: bool,
+        detail: Option<&str>,
+    ) -> Result<UiCommandResult, String> {
+        let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
+        let duplicate = self
+            .store
+            .latest_event_kind_in(attempt_id, &["attempt.start.cancelled"])
+            .map_err(store_message)?
+            .is_some();
+        if confirmed && !duplicate {
+            if attempt.state != AttemptState::Queued {
+                return Err("Startup completion raced with Cancel; no unsent claim was recorded.".into());
+            }
+            self.persist_event(
+                attempt_id,
+                "attempt.start.cancelled",
+                json!({"confirmed":true,"nativePromptSent":false,"reason":"user cancelled startup"}),
+                Some(AttemptState::Cancelled),
+            )?;
+        } else if !confirmed && !duplicate {
+            self.persist_event(
+                attempt_id,
+                "attempt.start.cancel.requested",
+                json!({"confirmed":false,"nativePromptSent":"not-yet-confirmed","detail":detail}),
+                None,
+            )?;
+        }
+        Ok(UiCommandResult {
+            request_id: request.request_id.clone(),
+            duplicate,
+            accepted: true,
+            snapshot: self.snapshot(None)?,
+            receipt: Some(json!({
+                "startupCancel": if confirmed { "confirmed" } else { "pending" },
+                "nativePromptSent": if confirmed { json!(false) } else { Value::Null },
+                "detail": detail,
+            })),
+        })
+    }
+
+    pub(crate) fn fork_native_worker(
+        &mut self,
+        plan: &NativeWorkerPlan,
+    ) -> Result<(Self, u64), String> {
+        let runtime_manager = self
+            .runtime_manager
+            .lend_attempts(&plan.attempt_ids, plan.startup_target.as_deref())
+            .map_err(|error| error.to_string())?;
+        let baseline = self.selection_revision;
+        Ok((
+            Self {
+                store: self.store.clone(),
+                runtime_manager,
+                selected_project_id: self.selected_project_id.clone(),
+                selected_campaign_id: self.selected_campaign_id.clone(),
+                selected_task_id: self.selected_task_id.clone(),
+                selected_attempt_id: self.selected_attempt_id.clone(),
+                notices: self.notices.clone(),
+                build_id: self.build_id.clone(),
+                pending_titles: Vec::new(),
+                selection_revision: baseline,
+            },
+            baseline,
+        ))
+    }
+
+    pub(crate) fn merge_native_worker(
+        &mut self,
+        plan: &NativeWorkerPlan,
+        mut worker: Self,
+        baseline: u64,
+    ) -> Result<(), String> {
+        self.runtime_manager
+            .return_attempts(&plan.attempt_ids, std::mem::take(&mut worker.runtime_manager))
+            .map_err(|error| error.to_string())?;
+        self.pending_titles.append(&mut worker.pending_titles);
+        if self.selection_revision == baseline {
+            self.selected_project_id = worker.selected_project_id;
+            self.selected_campaign_id = worker.selected_campaign_id;
+            self.selected_task_id = worker.selected_task_id;
+            self.selected_attempt_id = worker.selected_attempt_id;
+            self.selection_revision = worker.selection_revision;
+        }
+        for notice in worker.notices {
+            if !self.notices.contains(&notice) {
+                self.notices.push(notice);
+            }
+        }
+        Ok(())
+    }
+
     /// Persist provider events that arrived while no UI request was in flight.
     /// This is called by the Core-owned flusher as well as before each snapshot.
     pub fn flush_runtime_events(&mut self) -> Result<usize, String> {
+        self.flush_titles();
         let pending = self
             .runtime_manager
             .poll_all_events()
@@ -359,6 +634,7 @@ impl UiController {
                 json!({
                     "provider": "codex",
                     "reason": closure.reason,
+                    "reasonCode": "provider-transport",
                     "pid": closure.pid,
                     "registration_identity": identity,
                     "turnFailed": closure.turn_failed,
@@ -371,6 +647,24 @@ impl UiController {
             )?;
         }
         Ok(count)
+    }
+
+    fn flush_titles(&mut self) {
+        let mut pending = Vec::new();
+        for receiver in self.pending_titles.drain(..) {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    if let Some(title) = result.title {
+                        let _ = self
+                            .store
+                            .set_generated_conversation_title_if_unnamed(&result.campaign_id, &title);
+                    }
+                }
+                Err(TryRecvError::Empty) => pending.push(receiver),
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        self.pending_titles = pending;
     }
 
     pub fn snapshot(&mut self, after_cursor: Option<i64>) -> Result<CoreSnapshot, String> {
@@ -418,12 +712,19 @@ impl UiController {
                         provider: String::new(),
                         name: String::new(),
                     },
+                    session: ProductSession {
+                        state: "none".into(),
+                        native_id_known: false,
+                    },
                     turn: ProductTurn {
                         state: "idle".into(),
                         can_stop: false,
                         can_send: false,
                         reason: Some("no conversation is selected".into()),
+                        reason_code: None,
+                        actions: Vec::new(),
                     },
+                    result_summary: None,
                     title: String::new(),
                 },
                 preview: false,
@@ -668,6 +969,14 @@ impl UiController {
 
     pub fn handle(&mut self, request: UiCommandRequest) -> Result<UiCommandResult, String> {
         request.validate().map_err(|error| error.to_string())?;
+        if matches!(
+            request.message_type.as_str(),
+            "select_project" | "select_campaign" | "create_campaign" | "create_campaign_with_task"
+                | "select_runtime" | "select_attempt" | "start_conversation" | "handoff"
+                | "reassign" | "resume_native_session" | "continue_in_isolated_workspace"
+        ) {
+            self.selection_revision = self.selection_revision.wrapping_add(1);
+        }
         let mut duplicate = false;
         let mut receipt = None;
         match request.message_type.as_str() {
@@ -741,6 +1050,9 @@ impl UiController {
             }
             "classify_recovery" => {
                 self.classify_recovery(&request)?;
+            }
+            "close_session" => {
+                duplicate = self.close_session(&request)?;
             }
             "close_adapter_transport" => {
                 self.close_adapter_transport(&request)?;
@@ -2031,7 +2343,7 @@ impl UiController {
             .runtime_manager
             .registration_identity(&attempt_id)
             .unwrap_or_default();
-        if let Err((stage, error)) = self.initialize_admitted_runtime(
+        if let Err((stage, error, reason_code)) = self.initialize_admitted_runtime(
             &attempt_id,
             &campaign.id,
             &task.id,
@@ -2045,6 +2357,7 @@ impl UiController {
                 &registration_identity,
                 stage,
                 error,
+                reason_code,
             ));
         }
         // Commit the selection last, after every fallible step of the admission. Any error
@@ -2072,7 +2385,7 @@ impl UiController {
         task_id: &str,
         workspace: PathBuf,
         provider_label: &str,
-    ) -> Result<(), (&'static str, String)> {
+    ) -> Result<(), (&'static str, String, &'static str)> {
         let session = self
             .runtime_manager
             .create_session(
@@ -2085,18 +2398,18 @@ impl UiController {
                     resume_session: None,
                 },
             )
-            .map_err(|error| ("create_session", error.to_string()))?;
+            .map_err(|error| ("create_session", error.to_string(), admission_reason_code(&error)))?;
         if !session.handle.session_id.trim().is_empty()
             && !session.handle.session_id.starts_with("claude-session-")
         {
             self.store
                 .set_attempt_provider_session(attempt_id, &session.handle.session_id)
-                .map_err(|error| ("provider_session", store_message(error)))?;
+                .map_err(|error| ("provider_session", store_message(error), "provider-startup"))?;
         }
         if self
             .store
             .get_attempt(attempt_id)
-            .map_err(|error| ("attempt_active", store_message(error)))?
+            .map_err(|error| ("attempt_active", store_message(error), "provider-startup"))?
             .state
             == AttemptState::Queued
         {
@@ -2106,11 +2419,11 @@ impl UiController {
                 json!({ "provider": provider_label, "session": "[RUNTIME_SESSION]" }),
                 Some(AttemptState::Active),
             )
-            .map_err(|error| ("attempt_active", error))?;
+            .map_err(|error| ("attempt_active", error, "provider-startup"))?;
         }
         for event in session.events {
             self.persist_agent_event(&event)
-                .map_err(|error| ("session_events", error))?;
+                .map_err(|error| ("session_events", error, "provider-startup"))?;
         }
         Ok(())
     }
@@ -2134,6 +2447,7 @@ impl UiController {
         registration_identity: &str,
         stage: &'static str,
         error: String,
+        reason_code: &'static str,
     ) -> String {
         // Increment 6: if the failure was an observed Codex transport closure, name it in the
         // record (before the withdrawal, while the registration is certainly present). This is the
@@ -2177,6 +2491,7 @@ impl UiController {
             json!({
                 "stage": stage,
                 "error": error,
+                "reasonCode": reason_code,
                 "provider": provider,
                 "registration": registration,
                 "process": process,
@@ -2414,6 +2729,16 @@ impl UiController {
                     .to_string(),
             );
         }
+        if matches!(attempt.provider.to_ascii_lowercase().as_str(), "codex" | "grok" | "claude")
+            && attempt.provider_session.is_some()
+        {
+            if self.runtime_manager.registered_binding(&attempt_id).is_none() {
+                return Err("This session is detached. Resume it before sending another message; no message was recorded or replayed.".into());
+            }
+            if self.runtime_manager.registration_live(&attempt_id) != Some(true) {
+                return Err("This Runtime session is not ready. Check its status before sending; no message was recorded or replayed.".into());
+            }
+        }
         let auth = self
             .store
             .get_campaign_authorization(&campaign.id)
@@ -2553,16 +2878,10 @@ impl UiController {
                     workspace_root: workspace.clone(),
                     resume_session: resume,
                 };
-                let session = match self.runtime_manager.create_session(
-                    &attempt_id,
-                    &session_request(attempt.provider_session.clone()),
-                ) {
-                    Ok(session) => session,
-                    Err(_) => self
-                        .runtime_manager
-                        .create_session(&attempt_id, &session_request(None))
-                        .map_err(|error| error.to_string())?,
-                };
+                let session = self
+                    .runtime_manager
+                    .create_session(&attempt_id, &session_request(attempt.provider_session.clone()))
+                    .map_err(|error| error.to_string())?;
                 // A newly attached Runtime may have an opaque provider
                 // session already (Codex app-server and Scenario).  One-shot
                 // adapters intentionally return a Core-local placeholder;
@@ -2622,6 +2941,7 @@ impl UiController {
                                 "runtime.send.failed",
                                 json!({
                                     "error": first,
+                                    "reasonCode": if write_unknown { "delivery-unknown" } else { "provider-transport" },
                                     "retry": false,
                                     "deliveryState": if write_unknown { "UNKNOWN" } else { "FAILED" },
                                     "transport": closed_reason.unwrap_or("write-error")
@@ -2638,6 +2958,7 @@ impl UiController {
                             "runtime.send.failed",
                             json!({
                                 "error": first,
+                                "reasonCode": "delivery-unknown",
                                 "retry": false,
                                 "deliveryState": "UNKNOWN",
                                 "reason": "Claude native send may have partially crossed the transport boundary"
@@ -2709,6 +3030,7 @@ impl UiController {
                         "runtime.send.failed",
                         json!({
                             "error": first,
+                            "reasonCode": "delivery-unknown",
                             "retry": false,
                             "deliveryState": "UNKNOWN"
                         }),
@@ -3080,6 +3402,19 @@ impl UiController {
                         }),
                     )
                     .map_err(store_message)?;
+                if !duplicate && provider == "codex" {
+                    let executable = self
+                        .runtime_manager
+                        .registered_binding(&attempt_id)
+                        .and_then(|binding| binding.executable.clone());
+                    self.pending_titles.push(spawn_title(TitleRequest {
+                        campaign_id: campaign_id.clone(),
+                        provider: provider.clone(),
+                        executable,
+                        workspace_root: PathBuf::from(&canonical),
+                        first_prompt: message.clone(),
+                    }));
+                }
                 Ok(duplicate)
             }
             Err(error) => {
@@ -3846,13 +4181,9 @@ impl UiController {
         let authorization = payload_text_default(
             &request.payload,
             "authorization",
-            "goalport-electron-stable-v1:handoff",
+            "user-requested-handoff",
         );
-        let authorization_manifest = payload_text_default(
-            &request.payload,
-            "authorizationManifest",
-            "goal-runs/goalport-electron-stable-v1/evidence/locks/shared-interface-freeze.json",
-        );
+        let authorization_manifest = payload_text(&request.payload, "authorizationManifest").ok();
         let new_id = format!("attempt-handoff-{}", stable_suffix(&request.request_id));
         let new_attempt = Attempt::new(&new_id, &task.id, &provider, format!("{provider}-cap-v1"));
         self.store
@@ -3931,7 +4262,7 @@ impl UiController {
             })).take(32).collect::<Vec<_>>(),
             "authorization": {
                 "request": bounded_core_text(&authorization, 256),
-                "manifest": bounded_core_text(&authorization_manifest, 256),
+                "manifest": authorization_manifest.as_deref().map(|manifest| bounded_core_text(manifest, 256)),
                 "requestHash": sha256_hex(request.request_id.as_bytes())
             },
             "oldAttempt": {
@@ -4280,10 +4611,18 @@ impl UiController {
             self.selected_attempt_id.as_deref().unwrap_or_default(),
         );
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
+        if attempt.state.is_terminal() {
+            return Err(format!(
+                "Attempt {attempt_id} is closed or terminal; start a new Attempt instead of resuming its session"
+            ));
+        }
         let Some(session_id) = attempt.provider_session.clone() else {
             self.persist_recovery(&attempt_id, Some("UNSUPPORTED"))?;
             return Err("no persisted native session to resume".into());
         };
+        if attempt.provider.eq_ignore_ascii_case("claude") {
+            return Err("Claude Code session resume is not supported by GoalPort yet".into());
+        }
         let workspace = PathBuf::from(self.workspace_for_attempt(&attempt_id)?);
         self.ensure_workspace_ingress_allowed(
             workspace.to_string_lossy().as_ref(),
@@ -4291,7 +4630,41 @@ impl UiController {
         )?;
         if self
             .runtime_manager
-            .selected_provider(&attempt_id)
+            .turn_facts(&attempt_id)
+            .is_some_and(|facts| facts.in_flight || facts.delivery_unknown)
+            || !self
+                .store
+                .unsettled_commands_for_attempt(&attempt_id)
+                .map_err(store_message)?
+                .is_empty()
+            || self
+                .store
+                .outbox_for_attempt(&attempt_id)
+                .map_err(store_message)?
+                .iter()
+                .any(|item| item.state != crate::domain::OutboxState::Succeeded)
+            || self
+                .store
+                .decisions_for_attempt(&attempt_id, 1)
+                .map_err(store_message)?
+                .iter()
+                .any(|decision| decision.state == DecisionState::Pending)
+            || matches!(
+                self.store
+                    .latest_event_kind_in(
+                        &attempt_id,
+                        &["attempt.interrupt.requested", "runtime.turn.started", "runtime.turn.completed", "runtime.turn.failed", "runtime.turn.cancelled", "attempt.cancelled"],
+                    )
+                    .map_err(store_message)?
+                    .as_deref(),
+                Some("attempt.interrupt.requested" | "runtime.turn.started")
+            )
+        {
+            return Err("The previous turn or action is unresolved. Check its result before resuming this session; no message was resent.".into());
+        }
+        if self
+            .runtime_manager
+            .registered_binding(&attempt_id)
             .is_none()
         {
             self.runtime_manager
@@ -4333,7 +4706,7 @@ impl UiController {
                         None,
                     )?;
                     self.persist_recovery(&attempt_id, Some("UNSUPPORTED"))?;
-                    return Ok(());
+                    return Err("Native session resume returned a different thread id".into());
                 }
                 self.persist_event(
                     &attempt_id,
@@ -4384,7 +4757,7 @@ impl UiController {
                     None,
                 )?;
                 self.persist_recovery(&attempt_id, Some("UNSUPPORTED"))?;
-                Ok(())
+                Err(format!("Native session resume failed: {error}"))
             }
         }
     }
@@ -4448,6 +4821,84 @@ impl UiController {
         )?;
         self.persist_recovery(&attempt_id, Some(class))?;
         Ok(())
+    }
+
+    fn close_session(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
+        self.flush_runtime_events()?;
+        let attempt_id = payload_text_default(
+            &request.payload,
+            "attemptId",
+            self.selected_attempt_id.as_deref().unwrap_or_default(),
+        );
+        let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
+        if self
+            .store
+            .latest_event_kind_in(&attempt_id, &["runtime.session.closed"])
+            .map_err(store_message)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let facts = self
+            .runtime_manager
+            .turn_facts(&attempt_id)
+            .ok_or_else(|| "This Runtime session is not attached; there is nothing to close.".to_string())?;
+        if facts.in_flight || facts.delivery_unknown {
+            return Err("This Runtime may still be working. Stop its turn or check its result before closing the session.".into());
+        }
+        let workspace = self.workspace_for_attempt(&attempt_id)?;
+        if self
+            .store
+            .held_stop_for_workspace(&workspace)
+            .map_err(store_message)?
+            .is_some()
+        {
+            return Err("This workspace still has unresolved work. Check the Stop result before closing the session.".into());
+        }
+        if self
+            .store
+            .decisions_for_attempt(&attempt_id, 1)
+            .map_err(store_message)?
+            .iter()
+            .any(|decision| decision.state == DecisionState::Pending)
+        {
+            return Err("Answer the pending permission request before closing this session.".into());
+        }
+        if !self
+            .store
+            .unsettled_commands_for_attempt(&attempt_id)
+            .map_err(store_message)?
+            .is_empty()
+            || self
+                .store
+                .outbox_for_attempt(&attempt_id)
+                .map_err(store_message)?
+                .iter()
+                .any(|item| item.state != crate::domain::OutboxState::Succeeded)
+        {
+            return Err("This session has an unsettled action. Check its result before closing.".into());
+        }
+        match self.runtime_manager.confirm_process_identity(&attempt_id) {
+            Some(crate::runtime_manager::ProcessConfirmation::Confirmed { .. })
+            | Some(crate::runtime_manager::ProcessConfirmation::Exited { .. })
+            | Some(crate::runtime_manager::ProcessConfirmation::NotApplicable) => {}
+            Some(crate::runtime_manager::ProcessConfirmation::Unknown { reason }) => {
+                return Err(format!("The Runtime process could not be confirmed: {reason}"));
+            }
+            None => return Err("This Runtime session is not attached.".into()),
+        }
+        self.runtime_manager
+            .close_idle_session(&attempt_id)
+            .map_err(|error| error.to_string())?;
+        let state = matches!(attempt.state, AttemptState::Active | AttemptState::AwaitingReview)
+            .then_some(AttemptState::Closed);
+        self.persist_event(
+            &attempt_id,
+            "runtime.session.closed",
+            json!({"provider":attempt.provider,"confirmed":true,"turnWasActive":false}),
+            state,
+        )?;
+        Ok(false)
     }
 
     fn close_adapter_transport(&mut self, request: &UiCommandRequest) -> Result<(), String> {
@@ -4784,6 +5235,11 @@ impl UiController {
             AgentEventType::Unknown => "runtime.event.unknown",
         };
         let state = match event.event_type {
+            AgentEventType::TurnFailed
+                if matches!(
+                    event.payload.get("reasonCode").and_then(Value::as_str),
+                    Some("provider-quota" | "provider-overloaded")
+                ) => None,
             AgentEventType::TurnFailed => Some(AttemptState::Failed),
             AgentEventType::Cancelled => Some(AttemptState::Cancelled),
             AgentEventType::TurnCompleted => Some(AttemptState::AwaitingReview),
@@ -5543,6 +5999,20 @@ fn runtime_profiles() -> Vec<UiRuntime> {
     ]
 }
 
+fn admission_reason_code(error: &AdapterError) -> &'static str {
+    match error {
+        AdapterError::ExecutableMissing(_) => "provider-not-installed",
+        AdapterError::AuthenticationRequired(_) => "provider-auth-required",
+        AdapterError::Unsupported(_) | AdapterError::Protocol(_) => "provider-version",
+        AdapterError::InvalidRequest(_) => "provider-request-invalid",
+        AdapterError::Connection(_)
+        | AdapterError::RegistrationOccupied(_)
+        | AdapterError::Preflight(_)
+        | AdapterError::Io(_)
+        | AdapterError::Json(_) => "provider-startup",
+    }
+}
+
 fn runtime_version(provider: &str) -> String {
     match provider {
         "codex" => "0.152.0",
@@ -6170,6 +6640,49 @@ fn delivery_after_answer(before: &'static str, accepted: bool) -> &'static str {
         "UNKNOWN"
     } else {
         "FAILED"
+    }
+}
+
+#[cfg(test)]
+mod title_integration_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_native_title_cannot_replace_manual_rename() {
+        let store = Store::memory().unwrap();
+        let mut ui = UiController::new(store.clone()).unwrap();
+        let initial = ui.snapshot_if_changed(None).unwrap();
+        let initial_revision = initial["revision"].as_str().unwrap().to_owned();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        ui.pending_titles.push(receiver);
+        store.set_conversation_title("campaign-title", "My own title").unwrap();
+        assert_eq!(ui.snapshot_if_changed(Some(&initial_revision)).unwrap()["unchanged"], false);
+        sender.send(TitleResult {
+            campaign_id: "campaign-title".into(),
+            title: Some("Late model title".into()),
+        }).unwrap();
+        ui.flush_titles();
+        assert_eq!(
+            store.conversation_preference("campaign-title").unwrap().unwrap().title.as_deref(),
+            Some("My own title")
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        ui.pending_titles.push(receiver);
+        sender.send(TitleResult {
+            campaign_id: "campaign-generated".into(),
+            title: Some("Generated title".into()),
+        }).unwrap();
+        ui.flush_titles();
+        assert_eq!(
+            store.conversation_preference("campaign-generated").unwrap().unwrap().title.as_deref(),
+            Some("Generated title")
+        );
+        store.set_conversation_title("campaign-generated", "Renamed later").unwrap();
+        assert_eq!(
+            store.conversation_preference("campaign-generated").unwrap().unwrap().title.as_deref(),
+            Some("Renamed later")
+        );
     }
 }
 

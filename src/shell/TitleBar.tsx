@@ -4,6 +4,7 @@ import { connectionLabel } from "../lib/display";
 import type { CoreSnapshot } from "../types";
 
 interface TitleBarProps {
+  browserPreview?: boolean;
   snapshot: CoreSnapshot;
   campaignTitle: string | null;
   appInfo: AppInfo | null;
@@ -30,7 +31,7 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  snapshot, campaignTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
   const [menuOpen, setMenuOpen] = useState(false);
@@ -82,12 +83,12 @@ export function TitleBar({
         </div>
 
         <div className="titlebar-right">
-          <span className={`connection-pill connection-${snapshot.connection}`} title={connectionLabel(snapshot)}>
+          <span className={`connection-pill connection-${browserPreview ? "preview" : snapshot.connection}`} title={browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}>
             <span className="status-dot" aria-hidden="true" />
-            <span className="connection-text">{connectionLabel(snapshot)}</span>
+            <span className="connection-text">{browserPreview ? "Browser preview" : connectionLabel(snapshot)}</span>
           </span>
           {connected ? null : (
-            <button className="tb-button" type="button" aria-label="Reconnect Core" onClick={onReconnect}>
+            <button className="tb-button" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>
               Reconnect
             </button>
           )}

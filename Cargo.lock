@@ -1190,6 +1190,7 @@ dependencies = [
 name = "goalport-core-launcher"
 version = "1.0.0-rc.1"
 dependencies = [
+ "goalport-core",
  "serde_json",
  "sha2",
  "tempfile",

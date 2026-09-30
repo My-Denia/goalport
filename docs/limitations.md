@@ -1,25 +1,25 @@
 # Limitations
 
-GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not closed Stable V1. This page lists what the current RC does not do, or does only with conditions.
+GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not closed Stable V1. This page describes current source unless it explicitly names the previously built RC package.
 
 ## Distribution and platform
 
-- **Windows x64 only.**
-- Linux Unix socket is Scenario/dev-only. It is not Windows acceptance and not a product platform expansion. It serves one connection at a time, checks socket mode and peer uid, and refuses to replace a live socket. It rejects a umask that masks owner permissions before creating endpoint files. It does not prove that a world-writable parent is safe. A forced kill between bind and ownership-marker persistence can leave an unmarked stale socket; GoalPort refuses to remove it automatically. Verify that no process owns the endpoint and that both paths belong to GoalPort before manually removing the socket and its adjacent lock file.
+- **The desktop distribution targets Windows x64.** Linux Core has a developer entry, not a packaged Linux desktop.
+- Linux Core can run native Codex through the Unix command client ([Linux development](linux-development.md)). Connections are isolated with bounded waits. This does not establish native Claude/Grok or Windows desktop acceptance. Socket ownership and peer checks remain in force; a foreign or unidentifiable stale endpoint is never silently replaced.
 - **No downloadable release.** You build the package from source ([building](building.md)).
 - **Unsigned package.** Windows may warn before running it.
 - **Tauri** is a bounded regression target, not a second product.
 
 ## Data
 
-- **No database migration or import.** A profile is bound to the RC version and Core build that created it. Use a new data directory when you change builds ([local data](local-data.md)).
+- **Profile reuse depends on data compatibility.** Current source can reopen compatible data and offers supported imports with backups; unknown or newer formats remain refused ([profile continuity](profile-continuity.md)). Previously built RC packages keep their original build-bound behavior.
 - **Moved profiles are refused.** So are profiles from the earlier path identity format. Nothing is rewritten.
 - **Workspace matching is conservative.** Distinct folders that collapse to the same comparison key are refused.
 
 ## Runtimes
 
-- **Admission status differs per Runtime.** Native Runtimes are labelled Preview in the window. Codex is partial, Claude Code is partially admitted and Grok is admitted. Each ruling applies to a specific recorded build; a package built from current source has not been re-admitted ([runtime integration](runtimes.md#support-status)).
-- **Claude Code has no native `--resume`.**
+- **Admission status differs per Runtime.** Runtime support is shown as Available or Limited, according to the current capability projection. Codex is partial, Claude Code is partially admitted and Grok is admitted. Each ruling applies to a specific recorded build; a package built from current source has not been re-admitted ([runtime integration](runtimes.md#support-status)).
+- **Claude session resume and explicit session close are currently unsupported.** Core refuses those operations. The window can still close while work continues; Stop retains unresolved responsibility where required.
 - **CLI version changes are not detected.** Newer Runtime CLI versions may behave differently from the recorded ones.
 - **The Scenario Runtime is synthetic.** Its checks never count as native Runtime evidence.
 
@@ -50,8 +50,8 @@ The Core pipe accepts only the Windows user account that runs Core and rejects r
 
 ## Window and UI
 
-- **The right rail needs a wide window.** At a viewport of 1020 CSS pixels or narrower (more physical pixels under display scaling), the right rail is hidden. The rail holds the Decision Inbox, Runtime selection, Stop, handoff and Blocked work actions, so a pending permission request can be out of sight. Widen the window.
-- **Timeline timestamps are raw epoch milliseconds.**
+- **Controls adapt to the window width.** Runtime selection, Send, Stop and permission cards stay in the main conversation; navigation becomes a dismissible drawer at narrow widths. Desktop-native IME and operating-system close behavior still need Windows validation.
+- **Timestamps are formatted for the local display.** Raw committed timestamps remain in the stored events.
 - **Desktop notifications are not verified.** They use AUMID `GoalPort.Desktop` without a Start Menu shortcut, and visible toasts were not captured as evidence.
 
 ## Where the full record is

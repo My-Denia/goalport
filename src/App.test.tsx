@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { clickRuntimeOption } from "./runtime-picker.test-helpers";
 import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, type CoreSnapshot } from "./types";
 
@@ -35,7 +36,7 @@ function accept(request: CoreCommand, snapshot: unknown) {
 
 /** Open the composer Runtime chooser (aria-label "Select Runtime"), waiting for boot. */
 async function openRuntimePicker() {
-  fireEvent.click(await screen.findByRole("button", { name: /select runtime/i }));
+  fireEvent.click(await screen.findByRole("combobox", { name: /select runtime/i }));
 }
 
 /** The app close entry lives in the title-bar application menu (the native X
@@ -234,11 +235,12 @@ describe("GoalPort preview", () => {
     fireEvent.click(screen.getByRole("button", { name: /application menu/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /developer diagnostics/i }));
     fireEvent.click(await screen.findByRole("button", { name: /simulate offline/i }));
-    expect(screen.getAllByText("Core disconnected").length).toBeGreaterThan(0);
-    expect(screen.getByText(/No prompt will be replayed/i)).toBeTruthy();
+    expect(screen.getByText("Browser preview is offline")).toBeTruthy();
+    expect(screen.getByText(/nothing is sent to a Runtime/i)).toBeTruthy();
 
-    fireEvent.click(screen.getAllByRole("button", { name: /reconnect core/i })[0]);
-    await waitFor(() => expect(screen.getAllByText("Core connected").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByRole("button", { name: /reconnect preview/i })[0]);
+    await waitFor(() => expect(screen.queryByText("Browser preview is offline")).toBeNull());
+    expect(screen.getAllByText("Browser preview").length).toBeGreaterThan(0);
   });
 
   it("opens Continue in background close-choice from Close window", () => {
@@ -369,7 +371,7 @@ describe("GoalPort preview", () => {
     // Runtime selection stays blocked under the hold.
     await openRuntimePicker();
     const claudeOption = await screen.findByRole("option", { name: /claude code/i });
-    expect((claudeOption as HTMLButtonElement).disabled).toBe(true);
+    expect(claudeOption.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("offers no Stop on a terminal selection and keeps the provider visible", async () => {
@@ -456,7 +458,7 @@ describe("GoalPort preview", () => {
 
     render(<App />);
     await openRuntimePicker();
-    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
+    clickRuntimeOption(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -478,7 +480,7 @@ describe("GoalPort preview", () => {
 
     render(<App />);
     await openRuntimePicker();
-    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
+    clickRuntimeOption(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -510,7 +512,7 @@ describe("GoalPort preview", () => {
 
     render(<App />);
     await openRuntimePicker();
-    fireEvent.click(await screen.findByRole("option", { name: /opaque runtime/i }));
+    clickRuntimeOption(await screen.findByRole("option", { name: /opaque runtime/i }));
     await waitFor(() => expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true));
 
     const request = command.mock.calls.find(([candidate]) => candidate.messageType === "select_runtime")![0];
@@ -534,7 +536,7 @@ describe("GoalPort preview", () => {
 
     render(<App />);
     await openRuntimePicker();
-    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
+    clickRuntimeOption(await screen.findByRole("option", { name: /claude code/i }));
     await waitFor(() => {
       expect(command.mock.calls.some(([request]) => request.messageType === "select_runtime")).toBe(true);
     });
@@ -568,14 +570,14 @@ describe("GoalPort preview", () => {
     render(<App />);
     await openRuntimePicker();
     const claudeOption = await screen.findByRole("option", { name: /claude code/i });
-    fireEvent.click(claudeOption);
+    clickRuntimeOption(claudeOption);
     // The exact raw refusal stays visible inside Technical details.
     expect(await screen.findByText("already bound")).toBeTruthy();
     expect(screen.queryByText(/successfully selected/i)).toBeNull();
     await openRuntimePicker();
     const retryOption = await screen.findByRole("option", { name: /claude code/i });
-    await waitFor(() => expect((retryOption as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(retryOption);
+    await waitFor(() => expect(retryOption.getAttribute("aria-disabled")).not.toBe("true"));
+    clickRuntimeOption(retryOption);
     await waitFor(() => expect(screen.getAllByText(/core connected/i).length).toBeGreaterThan(0));
   });
 
@@ -674,8 +676,8 @@ describe("GoalPort preview", () => {
     await waitFor(() => expect(workspace.value).toBe("C:\\work\\chosen"));
     const goal = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.change(goal, { target: { value: "Keep this exact goal" } });
-    fireEvent.click(screen.getByRole("button", { name: "Select Runtime" }));
-    fireEvent.click(await screen.findByRole("option", { name: /claude code/i }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    clickRuntimeOption(await screen.findByRole("option", { name: /claude code/i }));
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
     expect((await screen.findByRole("alert")).textContent).toContain("could not complete that action");

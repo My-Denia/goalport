@@ -314,6 +314,10 @@ fn capacity_acknowledgement(source: &Value) -> Value {
             "message": "The operation result was committed, but the full projection exceeded the response capacity. Load history pages and retry the same request only for reconciliation."
         }
     });
+    if let Some(revision) = payload.get("revision").and_then(Value::as_str) {
+        minimal_payload["revision"] = json!(bounded_json_string(revision, 128));
+        minimal_payload["unchanged"] = json!(false);
+    }
     if let Some(value) = payload.get("reservation") {
         minimal_payload["reservation"] = minimal_reservation(value);
     }

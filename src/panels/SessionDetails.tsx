@@ -3,12 +3,15 @@ import type { CoreSnapshot, ProductConversation } from "../types";
 import { connectionLabel, headlineState, runtimeSelectionDisplay } from "../lib/display";
 
 interface SessionDetailsProps {
+  browserPreview?: boolean;
   open: boolean;
   onClose: () => void;
   snapshot: CoreSnapshot;
   product: ProductConversation | null;
   onChangeRuntime: () => void;
   onOpenHandoff: () => void;
+  onCloseSession: () => void;
+  onResumeSession: () => void;
   onOpenWorkspaceFolder: () => void;
 }
 
@@ -19,7 +22,7 @@ interface SessionDetailsProps {
  * No capability catalog, no evidence ledger, no internal identifiers; those
  * live in the separate Developer diagnostics surface.
  */
-export function SessionDetails({ open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onOpenWorkspaceFolder }: SessionDetailsProps) {
+export function SessionDetails({ browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder }: SessionDetailsProps) {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (event: globalThis.KeyboardEvent) => {
@@ -37,6 +40,12 @@ export function SessionDetails({ open, onClose, snapshot, product, onChangeRunti
   const runtimeDisplay = runtimeSelectionDisplay(runtime);
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
   const hasConversation = Boolean(snapshot.activeCampaignId);
+  const sessionLabel = product?.session?.state === "starting" ? "Starting"
+    : product?.session?.state === "attached" ? "Connected"
+    : product?.session?.state === "detached" ? "Detached"
+    : product?.session?.state === "closed" ? "Closed"
+    : product?.session?.state === "unavailable" ? "Unavailable"
+    : product?.session?.state === "none" ? "Not started" : null;
 
   return (
     <aside className={`inspector${open ? " inspector-open" : ""}`} aria-label="Session details" data-open={open ? "true" : "false"}>
@@ -66,7 +75,8 @@ export function SessionDetails({ open, onClose, snapshot, product, onChangeRunti
                   : `${runtimeDisplay.label}${runtime.state === "unavailable" ? " · not connected" : ""}`}
               </strong>
             </div>
-            <div><span>Connection</span><strong>{connectionLabel(snapshot)}</strong></div>
+            <div><span>Connection</span><strong>{browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}</strong></div>
+            {sessionLabel ? <div><span>Runtime session</span><strong>{sessionLabel}</strong></div> : null}
             <div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
             <div>
               <span>Approvals</span>
@@ -80,13 +90,23 @@ export function SessionDetails({ open, onClose, snapshot, product, onChangeRunti
             <button className="button button-quiet" type="button" onClick={onOpenHandoff} disabled={held || !hasConversation}>
               Handoff…
             </button>
+            {snapshot.connection === "connected" && !held && product?.turn.actions?.includes("close-session") ? (
+              <button className="button button-quiet" type="button" onClick={onCloseSession}>Close Runtime session</button>
+            ) : null}
+            {snapshot.connection === "connected" && !held && product?.turn.actions?.includes("resume-session") ? (
+              <button className="button button-quiet" type="button" onClick={onResumeSession}>Resume session</button>
+            ) : null}
             <button className="button button-quiet" type="button" onClick={onOpenWorkspaceFolder} disabled={!snapshot.project.workspaceRoot}>
               Open workspace folder
             </button>
           </div>
         </section>
-
-
+        {product?.resultSummary ? (
+          <section className="rail-panel" aria-labelledby="last-result-title">
+            <h3 id="last-result-title">Last result</h3>
+            <p className="result-excerpt">{product.resultSummary}</p>
+          </section>
+        ) : null}
       </div>
     </aside>
   );

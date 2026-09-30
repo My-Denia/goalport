@@ -37,7 +37,10 @@ pub struct ProductConversation {
     pub items: Vec<ProductConversationItem>,
     pub page_info: HistoryPageInfo,
     pub runtime: ProductRuntimeSelection,
+    pub session: ProductSession,
     pub turn: ProductTurn,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
     /// Additive beyond the packet's minimum wire shape: the deterministic
     /// product title (rename > first prompt, normalized to the first 44 Unicode
     /// characters > root task title). The sidebar needs it from Core.
@@ -84,6 +87,14 @@ pub struct ProductRuntimeSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProductSession {
+    /// `attached` | `detached` | `unavailable` | `none`.
+    pub state: String,
+    pub native_id_known: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProductTurn {
     /// `idle` | `starting` | `running` | `waiting-permission` | `stopping` |
     /// `stopped` | `completed` | `failed` | `uncertain`.
@@ -92,6 +103,10 @@ pub struct ProductTurn {
     pub can_send: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<String>,
 }
 
 /// Everything the projection needs from the controller context: which campaign
@@ -122,16 +137,49 @@ pub fn product_conversation(
         .map_err(|error| error.to_string())?;
     let title = effective_title(&preference, first_user_message, context.root_task_title);
     let runtime = project_runtime(store, runtime_manager, context, &preference)?;
+    let session = ProductSession {
+        state: if runtime.state == "selected" {
+            "attached"
+        } else if runtime.state == "starting" {
+            "starting"
+        } else if runtime_manager.registered_binding(&context.attempt.id).is_some() {
+            "unavailable"
+        } else if store
+            .latest_event_kind_in(&context.attempt.id, &["runtime.session.closed"])
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            "closed"
+        } else if context.attempt.provider_session.is_some() {
+            "detached"
+        } else {
+            "none"
+        }
+        .into(),
+        native_id_known: context.attempt.provider_session.is_some(),
+    };
     let mut turn = project_turn(store, runtime_manager, context, &runtime)?;
+    describe_turn(store, runtime_manager, context, &runtime, &session, &mut turn)?;
     if turn.can_send && !campaign_send_authorized(store, context.campaign_id)? {
         turn.can_send = false;
         turn.reason = Some("Sending is blocked because this conversation's permission to use the Runtime or perform actions was revoked.".into());
+        turn.reason_code = Some("authorization-revoked".into());
+        turn.actions.retain(|action| action != "send");
     }
+    let result_summary = if turn.state == "completed" {
+        store
+            .latest_completed_turn_reply(&context.attempt.id)
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
     Ok(ProductConversation {
         items,
         page_info,
         runtime,
+        session,
         turn,
+        result_summary,
         title,
     })
 }
@@ -281,12 +329,20 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
             | "attempt.admission.failed"
             | "runtime.transport.closed" => {
                 let technical_body = text_of("text").or_else(|| text_of("error"));
-                let body = match record.event.kind.as_str() {
+                let reason_code = payload
+                    .and_then(|value| value.get("reasonCode"))
+                    .and_then(Value::as_str);
+                let body = if let Some(reason_code) = reason_code {
+                    provider_issue_message(reason_code)
+                } else {
+                    match record.event.kind.as_str() {
                     "runtime.send.failed" => "Message delivery could not be completed. Check the connection and Technical details before sending anything again.",
                     "attempt.admission.failed" => "The selected Runtime could not be started. Review Technical details or choose another Runtime.",
                     "runtime.transport.closed" => "The Runtime connection closed. Review the session status before continuing.",
                     _ => "The Runtime could not finish this response. Review Technical details before continuing.",
-                }.to_owned();
+                    }
+                }
+                .to_owned();
                 if body.trim().is_empty() {
                     continue;
                 }
@@ -301,6 +357,9 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                 if let Some(retry) = payload.and_then(|value| value.get("retry")) {
                     technical.insert("retry".into(), retry.clone());
                 }
+                if let Some(reason_code) = reason_code {
+                    technical.insert("reasonCode".into(), Value::String(reason_code.into()));
+                }
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
                     logical_item_id: record.event.id.clone(),
@@ -311,7 +370,7 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                     body,
                     actor: None,
                     timestamp: Some(record.created_at.clone()),
-                    actions: None,
+                    actions: Some(vec!["diagnose".into()]),
                     technical_details: Some(Value::Object(technical).to_string()),
                 });
             }
@@ -378,6 +437,142 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
         .collect()
 }
 
+fn provider_issue_message(reason_code: &str) -> &'static str {
+    match reason_code {
+        "provider-quota" => "This Runtime has reached its usage limit. You can continue after the limit resets.",
+        "provider-auth-required" => "Sign in to this Runtime, then try again.",
+        "provider-not-installed" => "This Runtime is not installed. Install it or choose another Runtime.",
+        "provider-version" => "This Runtime could not accept the request. Update it or choose another Runtime.",
+        "provider-request-invalid" => "This Runtime rejected the request. Check Technical details before trying again.",
+        "provider-startup" => "This Runtime could not start. Check Technical details, then choose it again.",
+        "provider-overloaded" => "This Runtime is busy. Try another message later.",
+        "provider-transport" => "The Runtime connection failed. Check its session before continuing.",
+        "provider-permission" => "The Runtime denied this request. Check Technical details before continuing.",
+        "delivery-unknown" => "Message delivery is uncertain. Check the session before sending again.",
+        _ => "The Runtime could not finish this response. Check Technical details before continuing.",
+    }
+}
+
+fn describe_turn(
+    store: &Store,
+    runtime_manager: &mut RuntimeManager,
+    context: &ProductConversationContext<'_>,
+    runtime: &ProductRuntimeSelection,
+    session: &ProductSession,
+    turn: &mut ProductTurn,
+) -> Result<(), String> {
+    let latest = store
+        .latest_event_record_in(
+            &context.attempt.id,
+            &[
+                "runtime.turn.started",
+                "runtime.turn.completed",
+                "runtime.turn.failed",
+                "runtime.turn.cancelled",
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if let Some(record) = latest
+        && record.event.kind == "runtime.turn.failed"
+        && matches!(turn.state.as_str(), "idle" | "failed")
+    {
+        let code = record
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("reasonCode"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider-failed");
+        turn.reason_code = Some(code.into());
+        turn.reason = Some(provider_issue_message(code).into());
+        if turn.state == "idle" {
+            turn.state = "failed".into();
+            turn.can_send = runtime.state == "selected";
+        }
+    }
+    if turn.reason_code.is_none() {
+        turn.reason_code = match turn.state.as_str() {
+            "uncertain" => Some(if turn.reason.as_deref().is_some_and(|reason| reason.contains("delivery")) {
+                "delivery-unknown"
+            } else {
+                "recovery-required"
+            }),
+            "waiting-permission" => Some("permission-pending"),
+            "starting" => Some("turn-starting"),
+            "stopping" => Some("stop-pending"),
+            _ => None,
+        }
+        .map(str::to_owned);
+    }
+    if turn.can_send {
+        turn.actions.push("send".into());
+    }
+    if turn.can_stop {
+        turn.actions.push("stop".into());
+    }
+    if session.state == "attached"
+        && context.attempt.provider != "claude"
+        && matches!(turn.state.as_str(), "idle" | "completed" | "failed" | "stopped")
+    {
+        turn.actions.push("close-session".into());
+    }
+    if !turn.can_send && !turn.can_stop && turn.reason.is_some() {
+        let retained = runtime_manager.registered_binding(&context.attempt.id).is_some();
+        let settled = matches!(turn.state.as_str(), "idle" | "completed" | "failed" | "stopped");
+        let no_unsettled_effect = store
+            .unsettled_commands_for_attempt(&context.attempt.id)
+            .map_err(|error| error.to_string())?
+            .is_empty()
+            && store
+                .outbox_for_attempt(&context.attempt.id)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .all(|item| item.state == crate::domain::OutboxState::Succeeded)
+            && !store
+                .decisions_for_attempt(&context.attempt.id, 1)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|decision| decision.state == DecisionState::Pending);
+        let exited = retained
+            && matches!(
+                runtime_manager.confirm_process_identity(&context.attempt.id),
+                Some(crate::runtime_manager::ProcessConfirmation::Exited { .. })
+            );
+        let action = if session.state == "unavailable"
+            && exited
+            && settled
+            && no_unsettled_effect
+            && context.attempt.provider != "claude"
+        {
+            turn.reason_code = Some("provider-exited".into());
+            turn.reason = Some("The Runtime process ended. Close this session before starting new work; its history remains here.".into());
+            "close-session"
+        } else if turn.state == "uncertain" {
+            "diagnose"
+        } else if !retained
+            && session.native_id_known
+            && !context.attempt.state.is_terminal()
+            && !context.attempt.provider.eq_ignore_ascii_case("claude")
+            && settled
+            && no_unsettled_effect
+        {
+            turn.reason_code = Some("session-detached".into());
+            turn.reason = Some("Resume this session to continue. Earlier messages will not be sent again.".into());
+            "resume-session"
+        } else if !retained
+            && matches!(context.attempt.state, AttemptState::Queued)
+            && no_unsettled_effect
+        {
+            "select-runtime"
+        } else {
+            "diagnose"
+        };
+        if !turn.actions.iter().any(|existing| existing == action) {
+            turn.actions.push(action.into());
+        }
+    }
+    Ok(())
+}
+
 fn provider_display_name(provider: &str) -> String {
     match provider.to_ascii_lowercase().as_str() {
         "codex" => "Codex".into(),
@@ -401,6 +596,14 @@ fn project_runtime(
     context: &ProductConversationContext<'_>,
     preference: &Option<ConversationPreference>,
 ) -> Result<ProductRuntimeSelection, String> {
+    if runtime_manager.operation_busy(&context.attempt.id) {
+        let provider = context.attempt.provider.clone();
+        return Ok(ProductRuntimeSelection {
+            state: "starting".into(),
+            name: provider_display_name(&provider),
+            provider,
+        });
+    }
     let Some(selected) = preference
         .as_ref()
         .and_then(|row| row.selected_provider.clone())
@@ -467,6 +670,8 @@ fn project_turn(
             _ => "uncertain",
         };
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: state.into(),
             can_stop: false,
             can_send: false,
@@ -476,9 +681,21 @@ fn project_turn(
             )),
         });
     }
+    if runtime_manager.operation_cancelling(&attempt.id) {
+        return Ok(ProductTurn {
+            reason_code: Some("start-cancelling".into()),
+            actions: Vec::new(),
+            state: "stopping".into(),
+            can_stop: false,
+            can_send: false,
+            reason: Some("Ending this Runtime startup before any message is sent.".into()),
+        });
+    }
     // 2. Delivery unknown / send still executing.
     if facts.is_some_and(|facts| facts.delivery_unknown) {
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: "uncertain".into(),
             can_stop: false,
             can_send: false,
@@ -491,6 +708,8 @@ fn project_turn(
     }
     if executing_send {
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: "uncertain".into(),
             can_stop: false,
             can_send: false,
@@ -516,16 +735,41 @@ fn project_turn(
         .map_err(|error| error.to_string())?;
     if latest_turn_fact.as_deref() == Some("attempt.interrupt.requested") {
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: if facts.is_some_and(|facts| facts.in_flight) { "stopping" } else { "uncertain" }.into(),
             can_stop: false, can_send: false,
             reason: Some("Stop was requested. Waiting for the Runtime to confirm the result; new messages are blocked.".into()),
         });
     }
-    // 3. Restart leftover: unfinished turn facts without a live registration.
+    // 3. A completed native turn remains completed across a Core restart. The
+    // provider session is detached until the user explicitly resumes it; no
+    // message is resent as part of this projection.
     if attempt.state == AttemptState::Active
-        && runtime_manager.selected_provider(&attempt.id).is_none()
+        && runtime_manager.registered_binding(&attempt.id).is_none()
     {
+        if latest_turn_fact.as_deref() == Some("runtime.turn.completed")
+            && attempt.provider_session.is_some()
+            && !pending_permission
+            && !runtime_manager.operation_busy(&attempt.id)
+            && store
+                .outbox_for_attempt(&attempt.id)
+                .map_err(|error| error.to_string())?
+                .iter()
+                .all(|item| item.state == crate::domain::OutboxState::Succeeded)
+        {
+            return Ok(ProductTurn {
+                reason_code: Some("session-detached".into()),
+                actions: Vec::new(),
+                state: "completed".into(),
+                can_stop: false,
+                can_send: false,
+                reason: Some("The previous turn finished. Resume this session to continue.".into()),
+            });
+        }
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: "uncertain".into(),
             can_stop: false,
             can_send: false,
@@ -537,8 +781,20 @@ fn project_turn(
     }
     // 4. Live turn facts.
     if let Some(facts) = facts.filter(|facts| facts.in_flight) {
+        if runtime.state != "selected" && runtime.state != "starting" {
+            return Ok(ProductTurn {
+                reason_code: Some("recovery-required".into()),
+                actions: Vec::new(),
+                state: "uncertain".into(),
+                can_stop: false,
+                can_send: false,
+                reason: Some("The Runtime connection is unavailable and this turn's result is uncertain. Check it before continuing.".into()),
+            });
+        }
         if pending_permission {
             return Ok(ProductTurn {
+                reason_code: None,
+                actions: Vec::new(),
                 state: "waiting-permission".into(),
                 can_stop: facts.stoppable,
                 can_send: false,
@@ -551,6 +807,8 @@ fn project_turn(
         }
         if facts.stoppable {
             return Ok(ProductTurn {
+                reason_code: None,
+                actions: Vec::new(),
                 state: "running".into(),
                 can_stop: true,
                 can_send: false,
@@ -558,6 +816,8 @@ fn project_turn(
             });
         }
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: "starting".into(),
             can_stop: false,
             can_send: false,
@@ -599,6 +859,8 @@ fn project_turn(
             })
         });
         return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
             state: state.into(),
             can_stop: false,
             can_send: send_allowed,
@@ -608,6 +870,8 @@ fn project_turn(
     // 6. Active with a live registration and no turn in flight: between turns.
     let send_allowed = runtime.state == "selected";
     Ok(ProductTurn {
+        reason_code: None,
+        actions: Vec::new(),
         state: "idle".into(),
         can_stop: false,
         can_send: send_allowed,

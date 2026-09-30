@@ -220,6 +220,10 @@ pub struct RuntimeProbe {
 
 #[derive(Debug, Error)]
 pub enum AdapterError {
+    #[error("{0}")]
+    ExecutableMissing(String),
+    #[error("{0}")]
+    AuthenticationRequired(String),
     #[error("adapter capability unsupported: {0}")]
     Unsupported(String),
     #[error("adapter protocol error: {0}")]

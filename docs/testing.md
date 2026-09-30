@@ -75,3 +75,27 @@ A local run is not a remote CI result.
 ## Live and historical verification
 
 Live Runtime admission, long soak runs and GUI evidence drivers (`pnpm verify:*`, `scripts/connected/v1-*.mjs`) are separate, explicit workflows. They are not part of the checks above or of CI. A live Runtime probe needs `--live` plus a synthetic fixture folder created for that probe, and it redacts its output. The original fail-closed gate design is documented in [verification gates](reference/verification-gates.md) and the [validation matrix](reference/validation-matrix.md).
+
+## Linux and interactive preview checks
+
+The Linux CI job runs subprocess protocol peers for provider errors, approvals,
+session close, stalled initialization, concurrent clients and independent titles.
+It also exercises the Unix client and verifier cleanup without accessing a vendor
+account:
+
+```sh
+cargo test --locked -p goalport-core -p goalport-core-launcher
+python3 -B -m unittest discover -s scripts/connected -p 'test_*.py'
+pnpm build
+node scripts/preview/acceptance.mjs --out goal-runs/ui-check
+```
+
+The preview walk captures first use, both Runtime picker entries, keyboard
+selection, drafts during refresh, permission decisions, the close dialog, a
+completed-result excerpt and a quota failure at 560, 1024 and 1440px. Inspect the
+PNG files as well as the machine checks. The preview does not establish Windows
+IME, native system notifications, packaging, or real Runtime execution.
+
+Use the opt-in [native Linux task driver](linux-development.md#native-acceptance)
+for actual Codex acceptance. Windows ZIP packaging tests must run on Windows;
+PowerShell cannot consume the Linux temporary paths used by a Linux test process.
