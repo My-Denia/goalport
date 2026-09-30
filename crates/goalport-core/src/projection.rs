@@ -2735,7 +2735,18 @@ impl UiController {
             if self.runtime_manager.registered_binding(&attempt_id).is_none() {
                 return Err("This session is detached. Resume it before sending another message; no message was recorded or replayed.".into());
             }
-            if self.runtime_manager.registration_live(&attempt_id) != Some(true) {
+            // Increment 6 owns a closed Codex output stream: it records one FAILED
+            // send, keeps the registration, and does not start a replacement.
+            // `registration_live` is also false once that stream has ended, so this
+            // readiness gate must not swallow that case.
+            let codex_output_closed = attempt.provider.eq_ignore_ascii_case("codex")
+                && matches!(
+                    self.runtime_manager.transport_state(&attempt_id),
+                    Some(TransportState::Closed { .. })
+                );
+            if !codex_output_closed
+                && self.runtime_manager.registration_live(&attempt_id) != Some(true)
+            {
                 return Err("This Runtime session is not ready. Check its status before sending; no message was recorded or replayed.".into());
             }
         }

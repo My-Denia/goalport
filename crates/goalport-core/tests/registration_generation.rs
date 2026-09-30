@@ -583,7 +583,7 @@ createInterface({input:process.stdin}).on('line',(line)=>{
   if(message.method==='initialize'){send({id:message.id,result:{}});return}
   if(message.method==='thread/start'){send({id:message.id,result:{thread:{id:'pr14-thread'}}});return}
   if(message.method==='turn/start'){
-    appendFileSync(receipts,JSON.stringify({id:message.id,clientUserMessageId:message.params?.clientUserMessageId})+'\n');
+    appendFileSync(receipts,JSON.stringify({id:message.id,pid:process.pid,clientUserMessageId:message.params?.clientUserMessageId})+'\n');
     if(reject){
       send({id:message.id+100,error:{code:-32000,message:'foreign error'}});
       send({id:message.id,error:{code:-32001,message:'sanitized turn rejection'}});
@@ -621,6 +621,63 @@ fn pr14_turn_receipts(workspace: &Path) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn user_dispatch_receipts(workspace: &Path, request_id: &str) -> Vec<Value> {
+    pr14_turn_receipts(workspace)
+        .into_iter()
+        .filter(|receipt| receipt["clientUserMessageId"].as_str() == Some(request_id))
+        .collect()
+}
+
+/// The fixture that received this user dispatch. `start_conversation` may also
+/// launch one disposable naming session in the same workspace; that sidecar is
+/// not a second delivery of the user message. Anything else is still a hard stop.
+fn task_instance_for_user_dispatch(workspace: &Path, request_id: &str) -> Instance {
+    let started = Instant::now();
+    let mut stable_since: Option<(Instant, usize)> = None;
+    loop {
+        let receipts = pr14_turn_receipts(workspace);
+        let user = user_dispatch_receipts(workspace, request_id);
+        assert!(
+            user.len() <= 1,
+            "REAL-CODEX-RISK: user dispatch {request_id} was recorded more than once: {receipts:?}"
+        );
+        let fresh = instances(workspace);
+        for instance in &fresh {
+            assert!(
+                under_scratch(&instance.exec_path),
+                "REAL-CODEX-RISK: a fixture instance reports an executable outside the scratch root: {:?}",
+                instance.exec_path
+            );
+        }
+        assert!(
+            fresh.len() <= 2,
+            "REAL-CODEX-RISK: expected the task fixture and at most one naming sidecar, found {}: {fresh:?}",
+            fresh.len()
+        );
+        if let Some(receipt) = user.first() {
+            let pid = u32::try_from(receipt["pid"].as_u64().expect("receipt pid")).unwrap();
+            if let Some(instance) = fresh.iter().find(|instance| instance.pid == pid).cloned() {
+                let count = fresh.len();
+                let since = match stable_since {
+                    Some((at, seen)) if seen == count => at,
+                    _ => Instant::now(),
+                };
+                if since.elapsed() >= Duration::from_millis(300) {
+                    return instance;
+                }
+                stable_since = Some((since, count));
+            }
+        } else {
+            stable_since = None;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "REAL-CODEX-RISK: no synthetic fixture recorded the user dispatch {request_id}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The a4 shape of increment 4: an admission that fails at `session_events` (no Core epoch), row
@@ -3271,18 +3328,18 @@ fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
     );
     assert_eq!(retried["ok"], true, "{retried}");
     assert_eq!(retried["payload"]["duplicate"], false);
-    let instance = new_instance(&workspace, &[]);
+    let instance = task_instance_for_user_dispatch(&workspace, "pr14-first-send-request");
     let delivered = wait_for_event_count(&second_server, &attempt, "runtime.reply.delta", 1);
     assert_eq!(records_of(&delivered, "runtime.reply.delta").len(), 1);
-    let receipts = pr14_turn_receipts(&workspace);
+    let receipts = user_dispatch_receipts(&workspace, "pr14-first-send-request");
     assert_eq!(
         receipts.len(),
         1,
-        "one provider turn/start receipt: {receipts:?}"
+        "one user turn/start receipt: {receipts:?}"
     );
     assert_eq!(
-        receipts[0]["clientUserMessageId"],
-        "pr14-first-send-request"
+        receipts[0]["pid"].as_u64(),
+        Some(u64::from(instance.pid))
     );
     assert_eq!(
         records_of(&events(&second_server, &attempt), "message.user").len(),
@@ -3315,7 +3372,10 @@ fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
         records_of(&events(&second_server, &attempt), "runtime.reply.delta").len(),
         1
     );
-    assert_eq!(pr14_turn_receipts(&workspace).len(), 1);
+    assert_eq!(
+        user_dispatch_receipts(&workspace, "pr14-first-send-request").len(),
+        1
+    );
     stop_fixtures(&workspace, &[instance.pid]);
 }
 
@@ -3465,7 +3525,7 @@ fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
         }),
     );
     assert_eq!(started["ok"], true, "{started}");
-    let instance = new_instance(&workspace, &[]);
+    let instance = task_instance_for_user_dispatch(&workspace, "pr14-turn-error-request");
     let attempt = started["payload"]["snapshot"]["attempt"]["id"]
         .as_str()
         .unwrap()
@@ -3501,15 +3561,15 @@ fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
             .iter()
             .any(|item| item["kind"] == "actionable-error")
     );
-    let receipts = pr14_turn_receipts(&workspace);
+    let receipts = user_dispatch_receipts(&workspace, "pr14-turn-error-request");
     assert_eq!(
         receipts.len(),
         1,
-        "one rejected turn/start reached provider"
+        "one rejected user turn/start reached the provider: {receipts:?}"
     );
     assert_eq!(
-        receipts[0]["clientUserMessageId"],
-        "pr14-turn-error-request"
+        receipts[0]["pid"].as_u64(),
+        Some(u64::from(instance.pid))
     );
     stop_fixtures(&workspace, &[instance.pid]);
     drop(server);
