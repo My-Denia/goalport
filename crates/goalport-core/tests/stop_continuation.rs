@@ -1365,6 +1365,7 @@ fn cr5_a_basis_observation_from_another_core_epoch_is_refused() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn cr2_row3_an_unobservable_process_is_unknown_and_never_absent() {
     // The one mapping row with no coverage. An access-denied or otherwise

@@ -5,6 +5,7 @@
 //! capabilities but cannot write the authoritative store directly.
 
 pub mod adapters;
+pub mod async_title;
 pub mod assurance;
 pub mod claude_stop_broker;
 pub mod commands;

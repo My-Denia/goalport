@@ -744,6 +744,99 @@ fn reserved_queued_attempt_is_idle_with_reason() {
     );
 }
 
+#[test]
+fn unsupported_claude_resume_is_not_advertised_or_registered() {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(workspace.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let store = Store::memory().unwrap();
+    let project = Project {
+        id: "project-claude-resume".into(),
+        workspace_root: root,
+    };
+    let campaign = Campaign {
+        id: "campaign-claude-resume".into(),
+        goal: "Continue after restart".into(),
+        root_task_id: "task-claude-resume".into(),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    let task = Task {
+        id: campaign.root_task_id.clone(),
+        campaign_id: campaign.id.clone(),
+        title: "Continue".into(),
+        acceptance: "Result is visible".into(),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    store
+        .create_workspace_campaign(
+            &project,
+            &campaign,
+            &task,
+            "policy-claude-resume",
+            "{}",
+            &CampaignAuthorization::granted(),
+        )
+        .unwrap();
+    let attempt_id = "attempt-claude-resume";
+    store
+        .insert_attempt(&Attempt::new(attempt_id, &task.id, "claude", "claude-cap-v1"))
+        .unwrap();
+    store
+        .set_attempt_provider_session(attempt_id, "native-claude-session")
+        .unwrap();
+    for (seq, kind, state) in [
+        (1, "attempt.active", AttemptState::Active),
+        (2, "attempt.awaiting_review", AttemptState::AwaitingReview),
+    ] {
+        store
+            .append_event_with_state(
+                &goalport_core::Event {
+                    id: format!("claude-resume-{seq}"),
+                    attempt_id: attempt_id.into(),
+                    seq,
+                    kind: kind.into(),
+                    payload_ref: None,
+                },
+                Some(state),
+                None,
+            )
+            .unwrap();
+    }
+    store
+        .set_conversation_provider(&campaign.id, "claude")
+        .unwrap();
+
+    let server = CoreServer::new(store.clone());
+    let before = view(result(&server, "claude-resume-before", "snapshot", json!({})));
+    assert_eq!(before["productConversation"]["session"]["state"], "detached");
+    assert!(
+        !before["productConversation"]["turn"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action == "resume-session"),
+        "unsupported action must not be offered: {before}"
+    );
+    let refusal = result(
+        &server,
+        "claude-resume-refused",
+        "resume_native_session",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(refusal["ok"], false, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not supported by GoalPort yet")
+    );
+    let after = view(result(&server, "claude-resume-after", "snapshot", json!({})));
+    assert_eq!(after["productConversation"]["session"]["state"], "detached");
+    assert_eq!(event_kinds(&store, attempt_id), vec!["attempt.active", "attempt.awaiting_review"]);
+}
+
 // ---------------------------------------------------------------------------
 // Confirmed-stop successor lineage (R2/R3)
 // ---------------------------------------------------------------------------

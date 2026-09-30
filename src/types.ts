@@ -71,7 +71,7 @@ export interface HistoryPageInfo {
   itemCount: number;
 }
 
-export type ProductRuntimeSelectionState = "none" | "selected" | "unavailable";
+export type ProductRuntimeSelectionState = "none" | "starting" | "selected" | "unavailable";
 
 /** Selected-Runtime preference, independent of any live turn. Survives stopped/unavailable. */
 export interface ProductRuntimeSelection {
@@ -97,6 +97,10 @@ export interface ProductTurn {
   canStop: boolean;
   canSend: boolean;
   reason?: string;
+  /** Stable provider/UI failure class supplied by Core; never inferred from text. */
+  reasonCode?: string;
+  /** Available next actions supplied by Core. */
+  actions?: string[];
 }
 
 export interface ProductConversation {
@@ -104,11 +108,15 @@ export interface ProductConversation {
   pageInfo?: HistoryPageInfo;
   runtime: ProductRuntimeSelection;
   turn: ProductTurn;
-  /** Deterministic product title (rename > first prompt > root task title). */
+  /** Native session lifetime is independent of the current turn and send permission. */
+  session?: { state: "starting" | "attached" | "unavailable" | "detached" | "closed" | "none"; nativeIdKnown: boolean };
+  /** Product title: manual rename, independent generated title, or local fallback. */
   title: string;
+  /** Excerpt of an actually committed completed turn; never inferred success. */
+  resultSummary?: string;
 }
 
-const PRODUCT_RUNTIME_STATES: readonly ProductRuntimeSelectionState[] = ["none", "selected", "unavailable"];
+const PRODUCT_RUNTIME_STATES: readonly ProductRuntimeSelectionState[] = ["none", "starting", "selected", "unavailable"];
 const PRODUCT_TURN_STATES: readonly ProductTurnState[] = [
   "idle", "starting", "running", "waiting-permission",
   "stopping", "stopped", "completed", "failed", "uncertain"
@@ -151,6 +159,7 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
   if (!raw) return null;
   const runtimeRaw = asRecord(raw.runtime);
   const turnRaw = asRecord(raw.turn);
+  const sessionRaw = asRecord(raw.session);
   if (!runtimeRaw || !turnRaw) return null;
   const runtimeState = typeof runtimeRaw.state === "string" ? runtimeRaw.state : "";
   const turnState = typeof turnRaw.state === "string" ? turnRaw.state : "";
@@ -171,9 +180,15 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
       state: turnState as ProductTurnState,
       canStop: turnRaw.canStop === true || turnRaw.can_stop === true,
       canSend: turnRaw.canSend === true || turnRaw.can_send === true,
-      reason: optionalText(turnRaw.reason)
+      reason: optionalText(turnRaw.reason),
+      reasonCode: optionalText(turnRaw.reasonCode ?? turnRaw.reason_code),
+      actions: Array.isArray(turnRaw.actions) ? turnRaw.actions.map((action) => asText(action, "")).filter(Boolean) : undefined
     },
-    title: asText(raw.title, "")
+    session: sessionRaw && ["starting", "attached", "unavailable", "detached", "closed", "none"].includes(String(sessionRaw.state))
+      ? { state: sessionRaw.state as "starting" | "attached" | "unavailable" | "detached" | "closed" | "none", nativeIdKnown: sessionRaw.nativeIdKnown === true || sessionRaw.native_id_known === true }
+      : undefined,
+    title: asText(raw.title, ""),
+    resultSummary: optionalText(raw.resultSummary ?? raw.result_summary)
   };
 }
 
@@ -468,7 +483,7 @@ const initialTimeline: TimelineItem[] = [
 ];
 
 export const DEMO_SNAPSHOT: CoreSnapshot = {
-  protocolVersion: "goalport.ipc.v1",
+  protocolVersion: "goalport.ipc.v2",
   buildId: "preview-local",
   connection: "connected",
   projects: [],
@@ -556,7 +571,7 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
       id: "decision-permission-1",
       title: "Workspace write permission",
       kind: "permission",
-      facts: ["Attempt requested a mutating action", "The request is scoped to the bound workspace", "No action was sent after decline"],
+      facts: ["Update arithmetic.py in the selected workspace", "Only this edit will be allowed", "The edit waits for your decision"],
       recommendation: "Keep the action declined until you have reviewed the exact change.",
       defaultBehavior: "Remain waiting; do not retry automatically.",
       state: "pending"
@@ -567,8 +582,8 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
       id: "evidence-protocol",
       claim: "Desktop protocol version is compatible",
       state: "verified",
-      source: "Deterministic IPC contract · goalport.ipc.v1",
-      snapshot: "protocol-v1"
+      source: "Deterministic IPC contract · goalport.ipc.v2",
+      snapshot: "protocol-v2"
     },
     {
       id: "evidence-baseline",
@@ -630,7 +645,7 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
       {
         id: "product-assistant-1",
         kind: "assistant-message",
-        body: "**Workspace summary**\n\nThe preview baseline is bound to this task. The evidence loop still has one stale claim and one unsupported audit; nothing in the synthetic workspace is verified against a real Runtime.",
+        body: "**Workspace summary**\n\nThis sample project has a small arithmetic helper and three tests. Addition subtracts instead of adding. I can fix the helper and run the tests once you approve the edit.",
         timestamp: "2026-09-19T09:42:31Z"
       }
     ],
@@ -638,6 +653,21 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
     turn: { state: "idle", canStop: false, canSend: true },
     title: "Build a durable preview"
   }
+};
+
+/** Explicit browser-only empty fixture for first-use visual checks. */
+export const EMPTY_PREVIEW_SNAPSHOT: CoreSnapshot = {
+  ...DEMO_SNAPSHOT,
+  campaigns: [],
+  activeCampaignId: "",
+  activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" },
+  attempt: { ...DEMO_SNAPSHOT.attempt, id: "attempt-unassigned", taskId: "", provider: "unassigned", state: "waiting", eventCount: 0 },
+  timeline: [],
+  decisions: [],
+  evidence: [],
+  productConversation: null,
+  project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/tmp/goalport-preview-workspace" },
+  notices: ["Browser preview: this is a synthetic empty profile; no Runtime receives work."]
 };
 
 /** Empty transport state used only while a packaged Core is being connected. */

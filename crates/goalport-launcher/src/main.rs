@@ -40,12 +40,62 @@ fn run() -> Result<(), String> {
         return Err(format!("Core binary does not exist: {}", core.display()));
     }
     let core = core.canonicalize().unwrap_or(core);
-    let core_args: Vec<String> = args.collect();
+    #[allow(unused_mut)]
+    let mut core_args: Vec<String> = args.collect();
+    #[cfg(target_os = "linux")]
+    let db = {
+        if core_args.last().is_some_and(|arg| arg == "--db") {
+            return Err("--db requires a path".into());
+        }
+        let requested = arg_option(&core_args, "--db").unwrap_or_else(|| "goalport.sqlite".into());
+        let resolved = absolute_path(Path::new(&requested));
+        if let Some(index) = core_args.iter().position(|arg| arg == "--db") {
+            core_args[index + 1] = resolved.display().to_string();
+        } else {
+            core_args.extend(["--db".into(), resolved.display().to_string()]);
+        }
+        Some(resolved)
+    };
+    #[cfg(not(target_os = "linux"))]
     let db = arg_option(&core_args, "--db").map(PathBuf::from);
-    let pipe = arg_option(&core_args, "--pipe").unwrap_or_default();
-    let nonce = env::var("GOALPORT_LAUNCH_NONCE").unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let pipe_arg = arg_option(&core_args, "--pipe").unwrap_or_else(|| "goalport-core-v1".into());
+    #[cfg(not(target_os = "linux"))]
+    let pipe_arg = arg_option(&core_args, "--pipe").unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let pipe = goalport_core::ipc::resolve_unix_socket_path(&pipe_arg)
+        .map_err(|error| format!("unable to resolve Core endpoint: {error}"))?
+        .display()
+        .to_string();
+    #[cfg(not(target_os = "linux"))]
+    let pipe = pipe_arg;
+    let supplied_nonce = env::var("GOALPORT_LAUNCH_NONCE").unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    let nonce = if supplied_nonce.trim().is_empty() {
+        format!(
+            "linux-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        )
+    } else {
+        supplied_nonce
+    };
+    #[cfg(not(target_os = "linux"))]
+    let nonce = supplied_nonce;
+    #[cfg(target_os = "linux")]
+    let launch_requested_at = env::var("GOALPORT_LAUNCH_REQUESTED_AT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(utc_now_iso);
     let started_at = utc_now_iso();
     let identity = current_identity();
+    #[cfg(target_os = "linux")]
+    if identity.created_ms == 0 || identity.executable_sha256.is_empty() {
+        return Err("unable to observe the launcher's Linux process identity".into());
+    }
     let parent_pid = identity.parent_pid;
 
     let observed_parent = env::var("GOALPORT_ELECTRON_PID")
@@ -87,11 +137,14 @@ fn run() -> Result<(), String> {
             "GOALPORT_LAUNCHER_CREATED_MS",
             identity.created_ms.to_string(),
         );
+        command.env("GOALPORT_LAUNCHER_CREATION_DATE", identity.creation_date());
         command.env("GOALPORT_LAUNCHER_EXE", &identity.executable_path);
         command.env("GOALPORT_LAUNCHER_SHA256", &identity.executable_sha256);
         command.env("GOALPORT_LAUNCHER_PARENT_PID", observed_parent.to_string());
         command.env("GOALPORT_LAUNCHER_STARTED_AT", &started_at);
         command.env("GOALPORT_CORE_SPAWNED_AT", utc_now_iso());
+        #[cfg(target_os = "linux")]
+        command.env("GOALPORT_LAUNCH_REQUESTED_AT", &launch_requested_at);
         if !nonce.trim().is_empty() {
             command.env("GOALPORT_LAUNCH_NONCE", nonce.trim());
         }
@@ -383,7 +436,11 @@ fn launch_ready_matches(text: &str, expected: &LaunchReadyExpectation) -> bool {
             if requested <= launcher
                 && launcher <= startup
                 && startup <= ready
-                && observed_core.created_ms <= ready
+                && if cfg!(target_os = "linux") {
+                    observed_core.creation_token.is_some()
+                } else {
+                    observed_core.created_ms <= ready
+                }
     )
 }
 
@@ -402,34 +459,69 @@ struct ProcessIdentity {
     executable_path: String,
     executable_sha256: String,
     created_ms: u64,
+    creation_token: Option<String>,
 }
 
 impl ProcessIdentity {
     fn creation_date(&self) -> String {
-        format!("/Date({})/", self.created_ms)
+        self.creation_token
+            .clone()
+            .unwrap_or_else(|| format!("/Date({})/", self.created_ms))
     }
 }
 
 fn current_identity() -> ProcessIdentity {
-    let executable_path = env::current_exe()
-        .ok()
-        .and_then(|path| path.canonicalize().ok().or(Some(path)))
-        .unwrap_or_default();
-    ProcessIdentity {
-        pid: std::process::id(),
-        parent_pid: observed_parent_pid(),
-        executable_sha256: file_sha256(&executable_path),
-        executable_path: display_path(&executable_path),
-        created_ms: process_created_ms(),
+    #[cfg(target_os = "linux")]
+    {
+        let identity = goalport_core::process_identity::current_identity();
+        return ProcessIdentity {
+            pid: identity.pid,
+            parent_pid: identity.parent_pid,
+            executable_path: identity.executable_path,
+            executable_sha256: identity.executable_sha256,
+            created_ms: identity.created_ms,
+            creation_token: identity.creation_token,
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let executable_path = env::current_exe()
+            .ok()
+            .and_then(|path| path.canonicalize().ok().or(Some(path)))
+            .unwrap_or_default();
+        ProcessIdentity {
+            pid: std::process::id(),
+            parent_pid: observed_parent_pid(),
+            executable_sha256: file_sha256(&executable_path),
+            executable_path: display_path(&executable_path),
+            created_ms: process_created_ms(),
+            creation_token: None,
+        }
     }
 }
 
 fn observe_process(pid: u32) -> Option<ProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        return match goalport_core::process_identity::observe_process(pid) {
+            goalport_core::process_identity::ProcessObservation::Live(identity) => {
+                Some(ProcessIdentity {
+                    pid: identity.pid,
+                    parent_pid: identity.parent_pid,
+                    executable_path: identity.executable_path,
+                    executable_sha256: identity.executable_sha256,
+                    created_ms: identity.created_ms,
+                    creation_token: identity.creation_token,
+                })
+            }
+            _ => None,
+        };
+    }
     #[cfg(windows)]
     {
         windows_process_identity(pid)
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = pid;
         None
@@ -534,6 +626,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     (year as i32, m, d)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn process_created_ms() -> u64 {
     #[cfg(windows)]
     {
@@ -545,6 +638,7 @@ fn process_created_ms() -> u64 {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn fallback_created_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -552,6 +646,7 @@ fn fallback_created_ms() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn observed_parent_pid() -> u32 {
     #[cfg(windows)]
     {
@@ -635,6 +730,7 @@ fn windows_process_identity(pid: u32) -> Option<ProcessIdentity> {
                 executable_sha256: file_sha256(&executable_path),
                 executable_path: display_path(&executable_path),
                 created_ms: ticks / 10_000 - 11_644_473_600_000,
+                creation_token: None,
             })
         })();
         CloseHandle(process);

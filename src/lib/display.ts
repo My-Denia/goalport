@@ -109,8 +109,9 @@ export function headlineState(
   const turn = product?.turn;
   if (!turn) return { label: "Unavailable", tone: "blocked" };
   switch (turn.state) {
-    case "running":
     case "starting":
+      return { label: "Starting", tone: "in-progress" };
+    case "running":
       return { label: "Working", tone: "in-progress" };
     case "waiting-permission":
       return { label: "Needs approval", tone: "waiting" };
@@ -141,7 +142,7 @@ export function runtimeSelectionDisplay(runtime: ProductRuntimeSelection): { lab
   const name = runtime.name || runtime.provider;
   return {
     label: name,
-    detail: runtime.state === "selected" ? "selected" : "selected · reconnecting to use",
+    detail: runtime.state === "starting" ? "starting" : runtime.state === "selected" ? "selected" : "unavailable",
     glyph: name[0]?.toUpperCase() ?? "–"
   };
 }

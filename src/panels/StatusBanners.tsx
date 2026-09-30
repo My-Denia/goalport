@@ -8,6 +8,7 @@ export interface ActiveNotice {
 }
 
 interface StatusBannersProps {
+  browserPreview?: boolean;
   snapshot: CoreSnapshot;
   activeNotice: ActiveNotice | null;
   onDismissNotice: () => void;
@@ -20,7 +21,7 @@ interface StatusBannersProps {
  * Success paths are deliberately quiet — no banner is raised for accepted
  * sends, renames, reconnects or handoffs.
  */
-export function StatusBanners({ snapshot, activeNotice, onDismissNotice, onReconnect }: StatusBannersProps) {
+export function StatusBanners({ browserPreview = false, snapshot, activeNotice, onDismissNotice, onReconnect }: StatusBannersProps) {
   const hold = snapshot.stopResponsibility;
   const disconnected = snapshot.connection === "disconnected";
   const reconnecting = snapshot.connection === "reconnecting" || snapshot.connection === "degraded";
@@ -29,6 +30,12 @@ export function StatusBanners({ snapshot, activeNotice, onDismissNotice, onRecon
 
   return (
     <div className="status-banners">
+      {browserPreview ? (
+        <div className="banner banner-preview" role="status">
+          <span className="banner-glyph" aria-hidden="true">◌</span>
+          <div><strong>Browser preview</strong><span>Try the interface with sample data. No Core or Runtime receives work.</span></div>
+        </div>
+      ) : null}
       {capacityLimited ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
@@ -67,10 +74,12 @@ export function StatusBanners({ snapshot, activeNotice, onDismissNotice, onRecon
         <div className="banner banner-error" role="alert">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
           <div>
-            <strong>Core is disconnected</strong>
-            <span>Committed work is safe. Nothing is re-sent automatically; reconnect reads the Core projection.</span>
+            <strong>{browserPreview ? "Browser preview is offline" : "Core is disconnected"}</strong>
+            <span>{browserPreview
+              ? "This sample view is paused. Reconnect refreshes local preview state; nothing is sent to a Runtime."
+              : "Committed work is safe. Nothing is re-sent automatically; reconnect reads the Core projection."}</span>
           </div>
-          <button className="button button-small button-outline" type="button" aria-label="Reconnect Core" onClick={onReconnect}>
+          <button className="button button-small button-outline" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>
             Reconnect
           </button>
         </div>

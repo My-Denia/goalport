@@ -1,6 +1,7 @@
 import { CompositionEvent, KeyboardEvent, useEffect, useRef, type FormEvent } from "react";
 import type { CoreSnapshot, ProductRuntimeSelection, ProductTurn, RuntimeProfile } from "../types";
 import { runtimeSelectionDisplay } from "../lib/display";
+import { turnErrorCopy } from "../lib/turnErrorCopy";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
 
 interface RuntimePickerProps {
@@ -55,6 +56,8 @@ export function RuntimePicker({ runtimes, runtime, blocked, blockedReason, conne
 }
 
 interface ComposerProps {
+  /** Changes only when the user moves to another goal; snapshot polls leave it stable. */
+  focusKey: string;
   draft: string;
   snapshot: CoreSnapshot;
   runtime: ProductRuntimeSelection;
@@ -77,7 +80,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ draft, snapshot, runtime, turn, busy, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
+export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // IME composition guards. `composing` covers the active composition; the
   // timestamp catches the stray Enter some IMEs emit right after
@@ -92,6 +95,7 @@ export function Composer({ draft, snapshot, runtime, turn, busy, retryLabel, cho
   const canSubmit = draft.trim().length > 0 && connected && !busy
     && (reconciling || (!held && turn.canSend));
   const pending = turn.state === "starting" || turn.state === "stopping";
+  const turnProblem = turnErrorCopy(turn);
 
   // Auto-grow: keep the textarea matched to its content within a sane maximum.
   useEffect(() => {
@@ -102,10 +106,11 @@ export function Composer({ draft, snapshot, runtime, turn, busy, retryLabel, cho
   }, [draft]);
 
   // The composer is the primary input of the app: it takes focus when it
-  // appears (goal created / goal selected), so the next step is always typing.
+  // appears or a different goal is selected. Snapshot refresh keeps focusKey
+  // unchanged, so it cannot steal focus from a field the user chose.
   useEffect(() => {
     textareaRef.current?.focus();
-  }, []);
+  }, [focusKey]);
 
   const handleCompositionStart = () => { composingRef.current = true; };
   const handleCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
@@ -133,25 +138,17 @@ export function Composer({ draft, snapshot, runtime, turn, busy, retryLabel, cho
     }
   };
 
-  const placeholder = reconciling
-    ? "Retry the same request identity to reconcile its recorded result…"
-    : held
-    ? "Core holds write responsibility while residual execution is unknown…"
-    : !connected
-      ? "Reconnect Core before sending a new message…"
-      : !turn.canSend
-        ? turn.reason || "Sending is not available right now…"
-        : "Ask the selected Runtime to continue… (Enter to send, Shift+Enter for a new line)";
+  const placeholder = "Ask the selected Runtime to continue…";
 
   const hint = reconciling
-    ? "This checks the existing request. Core will not dispatch UNKNOWN work again."
+    ? "Check whether the previous message was received. It will not be sent again."
     : held
-    ? "Sending is blocked: Core holds write responsibility for residual execution."
+    ? "Some tools may still be running. Your draft stays here while the workspace is protected."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
       : !turn.canSend
-        ? turn.reason || "Sending is not available right now."
-        : "Draft stays with this goal · Enter to send";
+        ? turnProblem || "Sending is not available right now."
+        : "Enter to send · Shift+Enter for a new line";
 
   return (
     <div className="composer-dock">

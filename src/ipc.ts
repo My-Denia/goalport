@@ -4,6 +4,7 @@ import {
   appendPreviewMessage,
   createPreviewCampaign,
   DEMO_SNAPSHOT,
+  EMPTY_PREVIEW_SNAPSHOT,
   EMPTY_SNAPSHOT,
   HISTORY_WINDOW_ADVANCED_NOTICE,
   normalizeCommandRejection,
@@ -20,11 +21,67 @@ import {
   type CoreCommandOutcome,
   type CoreSnapshot,
   type HistoryPageInfo,
+  type ProductConversation,
   type ProductConversationItem,
   type TimelineItem
 } from "./types";
 
-export const IPC_PROTOCOL_VERSION = "goalport.ipc.v1";
+export const IPC_PROTOCOL_VERSION = "goalport.ipc.v2";
+
+export function previewInitialSnapshot(): CoreSnapshot {
+  const fixture = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("preview") : null;
+  if (fixture === "empty") return EMPTY_PREVIEW_SNAPSHOT;
+  if (fixture === "starting") {
+    return {
+      ...DEMO_SNAPSHOT, decisions: [], stopResponsibility: null,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation!,
+        runtime: { state: "starting", provider: "codex", name: "Codex" },
+        session: { state: "starting", nativeIdKnown: false },
+        turn: { state: "starting", canSend: false, canStop: true, reason: "Codex is starting. You can stop while it connects." }
+      }
+    };
+  }
+  if (fixture === "completed") {
+    const resultSummary = "Synthetic example: corrected addition and checked the three example tests.";
+    return {
+      ...DEMO_SNAPSHOT,
+      decisions: [],
+      stopResponsibility: null,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation!,
+        title: "Fix sample addition",
+        items: [{ id: "preview-completed-result", kind: "assistant-message", body: resultSummary }],
+        turn: { state: "completed", canSend: false, canStop: false, reason: "Browser preview does not send work to a Runtime." },
+        resultSummary
+      }
+    };
+  }
+  if (fixture === "quota") {
+    return {
+      ...DEMO_SNAPSHOT, decisions: [], stopResponsibility: null,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation!,
+        runtime: { state: "selected", provider: "codex", name: "Codex" },
+        session: { state: "attached", nativeIdKnown: false },
+        turn: { state: "failed", canSend: true, canStop: false, reasonCode: "provider-quota", actions: ["select-runtime", "send"] },
+        items: [{ id: "preview-quota", kind: "actionable-error", body: "Codex has reached its usage limit. Wait for the limit to reset or choose another Runtime.", technicalDetails: "Synthetic example: usageLimitExceeded", actions: ["select-runtime"] }]
+      }
+    };
+  }
+  if (fixture === "recovery") {
+    return {
+      ...DEMO_SNAPSHOT, decisions: [], stopResponsibility: null,
+      productConversation: {
+        ...DEMO_SNAPSHOT.productConversation!,
+        runtime: { state: "unavailable", provider: "codex", name: "Codex" },
+        session: { state: "detached", nativeIdKnown: true },
+        turn: { state: "completed", canSend: false, canStop: false, reasonCode: "session-detached", reason: "Resume this session to continue. Earlier messages will not be sent again.", actions: ["resume-session"] }
+      }
+    };
+  }
+  return DEMO_SNAPSHOT;
+}
 
 /** Display-only identity Core uses when a task has no persisted Attempt. */
 export const UNASSIGNED_ATTEMPT_ID = "attempt-unassigned";
@@ -70,6 +127,7 @@ export interface CoreCommand {
     | "resolve_decision"
     | "permission_response"
     | "interrupt"
+    | "close_session"
     | "safe_stop"
     | "reconnect"
     | "handoff"
@@ -104,6 +162,8 @@ export interface CoreClient {
   selectCampaign?(campaignId: string): Promise<CoreSnapshot>;
   selectRuntime?(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot>;
   interrupt?(attemptId: string): Promise<CoreSnapshot>;
+  closeSession?(attemptId: string): Promise<CoreSnapshot>;
+  resumeSession?(attemptId: string): Promise<CoreSnapshot>;
   recheckStopResponsibility?(attemptId: string): Promise<CoreSnapshot>;
   continueInIsolatedWorkspace?(attemptId: string, targetWorkspace: string): Promise<CoreSnapshot>;
   revokeAuthorization?(campaignId: string, scope?: string): Promise<CoreSnapshot>;
@@ -247,7 +307,8 @@ async function invokeCore<T>(command: string, args?: Record<string, unknown>): P
 
 class PreviewCoreClient implements CoreClient {
   readonly mode = "browser-preview" as const;
-  private state: CoreSnapshot = DEMO_SNAPSHOT;
+  private state: CoreSnapshot = previewInitialSnapshot();
+  private views = new Map<string, { product: ProductConversation | null; task: CoreSnapshot["activeTask"]; attempt: CoreSnapshot["attempt"]; decisions: CoreSnapshot["decisions"] }>();
 
   async snapshot(): Promise<CoreSnapshot> {
     return this.state;
@@ -311,6 +372,45 @@ class PreviewCoreClient implements CoreClient {
 
   async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
     this.state = renamePreviewConversation(this.state, campaignId, title);
+    return this.state;
+  }
+
+  async selectCampaign(campaignId: string): Promise<CoreSnapshot> {
+    const selected = this.state.campaigns.find((campaign) => campaign.id === campaignId);
+    if (selected && campaignId !== this.state.activeCampaignId) {
+      if (this.state.activeCampaignId) this.views.set(this.state.activeCampaignId, {
+        product: this.state.productConversation,
+        task: this.state.activeTask,
+        attempt: this.state.attempt,
+        decisions: this.state.decisions
+      });
+      const saved = this.views.get(campaignId);
+      this.state = {
+        ...this.state,
+        activeCampaignId: campaignId,
+        activeTask: saved?.task ?? { id: `task-${campaignId}`, title: selected.activeTaskTitle, acceptance: "Preview only", state: "waiting" },
+        attempt: saved?.attempt ?? { ...this.state.attempt, id: "attempt-unassigned", taskId: `task-${campaignId}`, provider: "unassigned", state: "waiting", eventCount: 0 },
+        decisions: saved?.decisions ?? [],
+        productConversation: saved?.product ?? {
+          items: [], title: selected.title,
+          runtime: { state: "none", provider: "", name: "" },
+          turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no Runtime; nothing runs here." }
+        }
+      };
+    }
+    return this.state;
+  }
+
+  async selectRuntime(provider: string): Promise<CoreSnapshot> {
+    const runtime = this.state.runtimes.find((candidate) => candidate.id === provider);
+    if (runtime && this.state.productConversation) this.state = {
+      ...this.state,
+      productConversation: {
+        ...this.state.productConversation,
+        runtime: { state: "selected", provider, name: runtime.name },
+        turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no Runtime; nothing runs here." }
+      }
+    };
     return this.state;
   }
 
@@ -438,8 +538,7 @@ class TauriCoreClient implements CoreClient {
         provider,
         oldAttemptId,
         handoffInstruction: instruction,
-        authorization: "goalport-ui-user-action",
-        authorizationManifest: "goal-runs/goalport-electron-stable-v1/evidence/locks/shared-interface-freeze.json"
+        authorization: "goalport-ui-user-action"
       }
     });
   }
@@ -628,6 +727,14 @@ class TauriCoreClient implements CoreClient {
 
   async interrupt(attemptId: string): Promise<CoreSnapshot> {
     return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "interrupt", payload: { attemptId } });
+  }
+
+  async closeSession(attemptId: string): Promise<CoreSnapshot> {
+    return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "close_session", payload: { attemptId } });
+  }
+
+  async resumeSession(attemptId: string): Promise<CoreSnapshot> {
+    return this.dispatch({ protocolVersion: IPC_PROTOCOL_VERSION, requestId: requestId(), entityVersion: this.entityVersion, messageType: "resume_native_session", payload: { attemptId } });
   }
 
   async recheckStopResponsibility(attemptId: string): Promise<CoreSnapshot> {

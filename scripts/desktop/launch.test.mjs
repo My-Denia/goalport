@@ -14,10 +14,36 @@ function securityContents(extra = {}) {
 const trustedEvent = (win) => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
 const require = createRequire(import.meta.url);
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, storagePathRelationship, assertCoreIdentity, childEnvironment, normalizedPath } = require("../../electron/launch-config.cjs");
-const { invokeCoreRequest, acknowledgedStopSnapshot } = require("../../electron/core-client.cjs");
+const { invokeCoreRequest, acknowledgedStopSnapshot, createPendingDecisionNotifier } = require("../../electron/core-client.cjs");
 
 const hash = "a".repeat(64);
 const otherHash = "b".repeat(64);
+
+test("repeated snapshots notify each pending decision once without hiding a later decision", () => {
+  const toasts = [];
+  const notify = createPendingDecisionNotifier((title, body) => { toasts.push({ title, body }); return true; });
+  const first = { decisions: [{ id: "approval-1", state: "pending", title: "Run the tests?" }] };
+  for (let index = 0; index < 100; index += 1) notify(structuredClone(first));
+  assert.equal(toasts.length, 1);
+  notify({ decisions: [...first.decisions, { id: "approval-2", state: "pending", title: "Edit the file?" }] });
+  assert.equal(toasts.length, 2);
+  assert.equal(toasts[1].body, "Edit the file?");
+  notify({ decisions: [{ id: "approval-1", state: "approved" }] });
+  notify(first); // An older in-flight snapshot must not repeat the toast.
+  assert.equal(toasts.length, 2);
+});
+
+test("notification failure cannot fail a Core result and may be retried when delivery works", () => {
+  let delivered = false;
+  let calls = 0;
+  const notify = createPendingDecisionNotifier(() => { calls += 1; if (!delivered) throw new Error("desktop unavailable"); return true; });
+  const pending = { decisions: [{ id: "approval-1", state: "pending" }] };
+  assert.doesNotThrow(() => notify(pending));
+  delivered = true;
+  notify(pending);
+  notify(pending);
+  assert.equal(calls, 2);
+});
 
 test("transport preserves reserved rejection and does not confuse a history page with snapshot", async () => {
   const snapshots = [];

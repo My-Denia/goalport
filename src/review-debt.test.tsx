@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { clickRuntimeOption } from "./runtime-picker.test-helpers";
 import { BootstrapScreen } from "./dialog/BootstrapScreen";
 import type { CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT, type CoreSnapshot } from "./types";
@@ -45,8 +46,8 @@ function mountElectron(snapshot: CoreSnapshot, command: (request: CoreCommand) =
 async function fillFirstSend() {
   fireEvent.change(await screen.findByRole("textbox", { name: /project folder/i }), { target: { value: "C:\\work" } });
   fireEvent.change(screen.getByRole("textbox", { name: /message composer/i }), { target: { value: "inspect once" } });
-  fireEvent.click(screen.getByRole("button", { name: /select runtime/i }));
-  fireEvent.click(await screen.findByRole("option", { name: /codex/i }));
+  fireEvent.click(screen.getByRole("combobox", { name: /select runtime/i }));
+  clickRuntimeOption(await screen.findByRole("option", { name: /codex/i }));
 }
 
 describe("review debt frontend contracts", () => {

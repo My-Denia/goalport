@@ -583,7 +583,7 @@ createInterface({input:process.stdin}).on('line',(line)=>{
   if(message.method==='initialize'){send({id:message.id,result:{}});return}
   if(message.method==='thread/start'){send({id:message.id,result:{thread:{id:'pr14-thread'}}});return}
   if(message.method==='turn/start'){
-    appendFileSync(receipts,JSON.stringify({id:message.id,clientUserMessageId:message.params?.clientUserMessageId})+'\n');
+    appendFileSync(receipts,JSON.stringify({id:message.id,pid:process.pid,clientUserMessageId:message.params?.clientUserMessageId})+'\n');
     if(reject){
       send({id:message.id+100,error:{code:-32000,message:'foreign error'}});
       send({id:message.id,error:{code:-32001,message:'sanitized turn rejection'}});
@@ -621,6 +621,63 @@ fn pr14_turn_receipts(workspace: &Path) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn user_dispatch_receipts(workspace: &Path, request_id: &str) -> Vec<Value> {
+    pr14_turn_receipts(workspace)
+        .into_iter()
+        .filter(|receipt| receipt["clientUserMessageId"].as_str() == Some(request_id))
+        .collect()
+}
+
+/// The fixture that received this user dispatch. `start_conversation` may also
+/// launch one disposable naming session in the same workspace; that sidecar is
+/// not a second delivery of the user message. Anything else is still a hard stop.
+fn task_instance_for_user_dispatch(workspace: &Path, request_id: &str) -> Instance {
+    let started = Instant::now();
+    let mut stable_since: Option<(Instant, usize)> = None;
+    loop {
+        let receipts = pr14_turn_receipts(workspace);
+        let user = user_dispatch_receipts(workspace, request_id);
+        assert!(
+            user.len() <= 1,
+            "REAL-CODEX-RISK: user dispatch {request_id} was recorded more than once: {receipts:?}"
+        );
+        let fresh = instances(workspace);
+        for instance in &fresh {
+            assert!(
+                under_scratch(&instance.exec_path),
+                "REAL-CODEX-RISK: a fixture instance reports an executable outside the scratch root: {:?}",
+                instance.exec_path
+            );
+        }
+        assert!(
+            fresh.len() <= 2,
+            "REAL-CODEX-RISK: expected the task fixture and at most one naming sidecar, found {}: {fresh:?}",
+            fresh.len()
+        );
+        if let Some(receipt) = user.first() {
+            let pid = u32::try_from(receipt["pid"].as_u64().expect("receipt pid")).unwrap();
+            if let Some(instance) = fresh.iter().find(|instance| instance.pid == pid).cloned() {
+                let count = fresh.len();
+                let since = match stable_since {
+                    Some((at, seen)) if seen == count => at,
+                    _ => Instant::now(),
+                };
+                if since.elapsed() >= Duration::from_millis(300) {
+                    return instance;
+                }
+                stable_since = Some((since, count));
+            }
+        } else {
+            stable_since = None;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "REAL-CODEX-RISK: no synthetic fixture recorded the user dispatch {request_id}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The a4 shape of increment 4: an admission that fails at `session_events` (no Core epoch), row
@@ -809,8 +866,8 @@ fn g2_restart_then_rejected_resume_is_still_refused() {
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(
-        resumed["ok"], true,
-        "the command records the rejection and returns ok: {resumed}"
+        resumed["ok"], false,
+        "the command records the rejection and refuses it: {resumed}"
     );
     assert!(
         is_live(second.pid),
@@ -894,7 +951,7 @@ fn g3_a_foreign_success_record_does_not_lift_the_refusal_across_a_restart() {
     );
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
-    assert_eq!(resumed["ok"], true, "{resumed}");
+    assert_eq!(resumed["ok"], false, "{resumed}");
     append_constructed_established(server, &r.attempt, "constructed-other:1");
     let before_select = events(server, &r.attempt);
 
@@ -942,11 +999,11 @@ fn g3b_same_lifetime_a_foreign_success_record_does_not_lift_the_failed_registrat
 }
 
 // ---------------------------------------------------------------------------------------------
-// G4: Core restart, the send_message re-select re-establishes, then reusable
+// G4: Core restart requires explicit resume before send, then reusable
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable() {
+fn g4_restart_requires_explicit_resume_before_send() {
     let _lock = lock();
     assert_env_pinned();
     let (case, r) = restart_after_kept_failure("g4", "resume_ok");
@@ -968,14 +1025,29 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
     );
 
     r.appdata.assert_armed();
-    let sent = call(
+    let premature = call(
         server,
         "g4-send",
         "send_message",
         json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "hello after restart" }),
     );
+    assert_eq!(premature["ok"], false, "{premature}");
+    assert!(error_of(&premature).contains("Resume"), "{premature}");
+    let resumed = call(
+        server,
+        "g4-resume",
+        "resume_native_session",
+        json!({ "attemptId": r.attempt }),
+    );
+    assert_eq!(resumed["ok"], true, "{resumed}");
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
+    let sent = call(
+        server,
+        "g4-send-after-resume",
+        "send_message",
+        json!({ "attemptId": r.attempt, "campaignId": case.campaign, "message": "hello after restart" }),
+    );
     assert_eq!(sent["ok"], true, "{sent}");
     assert!(is_live(second.pid));
     let after_send = events(server, &r.attempt);
@@ -984,14 +1056,14 @@ fn g4_restart_then_send_message_reselect_makes_the_fresh_registration_reusable()
     let selected = select_codex(server, "g4-select", &case, None);
     assert_eq!(
         selected["ok"], true,
-        "a registration re-established through the send path must not be refused by the old kept record: {selected}"
+        "a registration re-established through explicit resume must not be refused by the old kept record: {selected}"
     );
     let established: Vec<Value> = records_of(&after_send, ESTABLISHED_KIND)
         .into_iter()
         .cloned()
         .collect();
     assert_eq!(established.len(), 1, "{after_send:?}");
-    assert_eq!(established[0]["entry"], "send_message");
+    assert_eq!(established[0]["entry"], "resume_native_session");
     assert_ne!(
         established[0]["registration_identity"].as_str().unwrap(),
         r.kept_before["registration_identity"].as_str().unwrap()
@@ -1629,8 +1701,8 @@ fn h3a_resume_stream_closed_before_answer_is_unsupported_and_recorded() {
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(
-        resumed["ok"], true,
-        "the command records the failure and returns ok: {resumed}"
+        resumed["ok"], false,
+        "the command records the failure and refuses it: {resumed}"
     );
     let after = events(server, &r.attempt);
     let resumed_rec = records_of(&after, "runtime.session.resumed")
@@ -3256,18 +3328,18 @@ fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
     );
     assert_eq!(retried["ok"], true, "{retried}");
     assert_eq!(retried["payload"]["duplicate"], false);
-    let instance = new_instance(&workspace, &[]);
+    let instance = task_instance_for_user_dispatch(&workspace, "pr14-first-send-request");
     let delivered = wait_for_event_count(&second_server, &attempt, "runtime.reply.delta", 1);
     assert_eq!(records_of(&delivered, "runtime.reply.delta").len(), 1);
-    let receipts = pr14_turn_receipts(&workspace);
+    let receipts = user_dispatch_receipts(&workspace, "pr14-first-send-request");
     assert_eq!(
         receipts.len(),
         1,
-        "one provider turn/start receipt: {receipts:?}"
+        "one user turn/start receipt: {receipts:?}"
     );
     assert_eq!(
-        receipts[0]["clientUserMessageId"],
-        "pr14-first-send-request"
+        receipts[0]["pid"].as_u64(),
+        Some(u64::from(instance.pid))
     );
     assert_eq!(
         records_of(&events(&second_server, &attempt), "message.user").len(),
@@ -3300,7 +3372,10 @@ fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
         records_of(&events(&second_server, &attempt), "runtime.reply.delta").len(),
         1
     );
-    assert_eq!(pr14_turn_receipts(&workspace).len(), 1);
+    assert_eq!(
+        user_dispatch_receipts(&workspace, "pr14-first-send-request").len(),
+        1
+    );
     stop_fixtures(&workspace, &[instance.pid]);
 }
 
@@ -3450,7 +3525,7 @@ fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
         }),
     );
     assert_eq!(started["ok"], true, "{started}");
-    let instance = new_instance(&workspace, &[]);
+    let instance = task_instance_for_user_dispatch(&workspace, "pr14-turn-error-request");
     let attempt = started["payload"]["snapshot"]["attempt"]["id"]
         .as_str()
         .unwrap()
@@ -3486,15 +3561,15 @@ fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
             .iter()
             .any(|item| item["kind"] == "actionable-error")
     );
-    let receipts = pr14_turn_receipts(&workspace);
+    let receipts = user_dispatch_receipts(&workspace, "pr14-turn-error-request");
     assert_eq!(
         receipts.len(),
         1,
-        "one rejected turn/start reached provider"
+        "one rejected user turn/start reached the provider: {receipts:?}"
     );
     assert_eq!(
-        receipts[0]["clientUserMessageId"],
-        "pr14-turn-error-request"
+        receipts[0]["pid"].as_u64(),
+        Some(u64::from(instance.pid))
     );
     stop_fixtures(&workspace, &[instance.pid]);
     drop(server);

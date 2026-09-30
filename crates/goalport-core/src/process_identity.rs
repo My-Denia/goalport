@@ -9,6 +9,10 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+#[cfg(target_os = "linux")]
+#[path = "linux_process_identity.rs"]
+mod linux;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -16,6 +20,7 @@ pub struct ProcessIdentity {
     pub executable_path: String,
     pub executable_sha256: String,
     pub created_ms: u64,
+    pub creation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +32,7 @@ pub enum ProcessObservation {
 
 impl ProcessIdentity {
     pub fn creation_date(&self) -> String {
-        cim_date(self.created_ms)
+        self.creation_token.clone().unwrap_or_else(|| cim_date(self.created_ms))
     }
 
     pub fn to_json(&self) -> Value {
@@ -48,6 +53,12 @@ pub fn cim_date(created_ms: u64) -> String {
 }
 
 pub fn current_identity() -> ProcessIdentity {
+    #[cfg(target_os = "linux")]
+    {
+        if let ProcessObservation::Live(identity) = linux::observe_process(std::process::id()) {
+            return identity;
+        }
+    }
     let executable_path = env::current_exe()
         .ok()
         .and_then(|path| path.canonicalize().ok().or(Some(path)))
@@ -58,7 +69,10 @@ pub fn current_identity() -> ProcessIdentity {
         parent_pid: observed_parent_pid(),
         executable_path: display_path(&executable_path),
         executable_sha256,
-        created_ms: process_created_ms(),
+        // Linux must never publish a process-local clock sample as an OS
+        // identity; startup refuses this incomplete fallback.
+        created_ms: if cfg!(target_os = "linux") { 0 } else { process_created_ms() },
+        creation_token: None,
     }
 }
 
@@ -109,22 +123,7 @@ pub fn classify_linux_kill0_result(pid: u32, result: Result<(), i32>) -> Process
 
 #[cfg(target_os = "linux")]
 fn linux_observe_process(pid: u32) -> ProcessObservation {
-    if pid == 0 {
-        return ProcessObservation::Unknown("pid 0 is not observable".into());
-    }
-    if pid == std::process::id() {
-        return ProcessObservation::Live(current_identity());
-    }
-    // kill(pid, 0) probes existence without delivering a signal.
-    // ESRCH → NotRunning; EPERM / other errno / IO → Unknown (observation
-    // failure must not gate prior-Core as Ended). A zero return only proves
-    // the pid exists, not executable identity — keep Unknown.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return classify_linux_kill0_result(pid, Ok(()));
-    }
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-    classify_linux_kill0_result(pid, Err(errno))
+    linux::observe_process(pid)
 }
 
 pub fn display_path(path: &Path) -> String {
@@ -162,10 +161,12 @@ pub fn env_string(key: &str) -> String {
 
 pub fn identity_from_env(prefix: &str) -> Value {
     let created_ms = env_u64(&format!("{prefix}_CREATED_MS"));
+    let creation_date = env_string(&format!("{prefix}_CREATION_DATE"));
+    let creation_date = if creation_date.is_empty() { cim_date(created_ms) } else { creation_date };
     json!({
         "pid": env_u32(&format!("{prefix}_PID")),
         "createdMs": created_ms,
-        "creationDate": cim_date(created_ms),
+        "creationDate": creation_date,
         "executablePath": env_string(&format!("{prefix}_EXE")),
         "executableSha256": env_string(&format!("{prefix}_SHA256")),
     })
@@ -339,6 +340,7 @@ fn windows_process_identity(pid: u32) -> ProcessObservation {
                 executable_sha256: file_sha256(&executable_path),
                 executable_path: display_path(&executable_path),
                 created_ms: file_time_ms(&created),
+                creation_token: None,
             })
         })();
         CloseHandle(process);

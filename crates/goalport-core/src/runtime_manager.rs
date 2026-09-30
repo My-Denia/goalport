@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
@@ -147,6 +147,7 @@ pub struct TurnFacts {
 pub struct RuntimeProcessBinding {
     pub process_epoch: String,
     pub pid: u32,
+    pub parent_pid: u32,
     pub creation_date: String,
     pub executable_path: String,
     pub executable_sha256: String,
@@ -266,17 +267,26 @@ fn confirm_against_binding(
                 && identity
                     .executable_sha256
                     .eq_ignore_ascii_case(&binding.executable_sha256);
+            let path_matches = identity.executable_path.eq_ignore_ascii_case(&binding.executable_path);
             if identity.pid == binding.pid
+                && identity.parent_pid == binding.parent_pid
                 && identity.creation_date() == binding.creation_date
                 && hash_matches
+                && path_matches
             {
                 ProcessConfirmation::Confirmed {
                     pid,
                     process_epoch: binding.process_epoch.clone(),
                 }
             } else {
+                let mut changed = Vec::new();
+                if identity.pid != binding.pid { changed.push("pid"); }
+                if identity.parent_pid != binding.parent_pid { changed.push("parent-pid"); }
+                if identity.creation_date() != binding.creation_date { changed.push("creation-time"); }
+                if !hash_matches { changed.push("executable-hash"); }
+                if !path_matches { changed.push("executable-path"); }
                 ProcessConfirmation::Unknown {
-                    reason: "live process identity differs from the spawn-time binding".into(),
+                    reason: format!("live process identity differs from the initialized binding ({})", changed.join(", ")),
                 }
             }
         }
@@ -290,6 +300,138 @@ struct Registration {
     /// necessarily change it, which is what makes "not replaced" observable for
     /// variants whose process epoch and session id are constants.
     seq: u64,
+    identity: String,
+}
+
+const STARTUP_WAITING: u8 = 0;
+const STARTUP_DISPATCHING: u8 = 1;
+const STARTUP_CANCELLING: u8 = 2;
+const STARTUP_FINISHED: u8 = 3;
+
+/// One in-flight native startup. Its cancellation gate can win only before
+/// session initialization returns; a prompt send after that boundary is never
+/// represented as an unstarted operation.
+#[derive(Debug)]
+pub(crate) struct StartupControl {
+    phase: AtomicU8,
+    binding: Mutex<Option<RuntimeProcessBinding>>,
+    done: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Default for StartupControl {
+    fn default() -> Self {
+        Self {
+            phase: AtomicU8::new(STARTUP_WAITING),
+            binding: Mutex::new(None),
+            done: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl StartupControl {
+    fn for_operation(cancellable_start: bool) -> Self {
+        let control = Self::default();
+        if !cancellable_start {
+            control.phase.store(STARTUP_DISPATCHING, Ordering::Release);
+        }
+        control
+    }
+}
+
+impl StartupControl {
+    fn publish_binding(&self, binding: RuntimeProcessBinding) {
+        *self.binding.lock().expect("startup binding poisoned") = Some(binding);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == STARTUP_CANCELLING
+    }
+
+    fn mark_dispatching(&self) -> Result<(), AdapterError> {
+        if self.phase.load(Ordering::Acquire) == STARTUP_DISPATCHING {
+            return Ok(());
+        }
+        self.phase
+            .compare_exchange(
+                STARTUP_WAITING,
+                STARTUP_DISPATCHING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| AdapterError::Connection("native start was cancelled before prompt dispatch".into()))
+    }
+
+    /// Returns false if native initialization already passed the pre-dispatch
+    /// boundary. That result must not be described as a stopped or unsent turn.
+    pub(crate) fn request_cancel(&self) -> Result<bool, String> {
+        match self.phase.compare_exchange(
+            STARTUP_WAITING,
+            STARTUP_CANCELLING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                #[cfg(target_os = "linux")]
+                self.signal_exact(libc::SIGTERM)?;
+                #[cfg(not(target_os = "linux"))]
+                return Err("startup cancellation is unavailable on this platform".into());
+                Ok(true)
+            }
+            Err(STARTUP_CANCELLING) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn signal_exact(&self, signal: i32) -> Result<(), String> {
+        if !self.cancelled() {
+            return Err("startup signal is only allowed before native dispatch".into());
+        }
+        let Some(binding) = self.binding.lock().expect("startup binding poisoned").clone() else {
+            return Ok(());
+        };
+        match process_identity::observe_process(binding.pid) {
+            ProcessObservation::NotRunning => Ok(()),
+            ProcessObservation::Unknown(reason) => Err(format!("startup process identity is unknown: {reason}")),
+            ProcessObservation::Live(identity)
+                if identity.pid == binding.pid
+                    && identity.parent_pid == binding.parent_pid
+                    && identity.creation_date() == binding.creation_date =>
+            {
+                let rc = unsafe { libc::kill(binding.pid as libc::pid_t, signal) };
+                if rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(format!("unable to signal the owned startup process: {}", std::io::Error::last_os_error()))
+                }
+            }
+            ProcessObservation::Live(_) => Err("startup process identity changed; no signal was sent".into()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn force_if_stalled(&self) -> Result<(), String> {
+        if self.cancelled() {
+            self.signal_exact(libc::SIGKILL)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn wait_finished(&self, timeout: Duration) -> bool {
+        let done = self.done.lock().expect("startup completion poisoned");
+        *self.changed.wait_timeout_while(done, timeout, |done| !*done)
+            .expect("startup completion poisoned").0
+    }
+
+    fn finish(&self) {
+        self.phase.store(STARTUP_FINISHED, Ordering::Release);
+        *self.done.lock().expect("startup completion poisoned") = true;
+        self.changed.notify_all();
+    }
 }
 
 /// RuntimeManager is deliberately owned by the Core UI controller.  It is not
@@ -299,6 +441,8 @@ pub struct RuntimeManager {
     attempts: HashMap<String, ManagedRuntime>,
     selected_provider: HashMap<String, String>,
     registrations: HashMap<String, Registration>,
+    busy_attempts: HashMap<String, Arc<StartupControl>>,
+    startup_control: Option<Arc<StartupControl>>,
     registration_counter: u64,
     /// Minted once per manager (a Core restart yields a new one) and joined with `seq` into
     /// `registration_identity`, the persisted name of one registration.
@@ -346,6 +490,8 @@ impl RuntimeManager {
             attempts: HashMap::new(),
             selected_provider: HashMap::new(),
             registrations: HashMap::new(),
+            busy_attempts: HashMap::new(),
+            startup_control: None,
             registration_counter: 0,
             instance: format!(
                 "{:x}-{:x}-{}-{:032x}",
@@ -459,8 +605,124 @@ impl RuntimeManager {
     /// `runtime.registration.established` record so a persisted failure can be attributed to
     /// the registration it belongs to.
     pub fn registration_identity(&self, attempt_id: &str) -> Option<String> {
-        self.registration_seq(attempt_id)
-            .map(|seq| format!("{}:{seq}", self.instance))
+        self.registrations
+            .get(attempt_id)
+            .map(|registration| registration.identity.clone())
+    }
+
+    pub fn operation_busy(&self, attempt_id: &str) -> bool {
+        self.busy_attempts.contains_key(attempt_id)
+    }
+
+    pub fn operation_cancelling(&self, attempt_id: &str) -> bool {
+        self.busy_attempts
+            .get(attempt_id)
+            .is_some_and(|control| control.cancelled())
+    }
+
+    pub fn view_revision_facts(&mut self) -> String {
+        let mut busy = self
+            .busy_attempts
+            .iter()
+            .map(|(attempt, control)| {
+                format!("{attempt}:{}", control.phase.load(Ordering::Acquire))
+            })
+            .collect::<Vec<_>>();
+        busy.sort();
+        let mut attempt_ids = self
+            .attempts
+            .keys()
+            .chain(self.registrations.keys())
+            .chain(self.selected_provider.keys())
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        attempt_ids.sort();
+        let live = attempt_ids
+            .into_iter()
+            .map(|attempt_id| {
+                let running = self.registration_live(&attempt_id);
+                format!(
+                    "{}:{:?}:{:?}:{:?}:{:?}",
+                    attempt_id,
+                    self.registration_identity(&attempt_id),
+                    running,
+                    self.transport_state(&attempt_id),
+                    self.turn_facts(&attempt_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("{}|{}|{}", self.instance, busy.join("|"), live.join("|"))
+    }
+
+    pub(crate) fn startup_control(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
+        self.busy_attempts.get(attempt_id).cloned()
+    }
+
+    /// Lend exactly the named Runtime registrations to one connection worker.
+    /// Check the whole set before moving any process: handoff needs its source
+    /// and newly minted target protected as one operation.
+    pub fn lend_attempts(
+        &mut self,
+        attempt_ids: &[String],
+        startup_target: Option<&str>,
+    ) -> Result<Self, AdapterError> {
+        let unique = attempt_ids.iter().collect::<HashSet<_>>();
+        if attempt_ids.is_empty() || unique.len() != attempt_ids.len()
+            || startup_target.is_some_and(|target| !attempt_ids.iter().any(|id| id == target))
+        {
+            return Err(AdapterError::InvalidRequest("native worker Attempt set is invalid".into()));
+        }
+        if let Some(busy) = attempt_ids.iter().find(|id| self.busy_attempts.contains_key(*id)) {
+            return Err(AdapterError::RegistrationOccupied(format!(
+                "attempt {busy} already has a native operation in progress"
+            )));
+        }
+        let mut worker = Self::with_synthetic_only(self.synthetic_only);
+        for attempt_id in attempt_ids {
+            let is_startup = startup_target == Some(attempt_id.as_str());
+            let control = Arc::new(StartupControl::for_operation(is_startup));
+            self.busy_attempts.insert(attempt_id.clone(), control.clone());
+            if is_startup {
+                worker.startup_control = Some(control);
+            }
+            if let Some(runtime) = self.attempts.remove(attempt_id) {
+                worker.attempts.insert(attempt_id.clone(), runtime);
+            }
+            if let Some(registration) = self.registrations.get(attempt_id) {
+                worker.registrations.insert(attempt_id.clone(), registration.clone());
+            }
+            if let Some(provider) = self.selected_provider.get(attempt_id) {
+                worker.selected_provider.insert(attempt_id.clone(), provider.clone());
+            }
+        }
+        Ok(worker)
+    }
+
+    pub fn return_attempts(&mut self, attempt_ids: &[String], mut worker: Self) -> Result<(), AdapterError> {
+        if let Some(missing) = attempt_ids.iter().find(|id| !self.busy_attempts.contains_key(*id)) {
+            return Err(AdapterError::InvalidRequest(format!(
+                "attempt {missing} has no lent Runtime"
+            )));
+        }
+        for attempt_id in attempt_ids {
+            let control = self.busy_attempts.remove(attempt_id).expect("checked busy Attempt");
+            match worker.attempts.remove(attempt_id) {
+                Some(runtime) => { self.attempts.insert(attempt_id.clone(), runtime); }
+                None => { self.attempts.remove(attempt_id); }
+            }
+            match worker.registrations.remove(attempt_id) {
+                Some(registration) => { self.registrations.insert(attempt_id.clone(), registration); }
+                None => { self.registrations.remove(attempt_id); }
+            }
+            match worker.selected_provider.remove(attempt_id) {
+                Some(provider) => { self.selected_provider.insert(attempt_id.clone(), provider); }
+                None => { self.selected_provider.remove(attempt_id); }
+            }
+            control.finish();
+        }
+        Ok(())
     }
 
     /// Whether the registered Runtime has spawned a process, or may have. The sticky
@@ -536,17 +798,21 @@ impl RuntimeManager {
     /// Whether the registered Runtime is still live, by the notion each variant
     /// can actually observe: the in-process scenario adapter and the one-shot
     /// Codex exec transport are live while registered (neither holds a child
-    /// between turns); Codex app-server while its child has not exited — a stored
-    /// `Child` handle outlives the process, so it is polled with `try_wait`
-    /// rather than tested for presence; Grok and Claude while their stream pid is
-    /// live. `None` when nothing is registered.
+    /// between turns); Codex app-server only after its native thread is
+    /// established, its transport is open, and its child has not exited. A
+    /// running child remains separately observable through process identity;
+    /// Grok and Claude use their stream pid. `None` means no registration.
     pub fn registration_live(&mut self, attempt_id: &str) -> Option<bool> {
+        if self.busy_attempts.contains_key(attempt_id) {
+            return Some(false);
+        }
         Some(match self.attempts.get_mut(attempt_id)? {
             ManagedRuntime::Scenario(_) | ManagedRuntime::CodexExec(_) => true,
-            // Increment 6: a Codex registration is live only while its child has not exited AND its
-            // output transport has not ended. A live pid alone no longer means usable.
+            // A live process and open pipe cannot serve a prompt until the
+            // native thread has been established by start or verified resume.
             ManagedRuntime::Codex(process) => {
-                !process.transport.ended()
+                process.thread_id.is_some()
+                    && !process.transport.ended()
                     && process
                         .child
                         .as_mut()
@@ -751,7 +1017,7 @@ impl RuntimeManager {
     /// attempt still check this FIRST so they choose a vacant id rather than run
     /// into the refusal.
     pub fn has_attempt(&self, attempt_id: &str) -> bool {
-        self.attempts.contains_key(attempt_id)
+        self.attempts.contains_key(attempt_id) || self.busy_attempts.contains_key(attempt_id)
     }
 
     pub fn select_runtime(
@@ -773,7 +1039,7 @@ impl RuntimeManager {
         // `ManagedRuntime` (and for a native variant kill its child) with no event
         // and no record; callers that legitimately re-select the same binding are
         // served by `admit_runtime`'s reuse decision, never by replacement here.
-        if self.attempts.contains_key(attempt_id) {
+        if self.attempts.contains_key(attempt_id) || self.busy_attempts.contains_key(attempt_id) {
             return Err(AdapterError::RegistrationOccupied(format!(
                 "attempt {attempt_id} already has a registered Runtime; it is kept, not replaced"
             )));
@@ -826,11 +1092,13 @@ impl RuntimeManager {
         self.selected_provider
             .insert(attempt_id.to_owned(), provider);
         self.registration_counter += 1;
+        let identity = format!("{}:{}", self.instance, self.registration_counter);
         self.registrations.insert(
             attempt_id.to_owned(),
             Registration {
                 binding,
                 seq: self.registration_counter,
+                identity,
             },
         );
         Ok(summary)
@@ -846,6 +1114,7 @@ impl RuntimeManager {
         request: &SessionRequest,
     ) -> Result<RuntimeSessionResult, AdapterError> {
         self.ensure_attempt_allowed(attempt_id)?;
+        let startup_control = self.startup_control.clone();
         let runtime = self
             .attempts
             .get_mut(attempt_id)
@@ -856,10 +1125,52 @@ impl RuntimeManager {
                 let events = adapter.stream_events()?;
                 Ok(RuntimeSessionResult { handle, events })
             }
-            ManagedRuntime::Codex(process) => process.create_session(request),
+            ManagedRuntime::Codex(process) => {
+                process.startup_control = startup_control.clone();
+                let result = process.create_session(request);
+                if result.is_ok() && let Some(control) = startup_control {
+                    control.mark_dispatching()?;
+                }
+                result
+            }
             ManagedRuntime::CodexExec(process) => process.create_session(request),
-            ManagedRuntime::Claude(process) => process.create_session(request),
-            ManagedRuntime::Grok(process) => process.create_session(request),
+            ManagedRuntime::Claude(process) => {
+                process.startup_control = startup_control.clone();
+                let result = process.create_session(request);
+                if result.is_ok() && let Some(control) = startup_control.clone() {
+                    control.mark_dispatching()?;
+                }
+                result
+            }
+            ManagedRuntime::Grok(process) => {
+                process.startup_control = startup_control.clone();
+                let result = process.create_session(request);
+                if result.is_ok() && let Some(control) = startup_control {
+                    control.mark_dispatching()?;
+                }
+                result
+            }
+        }
+    }
+
+    /// Separate, ephemeral read-only Codex session for a title operation.
+    /// Other providers keep the local title until they have an equivalent
+    /// constrained native session path.
+    pub fn create_title_session(
+        &mut self,
+        attempt_id: &str,
+        request: &SessionRequest,
+    ) -> Result<RuntimeSessionResult, AdapterError> {
+        self.ensure_attempt_allowed(attempt_id)?;
+        let runtime = self
+            .attempts
+            .get_mut(attempt_id)
+            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+        match runtime {
+            ManagedRuntime::Codex(process) => process.create_session_with_options(request, true),
+            _ => Err(AdapterError::Unsupported(
+                "independent title generation requires a Codex app-server session".into(),
+            )),
         }
     }
 
@@ -1045,6 +1356,30 @@ impl RuntimeManager {
         }
     }
 
+    /// Explicit session close. Keep the registration if the owned child could
+    /// not be confirmed ended; a failed close must not advertise a free session.
+    pub fn close_idle_session(&mut self, attempt_id: &str) -> Result<(), AdapterError> {
+        let runtime = self
+            .attempts
+            .get_mut(attempt_id)
+            .ok_or_else(|| AdapterError::Connection("Runtime session is not attached".into()))?;
+        match runtime {
+            ManagedRuntime::Scenario(adapter) => adapter.close()?,
+            ManagedRuntime::Codex(process) => process.close()?,
+            ManagedRuntime::CodexExec(process) => process.close()?,
+            ManagedRuntime::Grok(process) => process.close()?,
+            ManagedRuntime::Claude(_) => {
+                return Err(AdapterError::Unsupported(
+                    "Claude session close is not verified; close the window or stop the active turn explicitly".into(),
+                ));
+            }
+        }
+        self.attempts.remove(attempt_id);
+        self.registrations.remove(attempt_id);
+        self.selected_provider.remove(attempt_id);
+        Ok(())
+    }
+
     /// Drain structured provider messages that arrived while the desktop was
     /// disconnected. The Core caller persists these events before exposing its
     /// next projection.
@@ -1107,6 +1442,13 @@ impl RuntimeManager {
     /// Claude residual-hold behavior is unchanged: it lives in the store, not
     /// here.
     pub fn turn_facts(&self, attempt_id: &str) -> Option<TurnFacts> {
+        if self.busy_attempts.contains_key(attempt_id) {
+            return Some(TurnFacts {
+                in_flight: true,
+                stoppable: false,
+                delivery_unknown: false,
+            });
+        }
         match self.attempts.get(attempt_id) {
             Some(ManagedRuntime::Codex(process)) => Some(TurnFacts {
                 in_flight: process.turn_in_flight(),
@@ -1298,6 +1640,7 @@ struct CodexProcess {
     closure_failed_turn: bool,
     /// The projection has taken this closure through `take_transport_closures`.
     transport_reported: bool,
+    startup_control: Option<Arc<StartupControl>>,
 }
 
 #[derive(Debug)]
@@ -1320,6 +1663,7 @@ struct PermissionCommand {
 struct CodexStartFailure {
     request_id: u64,
     detail: String,
+    reason_code: &'static str,
 }
 
 impl CodexProcess {
@@ -1354,6 +1698,7 @@ impl CodexProcess {
             stream_closed: false,
             closure_failed_turn: false,
             transport_reported: false,
+            startup_control: None,
         }
     }
 
@@ -1400,9 +1745,9 @@ impl CodexProcess {
             self.executable.display(),
             self.workspace_root.display()
         ));
-        let mut child = command.spawn().map_err(|error| {
-            AdapterError::Connection(format!("unable to start Codex app-server: {error}"))
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| native_spawn_error("Codex app-server", error))?;
         self.spawned = true;
         let stdin = child
             .stdin
@@ -1432,17 +1777,30 @@ impl CodexProcess {
         let canonical = format!(
             "codex|{}|{}|{}|{}",
             observed.pid,
-            observed.created_ms,
+            observed.creation_date(),
             observed.executable_path.to_ascii_lowercase(),
             observed.executable_sha256.to_ascii_lowercase()
         );
         self.process_binding = Some(RuntimeProcessBinding {
             process_epoch: format!("runtime-epoch:{}", sha256_hex(canonical.as_bytes())),
             pid: observed.pid,
+            parent_pid: observed.parent_pid,
             creation_date: observed.creation_date(),
             executable_path: observed.executable_path,
             executable_sha256: observed.executable_sha256,
         });
+        if let (Some(control), Some(binding)) =
+            (self.startup_control.as_ref(), self.process_binding.as_ref())
+        {
+            control.publish_binding(binding.clone());
+            if control.cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AdapterError::Connection(
+                    "native start was cancelled before prompt dispatch".into(),
+                ));
+            }
+        }
         self.child = Some(child);
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
         self.stdout = Some(BufReader::new(stdout));
@@ -1458,7 +1816,61 @@ impl CodexProcess {
         }))?;
         self.read_until_response(init_id, None, None)?;
         debug_runtime("initialize response received");
+        self.refresh_initializing_identity()?;
         self.send_json(&json!({ "method": "initialized", "params": {} }))?;
+        Ok(())
+    }
+
+    /// The launcher executable may `exec` a different image under the same
+    /// child PID before it answers initialize/thread start. Bind the image that
+    /// actually established the native session, while requiring the same OS
+    /// process (PID, creation time and parent). After admission this function
+    /// is never called again; later image drift stays Unknown.
+    fn refresh_initializing_identity(&mut self) -> Result<(), AdapterError> {
+        let prior = self.process_binding.as_ref().ok_or_else(|| {
+            AdapterError::Connection("Codex startup has no provisional process binding".into())
+        })?;
+        let pid = self.child.as_ref().ok_or_else(|| {
+            AdapterError::Connection("Codex startup has no owned child".into())
+        })?.id();
+        let identity = match process_identity::observe_process(pid) {
+            ProcessObservation::Live(identity) => identity,
+            ProcessObservation::NotRunning => {
+                return Err(AdapterError::Connection("Codex exited during initialization".into()));
+            }
+            ProcessObservation::Unknown(reason) => {
+                return Err(AdapterError::Connection(format!("Codex process identity is unobservable during initialization: {reason}")));
+            }
+        };
+        if identity.pid != prior.pid
+            || identity.parent_pid != prior.parent_pid
+            || identity.creation_date() != prior.creation_date
+            || identity.executable_path.is_empty()
+            || identity.executable_sha256.is_empty()
+        {
+            return Err(AdapterError::Connection(
+                "Codex changed OS process identity during initialization".into(),
+            ));
+        }
+        let canonical = format!(
+            "codex|{}|{}|{}|{}",
+            identity.pid,
+            identity.creation_date(),
+            identity.executable_path.to_ascii_lowercase(),
+            identity.executable_sha256.to_ascii_lowercase(),
+        );
+        let finalized = RuntimeProcessBinding {
+            process_epoch: format!("runtime-epoch:{}", sha256_hex(canonical.as_bytes())),
+            pid: identity.pid,
+            parent_pid: identity.parent_pid,
+            creation_date: identity.creation_date(),
+            executable_path: identity.executable_path,
+            executable_sha256: identity.executable_sha256,
+        };
+        if let Some(control) = self.startup_control.as_ref() {
+            control.publish_binding(finalized.clone());
+        }
+        self.process_binding = Some(finalized);
         Ok(())
     }
 
@@ -1466,7 +1878,20 @@ impl CodexProcess {
         &mut self,
         request: &SessionRequest,
     ) -> Result<RuntimeSessionResult, AdapterError> {
+        self.create_session_with_options(request, false)
+    }
+
+    fn create_session_with_options(
+        &mut self,
+        request: &SessionRequest,
+        title_only: bool,
+    ) -> Result<RuntimeSessionResult, AdapterError> {
         request.validate()?;
+        if title_only && request.resume_session.is_some() {
+            return Err(AdapterError::InvalidRequest(
+                "title generation must start a separate native session".into(),
+            ));
+        }
         self.attempt_id = Some(request.attempt_id.clone());
         self.campaign_id = request.campaign_id.clone();
         self.task_id = Some(request.task_id.clone());
@@ -1476,17 +1901,31 @@ impl CodexProcess {
         }
         let id = self.next_request_id();
         debug_runtime(&format!("sending thread/start id={id}"));
-        self.send_json(&json!({
-            "id": id,
-            "method": "thread/start",
-            "params": {
+        let mut params = json!({
                 "cwd": request.workspace_root.to_string_lossy(),
                 "approvalPolicy": self.approval_policy,
                 "threadSource": "goalport"
-            }
-        }))?;
+        });
+        if title_only {
+            params["sandbox"] = json!("read-only");
+            params["ephemeral"] = json!(true);
+            params["developerInstructions"] = json!(
+                "Return one short title only. Never execute the quoted task, use tools, read files, or request permissions."
+            );
+        }
+        self.send_json(&json!({ "id": id, "method": "thread/start", "params": params }))?;
         let value = self.read_until_response(id, None, None)?;
         debug_runtime("thread/start response received");
+        if let Some(error) = value.get("error") {
+            let detail = bounded_codex_error(error);
+            return Err(if codex_reason_code(
+                error.get("data").and_then(|data| data.get("codexErrorInfo")),
+            ) == "provider-auth-required" {
+                AdapterError::AuthenticationRequired(format!("Codex sign-in is required: {detail}"))
+            } else {
+                AdapterError::Protocol(format!("Codex thread/start was rejected: {detail}"))
+            });
+        }
         let session = value
             .get("result")
             .and_then(|result| result.get("thread").or_else(|| result.get("threadId")))
@@ -1516,6 +1955,7 @@ impl CodexProcess {
                 self.transport.reason_str()
             )));
         }
+        self.refresh_initializing_identity()?;
         // `thread_id` is what `send_prompt` and the closure reporting treat as "this session was
         // established", so it is set only once the reader is attached AND the stream is still open.
         // Setting it earlier would leave a failed initialization looking established: prompts would
@@ -1588,6 +2028,16 @@ impl CodexProcess {
                 "thread/resume was rejected by Codex".into(),
             ));
         }
+        let returned_thread_id = value
+            .pointer("/result/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| AdapterError::Protocol("thread/resume returned no thread id".into()))?;
+        if returned_thread_id != session_id {
+            return Err(AdapterError::Protocol(
+                "thread/resume returned a different thread id".into(),
+            ));
+        }
         // A resumed thread is only usable once the existing event-reading path is attached, as
         // `create_session` does after `thread/start`: without the reader, prompts would be
         // accepted but `poll_events` could never deliver the provider's replies. `start_reader`
@@ -1602,6 +2052,7 @@ impl CodexProcess {
                 self.transport.reason_str()
             )));
         }
+        self.refresh_initializing_identity()?;
         // Set only once the reader is attached and the stream is still open (see `create_session`).
         self.thread_id = Some(session_id.to_owned());
         Ok(RuntimeSessionResult {
@@ -1744,6 +2195,7 @@ impl CodexProcess {
                         "text": "Codex rejected the turn start request",
                         "turnStartRequestId": failure.request_id,
                         "error": failure.detail,
+                        "reasonCode": failure.reason_code,
                         "nativeTurnId": Value::Null
                     }),
                 });
@@ -1825,6 +2277,11 @@ impl CodexProcess {
                 return Some(CodexStartFailure {
                     request_id: pending,
                     detail: bounded_codex_error(error),
+                    reason_code: if error.get("code").and_then(Value::as_i64) == Some(-32601) {
+                        "provider-version"
+                    } else {
+                        codex_reason_code(error.get("data").and_then(|data| data.get("codexErrorInfo")))
+                    },
                 });
             }
             if let Some(turn_id) = value
@@ -2050,13 +2507,10 @@ impl CodexProcess {
     }
 
     fn close(&mut self) -> Result<(), AdapterError> {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.child = None;
+        close_owned_child(&mut self.child)?;
         self.stdin = None;
         self.stdout = None;
+        self.event_rx = None;
         Ok(())
     }
 
@@ -2296,6 +2750,7 @@ struct GrokAcpProcess {
     /// Set the moment a spawn succeeds and never cleared: a process existed at some point,
     /// whatever happened to it afterwards (see `RuntimeManager::process_started`).
     spawned: bool,
+    startup_control: Option<Arc<StartupControl>>,
 }
 
 impl GrokAcpProcess {
@@ -2329,6 +2784,7 @@ impl GrokAcpProcess {
             task_id: None,
             process_binding: None,
             spawned: false,
+            startup_control: None,
         }
     }
 
@@ -2371,9 +2827,9 @@ impl GrokAcpProcess {
             sha256_hex(self.executable.to_string_lossy().as_bytes()),
             sha256_hex(self.workspace_root.to_string_lossy().as_bytes())
         ));
-        let mut child = command.spawn().map_err(|error| {
-            AdapterError::Connection(format!("unable to start grok agent stdio: {error}"))
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| native_spawn_error("grok agent stdio", error))?;
         self.spawned = true;
         let stdin = child
             .stdin
@@ -2404,17 +2860,30 @@ impl GrokAcpProcess {
         let canonical = format!(
             "grok|{}|{}|{}|{}",
             observed.pid,
-            observed.created_ms,
+            observed.creation_date(),
             observed.executable_path.to_ascii_lowercase(),
             observed.executable_sha256.to_ascii_lowercase()
         );
         self.process_binding = Some(RuntimeProcessBinding {
             process_epoch: format!("runtime-epoch:{}", sha256_hex(canonical.as_bytes())),
             pid: observed.pid,
+            parent_pid: observed.parent_pid,
             creation_date: observed.creation_date(),
             executable_path: observed.executable_path,
             executable_sha256: observed.executable_sha256,
         });
+        if let (Some(control), Some(binding)) =
+            (self.startup_control.as_ref(), self.process_binding.as_ref())
+        {
+            control.publish_binding(binding.clone());
+            if control.cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AdapterError::Connection(
+                    "native start was cancelled before prompt dispatch".into(),
+                ));
+            }
+        }
         self.child = Some(child);
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
         self.stdout = Some(BufReader::new(stdout));
@@ -2824,7 +3293,7 @@ impl GrokAcpProcess {
             if let Some(error) = value.get("error") {
                 let code = error
                     .get("code")
-                    .map(bounded_scalar)
+                    .map(safe_provider_code)
                     .unwrap_or_else(|| "unknown".into());
                 self.sequence += 1;
                 return self.envelope(
@@ -3387,13 +3856,10 @@ impl GrokAcpProcess {
     }
 
     fn close(&mut self) -> Result<(), AdapterError> {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.child = None;
+        close_owned_child(&mut self.child)?;
         self.stdin = None;
         self.stdout = None;
+        self.event_rx = None;
         self.permission_tx = None;
         Ok(())
     }
@@ -3435,7 +3901,7 @@ impl GrokAcpProcess {
         if let Some(error) = response.get("error") {
             let code = error
                 .get("code")
-                .map(bounded_scalar)
+                .map(safe_provider_code)
                 .unwrap_or_else(|| "unknown".into());
             return Err(AdapterError::Protocol(format!(
                 "Grok ACP {method} returned error {code}"
@@ -3586,9 +4052,7 @@ impl CodexExecProcess {
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("XAI_API_KEY")
             .output()
-            .map_err(|error| {
-                AdapterError::Connection(format!("unable to start Codex exec: {error}"))
-            })?;
+            .map_err(|error| native_spawn_error("Codex exec", error))?;
         debug_runtime(&format!(
             "Codex exec returned status={:?} stdout_bytes={}",
             output.status.code(),
@@ -3822,6 +4286,7 @@ struct ClaudeStreamProcess {
     /// Set the moment a spawn succeeds and never cleared: a process existed at some point,
     /// whatever happened to it afterwards (see `RuntimeManager::process_started`).
     spawned: bool,
+    startup_control: Option<Arc<StartupControl>>,
 }
 
 impl ClaudeStreamProcess {
@@ -3875,6 +4340,7 @@ impl ClaudeStreamProcess {
             task_id: None,
             process_binding: None,
             spawned: false,
+            startup_control: None,
         }
     }
 
@@ -3965,9 +4431,9 @@ impl ClaudeStreamProcess {
                     command.env_remove(key);
                 }
                 hide_native_console(&mut command);
-                let mut child = command.spawn().map_err(|error| {
-                    AdapterError::Connection(format!("unable to start claude stream-json: {error}"))
-                })?;
+                let mut child = command
+                    .spawn()
+                    .map_err(|error| native_spawn_error("claude stream-json", error))?;
                 self.spawned = true;
                 let stdin = child.stdin.take().ok_or_else(|| {
                     AdapterError::Connection("Claude stream-json stdin unavailable".into())
@@ -3997,17 +4463,29 @@ impl ClaudeStreamProcess {
         let canonical = format!(
             "claude|{}|{}|{}|{}",
             observed.pid,
-            observed.created_ms,
+            observed.creation_date(),
             observed.executable_path.to_ascii_lowercase(),
             observed.executable_sha256.to_ascii_lowercase()
         );
         self.process_binding = Some(RuntimeProcessBinding {
             process_epoch: format!("runtime-epoch:{}", sha256_hex(canonical.as_bytes())),
             pid: observed.pid,
+            parent_pid: observed.parent_pid,
             creation_date: observed.creation_date(),
             executable_path: observed.executable_path,
             executable_sha256: observed.executable_sha256,
         });
+        if let (Some(control), Some(binding)) =
+            (self.startup_control.as_ref(), self.process_binding.as_ref())
+        {
+            control.publish_binding(binding.clone());
+            if control.cancelled() {
+                let _ = self.close();
+                return Err(AdapterError::Connection(
+                    "native start was cancelled before prompt dispatch".into(),
+                ));
+            }
+        }
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
         self.stdout = Some(BufReader::new(stdout));
         self.start_reader()?;
@@ -5749,6 +6227,17 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
         return None;
     }
     let params = value.get("params").unwrap_or(&Value::Null);
+    if lower == "error" {
+        let error = params.get("error").unwrap_or(&Value::Null);
+        let will_retry = params.get("willRetry").and_then(Value::as_bool) == Some(true);
+        return Some(json!({
+            "status": if will_retry { "retrying" } else { "failed" },
+            "reasonCode": codex_reason_code(error.get("codexErrorInfo")),
+            "text": "Codex reported a turn error",
+            "httpStatus": codex_http_status(error.get("codexErrorInfo")),
+            "willRetry": will_retry,
+        }));
+    }
     if lower.contains("agentmessage") && lower.contains("delta") {
         let text = params
             .get("delta")
@@ -5791,12 +6280,18 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
         return Some(json!({ "status": "running" }));
     }
     if lower.contains("turn/completed") || lower.contains("turn_completed") {
-        let status = params
-            .get("turn")
-            .and_then(|turn| turn.get("status"))
+        let turn = params.get("turn").unwrap_or(&Value::Null);
+        let status = turn
+            .get("status")
             .and_then(Value::as_str)
             .unwrap_or("completed");
-        return Some(json!({ "status": bounded_text(status) }));
+        let error = turn.get("error").unwrap_or(&Value::Null);
+        return Some(json!({
+            "status": bounded_text(status),
+            "reasonCode": (status == "failed").then(|| codex_reason_code(error.get("codexErrorInfo"))),
+            "text": (status == "failed").then_some("Codex turn failed"),
+            "httpStatus": codex_http_status(error.get("codexErrorInfo")),
+        }));
     }
     if lower.contains("approval") || lower.contains("permission") {
         if value.get("id").is_none_or(Value::is_null) {
@@ -5953,23 +6448,34 @@ fn extract_provider_request_id(value: &Value) -> Option<String> {
 fn bounded_codex_error(error: &Value) -> String {
     let code = error
         .get("code")
+        .and_then(Value::as_i64)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unknown".into());
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("turn start rejected")
-        .chars()
-        .map(|character| {
-            if character.is_control() && !matches!(character, '\n' | '\t') {
-                ' '
-            } else {
-                character
-            }
-        })
-        .take(2048)
-        .collect::<String>();
-    format!("code={code}; message={message}")
+    let reason = codex_reason_code(error.get("data").and_then(|data| data.get("codexErrorInfo")));
+    format!("code={code}; reason={reason}")
+}
+
+fn codex_http_status(info: Option<&Value>) -> Option<u64> {
+    let details = info?.as_object()?.values().next()?;
+    details.get("httpStatusCode")?.as_u64().filter(|status| *status <= 599)
+}
+
+/// Map only native structured fields. Provider prose is diagnostic detail, not
+/// evidence that a send is safe to repeat or that an account is out of quota.
+fn codex_reason_code(info: Option<&Value>) -> &'static str {
+    let kind = info.and_then(|info| {
+        info.as_str().or_else(|| info.as_object()?.keys().next().map(String::as_str))
+    });
+    match kind {
+        Some("usageLimitExceeded" | "rateLimitExceeded" | "sessionBudgetExceeded") => "provider-quota",
+        Some("unauthorized") => "provider-auth-required",
+        Some("contextWindowExceeded") => "provider-context-full",
+        Some("serverOverloaded" | "flexUnavailable") => "provider-overloaded",
+        Some("httpConnectionFailed" | "responseStreamConnectionFailed" | "responseStreamDisconnected") => "provider-transport",
+        Some("cyberPolicy" | "misalignmentPolicyViolation" | "tooManyDenials") => "provider-permission",
+        Some("badRequest") => "provider-request-invalid",
+        _ => "provider-failed",
+    }
 }
 
 fn classify_codex_method(method: &str, value: &Value) -> AgentEventType {
@@ -6017,7 +6523,17 @@ fn classify_codex_method(method: &str, value: &Value) -> AgentEventType {
         if status.contains("interrupt") || status.contains("cancel") {
             return AgentEventType::Cancelled;
         }
+        if status == "failed" {
+            return AgentEventType::TurnFailed;
+        }
         return AgentEventType::TurnCompleted;
+    }
+    if lower == "error" {
+        return if value.pointer("/params/willRetry").and_then(Value::as_bool) == Some(true) {
+            AgentEventType::Waiting
+        } else {
+            AgentEventType::TurnFailed
+        };
     }
     if lower.contains("turn/failed") || lower.contains("error") {
         return AgentEventType::TurnFailed;
@@ -6146,7 +6662,13 @@ fn is_safe_payload_key(key: &str) -> bool {
 
 fn bounded_text(value: &str) -> String {
     if value.len() > 8_192 {
-        format!("{}…", &value[..8_192])
+        let end = value
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= 8_192)
+            .last()
+            .unwrap_or(0);
+        format!("{}…", &value[..end])
     } else {
         value.to_owned()
     }
@@ -6158,9 +6680,32 @@ fn bounded_scalar(value: &Value) -> String {
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string());
     if text.len() > 128 {
-        format!("{}…", &text[..128])
+        let end = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= 128)
+            .last()
+            .unwrap_or(0);
+        format!("{}…", &text[..end])
     } else {
         text
+    }
+}
+
+fn safe_provider_code(value: &Value) -> String {
+    if let Some(number) = value.as_i64() {
+        return number.to_string();
+    }
+    match value.as_str() {
+        Some(code)
+            if code.len() <= 32
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')) =>
+        {
+            code.to_owned()
+        }
+        _ => "unknown".into(),
     }
 }
 
@@ -6176,6 +6721,33 @@ fn monotonic_id() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or_default()
+}
+
+fn close_owned_child(child: &mut Option<Child>) -> Result<(), AdapterError> {
+    if let Some(process) = child.as_mut() {
+        if process.try_wait()?.is_none() {
+            match process.kill() {
+                Ok(()) => {
+                    process.wait()?;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+                        && process.try_wait()?.is_some() => {}
+                Err(error) => return Err(AdapterError::Io(error)),
+            }
+        }
+    }
+    *child = None;
+    Ok(())
+}
+
+fn native_spawn_error(label: &str, error: std::io::Error) -> AdapterError {
+    let message = format!("unable to start {label}: {error}");
+    if error.kind() == std::io::ErrorKind::NotFound {
+        AdapterError::ExecutableMissing(message)
+    } else {
+        AdapterError::Connection(message)
+    }
 }
 
 fn debug_runtime(message: &str) {
@@ -6227,6 +6799,59 @@ fn native_approval_policy() -> Result<String, AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_cancel_cannot_claim_unsent_after_dispatch_boundary() {
+        let before_dispatch = StartupControl::default();
+        assert_eq!(before_dispatch.request_cancel().unwrap(), true);
+        assert!(before_dispatch.mark_dispatching().is_err());
+
+        let after_dispatch = StartupControl::default();
+        after_dispatch.mark_dispatching().unwrap();
+        assert_eq!(after_dispatch.request_cancel().unwrap(), false);
+    }
+
+    #[test]
+    fn provider_error_details_keep_structured_reason_without_private_prose() {
+        let secret = "Bearer sk-fixture-secret at /home/private-user/project";
+        let error = json!({
+            "code": -32000,
+            "message": secret,
+            "data": {"codexErrorInfo":"usageLimitExceeded"}
+        });
+        let detail = bounded_codex_error(&error);
+        assert_eq!(detail, "code=-32000; reason=provider-quota");
+        assert!(!detail.contains(secret));
+
+        let frame = json!({
+            "method":"error",
+            "params":{"error":{"message":secret,"codexErrorInfo":"usageLimitExceeded"},"willRetry":false}
+        });
+        let payload = normalized_codex_payload("error", &frame).unwrap();
+        assert_eq!(payload["reasonCode"], "provider-quota");
+        assert!(!payload.to_string().contains(secret));
+        let completed = json!({
+            "method":"turn/completed",
+            "params":{"turn":{"status":"failed","error":{"message":secret,"codexErrorInfo":"usageLimitExceeded"}}}
+        });
+        let payload = normalized_codex_payload("turn/completed", &completed).unwrap();
+        assert_eq!(payload["reasonCode"], "provider-quota");
+        assert!(!payload.to_string().contains(secret));
+        assert_eq!(safe_provider_code(&json!(secret)), "unknown");
+        assert_eq!(safe_provider_code(&json!(-32000)), "-32000");
+    }
+
+    #[test]
+    fn long_chinese_provider_text_is_truncated_at_utf8_boundaries() {
+        let text = "汉".repeat(3000);
+        let bounded = bounded_text(&text);
+        assert!(bounded.ends_with('…'));
+        assert!(bounded.len() <= 8_195);
+        let scalar = bounded_scalar(&json!(text));
+        assert!(scalar.ends_with('…'));
+        assert!(scalar.len() <= 131);
+    }
 
     #[test]
     fn synthetic_firewall_blocks_native_session_resume_and_send_before_spawn() {
@@ -6329,6 +6954,7 @@ mod tests {
         process.process_binding = Some(RuntimeProcessBinding {
             process_epoch: "runtime-epoch:test".into(),
             pid: 123,
+            parent_pid: 0,
             creation_date: "/Date(1788307200000)/".into(),
             executable_path: "C:\\bin\\codex.exe".into(),
             executable_sha256: "a".repeat(64),
@@ -6371,6 +6997,7 @@ mod tests {
         process.process_binding = Some(RuntimeProcessBinding {
             process_epoch: "runtime-epoch:stop".into(),
             pid: 4242,
+            parent_pid: 0,
             creation_date: "/Date(1788307200000)/".into(),
             executable_path: "C:\\bin\\claude.exe".into(),
             executable_sha256: "b".repeat(64),

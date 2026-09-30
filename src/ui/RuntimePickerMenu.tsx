@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { Popover } from "@base-ui/react/popover";
+import { Select } from "@base-ui/react/select";
 import type { RuntimeProfile } from "../types";
 import { supportStatusLabel } from "../lib/display";
 
@@ -24,10 +24,9 @@ interface RuntimePickerMenuProps {
 /**
  * The one and only Runtime picker menu (AGENTS.md §4: one component, one
  * place). The draft composer and the conversation composer previously each
- * maintained a hand-rolled copy of this floating layer — open state, document
- * mousedown listeners, Escape listeners. All of that now comes from Base UI:
- * collision-aware positioning (no more popup misplaced at window edges),
- * outside-press and Escape close, and focus handling.
+ * maintained a hand-rolled copy of this floating layer. Base UI Select owns
+ * listbox focus, arrow/Home/End navigation, activation, dismissal, and popup
+ * positioning. The chosen Runtime remains controlled by the caller.
  *
  * The popup is portaled to document.body by Base UI. The packaged-GUI smoke
  * driver therefore looks options up document-wide (`.runtime-picker-list
@@ -48,6 +47,7 @@ export function RuntimePickerMenu({
 }: RuntimePickerMenuProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const selectedValue = runtimes.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
 
   useEffect(() => {
     if (!focusSignal || focusSignal <= 0) return;
@@ -56,46 +56,48 @@ export function RuntimePickerMenu({
   }, [focusSignal]);
 
   return (
-    <Popover.Root open={open} onOpenChange={(next) => setOpen(next)}>
-      <Popover.Trigger
+    <Select.Root value={selectedValue} open={open} onOpenChange={setOpen}
+      onValueChange={(value) => { if (value) onSelect(value); }}>
+      <Select.Trigger
         ref={triggerRef}
         className={triggerClassName}
         aria-label={triggerAriaLabel}
         title={triggerTitle}
       >
         {triggerContent}
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Positioner sideOffset={6} collisionPadding={10}>
-          <Popover.Popup className="runtime-picker-list" role="listbox" aria-label="Runtimes">
-          {runtimes.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
-          {runtimes.map((candidate) => (
-            <button
-              key={candidate.id}
-              className="runtime-picker-item"
-              type="button"
-              role="option"
-              aria-selected={selectedId.trim().toLowerCase() === candidate.id.toLowerCase()}
-              disabled={isItemDisabled ? isItemDisabled(candidate) : false}
-              onClick={() => {
-                setOpen(false);
-                onSelect(candidate.id);
-              }}
-            >
-              <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
-              <span className="runtime-picker-copy">
-                <strong>{candidate.name}</strong>
-                <small>{candidate.subtitle}</small>
-              </span>
-              <span className={`support-chip support-${candidate.support}`}>
-                {supportStatusLabel(candidate)}
-              </span>
-            </button>
-          ))}
-          {blockedHint ? <p className="runtime-picker-hint">{blockedHint}</p> : null}
-          </Popover.Popup>
-        </Popover.Positioner>
-      </Popover.Portal>
-    </Popover.Root>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Positioner sideOffset={6} collisionPadding={10} alignItemWithTrigger={false}>
+          <Select.Popup className="runtime-picker-list">
+            <Select.List aria-label="Runtimes" style={{ display: "grid", gap: 2 }}>
+              {runtimes.map((candidate) => {
+                const disabled = isItemDisabled ? isItemDisabled(candidate) : false;
+                return (
+                  <Select.Item
+                    key={candidate.id}
+                    value={candidate.id}
+                    label={candidate.name}
+                    className="runtime-picker-item"
+                    disabled={disabled}
+                    style={disabled ? { opacity: 0.45, cursor: "not-allowed", pointerEvents: "none" } : undefined}
+                  >
+                    <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
+                    <span className="runtime-picker-copy">
+                      <strong>{candidate.name}</strong>
+                      <small>{candidate.subtitle}</small>
+                    </span>
+                    <span className={`support-chip support-${candidate.support}`}>
+                      {supportStatusLabel(candidate)}
+                    </span>
+                  </Select.Item>
+                );
+              })}
+            </Select.List>
+            {runtimes.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
+            {blockedHint ? <p className="runtime-picker-hint">{blockedHint}</p> : null}
+          </Select.Popup>
+        </Select.Positioner>
+      </Select.Portal>
+    </Select.Root>
   );
 }

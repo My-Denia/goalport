@@ -65,7 +65,7 @@ function HandoffSummary({ item }: { item: ProductConversationItem }) {
  * Actionable runtime failure: one honest, actionable sentence; the exact raw
  * technical context sits in a collapsed disclosure. No guessed cause.
  */
-function ActionableError({ item }: { item: ProductConversationItem }) {
+function ActionableError({ item, onChooseRuntime, onDiagnose }: { item: ProductConversationItem; onChooseRuntime?: () => void; onDiagnose?: () => void }) {
   return (
     <article className="tl-event tl-system card-accent-red" data-kind="actionable-error">
       <div className="tl-avatar" aria-hidden="true">⚠</div>
@@ -75,6 +75,11 @@ function ActionableError({ item }: { item: ProductConversationItem }) {
           <Timestamp value={item.timestamp} />
         </div>
         <div className="tl-system-body">{item.body}</div>
+        {item.actions?.includes("select-runtime") && onChooseRuntime ? (
+          <button className="button button-small button-outline" type="button" onClick={onChooseRuntime}>Choose Runtime</button>
+        ) : item.actions?.includes("diagnose") && onDiagnose ? (
+          <button className="button button-small button-outline" type="button" onClick={onDiagnose}>Open details</button>
+        ) : null}
         {item.technicalDetails ? (
           <details className="technical-details">
             <summary>Technical details</summary>
@@ -107,7 +112,7 @@ function ActivityGroup({ items }: { items: ProductConversationItem[] }) {
 }
 
 /** Groups consecutive activity-summary items; everything else renders directly. */
-function renderItems(items: ProductConversationItem[]) {
+function renderItems(items: ProductConversationItem[], onChooseRuntime?: () => void, onDiagnose?: () => void) {
   const nodes: React.ReactNode[] = [];
   let activity: ProductConversationItem[] = [];
   const flush = () => {
@@ -130,7 +135,7 @@ function renderItems(items: ProductConversationItem[]) {
         nodes.push(<AssistantMessage key={item.id} item={item} />);
         break;
       case "actionable-error":
-        nodes.push(<ActionableError key={item.id} item={item} />);
+        nodes.push(<ActionableError key={item.id} item={item} onChooseRuntime={onChooseRuntime} onDiagnose={onDiagnose} />);
         break;
       case "handoff-summary":
         nodes.push(<HandoffSummary key={item.id} item={item} />);
@@ -173,11 +178,13 @@ interface ProductConversationViewProps {
   product: ProductConversation;
   loadingEarlier?: boolean;
   onLoadEarlier?: () => void;
+  onChooseRuntime?: () => void;
+  onDiagnose?: () => void;
 }
 
-export function ProductConversationView({ product, loadingEarlier = false, onLoadEarlier }: ProductConversationViewProps) {
+export function ProductConversationView({ product, loadingEarlier = false, onLoadEarlier, onChooseRuntime, onDiagnose }: ProductConversationViewProps) {
   const visibleItems = useMemo(() => coalesceVisibleFragments(product.items), [product.items]);
-  const nodes = useMemo(() => renderItems(visibleItems), [visibleItems]);
+  const nodes = useMemo(() => renderItems(visibleItems, onChooseRuntime, onDiagnose), [visibleItems, onChooseRuntime, onDiagnose]);
   return (
     <div className="timeline-inner" data-product-conversation="true">
       {product.pageInfo?.hasOlder && onLoadEarlier ? (

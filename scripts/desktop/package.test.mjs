@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { finished } from "node:stream/promises";
 import test from "node:test";
 import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity } from "./package.mjs";
 import { verifyPackage } from "./verify-package.mjs";
@@ -70,7 +71,11 @@ async function fixture(t) {
   const source = { revision: "b".repeat(40), dirty: true, files, treeSha256: sha256(files.map(({ path, sha256: hash }) => `${path}\0${hash}\n`).join("")) };
   const manifest = { schemaVersion: 1, product: "GoalPort", version: "1.0.0-rc.1", channel: "Stable V1 RC", electronVersion: "44.0.0", source, components: Object.fromEntries(COMPONENTS.map((name) => [name, fileHash(resolve(root, "resources", name))])) };
   writeFileSync(resolve(stage, "build-info.json"), JSON.stringify(manifest));
-  await asarApi().createPackage(stage, resolve(root, "resources/app.asar"));
+  // asar 3.x resolves createPackage with the output WriteStream immediately
+  // after end(), before its pending writes have finished. Hashing it here can
+  // otherwise capture a partial archive and make the fixture fail at random.
+  const archive = await asarApi().createPackage(stage, resolve(root, "resources/app.asar"));
+  await finished(archive);
   manifest.artifacts = artifactPaths(root).map((name) => ({ path: name, bytes: statSync(resolve(root, name)).size, sha256: fileHash(resolve(root, name)) }));
   const save = () => writeFileSync(resolve(root, "package-manifest.json"), JSON.stringify(manifest));
   save();
