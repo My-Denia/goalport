@@ -47,6 +47,9 @@ pub struct TurnResultView {
     /// The workspace had more status rows than this result lists.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub files_truncated: bool,
+    /// The ending git status could not be read, so no file change was inferred.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub comparison_unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,19 +183,28 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
         .and_then(|payload| payload.get("recorded"))
         .and_then(Value::as_bool)
         == Some(true);
-    let (before, during, unattributed, lists_truncated) = if recorded {
+    let (before, during, unattributed, lists_truncated, comparison_unavailable) = if recorded {
         let start = fingerprints_from_payload(baseline.and_then(|record| record.payload.as_ref()));
         let start_truncated = baseline
             .and_then(|record| record.payload.as_ref())
             .and_then(|payload| payload.get("entriesTruncated"))
             .and_then(Value::as_bool)
             == Some(true);
-        let end = read_fingerprints(workspace).unwrap_or(StatusRead { entries: Vec::new(), truncated: false });
-        let attributed = attributed_paths(&records, baseline.map(|record| record.event.seq).unwrap_or(0), terminal.event.seq);
-        let (before, during, unattributed, dropped) = classify(workspace, &start, &end.entries, &attributed);
-        (before, during, unattributed, start_truncated || end.truncated || dropped)
+        match read_fingerprints(workspace) {
+            None => {
+                let before = start.iter().take(MAX_FILES).map(|entry| file_json(entry, "before")).collect();
+                (before, Vec::new(), Vec::new(), start_truncated, true)
+            }
+            Some(end) => {
+                let attributed = attributed_paths(&records, baseline.map(|record| record.event.seq).unwrap_or(0), terminal.event.seq);
+                // A truncated end window cannot prove that a baseline path
+                // disappeared. Absence from the first 80 rows is not a delete.
+                let (before, during, unattributed, dropped) = classify(workspace, &start, &end.entries, &attributed, !end.truncated);
+                (before, during, unattributed, start_truncated || end.truncated || dropped, false)
+            }
+        }
     } else {
-        (Vec::new(), Vec::new(), Vec::new(), false)
+        (Vec::new(), Vec::new(), Vec::new(), false, false)
     };
     let (reply_state, reply_text, reply_truncated) = reply_for(&records, terminal);
     Ok(Some(json!({
@@ -214,7 +226,8 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
         "before": before,
         "during": during,
         "unattributed": unattributed,
-        "filesTruncated": lists_truncated
+        "filesTruncated": lists_truncated,
+        "comparisonUnavailable": comparison_unavailable
     })))
 }
 
@@ -250,6 +263,7 @@ fn view_from_payload(payload: &Value, records: &[EventRecord], result_seq: i64) 
         commands,
         commands_truncated,
         files_truncated: payload.get("filesTruncated").and_then(Value::as_bool) == Some(true),
+        comparison_unavailable: payload.get("comparisonUnavailable").and_then(Value::as_bool) == Some(true),
     }
 }
 
@@ -459,6 +473,7 @@ fn classify(
     start: &[Fingerprint],
     end: &[Fingerprint],
     attributed: &BTreeMap<String, ()>,
+    allow_disappearance: bool,
 ) -> (Vec<Value>, Vec<Value>, Vec<Value>, bool) {
     let mut before = Vec::new();
     let mut during = Vec::new();
@@ -482,7 +497,7 @@ fn classify(
         }
     }
     for entry in start {
-        if path_still_present(end, &entry.path) {
+        if !allow_disappearance || path_still_present(end, &entry.path) {
             continue;
         }
         // A baseline path that git status no longer lists was deleted, or a
@@ -1276,6 +1291,70 @@ mod tests {
         let result = &project_turn_results(&store, "attempt-many").unwrap()[0];
         assert!(result.files_truncated, "{result:?}");
         assert_eq!(result.before.len(), MAX_FILES);
+    }
+
+    #[test]
+    fn a_failed_end_status_does_not_invent_file_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "turn@example.com"]);
+        git(root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
+        fs::write(root.join("scratch.txt"), "user file\n").unwrap();
+        let payload = baseline_payload(root, "unreadable-end");
+        assert_eq!(payload["recorded"], true);
+        let db = root.join("unreadable.sqlite");
+        let store = prepared(&db, root, "attempt-unreadable");
+        append_on(&store, "attempt-unreadable", 1, "workspace.baseline", &payload);
+        fs::rename(root.join(".git"), root.join("git-hidden")).unwrap();
+        append_on(&store, "attempt-unreadable", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-unreadable", root, 3);
+        let result = &project_turn_results(&store, "attempt-unreadable").unwrap()[0];
+        assert!(result.comparison_unavailable, "{result:?}");
+        assert!(result.before.iter().any(|file| file.path == "tracked.txt"));
+        assert!(result.before.iter().any(|file| file.path == "scratch.txt"));
+        assert!(result.during.is_empty() && result.unattributed.is_empty(), "{result:?}");
+    }
+
+    #[test]
+    fn a_truncated_window_shift_does_not_invent_a_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "turn@example.com"]);
+        git(root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        for index in 0..=MAX_FILES {
+            fs::write(root.join(format!("file-{index:03}.txt")), "same\n").unwrap();
+        }
+        let payload = baseline_payload(root, "shift");
+        assert_eq!(payload["entriesTruncated"], true);
+        let captured: Vec<String> = payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.get("path").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        fs::write(root.join("000-shift.txt"), "new\n").unwrap();
+        let db = root.join("shift.sqlite");
+        let store = prepared(&db, root, "attempt-shift");
+        append_on(&store, "attempt-shift", 1, "workspace.baseline", &payload);
+        append_on(&store, "attempt-shift", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-shift", root, 3);
+        let result = &project_turn_results(&store, "attempt-shift").unwrap()[0];
+        assert!(result.files_truncated);
+        assert!(!result.comparison_unavailable);
+        let invented = result.during.iter().chain(result.unattributed.iter()).any(|file| {
+            captured.iter().any(|path| path == &file.path) && (file.change == "modified" || file.change == "deleted")
+        });
+        assert!(!invented, "{result:?}");
+        assert!(result.unattributed.iter().chain(result.during.iter()).any(|file| file.path == "000-shift.txt" && file.change == "added"), "{result:?}");
     }
 
     #[test]

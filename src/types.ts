@@ -459,6 +459,7 @@ export interface TurnResult {
   commands: TurnCommandFact[];
   commandsTruncated?: boolean;
   filesTruncated?: boolean;
+  comparisonUnavailable?: boolean;
 }
 
 const initialTimeline: TimelineItem[] = [
@@ -1064,7 +1065,8 @@ function normalizeTurnResults(value: unknown): TurnResult[] | undefined {
       unattributed: normalizeTurnFiles(row.unattributed),
       commands: normalizeTurnCommands(row.commands),
       ...((row.commandsTruncated ?? row.commands_truncated) === true ? { commandsTruncated: true } : {}),
-      ...((row.filesTruncated ?? row.files_truncated) === true ? { filesTruncated: true } : {})
+      ...((row.filesTruncated ?? row.files_truncated) === true ? { filesTruncated: true } : {}),
+      ...((row.comparisonUnavailable ?? row.comparison_unavailable) === true ? { comparisonUnavailable: true } : {})
     } satisfies TurnResult;
   }).filter(isPresent);
   return results;
