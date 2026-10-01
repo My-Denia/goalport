@@ -48,7 +48,7 @@ const ASSERTION_MAP = [
   { superseded: "\"Message recorded for task\" success banner wait", current: "quiet success: draft cleared, no success banner, exact-once durable message/reply, rendered product conversation" },
   { retained: "UI attempt.state labels remain lowercase", current: "waiting|active|completed|failed from attempt_to_ui; durable attempt states and refusal labels are separate contracts" },
   { superseded: "terminal cross-provider race via two UI Select buttons clicked in one renderer task", current: "UI picker serializes (list closes on select); Core race proof retained through two concurrent raw select_runtime commands (labelled api)" },
-  { superseded: "explicit replay of send_message answers duplicate from any selected conversation", current: "replay of the exact UI conversation_send command/requestId: answered duplicate when its conversation is selected; refused fail-closed (\"not selected by Core\") while another conversation is displayed — recorded, not weakened" },
+  { superseded: "explicit replay of send_message answers duplicate from any selected conversation", current: "exact conversation_send replay of the same requestId is duplicate=true with zero re-delivery whether or not that goal is the shared selection; omitting attemptId while another goal is selected is still refused" },
   { superseded: "refusal text matched in page body (\"Core refused: ...\")", current: "visible readable refusal sentence in the notice banner plus the exact Core reason read from its collapsed technical disclosure and from durable rows" },
   { superseded: "responsive check of .context-rail/.runtime-row summary", current: "responsive check of .campaign-nav, the composer .runtime-picker and the Session details drawer" }
 ];
@@ -806,16 +806,18 @@ async function smoke() {
         return held.filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length === 1
           && held.filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === heldText).length === 1;
       }, 30000);
-      // Replay of the exact UI command (type, payload, requestId) while another
-      // conversation is displayed is refused fail-closed by the current Core
-      // (the old global duplicate acknowledgement is a superseded contract).
+      // Replay of the exact UI command (type, payload, requestId) is idempotent
+      // for the named campaign and attempt. Shared selection stays where it is.
       const beforeReplay = counts();
-      const replayRefused = await command("conversation_send", { message: heldText, campaignId: second.activeCampaignId, attemptId: heldTarget.attempt.id }, sends[0].requestId);
-      assert.equal(replayRefused.goalportRejected, true, "replay while another conversation is selected must not re-deliver");
-      assert.match(replayRefused.error, /is not selected by Core/);
-      assert.deepEqual(counts(), beforeReplay, "refused replay writes nothing");
+      const replayWhileOther = await command("conversation_send", { message: heldText, campaignId: second.activeCampaignId, attemptId: heldTarget.attempt.id }, sends[0].requestId);
+      assert.equal(replayWhileOther.accepted, true, "cross-goal exact replay is the recorded outcome");
+      assert.equal(replayWhileOther.duplicate, true, "replay while another conversation is selected must not re-deliver");
+      assert.equal((await snapshot()).activeCampaignId, third.activeCampaignId, "shared selection stays on Campaign C");
+      assert.deepEqual(counts(), beforeReplay, "cross-goal replay writes nothing");
+      assert.equal(events(heldTarget.attempt.id).filter((event) => event.kind === "message.user" && event.payload?.text === heldText).length, 1);
+      assert.equal(events(heldTarget.attempt.id).filter((event) => event.kind === "runtime.reply.delta" && event.payload?.text === heldText).length, 1);
       // With its own conversation selected again, the identical request is
-      // answered from the recorded outcome: duplicate, nothing re-delivered.
+      // still answered from the recorded outcome: duplicate, nothing re-delivered.
       await click(".campaign-item", await campaignButton(goalB));
       await until("Campaign B selected again", async () => (await snapshot()).activeCampaignId === second.activeCampaignId);
       const replay = await command("conversation_send", { message: heldText, campaignId: second.activeCampaignId, attemptId: heldTarget.attempt.id }, sends[0].requestId);
@@ -838,7 +840,7 @@ async function smoke() {
       await screen("08-delayed-send-new-campaign");
       marker("ui-cdp+api+db/delayed-send-goal-switch-and-exact-replay", {
         sourceCampaign: second.activeCampaignId, selectedCampaign: third.activeCampaignId,
-        issued: sends, replayWhileOtherSelected: { refused: replayRefused.error }, replayAnswer: { accepted: replay.accepted, duplicate: replay.duplicate },
+        issued: sends, replayWhileOtherSelected: { accepted: replayWhileOther.accepted, duplicate: replayWhileOther.duplicate }, replayAnswer: { accepted: replay.accepted, duplicate: replay.duplicate },
         counts: afterDelayed, superseded: "old send_message replay acknowledged from any selection"
       });
       await click(".campaign-item", await campaignButton(goalC));

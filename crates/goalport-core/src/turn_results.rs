@@ -44,6 +44,9 @@ pub struct TurnResultView {
     /// Later command records for this turn were not included.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub commands_truncated: bool,
+    /// The workspace had more status rows than this result lists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub files_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,10 +93,11 @@ struct Fingerprint {
 
 pub fn baseline_payload(workspace: &Path, request_id: &str) -> Value {
     match read_fingerprints(workspace) {
-        Some(entries) => json!({
+        Some(read) => json!({
             "requestId": request_id,
             "recorded": true,
-            "entries": entries.iter().map(fingerprint_json).collect::<Vec<_>>()
+            "entriesTruncated": read.truncated,
+            "entries": read.entries.iter().map(fingerprint_json).collect::<Vec<_>>()
         }),
         None => json!({
             "requestId": request_id,
@@ -176,13 +180,19 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
         .and_then(|payload| payload.get("recorded"))
         .and_then(Value::as_bool)
         == Some(true);
-    let (before, during, unattributed) = if recorded {
+    let (before, during, unattributed, lists_truncated) = if recorded {
         let start = fingerprints_from_payload(baseline.and_then(|record| record.payload.as_ref()));
-        let end = read_fingerprints(workspace).unwrap_or_default();
+        let start_truncated = baseline
+            .and_then(|record| record.payload.as_ref())
+            .and_then(|payload| payload.get("entriesTruncated"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        let end = read_fingerprints(workspace).unwrap_or(StatusRead { entries: Vec::new(), truncated: false });
         let attributed = attributed_paths(&records, baseline.map(|record| record.event.seq).unwrap_or(0), terminal.event.seq);
-        classify(workspace, &start, &end, &attributed)
+        let (before, during, unattributed, dropped) = classify(workspace, &start, &end.entries, &attributed);
+        (before, during, unattributed, start_truncated || end.truncated || dropped)
     } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new(), false)
     };
     let (reply_state, reply_text, reply_truncated) = reply_for(&records, terminal);
     Ok(Some(json!({
@@ -203,7 +213,8 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
         }),
         "before": before,
         "during": during,
-        "unattributed": unattributed
+        "unattributed": unattributed,
+        "filesTruncated": lists_truncated
     })))
 }
 
@@ -238,6 +249,7 @@ fn view_from_payload(payload: &Value, records: &[EventRecord], result_seq: i64) 
         unattributed: file_facts(payload.get("unattributed")),
         commands,
         commands_truncated,
+        files_truncated: payload.get("filesTruncated").and_then(Value::as_bool) == Some(true),
     }
 }
 
@@ -447,12 +459,14 @@ fn classify(
     start: &[Fingerprint],
     end: &[Fingerprint],
     attributed: &BTreeMap<String, ()>,
-) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+) -> (Vec<Value>, Vec<Value>, Vec<Value>, bool) {
     let mut before = Vec::new();
     let mut during = Vec::new();
     let mut unattributed = Vec::new();
+    let mut dropped = false;
     for entry in start {
         if before.len() >= MAX_FILES {
+            dropped = true;
             break;
         }
         before.push(file_json(entry, "before"));
@@ -463,7 +477,9 @@ fn classify(
         }
         // A rename/copy is one Git record. Do not also invent an add of the
         // destination or a delete of the source from the other path.
-        push_change(&mut during, &mut unattributed, attributed, entry);
+        if !push_change(&mut during, &mut unattributed, attributed, entry) {
+            dropped = true;
+        }
     }
     for entry in start {
         if path_still_present(end, &entry.path) {
@@ -473,9 +489,11 @@ fn classify(
         // dirty tracked file was restored to HEAD. Either way the user's
         // bytes changed and must show up as a turn change, not only as
         // "already in the workspace".
-        push_change(&mut during, &mut unattributed, attributed, &disappeared(workspace, entry));
+        if !push_change(&mut during, &mut unattributed, attributed, &disappeared(workspace, entry)) {
+            dropped = true;
+        }
     }
-    (before, during, unattributed)
+    (before, during, unattributed, dropped)
 }
 
 fn path_still_present(end: &[Fingerprint], path: &str) -> bool {
@@ -522,17 +540,22 @@ fn push_change(
     unattributed: &mut Vec<Value>,
     attributed: &BTreeMap<String, ()>,
     entry: &Fingerprint,
-) {
+) -> bool {
     let row = file_json(entry, &entry.change);
     let named = attributed.contains_key(&entry.path)
         || entry.from_path.as_ref().is_some_and(|path| attributed.contains_key(path));
     if named {
         if during.len() < MAX_FILES {
             during.push(row);
+            return true;
         }
-    } else if unattributed.len() < MAX_FILES {
-        unattributed.push(row);
+        return false;
     }
+    if unattributed.len() < MAX_FILES {
+        unattributed.push(row);
+        return true;
+    }
+    false
 }
 
 fn fingerprints_from_payload(payload: Option<&Value>) -> Vec<Fingerprint> {
@@ -580,7 +603,12 @@ fn file_json(entry: &Fingerprint, change: &str) -> Value {
     })
 }
 
-fn read_fingerprints(workspace: &Path) -> Option<Vec<Fingerprint>> {
+struct StatusRead {
+    entries: Vec<Fingerprint>,
+    truncated: bool,
+}
+
+fn read_fingerprints(workspace: &Path) -> Option<StatusRead> {
     if !workspace.is_dir() {
         return None;
     }
@@ -604,7 +632,12 @@ fn read_fingerprints(workspace: &Path) -> Option<Vec<Fingerprint>> {
     if !status.status.success() {
         return None;
     }
-    Some(parse_porcelain(&status.stdout, workspace))
+    let records = parse_porcelain_records(&status.stdout);
+    let truncated = records.len() > MAX_FILES;
+    Some(StatusRead {
+        entries: records.into_iter().take(MAX_FILES).map(|record| fingerprint(workspace, record)).collect(),
+        truncated,
+    })
 }
 
 struct PorcelainRecord {
@@ -614,16 +647,6 @@ struct PorcelainRecord {
     from_path: Option<String>,
 }
 
-fn parse_porcelain(bytes: &[u8], workspace: &Path) -> Vec<Fingerprint> {
-    parse_porcelain_records(bytes)
-        .into_iter()
-        .take(MAX_FILES)
-        .map(|record| fingerprint(workspace, record))
-        .collect()
-}
-
-/// `git status --porcelain=v1 -z` puts the destination in the status record
-/// and the source in the following NUL-terminated field for `R` and `C`.
 fn parse_porcelain_records(bytes: &[u8]) -> Vec<PorcelainRecord> {
     let fields: Vec<&[u8]> = bytes.split(|byte| *byte == 0).filter(|field| !field.is_empty()).collect();
     let mut records = Vec::new();
@@ -1227,6 +1250,32 @@ mod tests {
         assert_eq!(deleted.content_inspection, "not-applicable");
         let restored = result.unattributed.iter().find(|file| file.path == "tracked.txt").expect("restored tracked");
         assert_eq!(restored.change, "modified");
+    }
+
+    #[test]
+    fn more_than_the_file_cap_is_marked_truncated() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "turn@example.com"]);
+        git(root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        for index in 0..=MAX_FILES {
+            fs::write(root.join(format!("extra-{index}.txt")), "x\n").unwrap();
+        }
+        let payload = baseline_payload(root, "many");
+        assert_eq!(payload["entriesTruncated"], true);
+        assert_eq!(payload["entries"].as_array().unwrap().len(), MAX_FILES);
+        let db = root.join("many.sqlite");
+        let store = prepared(&db, root, "attempt-many");
+        append_on(&store, "attempt-many", 1, "workspace.baseline", &payload);
+        append_on(&store, "attempt-many", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-many", root, 3);
+        let result = &project_turn_results(&store, "attempt-many").unwrap()[0];
+        assert!(result.files_truncated, "{result:?}");
+        assert_eq!(result.before.len(), MAX_FILES);
     }
 
     #[test]
