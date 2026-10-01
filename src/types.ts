@@ -458,6 +458,7 @@ export interface TurnResult {
   unattributed: TurnFileFact[];
   commands: TurnCommandFact[];
   commandsTruncated?: boolean;
+  filesTruncated?: boolean;
 }
 
 const initialTimeline: TimelineItem[] = [
@@ -1062,7 +1063,8 @@ function normalizeTurnResults(value: unknown): TurnResult[] | undefined {
       during: normalizeTurnFiles(row.during),
       unattributed: normalizeTurnFiles(row.unattributed),
       commands: normalizeTurnCommands(row.commands),
-      ...((row.commandsTruncated ?? row.commands_truncated) === true ? { commandsTruncated: true } : {})
+      ...((row.commandsTruncated ?? row.commands_truncated) === true ? { commandsTruncated: true } : {}),
+      ...((row.filesTruncated ?? row.files_truncated) === true ? { filesTruncated: true } : {})
     } satisfies TurnResult;
   }).filter(isPresent);
   return results;
