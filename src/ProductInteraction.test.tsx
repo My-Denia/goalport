@@ -222,4 +222,17 @@ describe('conversation-first product boundary', () => {
     expect(approval.textContent).not.toContain('permission-private');
     expect(screen.queryByRole('complementary')).toBeNull();
   });
+
+  it('leaves the Electron document address unchanged when opening another goal', async () => {
+    window.history.replaceState(null, '', '/');
+    const current = base();
+    const other = { ...current.campaigns[0], id: 'campaign-b', title: 'Campaign B' };
+    const snapshot = { ...current, campaigns: [...current.campaigns, other] };
+    mount(snapshot, async (request) => request.messageType === 'select_campaign'
+      ? { ...snapshot, activeCampaignId: String(request.payload.campaignId) }
+      : snapshot);
+    fireEvent.click(await screen.findByRole('button', { name: /campaign b/i }));
+    await waitFor(() => expect(document.querySelector('.goalport-shell')?.getAttribute('data-campaign-id')).toBe('campaign-b'));
+    expect(window.location.pathname).toBe('/');
+  });
 });

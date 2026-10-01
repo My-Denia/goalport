@@ -160,4 +160,25 @@ describe("Linux Core bridge", () => {
     expect(stale.activeCampaignId).toBe("campaign-b");
     expect((await client.snapshot()).activeCampaignId).toBe("campaign-b");
   });
+
+  it("keeps Core connected when a request is refused", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      if (body.messageType === "rename_conversation") {
+        return jsonResponse({ ok: false, error: "That title is not allowed" });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: goal("campaign-a", "Goal A") } });
+    }));
+    const client = getCoreClient();
+    const connected = await client.snapshot();
+    expect(connected.connection).toBe("connected");
+    const refused = await client.renameConversation!("campaign-a", "nope");
+    expect(refused.connection).toBe("connected");
+    expect(refused.commandOutcome?.kind).toBe("refused");
+    expect(refused.notices[0]).toMatch(/^Core refused:/);
+  });
 });

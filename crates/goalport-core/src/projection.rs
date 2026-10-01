@@ -1173,6 +1173,7 @@ impl UiController {
             first_user_message.as_deref(),
             conversation_page_info,
         )?;
+        let (turn_results, omitted_turns) = crate::turn_results::project_turn_result_window(&self.store, &active_attempt.id)?;
         let mut snapshot = CoreSnapshot {
             related_holds,
             protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
@@ -1193,7 +1194,7 @@ impl UiController {
             evidence,
             stop_responsibility,
             product_conversation,
-            turn_results: crate::turn_results::project_turn_results(&self.store, &active_attempt.id)?,
+            turn_results,
             preview: active_attempt.id != UNASSIGNED_ATTEMPT_ID
                 && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
@@ -1208,6 +1209,10 @@ impl UiController {
             },
             bounds: ProjectionBounds::default(),
         };
+        if omitted_turns > 0 {
+            snapshot.bounds.truncated = true;
+            snapshot.bounds.omitted_counts.insert("turnResults".into(), omitted_turns);
+        }
         if snapshot.product_conversation.page_info.has_older {
             snapshot.bounds.truncated = true;
             snapshot

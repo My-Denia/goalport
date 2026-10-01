@@ -779,7 +779,7 @@ function App() {
     const known = snapshot.campaigns.some((campaign) => campaign.id === campaignId)
       || snapshot.goalOverview?.goals.some((goal) => goal.campaignId === campaignId);
     if (!known || campaignId === snapshot.activeCampaignId) return;
-    pushGoalRoute(campaignId);
+    if (client.mode === "linux-core") pushGoalRoute(campaignId);
     if (window.innerWidth <= 860) setNavCollapsed(true);
     // Explicit navigation closes a pending draft; it is not a submission.
     if (draftGoal) {
@@ -1033,7 +1033,7 @@ function App() {
                 <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
               </div>
 
-              <TurnResults results={snapshot.turnResults} />
+              <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
 
               <BackgroundAttention
                 snapshot={snapshot}

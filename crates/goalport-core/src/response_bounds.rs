@@ -224,6 +224,11 @@ fn prioritize_control(snapshot: &mut CoreSnapshot) {
 }
 
 fn pop_optional_control(snapshot: &mut CoreSnapshot) -> bool {
+    if !snapshot.turn_results.is_empty() {
+        snapshot.turn_results.remove(0);
+        snapshot.bounds.truncated = true;
+        return true;
+    }
     if !snapshot.notices.is_empty() {
         snapshot.notices.pop();
         snapshot.bounds.truncated = true;
@@ -280,6 +285,7 @@ fn collection_counts(snapshot: &CoreSnapshot) -> BTreeMap<&'static str, usize> {
         ("evidence", snapshot.evidence.len()),
         ("relatedHolds", snapshot.related_holds.len()),
         ("notices", snapshot.notices.len()),
+        ("turnResults", snapshot.turn_results.len()),
     ])
 }
 
@@ -288,10 +294,11 @@ fn record_omissions(snapshot: &mut CoreSnapshot, original: &BTreeMap<&'static st
     for (key, count) in original {
         let omitted = count.saturating_sub(*current.get(key).unwrap_or(&0));
         if omitted > 0 {
+            let already = snapshot.bounds.omitted_counts.get(*key).copied().unwrap_or(0);
             snapshot
                 .bounds
                 .omitted_counts
-                .insert((*key).into(), omitted);
+                .insert((*key).into(), already + omitted);
         }
     }
 }
