@@ -199,7 +199,14 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
                 let attributed = attributed_paths(&records, baseline.map(|record| record.event.seq).unwrap_or(0), terminal.event.seq);
                 // A truncated end window cannot prove that a baseline path
                 // disappeared. Absence from the first 80 rows is not a delete.
-                let (before, during, unattributed, dropped) = classify(workspace, &start, &end.entries, &attributed, !end.truncated);
+                let (before, during, unattributed, dropped) = classify(
+                    workspace,
+                    &start,
+                    &end.entries,
+                    &attributed,
+                    !end.truncated,
+                    start_truncated,
+                );
                 (before, during, unattributed, start_truncated || end.truncated || dropped, false)
             }
         }
@@ -474,6 +481,7 @@ fn classify(
     end: &[Fingerprint],
     attributed: &BTreeMap<String, ()>,
     allow_disappearance: bool,
+    start_truncated: bool,
 ) -> (Vec<Value>, Vec<Value>, Vec<Value>, bool) {
     let mut before = Vec::new();
     let mut during = Vec::new();
@@ -488,6 +496,11 @@ fn classify(
     }
     for entry in end {
         if start.iter().any(|prior| same_git_fact(prior, entry)) {
+            continue;
+        }
+        // A truncated baseline did not capture every pre-existing path.
+        // An end row that was outside that slice is not proof of an add.
+        if start_truncated && !captured_baseline_path(start, &entry.path) {
             continue;
         }
         // A rename/copy is one Git record. Do not also invent an add of the
@@ -509,6 +522,10 @@ fn classify(
         }
     }
     (before, during, unattributed, dropped)
+}
+
+fn captured_baseline_path(start: &[Fingerprint], path: &str) -> bool {
+    start.iter().any(|entry| entry.path == path || entry.from_path.as_deref() == Some(path))
 }
 
 fn path_still_present(end: &[Fingerprint], path: &str) -> bool {
@@ -1354,7 +1371,51 @@ mod tests {
             captured.iter().any(|path| path == &file.path) && (file.change == "modified" || file.change == "deleted")
         });
         assert!(!invented, "{result:?}");
-        assert!(result.unattributed.iter().chain(result.during.iter()).any(|file| file.path == "000-shift.txt" && file.change == "added"), "{result:?}");
+        assert!(
+            result.unattributed.iter().chain(result.during.iter()).all(|file| file.path != "000-shift.txt"),
+            "a path outside the captured baseline is not an add: {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_sliding_into_a_truncated_window_is_not_an_add() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        git(&root, &["init"]);
+        git(&root, &["config", "user.email", "turn@example.com"]);
+        git(&root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(&root, &["add", "base.txt"]);
+        git(&root, &["commit", "-m", "base"]);
+        for index in 0..=MAX_FILES {
+            fs::write(root.join(format!("file-{index:03}.txt")), "same\n").unwrap();
+        }
+        let payload = baseline_payload(&root, "slide");
+        assert_eq!(payload["entriesTruncated"], true);
+        let captured: Vec<String> = payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.get("path").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        assert!(captured.iter().any(|path| path == "file-000.txt"), "{captured:?}");
+        assert!(!captured.iter().any(|path| path == "file-080.txt"), "{captured:?}");
+        fs::remove_file(root.join("file-000.txt")).unwrap();
+        let db = directory.path().join("slide.sqlite");
+        let store = prepared(&db, &root, "attempt-slide");
+        append_on(&store, "attempt-slide", 1, "workspace.baseline", &payload);
+        append_on(&store, "attempt-slide", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-slide", &root, 3);
+        let result = &project_turn_results(&store, "attempt-slide").unwrap()[0];
+        assert!(result.files_truncated);
+        assert!(!result.comparison_unavailable);
+        let deleted = result.unattributed.iter().chain(result.during.iter()).find(|file| file.path == "file-000.txt");
+        assert_eq!(deleted.map(|file| file.change.as_str()), Some("deleted"), "{result:?}");
+        assert!(
+            result.unattributed.iter().chain(result.during.iter()).all(|file| file.path != "file-080.txt"),
+            "the pre-existing file that slid into the window is not an add: {result:?}"
+        );
     }
 
     #[test]
