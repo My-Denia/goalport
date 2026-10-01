@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { CoreSnapshot } from "../types";
+import type { CoreSnapshot, GoalCard } from "../types";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
@@ -23,8 +23,10 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const campaignListUnavailable = snapshot.bounds?.projectionUnavailable === true
+  const overview = snapshot.goalOverview;
+  const campaignListUnavailable = !overview && snapshot.bounds?.projectionUnavailable === true
     && snapshot.campaigns.length === 0;
+  const goalCount = overview ? overview.goals.length : snapshot.campaigns.length;
 
   useEffect(() => {
     if (renamingId) renameInputRef.current?.focus();
@@ -48,31 +50,91 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
           <span className="project-switcher-copy">
             <strong>{snapshot.project.name}</strong>
           </span>
-          <select
-            className="project-select"
-            aria-label="Project"
-            value={snapshot.selectedProjectId || snapshot.project.id}
-            onChange={(event) => onSelectProject(event.target.value)}
-          >
-            {(snapshot.projects.length > 0 ? snapshot.projects : [snapshot.project]).map((project) => (
-              <option key={project.id} value={project.id}>{project.name}</option>
-            ))}
-          </select>
+          {overview ? (
+            <span className="project-select project-select-static">{snapshot.project.name || "Workspace"}</span>
+          ) : (
+            <select
+              className="project-select"
+              aria-label="Project"
+              value={snapshot.selectedProjectId || snapshot.project.id}
+              onChange={(event) => onSelectProject(event.target.value)}
+            >
+              {(snapshot.projects.length > 0 ? snapshot.projects : [snapshot.project]).map((project) => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
+          )}
         </label>
       </div>
 
       <div className="sidebar-section-title">
         <span>Goals</span>
         <span className="count-badge" aria-label={campaignListUnavailable ? "Goal list unavailable" : undefined}>
-          {campaignListUnavailable ? "–" : snapshot.campaigns.length}
+          {campaignListUnavailable ? "–" : goalCount}
         </span>
       </div>
 
       <div className="campaign-list">
         {campaignListUnavailable ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
-        ) : snapshot.campaigns.length === 0 ? (
+        ) : goalCount === 0 ? (
           <p className="nav-empty">No goals yet. Start one from the top bar.</p>
+        ) : overview ? (
+          overview.goals.map((goal) => {
+            const active = goal.campaignId === snapshot.activeCampaignId;
+            const renaming = renamingId === goal.campaignId;
+            return (
+              <div key={goal.campaignId} className={`campaign-item-wrap${active ? " campaign-active" : ""}`}>
+                {renaming ? (
+                  <input
+                    ref={renameInputRef}
+                    className="campaign-rename-input"
+                    aria-label="Rename goal"
+                    value={renameDraft}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitRename();
+                      } else if (event.key === "Escape") {
+                        event.preventDefault();
+                        setRenamingId(null);
+                      }
+                    }}
+                    onBlur={commitRename}
+                  />
+                ) : (
+                  <button
+                    className={`campaign-item${active ? " campaign-active" : ""}`}
+                    type="button"
+                    title={goal.workspaceRoot}
+                    onClick={() => onSelectCampaign(goal.campaignId)}
+                  >
+                    <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
+                    <span className="campaign-item-copy">
+                      <strong>{goal.title}</strong>
+                      {attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
+                    </span>
+                    {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
+                  </button>
+                )}
+                {active && !renaming && !collapsed ? (
+                  <button
+                    className="campaign-rename-button"
+                    type="button"
+                    aria-label="Rename goal"
+                    title="Rename this goal"
+                    onClick={() => {
+                      setRenamingId(goal.campaignId);
+                      setRenameDraft(goal.title);
+                    }}
+                  >
+                    <span aria-hidden="true">✎</span>
+                  </button>
+                ) : null}
+              </div>
+            );
+          })
         ) : (
           snapshot.campaigns.map((campaign) => {
             const active = campaign.id === snapshot.activeCampaignId;
@@ -134,4 +196,43 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
       <div className="nav-spacer" />
     </nav>
   );
+}
+
+function attentionClass(goal: GoalCard): string {
+  switch (goal.attention) {
+    case "awaiting_approval":
+    case "needs_recovery":
+      return "campaign-state-paused";
+    case "failed":
+      return "campaign-state-failed";
+    case "complete":
+      return "campaign-state-complete";
+    case "running":
+    case "idle":
+      return "campaign-state-active";
+    default: {
+      const unreachable: never = goal.attention;
+      return unreachable;
+    }
+  }
+}
+
+function attentionText(goal: GoalCard): string {
+  switch (goal.attention) {
+    case "awaiting_approval":
+      return "Needs approval";
+    case "failed":
+      return "Failed";
+    case "needs_recovery":
+      return "Needs resume";
+    case "running":
+      return "Running";
+    case "idle":
+    case "complete":
+      return "";
+    default: {
+      const unreachable: never = goal.attention;
+      return unreachable;
+    }
+  }
 }

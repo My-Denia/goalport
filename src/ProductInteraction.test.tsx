@@ -141,6 +141,27 @@ describe('conversation-first product boundary', () => {
     expect(screen.queryByRole('button', { name: 'Close Runtime session' })).toBeNull();
   });
 
+  it('says the session is closing instead of starting while close is in flight', async () => {
+    const attached = base();
+    attached.productConversation!.session = { state: 'attached', nativeIdKnown: true };
+    attached.productConversation!.turn = { state: 'starting', canSend: false, canStop: false, actions: ['close-session'], reasonCode: 'turn-starting' };
+    let release: (snapshot: CoreSnapshot) => void = () => {};
+    const pending = new Promise<CoreSnapshot>((resolve) => { release = resolve; });
+    mount(attached, () => pending);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
+    expect(screen.getAllByText('Starting').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Close Runtime session' }));
+    expect(await screen.findAllByText('Closing session…')).not.toHaveLength(0);
+    expect(screen.queryByText('Starting')).toBeNull();
+    expect(screen.queryByText('The Runtime is starting. Wait for it to confirm this turn.')).toBeNull();
+    const closed = base();
+    closed.productConversation!.session = { state: 'closed', nativeIdKnown: true };
+    closed.productConversation!.turn = { state: 'completed', canSend: false, canStop: false, actions: [] };
+    release(closed);
+    expect(await screen.findByText('Runtime session closed. This goal remains available.')).toBeTruthy();
+    expect(screen.getByText('Closed')).toBeTruthy();
+  });
+
   it('offers the Core-approved close action for an exited Runtime', async () => {
     const exited = base();
     exited.productConversation!.runtime.state = 'unavailable';

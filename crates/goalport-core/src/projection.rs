@@ -241,10 +241,56 @@ pub struct CoreSnapshot {
     /// Runtime preference independent of any live turn, and the fail-closed turn
     /// model with canStop/canSend. Additive; the raw timeline above is unchanged.
     pub product_conversation: ProductConversation,
+    /// Frozen read-only results for settled turns on the attempt being viewed.
+    #[serde(default)]
+    pub turn_results: Vec<crate::turn_results::TurnResultView>,
     pub preview: bool,
     pub notices: Vec<String>,
     #[serde(default)]
     pub bounds: ProjectionBounds,
+}
+
+const GOAL_OVERVIEW_LIMIT: usize = 128;
+const GOAL_PENDING_LIMIT: usize = 64;
+
+/// One goal on the workbench shell. Status only — not its transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCard {
+    pub campaign_id: String,
+    pub project_id: String,
+    pub workspace_root: String,
+    pub title: String,
+    /// `running` | `awaiting_approval` | `failed` | `needs_recovery` | `idle` | `complete`.
+    pub attention: String,
+    pub attempt_id: String,
+    pub provider: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalPendingItem {
+    pub decision_id: String,
+    pub campaign_id: String,
+    pub attempt_id: String,
+    pub title: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalOverview {
+    pub revision: String,
+    pub goals: Vec<GoalCard>,
+    pub pending: Vec<GoalPendingItem>,
+    pub truncated: bool,
+}
+
+struct SavedSelection {
+    project_id: String,
+    campaign_id: Option<String>,
+    task_id: Option<String>,
+    attempt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -343,16 +389,227 @@ impl UiController {
         &self.store
     }
 
-    pub(crate) fn snapshot_if_changed(&mut self, known_revision: Option<&str>) -> Result<Value, String> {
+    pub(crate) fn snapshot_if_changed(
+        &mut self,
+        known_revision: Option<&str>,
+        campaign_id: Option<&str>,
+    ) -> Result<Value, String> {
         self.flush_runtime_events()?;
         // Capture this BEFORE building the snapshot. A write arriving during
         // projection changes the next revision and prompts one more fetch.
-        let revision = self.current_view_revision()?;
+        // A campaign-scoped read ignores the shared selection, so one client
+        // looking at another goal does not invalidate this view.
+        let revision = match campaign_id {
+            Some(campaign_id) => self.scoped_view_revision(campaign_id)?,
+            None => self.current_view_revision()?,
+        };
         if known_revision == Some(revision.as_str()) {
             return Ok(json!({"unchanged":true,"revision":revision}));
         }
-        let snapshot = self.snapshot(None)?;
+        let snapshot = match campaign_id {
+            Some(campaign_id) => self.snapshot_for_campaign(campaign_id, None)?,
+            None => self.snapshot(None)?,
+        };
         Ok(json!({"unchanged":false,"revision":revision,"snapshot":snapshot}))
+    }
+
+    /// Shell revision for the workbench overview. Store and Runtime facts
+    /// matter; which client is looking at which goal does not.
+    fn shell_revision(&mut self) -> Result<String, String> {
+        let (changes, journal_order) = self.store.mutation_revision().map_err(store_message)?;
+        let view = json!({
+            "storeChanges": changes,
+            "journalOrder": journal_order,
+            "runtime": self.runtime_manager.view_revision_facts(),
+        });
+        Ok(sha256_hex(view.to_string().as_bytes()))
+    }
+
+    pub(crate) fn scoped_view_revision(&mut self, campaign_id: &str) -> Result<String, String> {
+        let (changes, journal_order) = self.store.mutation_revision().map_err(store_message)?;
+        let view = json!({
+            "storeChanges": changes,
+            "journalOrder": journal_order,
+            "campaignId": campaign_id,
+            "runtime": self.runtime_manager.view_revision_facts(),
+        });
+        Ok(sha256_hex(view.to_string().as_bytes()))
+    }
+
+    fn save_selection(&self) -> SavedSelection {
+        SavedSelection {
+            project_id: self.selected_project_id.clone(),
+            campaign_id: self.selected_campaign_id.clone(),
+            task_id: self.selected_task_id.clone(),
+            attempt_id: self.selected_attempt_id.clone(),
+        }
+    }
+
+    fn restore_selection(&mut self, saved: SavedSelection) {
+        self.selected_project_id = saved.project_id;
+        self.selected_campaign_id = saved.campaign_id;
+        self.selected_task_id = saved.task_id;
+        self.selected_attempt_id = saved.attempt_id;
+    }
+
+    /// Run `body` and put the shared selection back afterwards, including when
+    /// `body` returns an error. The caller holds `&mut self` for the whole
+    /// call, so another request cannot observe the temporary selection.
+    fn restoring_selection<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let saved = self.save_selection();
+        let result = body(self);
+        self.restore_selection(saved);
+        result
+    }
+
+    /// Project one campaign without writing the shared selection. Callers that
+    /// still use `snapshot` keep the single-window default; a detail read must
+    /// not become that default.
+    pub(crate) fn snapshot_for_campaign(
+        &mut self,
+        campaign_id: &str,
+        after_cursor: Option<i64>,
+    ) -> Result<CoreSnapshot, String> {
+        if campaign_id.trim().is_empty() {
+            return Err("campaignId is required".into());
+        }
+        let project_id = self
+            .store
+            .campaign_project(campaign_id)
+            .map_err(store_message)?
+            .ok_or_else(|| format!("campaign {campaign_id} has no owning project"))?;
+        self.store
+            .get_campaign(campaign_id)
+            .map_err(store_message)?;
+        let campaign_id = campaign_id.to_string();
+        self.restoring_selection(|controller| {
+            controller.selected_project_id = project_id;
+            controller.selected_campaign_id = Some(campaign_id);
+            controller.selected_task_id = None;
+            controller.selected_attempt_id = None;
+            controller.snapshot(after_cursor)
+        })
+    }
+
+    /// Lightweight cards and pending approvals for every goal. This does not
+    /// include conversation history and does not change which goal a snapshot
+    /// would show.
+    pub(crate) fn goal_overview(&mut self) -> Result<GoalOverview, String> {
+        self.flush_runtime_events()?;
+        let revision = self.shell_revision()?;
+        let projects = self.store.list_projects().map_err(store_message)?;
+        let mut goals = Vec::new();
+        let mut pending = Vec::new();
+        let mut truncated = false;
+        for project in &projects {
+            if truncated {
+                break;
+            }
+            let campaigns = self.campaigns_for_project(&project.id)?;
+            for campaign in campaigns {
+                if goals.len() >= GOAL_OVERVIEW_LIMIT {
+                    truncated = true;
+                    break;
+                }
+                let tasks = self
+                    .store
+                    .tasks_for_campaign(&campaign.id)
+                    .map_err(store_message)?;
+                let task = tasks
+                    .iter()
+                    .find(|task| task.id == campaign.root_task_id)
+                    .or_else(|| tasks.first());
+                let Some(task) = task else {
+                    goals.push(GoalCard {
+                        campaign_id: campaign.id,
+                        project_id: project.id.clone(),
+                        workspace_root: project.workspace_root.clone(),
+                        title: campaign.goal,
+                        attention: "idle".into(),
+                        attempt_id: String::new(),
+                        provider: String::new(),
+                    });
+                    continue;
+                };
+                let attempts = self
+                    .store
+                    .attempts_for_task(&task.id)
+                    .map_err(store_message)?;
+                let mut campaign_pending = Vec::new();
+                for attempt in &attempts {
+                    let decisions = self
+                        .store
+                        .decisions_for_attempt(&attempt.id, 32)
+                        .map_err(store_message)?;
+                    for decision in decisions {
+                        if decision.state != DecisionState::Pending {
+                            continue;
+                        }
+                        if pending.len() + campaign_pending.len() >= GOAL_PENDING_LIMIT {
+                            truncated = true;
+                            break;
+                        }
+                        let ui = decision_to_ui(decision, &self.store);
+                        campaign_pending.push(GoalPendingItem {
+                            decision_id: ui.id,
+                            campaign_id: campaign.id.clone(),
+                            attempt_id: attempt.id.clone(),
+                            title: ui.title,
+                            kind: ui.kind,
+                        });
+                    }
+                }
+                let (attention, title, attempt_id, provider) = if let Some(attempt) = attempts.last()
+                {
+                    let context = ProductConversationContext {
+                        campaign_id: &campaign.id,
+                        attempt,
+                        workspace_root: &project.workspace_root,
+                        root_task_title: &task.title,
+                    };
+                    let product = product_conversation(
+                        &self.store,
+                        &mut self.runtime_manager,
+                        &context,
+                        Vec::new(),
+                        None,
+                        HistoryPageInfo::default(),
+                    )?;
+                    let mut attention =
+                        attention_from_turn(&product.turn.state, &product.session.state);
+                    if !campaign_pending.is_empty() {
+                        attention = "awaiting_approval";
+                    }
+                    let title = if product.title.trim().is_empty() {
+                        task.title.clone()
+                    } else {
+                        product.title
+                    };
+                    (attention, title, attempt.id.clone(), attempt.provider.clone())
+                } else {
+                    ("idle", task.title.clone(), String::new(), String::new())
+                };
+                pending.extend(campaign_pending);
+                goals.push(GoalCard {
+                    campaign_id: campaign.id,
+                    project_id: project.id.clone(),
+                    workspace_root: project.workspace_root.clone(),
+                    title,
+                    attention: attention.into(),
+                    attempt_id,
+                    provider,
+                });
+            }
+        }
+        Ok(GoalOverview {
+            revision,
+            goals,
+            pending,
+            truncated,
+        })
     }
 
     fn current_view_revision(&mut self) -> Result<String, String> {
@@ -727,6 +984,7 @@ impl UiController {
                     result_summary: None,
                     title: String::new(),
                 },
+                turn_results: Vec::new(),
                 preview: false,
                 notices: self.notices.clone(),
                 bounds: ProjectionBounds::default(),
@@ -935,6 +1193,7 @@ impl UiController {
             evidence,
             stop_responsibility,
             product_conversation,
+            turn_results: crate::turn_results::project_turn_results(&self.store, &active_attempt.id)?,
             preview: active_attempt.id != UNASSIGNED_ATTEMPT_ID
                 && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
@@ -1084,7 +1343,7 @@ impl UiController {
         } else {
             None
         };
-        let snapshot = self.snapshot(after_cursor)?;
+        let snapshot = self.response_snapshot(&request, after_cursor)?;
         Ok(UiCommandResult {
             request_id: request.request_id,
             duplicate,
@@ -1092,6 +1351,75 @@ impl UiController {
             snapshot,
             receipt,
         })
+    }
+
+    /// Send, stop and approval answers show the goal they named, then restore
+    /// the shared selection. Other commands keep the single-window snapshot so
+    /// renaming or listing a sibling does not switch the open conversation.
+    pub(crate) fn response_snapshot(
+        &mut self,
+        request: &UiCommandRequest,
+        after_cursor: Option<i64>,
+    ) -> Result<CoreSnapshot, String> {
+        if let Some(campaign_id) = self.response_campaign(request)? {
+            return self.snapshot_for_campaign(&campaign_id, after_cursor);
+        }
+        self.snapshot(after_cursor)
+    }
+
+    fn response_campaign(&self, request: &UiCommandRequest) -> Result<Option<String>, String> {
+        if !matches!(
+            request.message_type.as_str(),
+            "conversation_send"
+                | "send_message"
+                | "interrupt"
+                | "safe_stop"
+                | "cancel"
+                | "resolve_decision"
+                | "permission_response"
+                | "close_session"
+                | "resume_native_session"
+        ) {
+            return Ok(None);
+        }
+        if let Some(campaign_id) = request
+            .payload
+            .get("campaignId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(campaign_id.to_string()));
+        }
+        if let Some(attempt_id) = request
+            .payload
+            .get("attemptId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(self.campaign_for_attempt(attempt_id)?));
+        }
+        if let Some(decision_id) = request
+            .payload
+            .get("decisionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            let decision = self
+                .store
+                .get_decision(decision_id)
+                .map_err(store_message)?;
+            return Ok(Some(self.campaign_for_attempt(&decision.attempt_id)?));
+        }
+        Ok(None)
+    }
+
+    fn campaign_for_attempt(&self, attempt_id: &str) -> Result<String, String> {
+        let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
+        Ok(self
+            .store
+            .get_task(&attempt.task_id)
+            .map_err(store_message)?
+            .campaign_id)
     }
 
     /// Read-only byte-paged history. The response intentionally carries no
@@ -2041,8 +2369,28 @@ impl UiController {
         request: &UiCommandRequest,
         from_explicit_queue: bool,
     ) -> Result<(), String> {
-        let project_id =
-            payload_text_default(&request.payload, "projectId", &self.selected_project_id);
+        // A named campaign is the admission target. Its owning project wins
+        // over the shared selection, so admitting B does not require the
+        // single-window selection to already be B's workspace. An explicit
+        // projectId that disagrees with that owner is still refused. Omitting
+        // campaignId keeps the old empty-string lookup.
+        let campaign_id = payload_text_default(&request.payload, "campaignId", "");
+        let explicit_project = payload_text(&request.payload, "projectId").ok();
+        let project_id = if campaign_id.is_empty() {
+            explicit_project.unwrap_or_else(|| self.selected_project_id.clone())
+        } else {
+            let owner = self
+                .store
+                .campaign_project(&campaign_id)
+                .map_err(store_message)?
+                .ok_or_else(|| format!("campaign {campaign_id} has no owning project"))?;
+            if let Some(project_id) = explicit_project.as_deref()
+                && project_id != owner
+            {
+                return Err("campaign does not belong to selected project".into());
+            }
+            owner
+        };
         let project = self.store.get_project(&project_id).map_err(store_message)?;
         self.ensure_workspace_ingress_allowed(&project.workspace_root, "runtime admission")?;
         // The selection is committed only at the end of this function, after every fallible
@@ -2050,13 +2398,6 @@ impl UiController {
         // `select_project` here moved `selected_project_id` and cleared the campaign, task and
         // attempt selection BEFORE any refusal point, so a refused admission changed what the
         // user had selected. `get_project` above already validates the project exists.
-        //
-        // The `campaignId` fallback is deliberately the empty string: before this change
-        // `select_project` had just cleared `selected_campaign_id` at this point, so an omitted
-        // `campaignId` has always resolved to "" and been refused by the campaign lookup. Keeping
-        // that default means the reorder changes when the selection is committed, not what an
-        // incomplete payload does.
-        let campaign_id = payload_text_default(&request.payload, "campaignId", "");
         let campaign = self
             .store
             .get_campaign(&campaign_id)
@@ -2672,6 +3013,9 @@ impl UiController {
         if task.campaign_id != campaign.id {
             return Err("attempt task does not belong to campaign".into());
         }
+        // The attempt named by this request is the send target. Shared
+        // selection is neither required nor updated: another client can keep
+        // looking at a different goal while this send runs.
         // Increment 7: a repeated request is answered from its RECORDED result before workspace
         // resolution and every environment gate below (ingress, Core selection, terminality,
         // turn in flight, authorization) can flip that result, and before anything is delivered.
@@ -2709,9 +3053,6 @@ impl UiController {
         }
         let workspace = self.workspace_for_campaign(&campaign.id)?;
         self.ensure_workspace_ingress_allowed(&workspace, "message send")?;
-        if self.selected_attempt_id.as_deref() != Some(attempt_id.as_str()) {
-            return Err("attempt is not selected by Core".into());
-        }
         // A terminal Attempt is finished: nothing is persisted, no Runtime is
         // reattached, and no new Attempt is invented on the user's behalf.
         if attempt.state.is_terminal() {
@@ -2825,6 +3166,7 @@ impl UiController {
                 }
                 self.persist_event(&attempt_id, "message.user", user_payload, None)?;
             }
+            self.record_workspace_baseline(&attempt_id, &request.request_id)?;
             let provider = attempt.provider.clone();
             // Increment 6: a Codex registration whose output stream is closed is not usable. Refuse
             // BEFORE the liveness check, so the `!runtime_live` re-registration path is never
@@ -2852,12 +3194,7 @@ impl UiController {
                     ));
                 }
             }
-            let workspace = PathBuf::from(
-                self.store
-                    .get_project(&self.selected_project_id)
-                    .map_err(store_message)?
-                    .workspace_root,
-            );
+            let workspace = PathBuf::from(self.workspace_for_campaign(&campaign.id)?);
             let runtime_live = if provider.eq_ignore_ascii_case("codex")
                 || provider.eq_ignore_ascii_case("grok")
                 || provider.eq_ignore_ascii_case("claude")
@@ -3486,8 +3823,9 @@ impl UiController {
             .store
             .attempts_for_task(&task.id)
             .map_err(store_message)?;
-        let attempt_id = payload_text(&request.payload, "attemptId")
-            .ok()
+        let explicit_attempt = payload_text(&request.payload, "attemptId").ok();
+        let attempt_id = explicit_attempt
+            .clone()
             .or_else(|| attempts.last().map(|attempt| attempt.id.clone()))
             .ok_or_else(|| {
                 format!(
@@ -3506,16 +3844,21 @@ impl UiController {
             return self.send_confirmed_stop_successor(request, &attempt, task, &message);
         }
 
-        // Explicit send on the current, non-terminal attempt. The Core
-        // selection must already name it — an explicit Send never performs an
-        // implicit admission or selection change, so every existing send gate
-        // (Core selection, ingress, authorization, turn-in-flight, replay
-        // ledger) runs exactly as for send_message. Selecting a Runtime or
-        // recovering one is the separate explicit user action.
-        if self.selected_attempt_id.as_deref() != Some(attempt_id.as_str()) {
+        // An explicit attempt id is the send target and does not retarget the
+        // shared selection. Omitting it still refuses unless that attempt is
+        // already the shared selection — Send does not guess a target or
+        // admit a Runtime on the caller's behalf.
+        if explicit_attempt.is_none()
+            && self.selected_attempt_id.as_deref() != Some(attempt_id.as_str())
+        {
             return Err(format!(
                 "attempt {attempt_id} is not selected by Core; select the Runtime for this conversation first"
             ));
+        }
+        if explicit_attempt.is_some()
+            && !attempts.iter().any(|attempt| attempt.id == attempt_id)
+        {
+            return Err("attempt does not belong to this campaign".into());
         }
         let send_request = UiCommandRequest {
             protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
@@ -5204,6 +5547,40 @@ impl UiController {
         Ok(())
     }
 
+    fn record_workspace_baseline(&self, attempt_id: &str, request_id: &str) -> Result<(), String> {
+        let existing = self
+            .store
+            .list_event_records(attempt_id, 0)
+            .map_err(store_message)?;
+        if existing.iter().any(|record| {
+            record.event.kind == "workspace.baseline"
+                && record
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("requestId"))
+                    .and_then(Value::as_str)
+                    == Some(request_id)
+        }) {
+            return Ok(());
+        }
+        let workspace = self.workspace_for_attempt(attempt_id)?;
+        let payload = crate::turn_results::baseline_payload(std::path::Path::new(&workspace), request_id);
+        self.persist_event(attempt_id, "workspace.baseline", payload, None)
+    }
+
+    fn settle_turn_result(&self, attempt_id: &str) -> Result<(), String> {
+        let workspace = self.workspace_for_attempt(attempt_id)?;
+        let Some(payload) = crate::turn_results::settlement_payload(
+            &self.store,
+            attempt_id,
+            std::path::Path::new(&workspace),
+        )?
+        else {
+            return Ok(());
+        };
+        self.persist_event(attempt_id, "workspace.turn_result", payload, None)
+    }
+
     fn persist_event(
         &self,
         attempt_id: &str,
@@ -5418,6 +5795,9 @@ impl UiController {
             );
         }
         self.persist_event(&event.attempt_id, kind, payload, state)?;
+        if is_turn_terminal(kind) {
+            self.settle_turn_result(&event.attempt_id)?;
+        }
         // A native permission answered `cancelled` (Safe stop while the prompt was
         // pending) must not leave its Decision pending for ever: no option was selected,
         // so the Decision is closed as CANCELLED rather than approved or denied.
@@ -5790,6 +6170,26 @@ fn timeline_title(kind: &str) -> String {
         _ => "Message committed",
     }
     .into()
+}
+
+fn is_turn_terminal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "runtime.turn.completed" | "runtime.turn.failed" | "runtime.turn.cancelled"
+    )
+}
+
+fn attention_from_turn(turn_state: &str, session_state: &str) -> &'static str {
+    match turn_state {
+        "waiting-permission" => "awaiting_approval",
+        "running" | "starting" | "stopping" => "running",
+        "failed" => "failed",
+        "uncertain" => "needs_recovery",
+        "completed" | "stopped" => "complete",
+        "idle" if session_state == "detached" => "needs_recovery",
+        "idle" => "idle",
+        _ => "idle",
+    }
 }
 
 fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
@@ -6662,12 +7062,12 @@ mod title_integration_tests {
     fn delayed_native_title_cannot_replace_manual_rename() {
         let store = Store::memory().unwrap();
         let mut ui = UiController::new(store.clone()).unwrap();
-        let initial = ui.snapshot_if_changed(None).unwrap();
+        let initial = ui.snapshot_if_changed(None, None).unwrap();
         let initial_revision = initial["revision"].as_str().unwrap().to_owned();
         let (sender, receiver) = std::sync::mpsc::channel();
         ui.pending_titles.push(receiver);
         store.set_conversation_title("campaign-title", "My own title").unwrap();
-        assert_eq!(ui.snapshot_if_changed(Some(&initial_revision)).unwrap()["unchanged"], false);
+        assert_eq!(ui.snapshot_if_changed(Some(&initial_revision), None).unwrap()["unchanged"], false);
         sender.send(TitleResult {
             campaign_id: "campaign-title".into(),
             title: Some("Late model title".into()),

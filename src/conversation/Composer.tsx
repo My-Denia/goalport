@@ -63,6 +63,7 @@ interface ComposerProps {
   runtime: ProductRuntimeSelection;
   turn: ProductTurn;
   busy: boolean;
+  closingSession?: boolean;
   retryLabel?: string;
   /** Bumped by the app to open and focus the chooser (Session details → Change Runtime). */
   chooserFocusSignal: number;
@@ -80,7 +81,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
+export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // IME composition guards. `composing` covers the active composition; the
   // timestamp catches the stray Enter some IMEs emit right after
@@ -140,7 +141,9 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, retry
 
   const placeholder = "Ask the selected Runtime to continue…";
 
-  const hint = reconciling
+  const hint = closingSession
+    ? "Closing the Runtime session…"
+    : reconciling
     ? "Check whether the previous message was received. It will not be sent again."
     : held
     ? "Some tools may still be running. Your draft stays here while the workspace is protected."
@@ -177,7 +180,11 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, retry
         <div className="composer-actions">
           <span className="composer-hint">{hint}</span>
           <div className="composer-buttons">
-            {turn.canStop ? (
+            {closingSession ? (
+              <button className="composer-secondary" type="button" aria-label="Closing session" disabled>
+                <span aria-hidden="true">◌</span> Closing session…
+              </button>
+            ) : turn.canStop ? (
               <button
                 className="composer-secondary composer-stop"
                 type="button"

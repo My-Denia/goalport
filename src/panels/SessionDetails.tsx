@@ -13,6 +13,7 @@ interface SessionDetailsProps {
   onCloseSession: () => void;
   onResumeSession: () => void;
   onOpenWorkspaceFolder: () => void;
+  closingSession?: boolean;
 }
 
 /**
@@ -22,7 +23,7 @@ interface SessionDetailsProps {
  * No capability catalog, no evidence ledger, no internal identifiers; those
  * live in the separate Developer diagnostics surface.
  */
-export function SessionDetails({ browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder }: SessionDetailsProps) {
+export function SessionDetails({ browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder, closingSession = false }: SessionDetailsProps) {
   useEffect(() => {
     if (!open) return undefined;
     const onKey = (event: globalThis.KeyboardEvent) => {
@@ -35,12 +36,13 @@ export function SessionDetails({ browserPreview = false, open, onClose, snapshot
   if (!open) return null;
 
   const pendingCount = snapshot.decisions.filter((decision) => decision.state === "pending").length;
-  const state = headlineState(product, snapshot);
+  const state = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const runtime = product?.runtime ?? { state: "none" as const, provider: "", name: "" };
   const runtimeDisplay = runtimeSelectionDisplay(runtime);
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
   const hasConversation = Boolean(snapshot.activeCampaignId);
-  const sessionLabel = product?.session?.state === "starting" ? "Starting"
+  const sessionLabel = closingSession ? "Closing…"
+    : product?.session?.state === "starting" ? "Starting"
     : product?.session?.state === "attached" ? "Connected"
     : product?.session?.state === "detached" ? "Detached"
     : product?.session?.state === "closed" ? "Closed"

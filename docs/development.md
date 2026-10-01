@@ -37,7 +37,7 @@ pnpm electron:dev
 
 To exercise the product as users run it, build and start a package instead; see [building](building.md).
 
-`pnpm dev` starts the Vite dev server alone. Without Electron, the renderer shows a built-in synthetic browser preview with sample data. It is useful for layout work, but it is not connected to Core.
+`pnpm dev` starts the Vite dev server alone. Without Electron or the Linux workbench flag, the renderer shows a built-in synthetic browser preview with sample data. It is useful for layout work, but it is not connected to Core. The Linux workbench in `docs/linux-development.md` is the browser path that talks to a real Core.
 
 ## Working rules
 

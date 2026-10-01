@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   getCoreClient,
   mergeHistoryPageIntoSnapshot,
@@ -21,6 +21,8 @@ import { ProductConversationView } from "./conversation/ProductConversationView"
 import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
 import { PendingApprovals } from "./panels/PendingApprovals";
+import { BackgroundAttention } from "./panels/BackgroundAttention";
+import { TurnResults } from "./panels/TurnResults";
 import { StatusBanners, type ActiveNotice } from "./panels/StatusBanners";
 import { BlockedWorkPanel } from "./panels/BlockedWorkPanel";
 import { SessionDetails } from "./panels/SessionDetails";
@@ -33,6 +35,7 @@ import { conversationTitle, headlineState } from "./lib/display";
 import { GoalDialog } from "./ui/GoalDialog";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { useCoreSnapshot } from "./lib/useCoreSnapshot";
+import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute } from "./lib/goalRoute";
 import { useConversationDrafts } from "./lib/useConversationDrafts";
 import {
   canExplicitlyRetry,
@@ -126,6 +129,7 @@ function App() {
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 860);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [closingSession, setClosingSession] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [chooserFocusSignal, setChooserFocusSignal] = useState(0);
@@ -139,6 +143,10 @@ function App() {
   // tauri, older preload/test mounts) have no profile bootstrap and are ready
   // immediately.
   const selectionIntent = useRef(0);
+  useLayoutEffect(() => {
+    const routedGoal = campaignIdFromLocation();
+    if (routedGoal) client.pinView?.(routedGoal);
+  }, [client]);
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
   const historyRequest = useRef(0);
@@ -708,11 +716,16 @@ function App() {
       return;
     }
     const viewIntent = selectionIntent.current;
-    const next = await client.closeSession(attemptId);
-    if (viewIntent === selectionIntent.current) setSnapshot(next);
-    const failure = commandFailure(next, "close_session");
-    if (failure) setActiveNotice(failure);
-    else setActiveNotice({ sentence: "Runtime session closed. This goal remains available." });
+    setClosingSession(true);
+    try {
+      const next = await client.closeSession(attemptId);
+      if (viewIntent === selectionIntent.current) setSnapshot(next);
+      const failure = commandFailure(next, "close_session");
+      if (failure) setActiveNotice(failure);
+      else setActiveNotice({ sentence: "Runtime session closed. This goal remains available." });
+    } finally {
+      setClosingSession(false);
+    }
   }
 
   async function handleResumeSession() {
@@ -763,8 +776,10 @@ function App() {
   }
 
   async function selectCampaign(campaignId: string) {
-    const selected = snapshot.campaigns.find((campaign) => campaign.id === campaignId);
-    if (!selected || selected.id === snapshot.activeCampaignId) return;
+    const known = snapshot.campaigns.some((campaign) => campaign.id === campaignId)
+      || snapshot.goalOverview?.goals.some((goal) => goal.campaignId === campaignId);
+    if (!known || campaignId === snapshot.activeCampaignId) return;
+    pushGoalRoute(campaignId);
     if (window.innerWidth <= 860) setNavCollapsed(true);
     // Explicit navigation closes a pending draft; it is not a submission.
     if (draftGoal) {
@@ -778,10 +793,16 @@ function App() {
       const next = await client.selectCampaign(campaignId);
       if (intent !== selectionIntent.current) return;
       setSnapshot(next);
-      const failure = client.mode === "browser-preview" ? null : commandFailure(next, "select_campaign");
+      const failure = client.mode === "browser-preview" || client.mode === "linux-core"
+        ? (client.mode === "linux-core" && next.connection === "disconnected"
+          ? { sentence: "That goal could not be opened.", technical: next.notices[0] }
+          : null)
+        : commandFailure(next, "select_campaign");
       setActiveNotice(failure);
       return;
     }
+    const selected = snapshot.campaigns.find((campaign) => campaign.id === campaignId);
+    if (!selected) return;
     setSnapshot({
       ...snapshot,
       activeCampaignId: selected.id,
@@ -789,6 +810,24 @@ function App() {
       notices: [`Viewing ${selected.title}.`, ...snapshot.notices]
     });
   }
+
+  useEffect(() => {
+    if (client.mode !== "linux-core" || !booted) return undefined;
+    const miss = client.takeRouteMiss?.() ?? "";
+    if (miss) {
+      setActiveNotice({ sentence: "That goal is no longer available." });
+      replaceGoalRoute(snapshot.activeCampaignId || null);
+    } else if (snapshot.activeCampaignId) {
+      replaceGoalRoute(snapshot.activeCampaignId);
+    }
+    const onPop = () => {
+      const id = campaignIdFromLocation();
+      if (!id || id === snapshotRef.current.activeCampaignId) return;
+      void selectCampaign(id);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [booted, client, snapshot.activeCampaignId]);
 
   async function selectProject(projectId: string) {
     if (!client.selectProject || projectId === snapshot.selectedProjectId) return;
@@ -886,7 +925,7 @@ function App() {
   const heldPanel = snapshot.stopResponsibility;
   const relatedHolds: StopResponsibilitySummary[] = snapshot.relatedHolds ?? [];
   const heldNow = heldPanel?.writeResponsibility === "held";
-  const taskState = headlineState(product, snapshot);
+  const taskState = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const title = conversationTitle(snapshot);
 
   if (bootstrap && bootstrap.phase !== "done" && bootstrap.phase !== "checking") {
@@ -958,6 +997,7 @@ function App() {
                 retryLabel={draftRetryLabel}
                 error={draftError}
                 canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
+                workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                 onBrowse={() => { void chooseWorkspace(); }}
                 onChange={(value) => setDraftGoal((current) => {
                   if (!current) return { ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId };
@@ -992,6 +1032,13 @@ function App() {
                 </div>
                 <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
               </div>
+
+              <TurnResults results={snapshot.turnResults} />
+
+              <BackgroundAttention
+                snapshot={snapshot}
+                onOpen={(campaignId) => { void selectCampaign(campaignId); }}
+              />
 
               <PendingApprovals
                 snapshot={snapshot}
@@ -1041,6 +1088,7 @@ function App() {
                   ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
                   : product.turn}
                 busy={sendBusy}
+                closingSession={closingSession}
                 retryLabel={activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
@@ -1063,6 +1111,7 @@ function App() {
             }}
             onOpenHandoff={openHandoffDialog}
             onCloseSession={() => { void handleCloseSession(); }}
+            closingSession={closingSession}
             onResumeSession={() => { void handleResumeSession(); }}
             onOpenWorkspaceFolder={() => {
               void client.openInVsCode(snapshot.project.workspaceRoot).catch(() => {

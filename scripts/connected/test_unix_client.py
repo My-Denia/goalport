@@ -17,6 +17,109 @@ spec = importlib.util.spec_from_file_location("unix_client", Path(__file__).with
 client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(client)
 
+workbench_spec = importlib.util.spec_from_file_location(
+    "linux_workbench", Path(__file__).with_name("linux-workbench.py")
+)
+workbench = importlib.util.module_from_spec(workbench_spec)
+workbench_spec.loader.exec_module(workbench)
+
+
+class CommandRoutingTests(unittest.TestCase):
+    def test_overview_and_detail_do_not_select(self):
+        overview = client.command_for(client.parser().parse_args(["overview"]))
+        detail = client.command_for(client.parser().parse_args(["detail", "--campaign", "campaign-b"]))
+        self.assertEqual(overview, ("goal_overview", {}))
+        self.assertEqual(detail, ("goal_detail", {"campaignId": "campaign-b"}))
+
+    def test_bridge_rejects_another_pages_post_and_keeps_static_files_inside_dist(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        class FakeUnix:
+            MAX_FRAME_BYTES = 1024 * 1024
+
+            class ClientError(Exception):
+                pass
+
+            def __init__(self):
+                self.calls = []
+
+            def call(self, _endpoint, message_type, _payload=None, timeout=30, request_id=None):
+                self.calls.append(message_type)
+                return {"ok": True, "requestId": request_id, "entityVersion": 1,
+                        "protocolVersion": "goalport.ipc.v2", "payload": {}}
+
+        dist = Path(tempfile.mkdtemp(prefix="gp-bridge-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(dist, ignore_errors=True))
+        (dist / "index.html").write_text("<head><title>GoalPort</title></head>", encoding="utf-8")
+        (dist / "app.js").write_text("console.log('goalport')", encoding="utf-8")
+        outside = dist.parent / "secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        fake = FakeUnix()
+        handler = workbench.make_handler("/tmp/core.sock", dist, fake, 5)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+
+        def exchange(method, path, body=None, headers=None):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            payload = response.read()
+            status = response.status
+            header_text = str(response.headers)
+            connection.close()
+            return status, payload, header_text
+
+        host = {"Host": f"127.0.0.1:{port}"}
+        status, page, _headers = exchange("GET", "/", headers=host)
+        self.assertEqual(status, 200)
+        self.assertIn(b"__GOALPORT_LINUX_CORE__", page)
+        status, goal_page, _headers = exchange("GET", "/goals/campaign-b", headers=host)
+        self.assertEqual(status, 200)
+        self.assertIn(b"__GOALPORT_LINUX_CORE__", goal_page)
+        rewritten = workbench.inject_linux_flag('<head><script src="./assets/app.js"></script>')
+        self.assertIn('src="/assets/app.js"', rewritten)
+        self.assertNotIn('src="./assets/app.js"', rewritten)
+        status, script, _headers = exchange("GET", "/app.js", headers=host)
+        self.assertEqual(status, 200)
+        self.assertEqual(script, b"console.log('goalport')")
+        self.assertIsNone(workbench.safe_file(dist, "/../secret.txt"))
+        self.assertIsNone(workbench.safe_file(dist, "/%2e%2e/secret.txt"))
+        status, _escaped, _headers = exchange("GET", "/../secret.txt", headers=host)
+        self.assertEqual(status, 404)
+
+        body = json.dumps({"messageType": "goal_overview", "payload": {}}).encode()
+        status, allowed, allowed_headers = exchange("POST", "/goalport/ipc", body=body, headers={
+            **host, "Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}",
+        })
+        self.assertEqual(status, 200, allowed)
+        self.assertNotIn("Access-Control-Allow-Origin", allowed_headers)
+        self.assertEqual(fake.calls, ["goal_overview"])
+        status, cross, cross_headers = exchange("POST", "/goalport/ipc", body=body, headers={
+            **host, "Content-Type": "text/plain", "Origin": "http://evil.example",
+        })
+        self.assertEqual(status, 403, cross)
+        self.assertNotIn("Access-Control-Allow-Origin", cross_headers)
+        self.assertEqual(fake.calls, ["goal_overview"])
+        status, rebound, _headers = exchange("POST", "/goalport/ipc", body=body, headers={
+            "Host": f"evil.example:{port}", "Content-Type": "application/json",
+        })
+        self.assertEqual(status, 403, rebound)
+
+    def test_bridge_disconnect_is_not_a_preview_snapshot(self):
+        body = json.loads(workbench.disconnected_body("Linux Core is not connected"))
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["connection"], "disconnected")
+        self.assertNotIn("snapshot", body)
+        self.assertNotIn("preview", body)
+        html = workbench.inject_linux_flag("<head><title>GoalPort</title></head>")
+        self.assertIn("__GOALPORT_LINUX_CORE__", html)
+
 
 @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "Linux Unix client")
 class WireTests(unittest.TestCase):

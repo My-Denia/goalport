@@ -161,9 +161,12 @@ export function coalesceVisibleFragments(items: ProductConversationItem[]): Prod
       : false;
     if (logicalId && previous?.logicalItemId === logicalId && previous.kind === item.kind
       && fragmentCoverageIsContinuous) {
+      // A completed provider item repeats the whole message after its deltas.
+      // That fragment replaces the streamed text; a later delta still appends.
+      const replacesStream = previous.body.length > 0 && item.body.startsWith(previous.body);
       visible[visible.length - 1] = {
         ...previous,
-        body: previous.body + item.body,
+        body: replacesStream ? item.body : previous.body + item.body,
         continuesAfter: item.continuesAfter,
         technicalDetails: item.technicalDetails ?? previous.technicalDetails
       };

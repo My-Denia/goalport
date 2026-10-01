@@ -103,6 +103,16 @@ describe("bounded history pages", () => {
     expect(onLoad).toHaveBeenCalledOnce();
   });
 
+  it("lets a completed item replace its own streamed deltas", () => {
+    const visible = coalesceVisibleFragments([
+      { id: "d1", logicalItemId: "item-final", kind: "assistant-message", body: "Fixed " },
+      { id: "d2", logicalItemId: "item-final", kind: "assistant-message", body: "`add()`." },
+      { id: "done", logicalItemId: "item-final", kind: "assistant-message", body: "Fixed `add()`. Done." }
+    ]);
+    expect(visible).toHaveLength(1);
+    expect(visible[0]?.body).toBe("Fixed `add()`. Done.");
+  });
+
   it("does not concatenate a logical message across a missing physical fragment", () => {
     const visible = coalesceVisibleFragments([
       { id: "f0", logicalItemId: "m1", fragmentIndex: 0, continuesAfter: true, kind: "assistant-message", body: "begin" },

@@ -267,7 +267,10 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .campaign-state { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--ink-faint); }
 .campaign-state-active { background: var(--green); }
 .campaign-state-paused { background: var(--amber); }
+.campaign-state-failed { background: var(--red); }
 .campaign-state-complete { background: var(--blue); }
+.campaign-item-copy small { display: block; color: var(--ink-muted); font-size: 11px; font-weight: 600; }
+.project-select-static { pointer-events: none; }
 .campaign-item-copy { display: grid; min-width: 0; gap: 2px; }
 .campaign-item-copy strong { overflow: hidden; font-size: 12.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-item-copy small { color: var(--ink-muted); font-size: 11px; }
@@ -345,6 +348,47 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .task-state-blocked { background: var(--red-soft); color: var(--red); }
 .task-state-complete { background: var(--green-soft); color: var(--green); }
 .task-state-waiting { background: var(--panel-soft); color: var(--ink-muted); }
+
+/* ---------- Turn results ---------- */
+
+.turn-results {
+  width: calc(100% - 44px); max-width: 640px;
+  margin: 0 auto 10px; padding: 12px 14px; flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+}
+.turn-results h2 { margin: 0 0 8px; font-size: 13.5px; }
+.turn-result + .turn-result { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.turn-result-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.turn-reply-state { font-size: 11px; font-weight: 750; letter-spacing: 0.04em; text-transform: uppercase; }
+.reply-completed { color: var(--green); }
+.reply-failed, .reply-cancelled { color: var(--red); }
+.reply-uncertain { color: var(--amber); }
+.turn-reply { margin: 0 0 8px; white-space: pre-wrap; font-size: 13px; line-height: 1.45; }
+.turn-results .muted, .baseline-missing { margin: 0 0 8px; color: var(--ink-muted); font-size: 12.5px; }
+.turn-file-group h3, .turn-commands h3 { margin: 8px 0 4px; font-size: 12px; color: var(--ink-soft); }
+.turn-file-group ul, .turn-commands ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.turn-file-group li, .turn-commands li { display: grid; gap: 2px; font-size: 12.5px; }
+.turn-file-group code, .turn-commands code { font-size: 12px; }
+.turn-command-cwd { color: var(--ink-muted); }
+.turn-commands pre { margin: 0; white-space: pre-wrap; color: var(--ink-soft); font-size: 12px; }
+
+/* ---------- Other goals that need attention ---------- */
+
+.background-attention {
+  width: calc(100% - 44px); max-width: 640px;
+  margin: 0 auto 8px; display: grid; gap: 6px; flex: 0 0 auto;
+}
+.background-attention-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel);
+}
+.background-attention-copy { min-width: 0; display: grid; gap: 2px; }
+.background-attention-copy strong { font-size: 13px; }
+.background-attention-copy span { color: var(--ink-muted); font-size: 12px; }
+.background-attention-item .button { margin-left: auto; flex: 0 0 auto; }
+.attention-awaiting_approval { border-color: rgba(230, 183, 99, 0.45); }
+.attention-failed { border-color: rgba(224, 108, 117, 0.45); }
 
 /* ---------- Pending approvals (main area) ---------- */
 
@@ -846,7 +890,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .connection-pill .connection-text { display: none; }
   .connection-pill { padding: 0 8px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
-  .approvals { width: calc(100% - 28px); }
+  .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
   .timeline-inner, .composer-dock { padding-left: 14px; padding-right: 14px; }
 }
 
@@ -883,7 +927,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .conversation-heading { flex-direction: column; gap: 6px; padding: 12px 12px 8px; }
   .conversation-heading p { white-space: normal; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 10px; margin-right: 10px; }
-  .approvals { width: calc(100% - 20px); }
+  .approvals, .background-attention, .turn-results { width: calc(100% - 20px); }
   .timeline-inner, .composer-dock { padding-left: 10px; padding-right: 10px; }
   .composer-actions { flex-direction: column; align-items: stretch; gap: 8px; }
   .composer-buttons { justify-content: flex-end; }
