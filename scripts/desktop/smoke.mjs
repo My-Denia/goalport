@@ -48,7 +48,7 @@ const ASSERTION_MAP = [
   { superseded: "\"Message recorded for task\" success banner wait", current: "quiet success: draft cleared, no success banner, exact-once durable message/reply, rendered product conversation" },
   { retained: "UI attempt.state labels remain lowercase", current: "waiting|active|completed|failed from attempt_to_ui; durable attempt states and refusal labels are separate contracts" },
   { superseded: "terminal cross-provider race via two UI Select buttons clicked in one renderer task", current: "UI picker serializes (list closes on select); Core race proof retained through two concurrent raw select_runtime commands (labelled api)" },
-  { superseded: "explicit replay of send_message answers duplicate from any selected conversation", current: "exact conversation_send replay of the same requestId is duplicate=true with zero re-delivery whether or not that goal is the shared selection; omitting attemptId while another goal is selected is still refused" },
+  { superseded: "explicit replay of send_message answers duplicate from any selected conversation", current: "exact conversation_send replay of the same requestId, campaignId, and attemptId is duplicate=true with zero re-delivery whether or not that goal is the shared selection" },
   { superseded: "refusal text matched in page body (\"Core refused: ...\")", current: "visible readable refusal sentence in the notice banner plus the exact Core reason read from its collapsed technical disclosure and from durable rows" },
   { superseded: "responsive check of .context-rail/.runtime-row summary", current: "responsive check of .campaign-nav, the composer .runtime-picker and the Session details drawer" }
 ];

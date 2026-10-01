@@ -34,9 +34,15 @@ export function TurnResults({ results, omittedTurns = 0 }: TurnResultsProps) {
           {result.baselineRecorded ? (
             <>
               <FileGroup title="Already in the workspace" files={result.before} empty="No dirty, staged, or untracked files were recorded at the start." />
-              <FileGroup title="Changed during this turn" files={result.during} empty="No file edit in this turn named a path." />
-              <FileGroup title="Changed, not tied to a file edit" files={result.unattributed} empty="" />
               {result.filesTruncated ? <p className="muted">Some file changes are not listed.</p> : null}
+              {result.comparisonUnavailable ? (
+                <p className="muted">File changes could not be read for this turn.</p>
+              ) : (
+                <>
+                  <FileGroup title="Changed during this turn" files={result.during} empty="No file edit in this turn named a path." />
+                  <FileGroup title="Changed, not tied to a file edit" files={result.unattributed} empty="" />
+                </>
+              )}
             </>
           ) : (
             <p className="baseline-missing">Baseline not recorded</p>
