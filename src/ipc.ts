@@ -20,6 +20,8 @@ import {
   type CommandRejection,
   type CoreCommandOutcome,
   type CoreSnapshot,
+  type GoalCard,
+  type GoalOverview,
   type HistoryPageInfo,
   type ProductConversation,
   type ProductConversationItem,
@@ -148,7 +150,7 @@ export interface CoreCommand {
 }
 
 export interface CoreClient {
-  readonly mode: "tauri" | "electron" | "browser-preview";
+  readonly mode: "tauri" | "electron" | "browser-preview" | "linux-core";
   snapshot(): Promise<CoreSnapshot>;
   createCampaign(workspaceRoot: string, goal: string): Promise<CoreSnapshot>;
   sendMessage(message: string, campaignId: string, attemptId: string, taskId?: string): Promise<CoreSnapshot>;
@@ -160,6 +162,10 @@ export interface CoreClient {
   openInVsCode(workspaceRoot: string): Promise<void>;
   selectProject?(projectId: string): Promise<CoreSnapshot>;
   selectCampaign?(campaignId: string): Promise<CoreSnapshot>;
+  /** Keep background reads on this goal before the first poll adopts Core's shared selection. */
+  pinView?(campaignId: string): void;
+  /** A routed goal Core could not open. Empty when the last read matched the route. */
+  takeRouteMiss?(): string;
   selectRuntime?(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot>;
   interrupt?(attemptId: string): Promise<CoreSnapshot>;
   closeSession?(attemptId: string): Promise<CoreSnapshot>;
@@ -267,6 +273,7 @@ declare global {
     __goalportLastSelectResult?: CoreSnapshot;
     __goalportCommandTrace?: CommandTraceEntry[];
     __goalportCloseRequestId?: string;
+    __GOALPORT_LINUX_CORE__?: { bridge?: string } | true;
     goalportCore?: {
       snapshot: () => Promise<unknown>;
       command: (request: CoreCommand) => Promise<unknown>;
@@ -1005,6 +1012,385 @@ function traceCommand(
   window.__goalportCommandTrace = [...(window.__goalportCommandTrace ?? []), entry].slice(-64);
 }
 
+const GOAL_ATTENTION = new Set(["running", "awaiting_approval", "failed", "needs_recovery", "idle", "complete"]);
+
+function normalizeGoalOverview(value: unknown): GoalOverview {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : null;
+  const goals = record?.goals;
+  const pending = record?.pending;
+  if (!record || !Array.isArray(goals) || !Array.isArray(pending)) {
+    throw new Error("Core returned an invalid goal overview");
+  }
+  return {
+    revision: typeof record.revision === "string" ? record.revision : "",
+    truncated: record.truncated === true,
+    goals: goals.map((item) => {
+      const goal = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      const attention = typeof goal.attention === "string" && GOAL_ATTENTION.has(goal.attention)
+        ? goal.attention as GoalCard["attention"]
+        : "idle";
+      return {
+        campaignId: typeof goal.campaignId === "string" ? goal.campaignId : "",
+        projectId: typeof goal.projectId === "string" ? goal.projectId : "",
+        workspaceRoot: typeof goal.workspaceRoot === "string" ? goal.workspaceRoot : "",
+        title: typeof goal.title === "string" && goal.title.trim() ? goal.title : "Untitled goal",
+        attention,
+        attemptId: typeof goal.attemptId === "string" ? goal.attemptId : "",
+        provider: typeof goal.provider === "string" ? goal.provider : ""
+      };
+    }).filter((goal) => goal.campaignId),
+    pending: pending.map((item) => {
+      const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        decisionId: typeof row.decisionId === "string" ? row.decisionId : "",
+        campaignId: typeof row.campaignId === "string" ? row.campaignId : "",
+        attemptId: typeof row.attemptId === "string" ? row.attemptId : "",
+        title: typeof row.title === "string" ? row.title : "Approval needed",
+        kind: typeof row.kind === "string" ? row.kind : "permission"
+      };
+    }).filter((item) => item.decisionId && item.campaignId)
+  };
+}
+
+/**
+ * The user is looking at one real Linux goal. This client asks Core for that
+ * goal by id and never substitutes the sample preview when the socket is down.
+ */
+class LinuxCoreClient implements CoreClient {
+  readonly mode = "linux-core" as const;
+  private viewCampaignId = "";
+  private viewPinned = false;
+  private revision = "";
+  private suspended = false;
+  private generation = 0;
+  private appliedGeneration = 0;
+  private mutationDepth = 0;
+  private routeMiss = "";
+  private lastSnapshot: CoreSnapshot = { ...EMPTY_SNAPSHOT, preview: false, notices: [] };
+
+  pinView(campaignId: string): void {
+    if (!campaignId) return;
+    this.viewCampaignId = campaignId;
+    this.viewPinned = true;
+    this.revision = "";
+  }
+
+  takeRouteMiss(): string {
+    const miss = this.routeMiss;
+    this.routeMiss = "";
+    return miss;
+  }
+
+  private claimGeneration(): number {
+    this.generation += 1;
+    return this.generation;
+  }
+
+  private commitSnapshot(generation: number, snapshot: CoreSnapshot): CoreSnapshot {
+    if (generation < this.appliedGeneration) return this.lastSnapshot;
+    this.appliedGeneration = generation;
+    this.lastSnapshot = snapshot;
+    return snapshot;
+  }
+
+  async snapshot(): Promise<CoreSnapshot> {
+    if (this.suspended) return this.lastSnapshot;
+    const generation = this.claimGeneration();
+    const mutationAtStart = this.mutationDepth;
+    try {
+      const payload: Record<string, string> = {};
+      if (this.viewCampaignId) payload.campaignId = this.viewCampaignId;
+      if (this.revision) payload.revision = this.revision;
+      const response = await this.post("snapshot_if_changed", payload);
+      const envelope = payloadOf(response);
+      const overview = await this.readOverview();
+      if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
+      if (envelope.unchanged === true) {
+        this.revision = typeof envelope.revision === "string" ? envelope.revision : this.revision;
+        return this.commitSnapshot(generation, { ...this.lastSnapshot, preview: false, goalOverview: overview });
+      }
+      const snapshot = resolveCoreSnapshot(envelope.snapshot);
+      if (!snapshot) throw new Error("Core returned an invalid snapshot");
+      if (!this.viewPinned && !this.viewCampaignId && snapshot.activeCampaignId) this.viewCampaignId = snapshot.activeCampaignId;
+      this.revision = typeof envelope.revision === "string" ? envelope.revision : "";
+      return this.commitSnapshot(generation, { ...snapshot, preview: false, goalOverview: overview });
+    } catch (error) {
+      if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
+      const message = errorMessage(error);
+      const missing = this.viewPinned && this.viewCampaignId && (
+        message.includes("has no owning project")
+        || message.includes("entity not found")
+        || message.includes("Query returned no rows")
+      );
+      if (missing) {
+        this.routeMiss = this.viewCampaignId;
+        this.viewPinned = false;
+        this.viewCampaignId = "";
+        this.revision = "";
+        return this.snapshot();
+      }
+      return this.fail(error);
+    }
+  }
+
+  async selectCampaign(campaignId: string): Promise<CoreSnapshot> {
+    const generation = this.claimGeneration();
+    this.mutationDepth += 1;
+    const previousView = this.viewCampaignId;
+    const previousRevision = this.revision;
+    const previousPinned = this.viewPinned;
+    this.viewCampaignId = campaignId;
+    this.viewPinned = true;
+    this.revision = "";
+    try {
+      const response = await this.post("goal_detail", { campaignId });
+      const envelope = payloadOf(response);
+      const snapshot = resolveCoreSnapshot(envelope.snapshot);
+      if (!snapshot || snapshot.activeCampaignId !== campaignId) {
+        throw new Error("Core did not return that goal");
+      }
+      this.revision = typeof envelope.revision === "string" ? envelope.revision : "";
+      const overview = await this.readOverview();
+      if (generation < this.appliedGeneration) return this.lastSnapshot;
+      return this.commitSnapshot(generation, { ...snapshot, preview: false, goalOverview: overview });
+    } catch (error) {
+      if (generation < this.appliedGeneration) return this.lastSnapshot;
+      this.viewCampaignId = previousView;
+      this.viewPinned = previousPinned;
+      this.revision = previousRevision;
+      return this.fail(error);
+    } finally {
+      this.mutationDepth -= 1;
+    }
+  }
+
+  async selectProject(): Promise<CoreSnapshot> {
+    // Which project is on screen is this page's choice. Opening a goal loads
+    // it; there is no shared project selection to update.
+    return this.lastSnapshot;
+  }
+
+  async createCampaign(workspaceRoot: string, goal: string): Promise<CoreSnapshot> {
+    return this.mutate("create_campaign", { workspaceRoot, goal }, true);
+  }
+
+  async sendMessage(message: string, campaignId: string, attemptId: string, taskId?: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string> = { message, campaignId, attemptId };
+    if (taskId) payload.taskId = taskId;
+    return this.mutate("send_message", payload, false);
+  }
+
+  async resolveDecision(decisionId: string, allow = false): Promise<CoreSnapshot> {
+    return this.mutate("resolve_decision", { decisionId, allow }, false);
+  }
+
+  async reconnect(): Promise<CoreSnapshot> {
+    this.suspended = false;
+    return this.snapshot();
+  }
+
+  async startCore(): Promise<CoreSnapshot> {
+    this.suspended = false;
+    return this.snapshot();
+  }
+
+  async setConnection(connection: ConnectionState): Promise<CoreSnapshot> {
+    if (connection === "disconnected") {
+      this.suspended = true;
+      this.lastSnapshot = { ...this.lastSnapshot, connection: "disconnected", preview: false };
+      return this.lastSnapshot;
+    }
+    this.suspended = false;
+    return this.snapshot();
+  }
+
+  async openInVsCode(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string): Promise<CoreSnapshot> {
+    return this.mutate("start_conversation", { workspaceRoot, provider, message }, true, stableRequestId);
+  }
+
+  async conversationSend(message: string, campaignId: string, attemptId: string | undefined, stableRequestId: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string> = { message, campaignId };
+    const persisted = persistedAttemptId(attemptId);
+    if (persisted) payload.attemptId = persisted;
+    return this.mutate("conversation_send", payload, false, stableRequestId);
+  }
+
+  async historyPage(request: HistoryPageRequest): Promise<HistoryPage> {
+    const command: CoreCommand = {
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: requestId(),
+      entityVersion: 1,
+      messageType: "history_page",
+      payload: {
+        scope: request.scope,
+        ownerId: request.ownerId,
+        direction: request.direction,
+        ...(request.cursor ? { cursor: request.cursor } : {})
+      }
+    };
+    const response = await this.post(command.messageType, command.payload, command.requestId);
+    return historyPageEnvelope(payloadOf(response), command);
+  }
+
+  async renameConversation(campaignId: string, title: string): Promise<CoreSnapshot> {
+    return this.mutate("rename_conversation", { campaignId, title }, false);
+  }
+
+  async selectRuntime(provider: string, campaignId: string, taskId: string, attemptId?: string): Promise<CoreSnapshot> {
+    const payload: Record<string, string> = { provider, campaignId, taskId };
+    const persisted = persistedAttemptId(attemptId);
+    if (persisted) payload.attemptId = persisted;
+    return this.mutate("select_runtime", payload, false);
+  }
+
+  async interrupt(attemptId: string): Promise<CoreSnapshot> {
+    return this.mutate("interrupt", { attemptId }, false);
+  }
+
+  async closeSession(attemptId: string): Promise<CoreSnapshot> {
+    return this.mutate("close_session", { attemptId }, false);
+  }
+
+  async resumeSession(attemptId: string): Promise<CoreSnapshot> {
+    return this.mutate("resume_native_session", { attemptId }, false);
+  }
+
+  async recheckStopResponsibility(attemptId: string): Promise<CoreSnapshot> {
+    return this.mutate("recheck_stop_responsibility", { attemptId }, false);
+  }
+
+  async continueInIsolatedWorkspace(attemptId: string, targetWorkspace: string): Promise<CoreSnapshot> {
+    return this.mutate("continue_in_isolated_workspace", { attemptId, targetWorkspace }, false);
+  }
+
+  async handoff(provider: string, oldAttemptId: string, instruction: string): Promise<CoreSnapshot> {
+    return this.mutate("handoff", { provider, oldAttemptId, instruction }, false);
+  }
+
+  async revokeAuthorization(campaignId: string, scope = "action"): Promise<CoreSnapshot> {
+    return this.mutate("revoke_authorization", { campaignId, scope }, false);
+  }
+
+  async requestOwnerAction(action: string, planApproved = true, auditPassed = true): Promise<CoreSnapshot> {
+    return this.mutate("request_owner_action", { action, planApproved, auditPassed }, false);
+  }
+
+  async notify(): Promise<boolean> {
+    return false;
+  }
+
+  async chooseWorkspace(): Promise<string | null> {
+    return null;
+  }
+
+  async appInfo(): Promise<AppInfo> {
+    return { version: "", channel: "linux-core", testMode: false, dataPath: "" };
+  }
+
+  private async readOverview(): Promise<GoalOverview> {
+    const response = await this.post("goal_overview", {});
+    return normalizeGoalOverview(payloadOf(response).overview);
+  }
+
+  private async mutate(
+    messageType: CoreCommand["messageType"],
+    payload: Record<string, string | number | boolean>,
+    adoptView: boolean,
+    stableRequestId?: string
+  ): Promise<CoreSnapshot> {
+    const generation = this.claimGeneration();
+    this.mutationDepth += 1;
+    const command: CoreCommand = {
+      protocolVersion: IPC_PROTOCOL_VERSION,
+      requestId: stableRequestId ?? requestId(),
+      entityVersion: 1,
+      messageType,
+      payload
+    };
+    try {
+      const response = await this.post(messageType, payload, command.requestId);
+      const snapshot = resolveCoreSnapshot(payloadOf(response).snapshot);
+      if (!snapshot) throw new Error("Core returned an invalid snapshot");
+      if (generation < this.appliedGeneration) return this.lastSnapshot;
+      if (adoptView && snapshot.activeCampaignId) {
+        this.viewCampaignId = snapshot.activeCampaignId;
+        this.viewPinned = true;
+        this.revision = "";
+      }
+      return this.commitSnapshot(generation, {
+        ...snapshot,
+        preview: false,
+        goalOverview: this.lastSnapshot.goalOverview,
+        commandOutcome: commandOutcome(command, "accepted")
+      });
+    } catch (error) {
+      if (generation < this.appliedGeneration) return this.lastSnapshot;
+      const message = errorMessage(error);
+      return this.commitSnapshot(generation, {
+        ...this.lastSnapshot,
+        preview: false,
+        connection: "disconnected",
+        commandOutcome: commandOutcome(command, "transport-error", message),
+        notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices]
+      });
+    } finally {
+      this.mutationDepth -= 1;
+    }
+  }
+
+  private fail(error: unknown): CoreSnapshot {
+    const message = errorMessage(error);
+    this.lastSnapshot = {
+      ...this.lastSnapshot,
+      preview: false,
+      connection: "disconnected",
+      notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Core request failed:"))]
+    };
+    return this.lastSnapshot;
+  }
+
+  private async post(messageType: string, payload: Record<string, unknown>, stableRequestId?: string): Promise<Record<string, unknown>> {
+    const requestIdValue = stableRequestId ?? requestId();
+    let response: Response;
+    try {
+      response = await fetch("/goalport/ipc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          protocolVersion: IPC_PROTOCOL_VERSION,
+          requestId: requestIdValue,
+          entityVersion: 1,
+          messageType,
+          payload
+        })
+      });
+    } catch (error) {
+      throw new Error(errorMessage(error));
+    }
+    if (!response.ok) throw new Error("Linux Core is not connected");
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== "object") throw new Error("Core returned an unreadable response");
+    const record = parsed as Record<string, unknown>;
+    if (record.ok !== true) {
+      const message = typeof record.error === "string" ? record.error : "Core refused the request";
+      throw new Error(message);
+    }
+    return record;
+  }
+}
+
+function payloadOf(response: Record<string, unknown>): Record<string, unknown> {
+  return response.payload && typeof response.payload === "object" ? response.payload as Record<string, unknown> : {};
+}
+
+function linuxCoreEnabled(): boolean {
+  return typeof window !== "undefined" && Boolean(window.__GOALPORT_LINUX_CORE__);
+}
+
 let sharedClient: CoreClient | undefined;
 
 export function getCoreClient(): CoreClient {
@@ -1012,7 +1398,10 @@ export function getCoreClient(): CoreClient {
   // synthetic transport per mounted App prevents one test/demo window from
   // leaking its projection into another. Tauri uses one client because it
   // represents the single local Core connection for the desktop window.
+  // The Linux bridge is explicit: a missing socket stays disconnected and
+  // never falls through to the sample preview.
   if (typeof window !== "undefined" && window.__GOALPORT_ELECTRON__ && window.goalportCore) return new TauriCoreClient("electron");
+  if (linuxCoreEnabled()) return new LinuxCoreClient();
   if (!isTauriRuntime()) return new PreviewCoreClient();
   if (!sharedClient) sharedClient = new TauriCoreClient();
   return sharedClient;

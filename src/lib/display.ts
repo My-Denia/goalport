@@ -102,8 +102,10 @@ export interface HeadlineState {
  */
 export function headlineState(
   product: ProductConversation | null,
-  snapshot: CoreSnapshot
+  snapshot: CoreSnapshot,
+  activity?: "closing-session"
 ): HeadlineState {
+  if (activity === "closing-session") return { label: "Closing session…", tone: "waiting" };
   if (snapshot.connection !== "connected") return { label: "Disconnected", tone: "blocked" };
   if (snapshot.stopResponsibility?.writeResponsibility === "held") return { label: "Blocked", tone: "blocked" };
   const turn = product?.turn;

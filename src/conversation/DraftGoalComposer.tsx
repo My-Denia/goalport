@@ -56,6 +56,7 @@ interface DraftGoalComposerProps {
   retryLabel?: string;
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
+  workspacePlaceholder?: string;
   onBrowse: () => void;
   onChange: (value: GoalDraftValue) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -69,7 +70,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // IME composition guards, identical to the conversation composer.
@@ -137,7 +138,7 @@ export function DraftGoalComposer({
             aria-label="Project folder"
             value={draft.workspace}
             onChange={(event) => onChange({ ...draft, workspace: event.target.value })}
-            placeholder="C:\workspace\your-project"
+            placeholder={workspacePlaceholder ?? "C:\\workspace\\your-project"}
             disabled={busy}
           />
           {canBrowse ? (

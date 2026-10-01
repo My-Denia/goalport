@@ -52,6 +52,19 @@ supported. After Core restarts, a settled Codex session offers this action;
 sending is disabled until the saved session is attached. Failed or unknown
 delivery is not replayed. `select`, `runtime`, and `rename` have help via `COMMAND --help`.
 
+`overview` lists every goal's status and pending approvals. `detail --campaign CAMPAIGN_ID` reads that goal. Neither command changes which goal another client is viewing. `select` still updates the shared single-window selection; use it only when one client owns the screen.
+
+## Workbench
+
+The same renderer can talk to this Core through a local bridge. The bridge is a development entry, not a Linux package: no installer, tray, or remote listener. It serves the built page on `127.0.0.1` and forwards each POST to the Unix socket. It does not keep a session or a database. If the socket is down, the page shows disconnected and does not fall back to sample data.
+
+```sh
+pnpm build
+python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.sock
+```
+
+Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Switching goals and reading another goal from `detail` are independent.
+
 Every operation goes through the production v2 protocol and Core's existing
 permission and delivery rules. A timeout after sending a mutation means its
 delivery is unknown. The client prints the request ID and never retries it

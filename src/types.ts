@@ -361,6 +361,32 @@ export interface RecheckObservationSummary {
   attemptState: string;
 }
 
+export interface GoalCard {
+  campaignId: string;
+  projectId: string;
+  workspaceRoot: string;
+  title: string;
+  attention: "running" | "awaiting_approval" | "failed" | "needs_recovery" | "idle" | "complete";
+  attemptId: string;
+  provider: string;
+}
+
+export interface GoalPendingItem {
+  decisionId: string;
+  campaignId: string;
+  attemptId: string;
+  title: string;
+  kind: string;
+}
+
+/** Shell list of goals and approvals. It does not carry conversation history. */
+export interface GoalOverview {
+  revision: string;
+  goals: GoalCard[];
+  pending: GoalPendingItem[];
+  truncated: boolean;
+}
+
 export interface CoreSnapshot {
   protocolVersion: string;
   buildId: string;
@@ -398,6 +424,38 @@ export interface CoreSnapshot {
    * compatibility message and never falls back to the raw timeline.
    */
   productConversation: ProductConversation | null;
+  /** Present when this page is talking to a Linux Core that publishes a goal shell. */
+  goalOverview?: GoalOverview;
+  /** Settled turns for the goal on screen. Absent on older Core builds. */
+  turnResults?: TurnResult[];
+}
+
+export interface TurnFileFact {
+  path: string;
+  fromPath?: string;
+  area: "staged" | "unstaged" | "untracked";
+  status: string;
+  change: "before" | "added" | "modified" | "deleted" | "renamed" | "copied";
+  contentInspection?: "available" | "binary" | "too-large" | "unreadable" | "not-applicable";
+}
+
+export interface TurnCommandFact {
+  command: string;
+  cwd?: string;
+  state: "started" | "completed" | "failed";
+  exitCode?: number;
+  output?: string;
+}
+
+export interface TurnResult {
+  requestId: string;
+  replyState: "completed" | "failed" | "cancelled" | "uncertain";
+  replyText?: string;
+  baselineRecorded: boolean;
+  before: TurnFileFact[];
+  during: TurnFileFact[];
+  unattributed: TurnFileFact[];
+  commands: TurnCommandFact[];
 }
 
 const initialTimeline: TimelineItem[] = [
@@ -978,11 +1036,75 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
     notices: Array.isArray(raw.notices) ? raw.notices.map((notice) => asText(notice, "")).filter(Boolean) : [],
     bounds: normalizeSnapshotBounds(raw.bounds),
     commandOutcome: undefined,
-    productConversation: normalizeProductConversation(raw.productConversation ?? raw.product_conversation)
+    productConversation: normalizeProductConversation(raw.productConversation ?? raw.product_conversation),
+    turnResults: normalizeTurnResults(raw.turnResults ?? raw.turn_results)
   };
 }
 
 type WireRecord = Record<string, unknown>;
+
+function normalizeTurnResults(value: unknown): TurnResult[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const results = value.map((item) => {
+    const row = asRecord(item);
+    if (!row) return null;
+    const replyState = row.replyState ?? row.reply_state;
+    if (replyState !== "completed" && replyState !== "failed" && replyState !== "cancelled" && replyState !== "uncertain") return null;
+    return {
+      requestId: asText(row.requestId ?? row.request_id, ""),
+      replyState,
+      ...(typeof (row.replyText ?? row.reply_text) === "string" ? { replyText: String(row.replyText ?? row.reply_text) } : {}),
+      baselineRecorded: (row.baselineRecorded ?? row.baseline_recorded) === true,
+      before: normalizeTurnFiles(row.before),
+      during: normalizeTurnFiles(row.during),
+      unattributed: normalizeTurnFiles(row.unattributed),
+      commands: normalizeTurnCommands(row.commands)
+    } satisfies TurnResult;
+  }).filter(isPresent);
+  return results;
+}
+
+function normalizeTurnFiles(value: unknown): TurnFileFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const row = asRecord(item);
+    if (!row || typeof row.path !== "string" || !row.path) return null;
+    const area = row.area === "staged" || row.area === "untracked" ? row.area : "unstaged";
+    const change = row.change === "added" || row.change === "modified" || row.change === "deleted" || row.change === "renamed" || row.change === "copied"
+      ? row.change
+      : "before";
+    const inspection = row.contentInspection ?? row.content_inspection;
+    const contentInspection = inspection === "binary" || inspection === "too-large" || inspection === "unreadable" || inspection === "not-applicable" || inspection === "available"
+      ? inspection
+      : undefined;
+    const fromPath = typeof (row.fromPath ?? row.from_path) === "string" ? String(row.fromPath ?? row.from_path) : "";
+    return {
+      path: row.path,
+      ...(fromPath ? { fromPath } : {}),
+      area,
+      status: asText(row.status, ""),
+      change,
+      ...(contentInspection ? { contentInspection } : {})
+    } satisfies TurnFileFact;
+  }).filter(isPresent);
+}
+
+function normalizeTurnCommands(value: unknown): TurnCommandFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const row = asRecord(item);
+    if (!row || typeof row.command !== "string" || !row.command.trim()) return null;
+    const state = row.state === "failed" || row.state === "started" ? row.state : "completed";
+    const exitCode = typeof row.exitCode === "number" ? row.exitCode : typeof row.exit_code === "number" ? row.exit_code : undefined;
+    return {
+      command: row.command,
+      ...(typeof row.cwd === "string" && row.cwd ? { cwd: row.cwd } : {}),
+      state,
+      ...(exitCode === undefined ? {} : { exitCode }),
+      ...(typeof row.output === "string" && row.output ? { output: row.output } : {})
+    } satisfies TurnCommandFact;
+  }).filter(isPresent);
+}
 
 function asRecord(value: unknown): WireRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as WireRecord) : null;

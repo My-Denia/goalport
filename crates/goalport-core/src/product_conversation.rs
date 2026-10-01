@@ -215,6 +215,7 @@ fn effective_title(
 pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationItem> {
     let mut items = Vec::new();
     let mut pending_reply: Option<ProductConversationItem> = None;
+    let mut pending_item_id: Option<String> = None;
     let mut reply_attempt = String::new();
     let mut seen_handoff_operations = HashSet::new();
     for record in records {
@@ -243,6 +244,7 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
             if let Some(reply) = pending_reply.take() {
                 items.push(reply);
             }
+            pending_item_id = None;
         }
         match record.event.kind.as_str() {
             "message.user" => {
@@ -277,13 +279,30 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                 let Some(delta) = text_of("text") else {
                     continue;
                 };
+                if delta.trim().is_empty() {
+                    continue;
+                }
+                let item_id = text_of("itemId").filter(|item_id| !item_id.is_empty());
+                let completed = text_of("status").as_deref() == Some("completed");
+                if pending_reply.is_some() && item_id.is_some() && pending_item_id.as_ref() != item_id.as_ref() {
+                    if let Some(reply) = pending_reply.take() {
+                        items.push(reply);
+                    }
+                    pending_item_id = None;
+                }
                 match pending_reply.as_mut() {
+                    // A completed provider item carries the whole message.
+                    // Appending it after that item's deltas would show the reply twice.
+                    Some(reply) if completed && item_id.is_some() => {
+                        reply.body = delta;
+                    }
                     Some(reply) => reply.body.push_str(&delta),
                     None => {
                         reply_attempt = record.event.attempt_id.clone();
+                        pending_item_id = item_id.clone();
                         pending_reply = Some(ProductConversationItem {
                             id: record.event.id.clone(),
-                            logical_item_id: record.event.id.clone(),
+                            logical_item_id: item_id.clone().unwrap_or_else(|| record.event.id.clone()),
                             fragment_index: 0,
                             continues_before: false,
                             continues_after: false,
@@ -295,6 +314,12 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                             technical_details: None,
                         });
                     }
+                }
+                if completed && item_id.is_some() {
+                    if let Some(reply) = pending_reply.take() {
+                        items.push(reply);
+                    }
+                    pending_item_id = None;
                 }
             }
             "runtime.tool.activity" => {

@@ -202,6 +202,8 @@ fn supported_ui_message(value: &str) -> bool {
             | "get_startup_receipt"
             | "get_close_choice_receipt"
             | "history_page"
+            | "goal_overview"
+            | "goal_detail"
     )
 }
 
@@ -596,10 +598,10 @@ impl CoreServer {
         let mut ui = self.ui.lock().expect("ui projection poisoned");
         ui.merge_native_worker(&plan, worker, baseline)?;
         outcome.map(|mut result| {
-            // A user may have selected another conversation during startup.
-            // Answer with the merged current snapshot instead of the worker's
-            // private selection.
-            result.snapshot = ui.snapshot(None)?;
+            // Rebuild from the merged controller. A named send, stop or
+            // approval shows that goal and leaves the shared selection as it
+            // was; anything else keeps the single-window snapshot.
+            result.snapshot = ui.response_snapshot(request, None)?;
             Ok(result)
         })?
     }
@@ -634,7 +636,16 @@ impl CoreServer {
                         return Err(IpcError::Invalid("snapshot_if_changed requires UI protocol v2".into()));
                     }
                     let known = request.payload.get("revision").and_then(Value::as_str);
-                    let outcome = self.ui.lock().expect("ui projection poisoned").snapshot_if_changed(known);
+                    let campaign_id = request
+                        .payload
+                        .get("campaignId")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty());
+                    let outcome = self
+                        .ui
+                        .lock()
+                        .expect("ui projection poisoned")
+                        .snapshot_if_changed(known, campaign_id);
                     let (ok, payload, error) = match outcome {
                         Ok(payload) => (true, payload, None),
                         Err(message) => (false, Value::Null, Some(bound_error(&message))),
@@ -666,6 +677,74 @@ impl CoreServer {
                 } else {
                     if std::env::var_os("GOALPORT_DEBUG").is_some() {
                         eprintln!("goalport-ui: handling {}", request.message_type);
+                    }
+                    if request.message_type == "goal_overview" || request.message_type == "goal_detail" {
+                        if request.protocol_version != CONNECTED_UI_PROTOCOL_VERSION {
+                            return Err(IpcError::Invalid(
+                                "goal overview and detail require UI protocol v2".into(),
+                            ));
+                        }
+                        let mut ui = self.ui.lock().expect("ui projection poisoned");
+                        let outcome = if request.message_type == "goal_overview" {
+                            ui.goal_overview().map(|overview| serde_json::json!({
+                                "requestId": request.request_id,
+                                "accepted": true,
+                                "overview": overview
+                            }))
+                        } else {
+                            let campaign_id = request
+                                .payload
+                                .get("campaignId")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.is_empty());
+                            match campaign_id {
+                                None => Err("campaignId is required".to_string()),
+                                Some(campaign_id) => match ui.scoped_view_revision(campaign_id) {
+                                    Err(error) => Err(error),
+                                    Ok(revision) => ui.snapshot_for_campaign(campaign_id, None).map(|snapshot| {
+                                        serde_json::json!({
+                                            "requestId": request.request_id,
+                                            "accepted": true,
+                                            "revision": revision,
+                                            "snapshot": snapshot
+                                        })
+                                    }),
+                                },
+                            }
+                        };
+                        let value = match outcome {
+                            Ok(payload) => serde_json::to_value(UiCommandResponse {
+                                protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                                request_id: request.request_id.clone(),
+                                entity_version: request.entity_version,
+                                ok: true,
+                                payload,
+                                error: None,
+                            })?,
+                            Err(error) => {
+                                let error = bound_error(&error);
+                                serde_json::to_value(UiCommandResponse {
+                                    protocol_version: CONNECTED_UI_PROTOCOL_VERSION,
+                                    request_id: request.request_id.clone(),
+                                    entity_version: request.entity_version,
+                                    ok: false,
+                                    payload: serde_json::json!({
+                                        "requestId": request.request_id,
+                                        "accepted": false,
+                                        "rejection": {
+                                            "code": "goal-read-rejected",
+                                            "message": error.clone(),
+                                            "deliveryState": "FAILED",
+                                            "nativeDispatchState": "NOT_STARTED",
+                                            "retryMode": "NONE",
+                                            "reservation": Value::Null
+                                        }
+                                    }),
+                                    error: Some(error),
+                                })?
+                            }
+                        };
+                        return bound_ui_response(value).map_err(IpcError::Invalid);
                     }
                     if request.message_type == "history_page" {
                         let outcome = self

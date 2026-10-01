@@ -20,6 +20,7 @@ pub mod projection;
 pub mod response_bounds;
 pub mod runtime_manager;
 pub mod store;
+pub mod turn_results;
 
 pub use adapters::{
     AdapterError, AgentAdapter, AuthState, CancelResult, Capability, CapabilitySnapshot,

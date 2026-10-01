@@ -170,7 +170,7 @@ def call(endpoint=None, message_type="snapshot", payload=None, *, timeout=30,
             return response
     except (OSError, EOFError, ValueError) as error:
         read_only = message_type in {"snapshot", "snapshot_if_changed", "history_page", "get_startup_receipt",
-                                     "get_close_choice_receipt"}
+                                     "get_close_choice_receipt", "goal_overview", "goal_detail"}
         state = "READ_FAILED" if read_only else "UNKNOWN" if sent else "NOT_SENT"
         raise ClientError(str(error), request_id, state) from error
 
@@ -241,6 +241,9 @@ def parser():
     commands = result.add_subparsers(dest="action")
     commands.add_parser("snapshot", help="read the current desktop projection")
     commands.add_parser("diagnose", help="explain send/stop availability and pending permissions")
+    commands.add_parser("overview", help="list goals and pending approvals without changing the open goal")
+    detail = commands.add_parser("detail", help="read one goal by id without changing the shared selection")
+    detail.add_argument("--campaign", required=True)
     watch = commands.add_parser("watch", help="read changed diagnostics using short polling exchanges")
     watch.add_argument("--interval", type=float, default=0.75)
     watch.add_argument("--count", type=int, default=0, help="number of samples; 0 runs until interrupted")
@@ -291,6 +294,10 @@ def command_for(args):
     action = args.action or "snapshot"
     if action == "watch":
         return "snapshot_if_changed", {}
+    if action == "overview":
+        return "goal_overview", {}
+    if action == "detail":
+        return "goal_detail", {"campaignId": args.campaign}
     if action in {"snapshot", "diagnose"}:
         return "snapshot", {}
     if action in {"new", "send"}:
@@ -332,7 +339,7 @@ def main(argv=None):
     if argv and argv[0] == "--resolve-only":
         print(resolve(argv[1] if len(argv) > 1 else None))
         return 0
-    actions = {"snapshot", "diagnose", "watch", "new", "send", "select", "runtime",
+    actions = {"snapshot", "diagnose", "overview", "detail", "watch", "new", "send", "select", "runtime",
                "decision", "stop", "resume", "close-session", "rename", "command"}
     if argv and not argv[0].startswith("-") and argv[0] not in actions:
         argv = ["--endpoint", argv[0], *argv[1:]]

@@ -6212,6 +6212,77 @@ impl BoundedReadLine for BufReader<ChildStdout> {
     }
 }
 
+/// Copy structured command and file fields when the provider sent them.
+/// Missing fields stay absent. Reply text is never read as an exit code.
+fn observed_tool_fields(item: &Value) -> Value {
+    let mut extra = serde_json::Map::new();
+    if let Some(command) = command_line(item.get("command")) {
+        extra.insert("command".into(), json!(bounded_text(&command)));
+    }
+    if let Some(cwd) = item.get("cwd").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        extra.insert("cwd".into(), json!(bounded_text(cwd)));
+    }
+    if let Some(code) = item
+        .get("exitCode")
+        .or_else(|| item.get("exit_code"))
+        .and_then(Value::as_i64)
+    {
+        extra.insert("exitCode".into(), json!(code));
+    }
+    let stdout = item
+        .get("aggregatedOutput")
+        .or_else(|| item.get("stdout"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stderr = item.get("stderr").and_then(Value::as_str).unwrap_or("");
+    let mut output = String::new();
+    if !stdout.is_empty() {
+        output.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(stderr);
+    }
+    if !output.is_empty() {
+        let bounded: String = output.chars().take(400).collect();
+        extra.insert("output".into(), json!(bounded));
+    }
+    let mut paths = Vec::new();
+    if let Some(path) = item.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        paths.push(path.to_string());
+    }
+    if let Some(changes) = item.get("changes").and_then(Value::as_array) {
+        for change in changes {
+            if let Some(path) = change.get("path").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    if !paths.is_empty() {
+        paths.truncate(40);
+        extra.insert("paths".into(), json!(paths));
+    }
+    Value::Object(extra)
+}
+
+fn command_line(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    let parts = value.as_array()?;
+    let joined = parts
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
 fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
     let lower = method.to_ascii_lowercase();
     // These notifications describe the provider's own diagnostics and can
@@ -6243,7 +6314,9 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             .get("delta")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        return Some(json!({ "text": bounded_text(text) }));
+        let mut payload = json!({ "text": bounded_text(text) });
+        insert_codex_item_id(&mut payload, params);
+        return Some(payload);
     }
     if lower.contains("agentmessage") && lower.contains("completed") {
         let text = params
@@ -6251,16 +6324,18 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             .and_then(|item| item.get("text"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        return Some(json!({ "text": bounded_text(text), "status": "completed" }));
+        let mut payload = json!({ "text": bounded_text(text), "status": "completed" });
+        insert_codex_item_id(&mut payload, params);
+        return Some(payload);
     }
     if lower.contains("item/started") || lower.contains("item/completed") {
         let item = params.get("item").unwrap_or(&Value::Null);
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or("item");
         if item_type.eq_ignore_ascii_case("agentMessage") {
             let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
-            return Some(
-                json!({ "text": bounded_text(text), "status": if lower.contains("completed") { "completed" } else { "started" } }),
-            );
+            let mut payload = json!({ "text": bounded_text(text), "status": if lower.contains("completed") { "completed" } else { "started" } });
+            insert_codex_item_id(&mut payload, params);
+            return Some(payload);
         }
         if item_type.eq_ignore_ascii_case("userMessage") {
             return None;
@@ -6269,10 +6344,16 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             || item_type.to_ascii_lowercase().contains("command")
             || item_type.to_ascii_lowercase().contains("filechange")
         {
-            return Some(json!({
+            let mut payload = json!({
                 "tool": bounded_text(item_type),
                 "status": if lower.contains("completed") { "completed" } else { "started" }
-            }));
+            });
+            if let (Some(object), Some(extra)) = (payload.as_object_mut(), observed_tool_fields(item).as_object()) {
+                for (key, value) in extra {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+            return Some(payload);
         }
         return None;
     }
@@ -6499,6 +6580,9 @@ fn classify_codex_method(method: &str, value: &Value) -> AgentEventType {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_ascii_lowercase();
+        if item_type == "agentmessage" {
+            return AgentEventType::MessageDelta;
+        }
         if item_type.contains("tool")
             || item_type.contains("command")
             || item_type.contains("filechange")
@@ -6658,6 +6742,20 @@ fn is_safe_payload_key(key: &str) -> bool {
             | "is_error"
             | "usage"
     )
+}
+
+fn insert_codex_item_id(payload: &mut Value, params: &Value) {
+    let item_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("item").and_then(|item| item.get("id")).and_then(Value::as_str))
+        .filter(|item_id| !item_id.is_empty());
+    let Some(item_id) = item_id else { return };
+    let Some(object) = payload.as_object_mut() else { return };
+    object.insert(
+        "itemId".into(),
+        Value::String(item_id.chars().take(128).collect()),
+    );
 }
 
 fn bounded_text(value: &str) -> String {
@@ -6910,9 +7008,23 @@ mod tests {
 
     #[test]
     fn codex_agent_delta_is_normalized_to_visible_text() {
-        let value = json!({ "method": "item/agentMessage/delta", "params": { "delta": "hello" } });
+        let value = json!({ "method": "item/agentMessage/delta", "params": { "itemId": "item-1", "delta": "hello" } });
         let payload = normalized_codex_payload("item/agentMessage/delta", &value).unwrap();
         assert_eq!(payload["text"], "hello");
+        assert_eq!(payload["itemId"], "item-1");
+    }
+
+    #[test]
+    fn codex_completed_agent_item_is_one_message_with_its_full_text() {
+        let value = json!({
+            "method": "item/completed",
+            "params": { "item": { "id": "item-final", "type": "agentMessage", "text": "Fixed add()." } }
+        });
+        assert_eq!(classify_codex_method("item/completed", &value), AgentEventType::MessageDelta);
+        let payload = normalized_codex_payload("item/completed", &value).unwrap();
+        assert_eq!(payload["text"], "Fixed add().");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["itemId"], "item-final");
     }
 
     #[test]
