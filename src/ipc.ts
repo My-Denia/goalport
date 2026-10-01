@@ -1052,6 +1052,17 @@ function normalizeGoalOverview(value: unknown): GoalOverview {
   };
 }
 
+class CoreRequestRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CoreRequestRefused";
+  }
+}
+
+function isCoreRefusal(error: unknown): error is CoreRequestRefused {
+  return error instanceof CoreRequestRefused;
+}
+
 /**
  * The user is looking at one real Linux goal. This client asks Core for that
  * goal by id and never substitutes the sample preview when the socket is down.
@@ -1122,12 +1133,20 @@ class LinuxCoreClient implements CoreClient {
         || message.includes("entity not found")
         || message.includes("Query returned no rows")
       );
-      if (missing) {
-        this.routeMiss = this.viewCampaignId;
-        this.viewPinned = false;
-        this.viewCampaignId = "";
-        this.revision = "";
-        return this.snapshot();
+      if (isCoreRefusal(error)) {
+        if (missing) {
+          this.routeMiss = this.viewCampaignId;
+          this.viewPinned = false;
+          this.viewCampaignId = "";
+          this.revision = "";
+          return this.snapshot();
+        }
+        const notice = `Core refused: ${message}`;
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
+        });
       }
       return this.fail(error);
     }
@@ -1158,6 +1177,15 @@ class LinuxCoreClient implements CoreClient {
       this.viewCampaignId = previousView;
       this.viewPinned = previousPinned;
       this.revision = previousRevision;
+      if (isCoreRefusal(error)) {
+        const message = errorMessage(error);
+        const notice = `Core refused: ${message}`;
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
+        });
+      }
       return this.fail(error);
     } finally {
       this.mutationDepth -= 1;
@@ -1329,6 +1357,15 @@ class LinuxCoreClient implements CoreClient {
       });
     } catch (error) {
       if (generation < this.appliedGeneration) return this.lastSnapshot;
+      if (isCoreRefusal(error)) {
+        const message = errorMessage(error);
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          commandOutcome: commandOutcome(command, "refused", message),
+          notices: [`Core refused: ${message}`, ...this.lastSnapshot.notices.filter((notice) => notice !== `Core refused: ${message}`)]
+        });
+      }
       const message = errorMessage(error);
       return this.commitSnapshot(generation, {
         ...this.lastSnapshot,
@@ -1377,7 +1414,7 @@ class LinuxCoreClient implements CoreClient {
     const record = parsed as Record<string, unknown>;
     if (record.ok !== true) {
       const message = typeof record.error === "string" ? record.error : "Core refused the request";
-      throw new Error(message);
+      throw new CoreRequestRefused(message);
     }
     return record;
   }

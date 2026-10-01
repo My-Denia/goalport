@@ -231,7 +231,7 @@ export interface SnapshotBounds {
   projectionUnavailable: boolean;
   omittedCounts: Partial<Record<
     "projects" | "campaigns" | "decisions" | "evidence" | "notices" |
-    "relatedHolds" | "conversationItems" | "timelineItems",
+    "relatedHolds" | "conversationItems" | "timelineItems" | "turnResults" | "runtimes",
     number
   >>;
 }
@@ -451,11 +451,13 @@ export interface TurnResult {
   requestId: string;
   replyState: "completed" | "failed" | "cancelled" | "uncertain";
   replyText?: string;
+  replyTruncated?: boolean;
   baselineRecorded: boolean;
   before: TurnFileFact[];
   during: TurnFileFact[];
   unattributed: TurnFileFact[];
   commands: TurnCommandFact[];
+  commandsTruncated?: boolean;
 }
 
 const initialTimeline: TimelineItem[] = [
@@ -1054,11 +1056,13 @@ function normalizeTurnResults(value: unknown): TurnResult[] | undefined {
       requestId: asText(row.requestId ?? row.request_id, ""),
       replyState,
       ...(typeof (row.replyText ?? row.reply_text) === "string" ? { replyText: String(row.replyText ?? row.reply_text) } : {}),
+      ...((row.replyTruncated ?? row.reply_truncated) === true ? { replyTruncated: true } : {}),
       baselineRecorded: (row.baselineRecorded ?? row.baseline_recorded) === true,
       before: normalizeTurnFiles(row.before),
       during: normalizeTurnFiles(row.during),
       unattributed: normalizeTurnFiles(row.unattributed),
-      commands: normalizeTurnCommands(row.commands)
+      commands: normalizeTurnCommands(row.commands),
+      ...((row.commandsTruncated ?? row.commands_truncated) === true ? { commandsTruncated: true } : {})
     } satisfies TurnResult;
   }).filter(isPresent);
   return results;
@@ -1401,7 +1405,7 @@ function normalizeSnapshotBounds(value: unknown): SnapshotBounds | undefined {
   if (!raw) return undefined;
   const omittedRaw = asRecord(raw.omittedCounts ?? raw.omitted_counts ?? raw.omitted);
   const omittedCounts: SnapshotBounds["omittedCounts"] = {};
-  for (const key of ["projects", "campaigns", "decisions", "evidence", "notices", "relatedHolds", "conversationItems", "timelineItems"] as const) {
+  for (const key of ["projects", "campaigns", "decisions", "evidence", "notices", "relatedHolds", "conversationItems", "timelineItems", "turnResults", "runtimes"] as const) {
     const snake = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
     const count = omittedRaw ? optionalNumber(omittedRaw[key] ?? omittedRaw[snake]) : undefined;
     if (count !== undefined && count > 0) omittedCounts[key] = count;

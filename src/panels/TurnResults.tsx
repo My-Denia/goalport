@@ -3,6 +3,7 @@ import type { TurnCommandFact, TurnFileFact, TurnResult } from "../types";
 
 interface TurnResultsProps {
   results: TurnResult[] | undefined;
+  omittedTurns?: number;
 }
 
 const REPLY_LABEL: Record<TurnResult["replyState"], string> = {
@@ -17,18 +18,19 @@ const REPLY_LABEL: Record<TurnResult["replyState"], string> = {
  * which files were already dirty, what changed afterwards, and which commands
  * actually finished. A reply that mentions tests is not an exit code.
  */
-export function TurnResults({ results }: TurnResultsProps) {
-  if (!results || results.length === 0) return null;
-  const ordered = [...results].reverse();
+export function TurnResults({ results, omittedTurns = 0 }: TurnResultsProps) {
+  if ((!results || results.length === 0) && omittedTurns === 0) return null;
+  const ordered = [...(results ?? [])].reverse();
   return (
     <section className="turn-results" aria-label="Results">
       <h2>Results</h2>
+      {omittedTurns > 0 ? <p className="muted">Older results are not in this view.</p> : null}
       {ordered.map((result, index) => (
         <article className="turn-result" key={`${result.requestId}-${index}`}>
           <header className="turn-result-head">
             <span className={`turn-reply-state reply-${result.replyState}`}>{REPLY_LABEL[result.replyState]}</span>
           </header>
-          {result.replyText ? <ReplyBody text={result.replyText} /> : <p className="turn-reply muted">No final reply for this turn.</p>}
+          {result.replyText ? <ReplyBody text={result.replyText} truncated={result.replyTruncated === true} /> : <p className="turn-reply muted">No final reply for this turn.</p>}
           {result.baselineRecorded ? (
             <>
               <FileGroup title="Already in the workspace" files={result.before} empty="No dirty, staged, or untracked files were recorded at the start." />
@@ -38,7 +40,7 @@ export function TurnResults({ results }: TurnResultsProps) {
           ) : (
             <p className="baseline-missing">Baseline not recorded</p>
           )}
-          <CommandList commands={result.commands} />
+          <CommandList commands={result.commands} truncated={result.commandsTruncated === true} />
         </article>
       ))}
     </section>
@@ -48,15 +50,18 @@ export function TurnResults({ results }: TurnResultsProps) {
 const REPLY_FOLD = 1200;
 
 /** The stored reply is the final assistant item. Folding is only a reading aid. */
-function ReplyBody({ text }: { text: string }) {
+function ReplyBody({ text, truncated }: { text: string; truncated: boolean }) {
   const [open, setOpen] = useState(false);
-  if (text.length <= REPLY_FOLD) return <p className="turn-reply">{text}</p>;
+  const folded = text.length > REPLY_FOLD;
   return (
     <div className="turn-reply-block">
-      <p className="turn-reply">{open ? text : `${text.slice(0, REPLY_FOLD).trimEnd()}…`}</p>
-      <button className="button button-quiet turn-reply-more" type="button" onClick={() => setOpen((value) => !value)}>
-        {open ? "Show less" : "Show the full reply"}
-      </button>
+      <p className="turn-reply">{folded && !open ? `${text.slice(0, REPLY_FOLD).trimEnd()}…` : text}</p>
+      {folded ? (
+        <button className="button button-quiet turn-reply-more" type="button" onClick={() => setOpen((value) => !value)}>
+          {open ? "Show less" : "Show the full reply"}
+        </button>
+      ) : null}
+      {truncated ? <p className="muted">This reply was shortened in the saved result.</p> : null}
     </div>
   );
 }
@@ -100,7 +105,7 @@ function inspectionNote(inspection: TurnFileFact["contentInspection"]): string {
   }
 }
 
-function CommandList({ commands }: { commands: TurnCommandFact[] }) {
+function CommandList({ commands, truncated }: { commands: TurnCommandFact[]; truncated: boolean }) {
   return (
     <div className="turn-commands">
       <h3>Commands</h3>
@@ -116,6 +121,7 @@ function CommandList({ commands }: { commands: TurnCommandFact[] }) {
           ))}
         </ul>
       )}
+      {truncated ? <p className="muted">Some commands from this turn are not listed.</p> : null}
     </div>
   );
 }

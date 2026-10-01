@@ -22,6 +22,8 @@ const OUTPUT_CHARS: usize = 400;
 const REPLY_CHARS: usize = 480;
 const REPLY_STORAGE_CHARS: usize = 32_768;
 const MAX_FILES: usize = 80;
+const MAX_PROJECTED_TURNS: usize = 8;
+const MAX_COMMANDS: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,11 +33,17 @@ pub struct TurnResultView {
     pub reply_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_text: Option<String>,
+    /// The stored reply is a prefix of the final assistant item.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply_truncated: bool,
     pub baseline_recorded: bool,
     pub before: Vec<FileFact>,
     pub during: Vec<FileFact>,
     pub unattributed: Vec<FileFact>,
     pub commands: Vec<CommandFact>,
+    /// Later command records for this turn were not included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub commands_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,8 +103,13 @@ pub fn baseline_payload(workspace: &Path, request_id: &str) -> Value {
 }
 
 pub fn project_turn_results(store: &Store, attempt_id: &str) -> Result<Vec<TurnResultView>, String> {
+    Ok(project_turn_result_window(store, attempt_id)?.0)
+}
+
+/// Newest settled turns, plus how many older turns were left out of this view.
+pub fn project_turn_result_window(store: &Store, attempt_id: &str) -> Result<(Vec<TurnResultView>, usize), String> {
     if attempt_id.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let records = store
         .list_event_records(attempt_id, 0)
@@ -111,7 +124,11 @@ pub fn project_turn_results(store: &Store, attempt_id: &str) -> Result<Vec<TurnR
         };
         results.push(view_from_payload(payload, &records, record.event.seq));
     }
-    Ok(results)
+    let omitted = results.len().saturating_sub(MAX_PROJECTED_TURNS);
+    if omitted > 0 {
+        results.drain(0..omitted);
+    }
+    Ok((results, omitted))
 }
 
 /// Freeze the file comparison for a terminal turn that does not yet have one.
@@ -163,17 +180,18 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
         let start = fingerprints_from_payload(baseline.and_then(|record| record.payload.as_ref()));
         let end = read_fingerprints(workspace).unwrap_or_default();
         let attributed = attributed_paths(&records, baseline.map(|record| record.event.seq).unwrap_or(0), terminal.event.seq);
-        classify(&start, &end, &attributed)
+        classify(workspace, &start, &end, &attributed)
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
-    let (reply_state, reply_text) = reply_for(&records, terminal);
+    let (reply_state, reply_text, reply_truncated) = reply_for(&records, terminal);
     Ok(Some(json!({
         "requestId": request_id,
         "terminalSeq": terminal.event.seq,
         "baselineSeq": baseline.map(|record| record.event.seq),
         "replyState": reply_state,
         "replyText": reply_text,
+        "replyTruncated": reply_truncated,
         "baselineRecorded": recorded,
         "afterSeq": baseline.map(|record| record.event.seq).unwrap_or_else(|| {
             records
@@ -196,6 +214,11 @@ fn view_from_payload(payload: &Value, records: &[EventRecord], result_seq: i64) 
         .and_then(Value::as_i64)
         .unwrap_or(0);
     let terminal_seq = payload.get("terminalSeq").and_then(Value::as_i64).unwrap_or(result_seq);
+    let mut commands = commands_between(records, baseline_seq, terminal_seq);
+    let commands_truncated = commands.len() > MAX_COMMANDS;
+    if commands_truncated {
+        commands.truncate(MAX_COMMANDS);
+    }
     TurnResultView {
         request_id: payload.get("requestId").and_then(Value::as_str).unwrap_or("").to_string(),
         reply_state: payload
@@ -208,11 +231,13 @@ fn view_from_payload(payload: &Value, records: &[EventRecord], result_seq: i64) 
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
+        reply_truncated: payload.get("replyTruncated").and_then(Value::as_bool) == Some(true),
         baseline_recorded: payload.get("baselineRecorded").and_then(Value::as_bool) == Some(true),
         before: file_facts(payload.get("before")),
         during: file_facts(payload.get("during")),
         unattributed: file_facts(payload.get("unattributed")),
-        commands: commands_between(records, baseline_seq, terminal_seq),
+        commands,
+        commands_truncated,
     }
 }
 
@@ -240,7 +265,7 @@ fn is_terminal(kind: &str) -> bool {
     matches!(kind, "runtime.turn.completed" | "runtime.turn.failed" | "runtime.turn.cancelled")
 }
 
-fn reply_for(records: &[EventRecord], terminal: &EventRecord) -> (String, Option<String>) {
+fn reply_for(records: &[EventRecord], terminal: &EventRecord) -> (String, Option<String>, bool) {
     let state = match terminal.event.kind.as_str() {
         "runtime.turn.failed" => "failed",
         "runtime.turn.cancelled" => "cancelled",
@@ -263,18 +288,28 @@ fn reply_for(records: &[EventRecord], terminal: &EventRecord) -> (String, Option
         }
         _ => "uncertain",
     };
-    let text = match state {
-        "completed" => completed_reply(records, terminal.event.seq),
-        "failed" => terminal
-            .payload
-            .as_ref()
-            .and_then(|payload| payload.get("text").or_else(|| payload.get("error")))
-            .and_then(Value::as_str)
-            .filter(|text| !text.trim().is_empty())
-            .map(|text| bound_chars(text.trim(), REPLY_CHARS)),
-        _ => None,
+    let (text, truncated) = match state {
+        "completed" => completed_reply(records, terminal.event.seq)
+            .map(|reply| (Some(reply.text), reply.truncated))
+            .unwrap_or((None, false)),
+        "failed" => (
+            terminal
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("text").or_else(|| payload.get("error")))
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| bound_chars(text.trim(), REPLY_CHARS)),
+            false,
+        ),
+        _ => (None, false),
     };
-    (state.to_string(), text)
+    (state.to_string(), text, truncated)
+}
+
+struct BoundedReply {
+    text: String,
+    truncated: bool,
 }
 
 struct ReplyItem {
@@ -286,7 +321,7 @@ struct ReplyItem {
 /// Earlier progress items stay in the transcript and do not join this text.
 /// A completed body wins; that item's own deltas are used only when the
 /// protocol sealed the item without a body.
-fn completed_reply(records: &[EventRecord], terminal_seq: i64) -> Option<String> {
+fn completed_reply(records: &[EventRecord], terminal_seq: i64) -> Option<BoundedReply> {
     let window_start = records
         .iter()
         .rev()
@@ -340,7 +375,15 @@ fn completed_reply(records: &[EventRecord], terminal_seq: i64) -> Option<String>
         items.get("open").map(|item| item.deltas.clone()).unwrap_or_default()
     };
     let text = text.trim();
-    (!text.is_empty()).then(|| bound_chars(text, REPLY_STORAGE_CHARS))
+    (!text.is_empty()).then(|| bound_reply(text))
+}
+
+fn bound_reply(text: &str) -> BoundedReply {
+    let truncated = text.chars().nth(REPLY_STORAGE_CHARS).is_some();
+    BoundedReply {
+        text: bound_chars(text, REPLY_STORAGE_CHARS),
+        truncated,
+    }
 }
 
 fn commands_between(records: &[EventRecord], start_seq: i64, end_seq: i64) -> Vec<CommandFact> {
@@ -400,6 +443,7 @@ fn attributed_paths(records: &[EventRecord], start_seq: i64, end_seq: i64) -> BT
 }
 
 fn classify(
+    workspace: &Path,
     start: &[Fingerprint],
     end: &[Fingerprint],
     attributed: &BTreeMap<String, ()>,
@@ -421,7 +465,47 @@ fn classify(
         // destination or a delete of the source from the other path.
         push_change(&mut during, &mut unattributed, attributed, entry);
     }
+    for entry in start {
+        if path_still_present(end, &entry.path) {
+            continue;
+        }
+        // A baseline path that git status no longer lists was deleted, or a
+        // dirty tracked file was restored to HEAD. Either way the user's
+        // bytes changed and must show up as a turn change, not only as
+        // "already in the workspace".
+        push_change(&mut during, &mut unattributed, attributed, &disappeared(workspace, entry));
+    }
     (before, during, unattributed)
+}
+
+fn path_still_present(end: &[Fingerprint], path: &str) -> bool {
+    end.iter().any(|entry| entry.path == path || entry.from_path.as_deref() == Some(path))
+}
+
+fn disappeared(workspace: &Path, entry: &Fingerprint) -> Fingerprint {
+    let candidate = workspace.join(&entry.path);
+    if candidate.is_file() {
+        let (content_hash, content_inspection) = inspect_content(workspace, &entry.path);
+        Fingerprint {
+            path: entry.path.clone(),
+            from_path: None,
+            area: entry.area.clone(),
+            status: "  ".into(),
+            change: "modified".into(),
+            content_hash,
+            content_inspection,
+        }
+    } else {
+        Fingerprint {
+            path: entry.path.clone(),
+            from_path: None,
+            area: entry.area.clone(),
+            status: entry.status.clone(),
+            change: "deleted".into(),
+            content_hash: None,
+            content_inspection: "not-applicable".into(),
+        }
+    }
 }
 
 fn same_git_fact(prior: &Fingerprint, current: &Fingerprint) -> bool {
@@ -1117,6 +1201,59 @@ mod tests {
     }
 
     #[test]
+    fn a_baseline_file_that_vanishes_is_a_turn_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "turn@example.com"]);
+        git(root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        git(root, &["add", "tracked.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        fs::write(root.join("tracked.txt"), "dirty before the turn\n").unwrap();
+        fs::write(root.join("scratch.txt"), "user file\n").unwrap();
+        let db = root.join("vanish.sqlite");
+        let store = prepared(&db, root, "attempt-vanish");
+        append_on(&store, "attempt-vanish", 1, "workspace.baseline", &baseline_payload(root, "vanish"));
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        fs::remove_file(root.join("scratch.txt")).unwrap();
+        append_on(&store, "attempt-vanish", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-vanish", root, 3);
+        let result = &project_turn_results(&store, "attempt-vanish").unwrap()[0];
+        assert!(result.before.iter().any(|file| file.path == "scratch.txt"), "{result:?}");
+        assert!(result.before.iter().any(|file| file.path == "tracked.txt"), "{result:?}");
+        let deleted = result.unattributed.iter().find(|file| file.path == "scratch.txt").expect("deleted scratch");
+        assert_eq!(deleted.change, "deleted");
+        assert_eq!(deleted.content_inspection, "not-applicable");
+        let restored = result.unattributed.iter().find(|file| file.path == "tracked.txt").expect("restored tracked");
+        assert_eq!(restored.change, "modified");
+    }
+
+    #[test]
+    fn a_reply_past_the_storage_cap_is_marked_truncated() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "turn@example.com"]);
+        git(root, &["config", "user.name", "Turn"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(root, &["add", "base.txt"]);
+        git(root, &["commit", "-m", "base"]);
+        let db = root.join("long.sqlite");
+        let store = prepared(&db, root, "attempt-long");
+        let body = "y".repeat(REPLY_STORAGE_CHARS + 24);
+        append_on(&store, "attempt-long", 1, "workspace.baseline", &baseline_payload(root, "long"));
+        append_on(&store, "attempt-long", 2, "runtime.turn.started", &json!({ "status": "running" }));
+        append_on(&store, "attempt-long", 3, "runtime.reply.delta", &json!({ "itemId": "item-final", "text": body, "status": "completed" }));
+        append_on(&store, "attempt-long", 4, "runtime.turn.completed", &json!({ "status": "completed" }));
+        settle(&store, "attempt-long", root, 5);
+        let result = &project_turn_results(&store, "attempt-long").unwrap()[0];
+        assert!(result.reply_truncated);
+        assert_eq!(result.reply_text.as_deref().unwrap().chars().count(), REPLY_STORAGE_CHARS);
+        assert!(!result.reply_text.as_deref().unwrap().contains("progress"));
+    }
+
+    #[test]
     fn audit_delete_rename_inspection_and_frozen_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repo");
@@ -1142,12 +1279,18 @@ mod tests {
         fs::write(root.join("rename-dst.txt"), "name\nedited after rename\n").unwrap();
         fs::write(root.join("binary.bin"), b"hello\0world").unwrap();
         fs::write(root.join("big.bin"), vec![b'a'; (CONTENT_LIMIT as usize) + 1]).unwrap();
-        let locked = root.join("locked.txt");
-        fs::write(&locked, "secret\n").unwrap();
-        let _ = std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0));
+        #[cfg(unix)]
+        {
+            let locked = root.join("locked.txt");
+            fs::write(&locked, "secret\n").unwrap();
+            let _ = std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0));
+        }
         append_on(&store, "attempt-gates", 2, "runtime.turn.completed", &json!({ "status": "completed" }));
         settle(&store, "attempt-gates", &root, 3);
-        let _ = std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o644));
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(root.join("locked.txt"), std::os::unix::fs::PermissionsExt::from_mode(0o644));
+        }
 
         let frozen = project_turn_results(&store, "attempt-gates").unwrap();
         let result = &frozen[0];
@@ -1164,6 +1307,7 @@ mod tests {
         assert!(result.unattributed.iter().chain(result.during.iter()).all(|file| file.path != "rename-src.txt" || file.change == "renamed"));
         assert!(result.unattributed.iter().any(|file| file.path == "binary.bin" && file.content_inspection == "binary"), "{result:?}");
         assert!(result.unattributed.iter().any(|file| file.path == "big.bin" && file.content_inspection == "too-large"), "{result:?}");
+        #[cfg(unix)]
         assert!(result.unattributed.iter().any(|file| file.path == "locked.txt" && file.content_inspection == "unreadable"), "{result:?}");
 
         fs::write(root.join("rename-dst.txt"), "replaced after settlement\n").unwrap();
