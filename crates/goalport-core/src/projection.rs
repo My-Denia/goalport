@@ -848,6 +848,14 @@ impl UiController {
             .runtime_manager
             .lend_attempts(&plan.attempt_ids, plan.startup_target.as_deref())
             .map_err(|error| error.to_string())?;
+        // Retained provider observations belong to their Runtime registration.
+        // Move only the lent attempts, preserving order on both controllers.
+        let (uncommitted_native_events, retained_events) = std::mem::take(&mut self.uncommitted_native_events)
+            .into_iter().partition(|event| plan.attempt_ids.contains(&event.attempt_id));
+        self.uncommitted_native_events = retained_events;
+        let (uncommitted_closures, retained_closures) = std::mem::take(&mut self.uncommitted_closures)
+            .into_iter().partition(|pending| plan.attempt_ids.contains(&pending.closure.attempt_id));
+        self.uncommitted_closures = retained_closures;
         let baseline = self.selection_revision;
         Ok((
             Self {
@@ -861,9 +869,9 @@ impl UiController {
                 build_id: self.build_id.clone(),
                 pending_titles: Vec::new(),
                 selection_revision: baseline,
-                uncommitted_native_events: Vec::new(),
-                uncommitted_closures: Vec::new(),
-                native_persistence_error: None,
+                uncommitted_native_events,
+                uncommitted_closures,
+                native_persistence_error: self.native_persistence_error.clone(),
             },
             baseline,
         ))
@@ -884,6 +892,11 @@ impl UiController {
             .append(&mut worker.uncommitted_native_events);
         self.uncommitted_closures
             .append(&mut worker.uncommitted_closures);
+        if self.uncommitted_native_events.is_empty() && self.uncommitted_closures.is_empty()
+            && worker.native_persistence_error.is_none()
+        {
+            self.native_persistence_error = None;
+        }
         self.runtime_manager
             .return_attempts(&plan.attempt_ids, std::mem::take(&mut worker.runtime_manager))
             .map_err(|error| error.to_string())?;
@@ -4333,6 +4346,9 @@ impl UiController {
         );
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
         if attempt.provider.eq_ignore_ascii_case("claude") {
+            // Claude already requires durable Stop responsibility before dispatch.
+            // Save earlier observations before starting that existing protocol.
+            self.flush_runtime_events()?;
             self.stop_claude_with_operation(&attempt_id, &request.request_id, "ui.stop", None)?;
             return Ok(());
         }
@@ -4359,6 +4375,9 @@ impl UiController {
             .runtime_manager
             .interrupt(&attempt_id)
             .map_err(|error| error.to_string())?;
+        // Attempt native Stop even while storage is unavailable. Its later
+        // journal record must not overtake previously retained observations.
+        self.flush_runtime_events()?;
         if result.confirmed {
             self.persist_event(
                 &attempt_id,
@@ -8141,6 +8160,123 @@ mod native_event_retention_tests {
         assert_eq!(controller.flush_runtime_events().unwrap(),0);
         assert_eq!(kind_count(&store,attempt,"runtime.turn.completed"),1);
         assert_eq!(kind_count(&store,attempt,"workspace.turn_result"),1);
+    }
+
+    #[test]
+    fn lent_worker_recovers_older_partial_events_before_stop() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-native-loan-order";
+        let task = "task-synthetic-preview";
+        active_attempt(&store, task, attempt);
+        controller.runtime_manager.select_runtime(attempt, "scenario", None, "fixture", Path::new(".")).unwrap();
+        let mut retained = permission(attempt, task);
+        retained.process_epoch_id = "original-loan-process".into();
+        controller.uncommitted_native_events.push(retained);
+        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 3, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        testing_fail_next_decision_inserts(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert_eq!(kind_count(&store, attempt, "runtime.permission.request"), 1);
+        assert_eq!(kind_count(&store, attempt, "runtime.reply.delta"), 0);
+        assert_eq!(controller.uncommitted_native_events.len(), 2);
+        let original_id = native_journal_id(attempt, "original-loan-process", "permission-1", 2);
+        let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
+        let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
+        let request: UiCommandRequest = serde_json::from_value(json!({
+            "protocolVersion":CONNECTED_UI_PROTOCOL_VERSION,"requestId":"stop-after-partial-save",
+            "entityVersion":1,"messageType":"cancel","payload":{"attemptId":attempt}
+        })).unwrap();
+        worker.handle(request).unwrap();
+        controller.merge_native_worker(&plan, worker, baseline).unwrap();
+        assert!(controller.native_persistence_error.is_none());
+        controller.flush_runtime_events().unwrap();
+        let records = store.list_event_records(attempt, 0).unwrap();
+        let reply = records.iter().find(|r|r.event.kind=="runtime.reply.delta").unwrap();
+        let stop = records.iter().find(|r|r.event.kind=="attempt.cancelled").unwrap();
+        assert!(reply.event.seq < stop.event.seq, "older output must precede Stop: {records:?}");
+        assert_eq!(records.iter().filter(|r|r.event.id==original_id).count(), 1);
+        assert_eq!(store.get_decision("decision-permission-1").unwrap().state, DecisionState::Pending);
+        assert!(controller.uncommitted_native_events.is_empty());
+        let count = records.len();
+        assert_eq!(controller.flush_runtime_events().unwrap(), 0);
+        assert_eq!(store.list_event_records(attempt, 0).unwrap().len(), count);
+    }
+
+    #[test]
+    fn stop_does_not_overtake_a_still_failed_lent_queue() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-native-stop-fault";
+        let task = "task-synthetic-preview";
+        active_attempt(&store, task, attempt);
+        controller.runtime_manager.select_runtime(attempt, "scenario", None, "fixture", Path::new(".")).unwrap();
+        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        controller.uncommitted_closures.push(PendingTransportClosure {
+            closure: TransportClosure { attempt_id: attempt.into(), reason: "stream-closed", pid: None, turn_failed: false },
+            registration_identity: "original-stop-registration".into(),
+        });
+        let sibling = "attempt-native-unlent";
+        active_attempt(&store, task, sibling);
+        controller.uncommitted_native_events.push(envelope(sibling, task, "sibling-reply", 1, AgentEventType::MessageDelta, json!({"text":"other goal"})));
+        let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
+        let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
+        assert_eq!(controller.uncommitted_native_events[0].attempt_id, sibling);
+        assert_eq!(worker.uncommitted_native_events.len(), 1);
+        assert_eq!(worker.uncommitted_closures[0].registration_identity, "original-stop-registration");
+        let request: UiCommandRequest = serde_json::from_value(json!({
+            "protocolVersion":CONNECTED_UI_PROTOCOL_VERSION,"requestId":"stop-while-save-fails",
+            "entityVersion":1,"messageType":"cancel","payload":{"attemptId":attempt}
+        })).unwrap();
+        testing_fail_next_appends(1);
+        assert!(worker.handle(request).unwrap_err().contains("injected persistence failure"));
+        assert_eq!(kind_count(&store, attempt, "attempt.cancelled"), 0);
+        assert_eq!(worker.uncommitted_native_events.len(), 1);
+        assert_eq!(worker.uncommitted_closures.len(), 1);
+        controller.merge_native_worker(&plan, worker, baseline).unwrap();
+        assert!(controller.native_persistence_error.is_some());
+        assert_eq!(controller.uncommitted_native_events.len(), 2);
+        controller.flush_runtime_events().unwrap();
+        assert_eq!(kind_count(&store, attempt, "runtime.reply.delta"), 1);
+        assert_eq!(kind_count(&store, attempt, "runtime.transport.closed"), 1);
+        assert_eq!(kind_count(&store, sibling, "runtime.reply.delta"), 1);
+        assert!(controller.native_persistence_error.is_none());
+    }
+
+    #[test]
+    fn claude_stop_retains_older_output_before_durable_stop_record() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-claude-loan-order";
+        let task = "task-synthetic-preview";
+        store.insert_attempt(&Attempt::new(attempt, task, "claude", "claude-cap-v1")).unwrap();
+        store.append_event_with_state(&Event { id: "activate-claude-loan".into(), attempt_id: attempt.into(), seq: 1,
+            kind: "attempt.active".into(), payload_ref: None }, Some(AttemptState::Active), None).unwrap();
+        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
+        let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
+        let request: UiCommandRequest = serde_json::from_value(json!({
+            "protocolVersion":CONNECTED_UI_PROTOCOL_VERSION,"requestId":"stop-claude-after-save-fault",
+            "entityVersion":1,"messageType":"cancel","payload":{"attemptId":attempt}
+        })).unwrap();
+        testing_fail_next_appends(1);
+        assert!(worker.handle(request.clone()).unwrap_err().contains("injected persistence failure"));
+        assert!(store.stop_responsibility_for_attempt(attempt).unwrap().is_none());
+        assert_eq!(worker.uncommitted_native_events.len(), 1);
+        // Recovered active Claude without an attached process follows the existing
+        // unconfirmed/held Stop path, never inventing native cancellation success.
+        worker.handle(request).unwrap();
+        controller.merge_native_worker(&plan, worker, baseline).unwrap();
+        let records = store.list_event_records(attempt, 0).unwrap();
+        let reply = records.iter().find(|r|r.event.kind=="runtime.reply.delta").unwrap();
+        let stop = records.iter().find(|r|r.event.kind=="attempt.stop.unconfirmed").unwrap();
+        assert!(reply.event.seq < stop.event.seq, "{records:?}");
+        assert_eq!(kind_count(&store, attempt, "runtime.reply.delta"), 1);
+        assert!(controller.uncommitted_native_events.is_empty());
+        assert!(controller.native_persistence_error.is_none());
+        assert_eq!(controller.flush_runtime_events().unwrap(), 0);
     }
 
     #[test]
