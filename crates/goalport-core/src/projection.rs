@@ -708,8 +708,13 @@ impl UiController {
                 )
                 .ok()
             }
-            "send_message" | "resume_native_session" | "interrupt" | "safe_stop"
-            | "cancel" | "close_session" => {
+            "interrupt" | "safe_stop" | "cancel" => {
+                let attempt_id = self.stop_target(request).ok()?;
+                let attempt = self.store.get_attempt(&attempt_id).ok()?;
+                matches!(attempt.provider.as_str(), "codex" | "claude" | "grok")
+                    .then(|| attempt.id)
+            }
+            "send_message" | "resume_native_session" | "close_session" => {
                 let attempt_id = request
                     .payload
                     .get("attemptId")
@@ -1544,8 +1549,11 @@ impl UiController {
             && receipt.get("persistence").is_some()
             && matches!(request.message_type.as_str(), "interrupt" | "safe_stop" | "cancel")
         {
-            let attempt_id = payload_text_default(&request.payload, "attemptId", self.selected_attempt_id.as_deref().unwrap_or_default());
-            receipt["persistence"] = json!(if self.has_pending_native_persistence(&attempt_id) { "pending" } else { "saved" });
+            if let Some(attempt_id) = receipt.get("attemptId").and_then(Value::as_str)
+                .or_else(|| request.payload.get("attemptId").and_then(Value::as_str))
+            {
+                receipt["persistence"] = json!(if self.has_pending_native_persistence(attempt_id) { "pending" } else { "saved" });
+            }
         }
     }
 
@@ -4430,12 +4438,21 @@ impl UiController {
         Ok(())
     }
 
+    fn stop_target(&self, request: &UiCommandRequest) -> Result<String, String> {
+        let explicit = request.payload.get("attemptId").and_then(Value::as_str);
+        if let Some((attempt_id, _)) = self.native_stop_outcomes.iter()
+            .find(|(_, stop)| stop.request_id == request.request_id)
+        {
+            if explicit.is_some_and(|target| target != attempt_id) {
+                return Err("This Stop request already targets another session; use a new request to stop the newly selected session".into());
+            }
+            return Ok(attempt_id.clone());
+        }
+        Ok(explicit.or(self.selected_attempt_id.as_deref()).unwrap_or_default().to_owned())
+    }
+
     fn interrupt(&mut self, request: &UiCommandRequest) -> Result<Value, String> {
-        let attempt_id = payload_text_default(
-            &request.payload,
-            "attemptId",
-            self.selected_attempt_id.as_deref().unwrap_or_default(),
-        );
+        let attempt_id = self.stop_target(request)?;
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
         if attempt.provider.eq_ignore_ascii_case("claude") {
             // Claude already requires durable Stop responsibility before dispatch.
@@ -4452,7 +4469,7 @@ impl UiController {
         }
         if let Some(stop) = self.native_stop_outcomes.get(&attempt_id).cloned() {
             let persisted = self.flush_runtime_events().is_ok();
-            return Ok(json!({"requested":stop.result.requested,"confirmed":stop.result.confirmed,
+            return Ok(json!({"attemptId":attempt_id,"requested":stop.result.requested,"confirmed":stop.result.confirmed,
                 "persistence":if persisted {"saved"} else {"pending"},"duplicateDispatch":true,
                 "originalRequestId":stop.request_id,"reason":stop.result.reason}));
         }
@@ -4485,7 +4502,7 @@ impl UiController {
             result: result.clone(), journaled: false,
         });
         let persisted = self.flush_runtime_events().is_ok();
-        Ok(json!({"requested":result.requested,"confirmed":result.confirmed,
+        Ok(json!({"attemptId":attempt_id,"requested":result.requested,"confirmed":result.confirmed,
             "persistence":if persisted {"saved"} else {"pending"},"duplicateDispatch":false,"reason":result.reason}))
     }
 
@@ -5076,6 +5093,11 @@ impl UiController {
         self.store
             .set_campaign_authorization(&campaign_id, &auth)
             .map_err(store_message)?;
+        // Deny future work immediately, then settle earlier observations before
+        // deriving automatic Stop effects from freshly loaded attempt state.
+        self.flush_runtime_events().map_err(|error| format!(
+            "Current authorization was revoked, but earlier Runtime updates have not been saved. Automatic stop handling is deferred; use Stop to request it directly. {error}"
+        ))?;
         let tasks = self
             .store
             .tasks_for_campaign(&campaign_id)
@@ -8627,6 +8649,141 @@ mod native_event_retention_tests {
         assert_eq!(kind_count(&store,source,"runtime.turn.cancelled"),1);
         assert_eq!(kind_count(&store,source,"attempt.cancelled"),0);
         assert_eq!(kind_count(&store,source,"handoff.completed"),1);
+    }
+
+    #[test]
+    fn lifecycle_revocation_recovers_old_reply_before_cancel_and_notice() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-lifecycle-source".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":source,"provider":"scenario","version":"scenario-1"})}).unwrap();
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","before-revocation",20,
+            AgentEventType::MessageDelta,json!({"text":"older output"})));
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"ordered-revocation".into(),
+            entity_version:0,message_type:"revoke_authorization".into(),payload:json!({"campaignId":"campaign-synthetic-preview","scope":"action"})}).unwrap();
+        let records = store.list_event_records(source,0).unwrap();
+        let reply = records.iter().find(|r|r.event.kind=="runtime.reply.delta").unwrap();
+        let cancelled = records.iter().find(|r|r.event.kind=="attempt.cancelled").unwrap();
+        let notice = records.iter().find(|r|r.event.kind=="authorization.revoked").unwrap();
+        assert!(reply.event.seq<cancelled.event.seq && cancelled.event.seq<notice.event.seq,"{records:?}");
+        assert!(!store.get_campaign_authorization("campaign-synthetic-preview").unwrap().action_authorized);
+    }
+
+    #[test]
+    fn lifecycle_revocation_uses_recovered_terminal_state_before_stop() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-lifecycle-source".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":source,"provider":"scenario","version":"scenario-1"})}).unwrap();
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","terminal-before-revoke",20,
+            AgentEventType::Cancelled,json!({"reason":"native turn already stopped"})));
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"terminal-revocation".into(),
+            entity_version:0,message_type:"revoke_authorization".into(),payload:json!({"campaignId":"campaign-synthetic-preview","scope":"provider"})}).unwrap();
+        assert_eq!(kind_count(&store,source,"runtime.turn.cancelled"),1);
+        assert_eq!(kind_count(&store,source,"attempt.cancelled"),0,"do not issue a second Stop after the retained terminal commits");
+        assert_eq!(store.get_attempt(source).unwrap().state,AttemptState::Cancelled);
+        assert!(!store.get_campaign_authorization("campaign-synthetic-preview").unwrap().provider_authorized);
+    }
+
+    #[test]
+    fn lifecycle_implicit_stop_receipt_keeps_target_across_worker_merge() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-lifecycle-source".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":source,"provider":"scenario","version":"scenario-1"})}).unwrap();
+        let sibling = "attempt-implicit-stop-sibling";
+        store.insert_attempt(&Attempt::new(sibling,"task-synthetic-preview","scenario","scenario-cap-v1")).unwrap();
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","implicit-stop-old-reply",20,
+            AgentEventType::MessageDelta,json!({"text":"older output"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"implicit-stop-merge".into(),
+            entity_version:0,message_type:"cancel".into(),payload:json!({})};
+        let plan = NativeWorkerPlan {attempt_ids:vec![source.into()],startup_target:None};
+        let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
+        testing_fail_next_appends(2);
+        let mut result = worker.handle(request.clone()).unwrap();
+        assert_eq!(result.receipt.as_ref().unwrap()["persistence"],"pending");
+        // This is the selection mutation a second client completes while the
+        // source Runtime is lent; merge must preserve that newer selection.
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-implicit-stop-sibling".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":sibling,"provider":"scenario"})}).unwrap();
+        controller.merge_native_worker(&plan,worker,baseline).unwrap();
+        testing_fail_next_appends(1);
+        result.snapshot = controller.response_snapshot(&request,None).unwrap();
+        controller.reconcile_stop_receipt(&request,&mut result.receipt);
+        assert_eq!(controller.selected_attempt_id.as_deref(),Some(sibling));
+        assert!(controller.has_pending_native_persistence(source));
+        assert!(!controller.has_pending_native_persistence(sibling));
+        assert_eq!(result.receipt.as_ref().unwrap()["persistence"],"pending","the pending Stop belongs to the original source, not the later selected sibling");
+        assert_eq!(result.receipt.unwrap()["attemptId"],source);
+    }
+
+    #[test]
+    fn lifecycle_implicit_recorded_stop_replays_before_current_selection() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-lifecycle-source".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":source,"provider":"scenario","version":"scenario-1"})}).unwrap();
+        let sibling = "attempt-implicit-replay-sibling";
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"implicit-saved-stop".into(),
+            entity_version:0,message_type:"safe_stop".into(),payload:json!({})};
+        controller.handle(request.clone()).unwrap();
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-stop-sibling".into(),
+            entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":sibling,"provider":"scenario"})}).unwrap();
+        assert_eq!(controller.selected_attempt_id.as_deref(),Some(sibling));
+        let before = store.list_event_records(sibling,0).unwrap().len();
+        let retry = controller.handle(request.clone()).unwrap().receipt.unwrap();
+        assert_eq!(store.get_attempt(sibling).unwrap().state,AttemptState::Active,"recorded Stop retry must not stop the newly selected Runtime");
+        assert_eq!(store.list_event_records(sibling,0).unwrap().len(),before);
+        assert_eq!(controller.selected_attempt_id.as_deref(),Some(sibling));
+        assert_eq!(retry["attemptId"],source);
+        assert_eq!(retry["duplicateDispatch"],true);
+        let mut changed_target = request;
+        changed_target.payload = json!({"attemptId":sibling});
+        assert!(controller.handle(changed_target).unwrap_err().contains("already targets another session"));
+        assert_eq!(store.get_attempt(sibling).unwrap().state,AttemptState::Active);
+        let fresh = controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"fresh-stop-sibling".into(),
+            entity_version:0,message_type:"interrupt".into(),payload:json!({})}).unwrap().receipt.unwrap();
+        assert_eq!(fresh["attemptId"],sibling);
+        assert_eq!(fresh["duplicateDispatch"],false);
+        assert_eq!(store.get_attempt(sibling).unwrap().state,AttemptState::Cancelled);
+    }
+
+    #[test]
+    fn lifecycle_revocation_failure_denies_work_and_keeps_standalone_stop_available() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"select-lifecycle-source".into(),entity_version:0,message_type:"select_runtime".into(),payload:json!({"campaignId":"campaign-synthetic-preview","taskId":"task-synthetic-preview","attemptId":source,"provider":"scenario","version":"scenario-1"})}).unwrap();
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","reply-before-denial",2,AgentEventType::MessageDelta,json!({"text":"older reply"})));
+        let revoke = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"revoke-with-unsaved-reply".into(),entity_version:0,message_type:"revoke_authorization".into(),payload:json!({"campaignId":"campaign-synthetic-preview","scope":"provider"})};
+        testing_fail_next_appends(1);
+        let error = controller.handle(revoke.clone()).unwrap_err();
+        assert!(error.contains("authorization was revoked") && error.contains("Automatic stop handling is deferred"));
+        assert!(!store.get_campaign_authorization("campaign-synthetic-preview").unwrap().provider_authorized);
+        assert_eq!(store.get_attempt(source).unwrap().state,AttemptState::Active);
+        assert_eq!(controller.uncommitted_native_events.len(),1);
+        assert_eq!(kind_count(&store,source,"attempt.cancelled"),0);
+        assert_eq!(kind_count(&store,source,"authorization.revoked"),0);
+        testing_fail_next_appends(2);
+        let stop = controller.handle(UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"standalone-stop-after-revoke".into(),entity_version:0,message_type:"cancel".into(),payload:json!({})}).unwrap().receipt.unwrap();
+        assert_eq!(stop["requested"],true);
+        assert_eq!(stop["persistence"],"pending");
+        controller.handle(revoke).unwrap();
+        let records = store.list_event_records(source,0).unwrap();
+        let seq = |kind| records.iter().find(|r|r.event.kind==kind).unwrap().event.seq;
+        assert!(seq("runtime.reply.delta") < seq("attempt.cancelled"));
+        assert!(seq("attempt.cancelled") < seq("authorization.revoked"));
+        assert_eq!(kind_count(&store,source,"attempt.cancelled"),1);
+        assert!(controller.uncommitted_native_events.is_empty());
     }
 
     #[test]
