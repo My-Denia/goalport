@@ -1287,6 +1287,80 @@ fn close_adapter_transport_cancels_the_shown_approval_without_killing() {
     unsafe { libc::kill(pid, libc::SIGTERM) };
 }
 
+#[test]
+fn uncertain_permission_write_does_not_approve_or_replay() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-write-unknown");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    let decision_id = rows[0].id.clone();
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.path().join("stdin-closed").is_file() {
+        assert!(Instant::now() < deadline, "stdin was not closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let first = request(
+        &server,
+        "allow-unknown",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(first["ok"], false, "{first}");
+    let error = first["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("permission response delivery could not be confirmed"),
+        "{first}"
+    );
+    assert_eq!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    let records = store.list_event_records(&attempt_id, 0).unwrap();
+    let unknown = records.iter().any(|record| {
+        record.event.kind == "permission.response"
+            && record.payload.as_ref().is_some_and(|payload| {
+                payload["deliveryState"] == "UNKNOWN"
+                    && payload["text"] == "permission response delivery could not be confirmed"
+                    && payload["decisionId"] == decision_id
+            })
+    });
+    assert!(unknown, "journal did not keep the unknown delivery: {records:?}");
+    let second = request(
+        &server,
+        "allow-unknown-again",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(second["ok"], false, "{second}");
+    let again = second["error"].as_str().unwrap_or("");
+    assert!(
+        again.contains("only pending decisions can be resolved"),
+        "{second}"
+    );
+    assert!(
+        !again.contains("permission response delivery could not be confirmed"),
+        "{second}"
+    );
+    assert_eq!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    assert_ne!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Approved
+    );
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(&record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
+    if let Ok(text) = fs::read_to_string(workspace.path().join("process-starts")) {
+        if let Ok(pid) = text.lines().next().unwrap_or("").parse::<i32>() {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
 fn approval_then_terminal_error_is_not_acceptable() {
     approval_answer_before_next_poll_is_refused(
         "permission-terminal-error",

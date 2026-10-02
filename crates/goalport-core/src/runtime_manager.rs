@@ -2762,10 +2762,24 @@ impl CodexProcess {
         {
             return Err(AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into()));
         }
-        self.send_json(&json!({
+        let write = self.send_json(&json!({
             "id": binding.rpc_json,
             "result": { "decision": if response.allow { "accept" } else { "decline" } }
-        }))?;
+        }));
+        if let Err(error) = write {
+            // A missing stdin fails before any byte. An error from the write
+            // itself may already have entered the pipe, so this callback cannot
+            // be submitted again.
+            if matches!(error, AdapterError::Io(_) | AdapterError::Json(_)) {
+                if let Some(stored) = slot.by_decision.get_mut(request_id) {
+                    stored.unanswerable = true;
+                }
+                return Err(AdapterError::Connection(
+                    "permission response delivery could not be confirmed".into(),
+                ));
+            }
+            return Err(error);
+        }
         slot.by_decision.remove(request_id);
         Ok(())
     }
@@ -7867,6 +7881,54 @@ time.sleep(30)
         assert!(err.contains("permission binding"), "{err}");
         assert!(!err.contains("stdin is closed"), "{err}");
         assert!(!unread.approval.lock().unwrap().registration_closed);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uncertain_permission_write_is_not_replayed() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-codex-unknown-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut process = codex_under_test("epoch-unknown");
+        let _child = attach_python_reader(
+            &mut process,
+            &dir,
+            r#"
+import os, pathlib, time
+os.close(0)
+pathlib.Path("stdin-closed").write_text("ready")
+time.sleep(30)
+"#,
+        );
+        // attach_python_reader also starts the stdout reader. This child has no
+        // stdout payload; the closed stdin is what makes the write uncertain.
+        process.note_frame(&approval_frame("rpc-A", "U"));
+        let id = decision_ids(&process).into_iter().next().unwrap();
+        wait_until(|| dir.join("stdin-closed").is_file());
+        let first = answer_error(&mut process, &id);
+        assert!(
+            first.contains("permission response delivery could not be confirmed"),
+            "{first}"
+        );
+        assert!(
+            process
+                .approval
+                .lock()
+                .unwrap()
+                .by_decision
+                .get(&id)
+                .is_some_and(|binding| binding.unanswerable)
+        );
+        let second = answer_error(&mut process, &id);
+        assert!(second.contains("permission binding"), "{second}");
+        assert!(
+            !second.contains("permission response delivery could not be confirmed"),
+            "{second}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
