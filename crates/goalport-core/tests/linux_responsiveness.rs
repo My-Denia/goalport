@@ -598,3 +598,200 @@ fn stalled_native_initialize_does_not_block_snapshot_other_session_or_cancel() {
     );
     let _ = server_thread;
 }
+
+#[test]
+fn bad_frame_and_permission_wait_leave_other_goals_usable() {
+    let home = tempfile::tempdir().unwrap();
+    let permission_workspace = home.path().join("permission");
+    let other_workspace = home.path().join("other");
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&permission_workspace).unwrap();
+    fs::create_dir_all(&other_workspace).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py"),
+        permission_workspace.join("app-server"),
+    )
+    .unwrap();
+    fs::write(
+        permission_workspace.join("peer-scenario"),
+        "permission-deny",
+    )
+    .unwrap();
+    let python = python_executable();
+    std::os::unix::fs::symlink(&python, bin.join("codex")).unwrap();
+    let mut paths = vec![bin.clone()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    let _env = TestEnvironment::set(&[
+        ("PATH", Some(path)),
+        ("APPDATA", None),
+        ("GOALPORT_CODEX_TRANSPORT", None),
+        ("GOALPORT_TEST_SYNTHETIC_ONLY", None),
+        (
+            "GOALPORT_LAUNCH_NONCE",
+            Some(format!("fault-isolation-{}", std::process::id()).into()),
+        ),
+    ]);
+    let store = Store::memory().unwrap();
+    let db = home.path().join("core.sqlite");
+    let epoch = begin_startup_epoch(&store, "fault-isolation", &db).unwrap();
+    complete_startup_epoch(
+        &store,
+        "fault-isolation",
+        &db,
+        &epoch,
+        &json!({"status":"completed"}),
+    )
+    .unwrap();
+    let server = CoreServer::new(store.clone());
+    let sock = home.path().join("core.sock");
+    let server_thread = {
+        let server = server.clone();
+        let path = sock.clone();
+        std::thread::spawn(move || server.serve_unix_socket_at(&path))
+    };
+    await_file(&sock);
+
+    let started = {
+        let path = sock.clone();
+        let workspace = permission_workspace.clone();
+        std::thread::spawn(move || {
+            wire(
+                &path,
+                "permission-goal",
+                "start_conversation",
+                json!({
+                    "workspaceRoot": workspace,
+                    "provider": "codex",
+                    "message": "Run the checked command"
+                }),
+                Duration::from_secs(5),
+            )
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw_decision = false;
+    while Instant::now() < deadline {
+        let view = wire(
+            &sock,
+            "await-permission",
+            "snapshot",
+            json!({}),
+            Duration::from_secs(2),
+        );
+        if view["ok"] == true
+            && view["payload"]["snapshot"]["decisions"]
+                .as_array()
+                .is_some_and(|decisions| !decisions.is_empty())
+        {
+            saw_decision = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(saw_decision, "permission request never became a Decision");
+    let started = started.join().unwrap();
+    assert_eq!(started["ok"], true, "{started}");
+    let permission_attempt = started["payload"]["snapshot"]["attempt"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let permission_campaign = started["payload"]["snapshot"]["activeCampaignId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let other = wire(
+        &sock,
+        "create-other-during-permission",
+        "create_campaign",
+        json!({
+            "workspaceRoot": other_workspace,
+            "goal": "Keep working",
+            "title": "Other"
+        }),
+        Duration::from_secs(2),
+    );
+    assert_eq!(other["ok"], true, "{other}");
+    let other_campaign = other["payload"]["snapshot"]["activeCampaignId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let permission_view_started = Instant::now();
+    let permission_view = wire(
+        &sock,
+        "read-permission-goal",
+        "goal_detail",
+        json!({"campaignId": permission_campaign}),
+        Duration::from_secs(2),
+    );
+    assert_eq!(permission_view["ok"], true, "{permission_view}");
+    assert!(permission_view_started.elapsed() < Duration::from_secs(2));
+    let shared_after_detail = wire(
+        &sock,
+        "shared-after-detail",
+        "snapshot",
+        json!({}),
+        Duration::from_secs(2),
+    );
+    assert_eq!(
+        shared_after_detail["payload"]["snapshot"]["activeCampaignId"], other_campaign,
+        "opening the waiting goal took over the goal on screen"
+    );
+
+    let mut bad = UnixStream::connect(&sock).unwrap();
+    bad.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    bad.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    let garbage = br#"{"not":"a frame we understand""#;
+    bad.write_all(&(garbage.len() as u32).to_le_bytes())
+        .unwrap();
+    bad.write_all(garbage).unwrap();
+    let mut ignored = [0u8; 8];
+    let _ = bad.read(&mut ignored);
+    drop(bad);
+
+    let after_bad = wire(
+        &sock,
+        "after-bad-frame",
+        "goal_detail",
+        json!({"campaignId": other_campaign}),
+        Duration::from_secs(2),
+    );
+    assert_eq!(after_bad["ok"], true, "{after_bad}");
+    let cancel_started = Instant::now();
+    let cancelled = wire(
+        &sock,
+        "stop-during-permission",
+        "interrupt",
+        json!({"attemptId": permission_attempt}),
+        Duration::from_secs(2),
+    );
+    assert!(cancel_started.elapsed() < Duration::from_secs(2));
+    assert_eq!(cancelled["ok"], true, "{cancelled}");
+    assert_eq!(
+        fs::read_to_string(permission_workspace.join("turn-count"))
+            .unwrap()
+            .trim(),
+        "1",
+        "Stop sent another native turn"
+    );
+    let user_messages = store
+        .list_event_records(&permission_attempt, 0)
+        .unwrap()
+        .iter()
+        .filter(|record| record.event.kind == "message.user")
+        .count();
+    assert_eq!(user_messages, 1, "Stop wrote another user message");
+    let other_after_stop = wire(
+        &sock,
+        "other-after-stop",
+        "goal_detail",
+        json!({"campaignId": other_campaign}),
+        Duration::from_secs(2),
+    );
+    assert_eq!(other_after_stop["ok"], true, "{other_after_stop}");
+    let _ = server_thread;
+}

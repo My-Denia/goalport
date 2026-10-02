@@ -20,10 +20,47 @@ use thiserror::Error;
 
 pub const SCHEMA_VERSION: i64 = 9;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_APPENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static FAIL_NEXT_DECISION_INSERTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub fn testing_fail_next_appends(count: u32) {
+    FAIL_NEXT_APPENDS.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+pub fn testing_fail_next_decision_inserts(count: u32) {
+    FAIL_NEXT_DECISION_INSERTS.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn take_injected_failure(kind: &str) -> bool {
+    let tick = |cell: &std::cell::Cell<u32>| {
+        let left = cell.get();
+        if left == 0 {
+            false
+        } else {
+            cell.set(left - 1);
+            true
+        }
+    };
+    match kind {
+        "append" => FAIL_NEXT_APPENDS.with(tick),
+        "decision" => FAIL_NEXT_DECISION_INSERTS.with(tick),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[cfg(test)]
+    #[error("injected persistence failure")]
+    InjectedFailure,
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("domain error: {0}")]
@@ -2982,6 +3019,10 @@ impl Store {
         state_after: Option<AttemptState>,
         payload: Option<&Value>,
     ) -> Result<AppendEventOutcome, StoreError> {
+        #[cfg(test)]
+        if take_injected_failure("append") {
+            return Err(StoreError::InjectedFailure);
+        }
         if event.seq <= 0 {
             return Err(StoreError::SequenceConflict {
                 attempt_id: event.attempt_id.clone(),
@@ -3073,6 +3114,18 @@ impl Store {
         }
         tx.commit()?;
         Ok(AppendEventOutcome::Inserted(event.clone()))
+    }
+
+    pub fn contains_event(&self, id: &str) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM events WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
     }
 
     pub fn list_events(&self, attempt_id: &str) -> Result<Vec<Event>, StoreError> {
@@ -3905,6 +3958,10 @@ impl Store {
     }
 
     pub fn insert_decision(&self, decision: &Decision) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if take_injected_failure("decision") {
+            return Err(StoreError::InjectedFailure);
+        }
         let connection = self.inner.lock().expect("store mutex poisoned");
         insert_or_conflict(
             &connection,

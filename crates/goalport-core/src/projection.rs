@@ -24,7 +24,9 @@ use crate::{
         ProductTurn,
         product_conversation,
     },
-    runtime_manager::{RegistrationWithdrawal, RuntimeManager, StartupControl, TransportState},
+    runtime_manager::{
+        RegistrationWithdrawal, RuntimeManager, StartupControl, TransportClosure, TransportState,
+    },
     store::{
         self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ConfirmedStopSuccessor,
         ConversationPrepareOutcome, ConversationRequestPhase, ConversationRequestRow,
@@ -313,6 +315,13 @@ pub struct UiCommandResult {
     pub receipt: Option<Value>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingTransportClosure {
+    closure: TransportClosure,
+    // Capture when consumed: a retry must never borrow a later registration's identity.
+    registration_identity: String,
+}
+
 #[derive(Debug)]
 pub struct UiController {
     store: Store,
@@ -325,6 +334,11 @@ pub struct UiController {
     build_id: String,
     pending_titles: Vec<Receiver<TitleResult>>,
     selection_revision: u64,
+    /// Provider events already taken from the Runtime and not yet committed
+    /// with their Decision. A failed write leaves them here for the next flush.
+    uncommitted_native_events: Vec<AgentEventEnvelope>,
+    uncommitted_closures: Vec<PendingTransportClosure>,
+    native_persistence_error: Option<String>,
 }
 
 impl UiController {
@@ -366,6 +380,9 @@ impl UiController {
             build_id: current_executable_build_id(),
             pending_titles: Vec::new(),
             selection_revision: 0,
+            uncommitted_native_events: Vec::new(),
+            uncommitted_closures: Vec::new(),
+            native_persistence_error: None,
         };
         if let Some(workspace_root) = seed_workspace {
             controller.ensure_seed(&workspace_root)?;
@@ -394,7 +411,8 @@ impl UiController {
         known_revision: Option<&str>,
         campaign_id: Option<&str>,
     ) -> Result<Value, String> {
-        self.flush_runtime_events()?;
+        // A failed native-event write stays queued. The view still opens.
+        let _ = self.flush_runtime_events();
         // Capture this BEFORE building the snapshot. A write arriving during
         // projection changes the next revision and prompts one more fetch.
         // A campaign-scoped read ignores the shared selection, so one client
@@ -407,8 +425,8 @@ impl UiController {
             return Ok(json!({"unchanged":true,"revision":revision}));
         }
         let snapshot = match campaign_id {
-            Some(campaign_id) => self.snapshot_for_campaign(campaign_id, None)?,
-            None => self.snapshot(None)?,
+            Some(campaign_id) => self.snapshot_for_campaign_with_runtime_flush(campaign_id, None, false)?,
+            None => self.snapshot_with_runtime_flush(None, false)?,
         };
         Ok(json!({"unchanged":false,"revision":revision,"snapshot":snapshot}))
     }
@@ -421,6 +439,7 @@ impl UiController {
             "storeChanges": changes,
             "journalOrder": journal_order,
             "runtime": self.runtime_manager.view_revision_facts(),
+            "nativePersistence": self.native_persistence_facts(),
         });
         Ok(sha256_hex(view.to_string().as_bytes()))
     }
@@ -432,6 +451,7 @@ impl UiController {
             "journalOrder": journal_order,
             "campaignId": campaign_id,
             "runtime": self.runtime_manager.view_revision_facts(),
+            "nativePersistence": self.native_persistence_facts(),
         });
         Ok(sha256_hex(view.to_string().as_bytes()))
     }
@@ -473,6 +493,15 @@ impl UiController {
         campaign_id: &str,
         after_cursor: Option<i64>,
     ) -> Result<CoreSnapshot, String> {
+        self.snapshot_for_campaign_with_runtime_flush(campaign_id, after_cursor, true)
+    }
+
+    fn snapshot_for_campaign_with_runtime_flush(
+        &mut self,
+        campaign_id: &str,
+        after_cursor: Option<i64>,
+        flush_runtime: bool,
+    ) -> Result<CoreSnapshot, String> {
         if campaign_id.trim().is_empty() {
             return Err("campaignId is required".into());
         }
@@ -490,7 +519,7 @@ impl UiController {
             controller.selected_campaign_id = Some(campaign_id);
             controller.selected_task_id = None;
             controller.selected_attempt_id = None;
-            controller.snapshot(after_cursor)
+            controller.snapshot_with_runtime_flush(after_cursor, flush_runtime)
         })
     }
 
@@ -498,7 +527,7 @@ impl UiController {
     /// include conversation history and does not change which goal a snapshot
     /// would show.
     pub(crate) fn goal_overview(&mut self) -> Result<GoalOverview, String> {
-        self.flush_runtime_events()?;
+        let _ = self.flush_runtime_events();
         let revision = self.shell_revision()?;
         let projects = self.store.list_projects().map_err(store_message)?;
         let mut goals = Vec::new();
@@ -623,6 +652,7 @@ impl UiController {
             "selectedTask": self.selected_task_id,
             "selectedAttempt": self.selected_attempt_id,
             "runtime": self.runtime_manager.view_revision_facts(),
+            "nativePersistence": self.native_persistence_facts(),
         });
         Ok(sha256_hex(view.to_string().as_bytes()))
     }
@@ -831,6 +861,9 @@ impl UiController {
                 build_id: self.build_id.clone(),
                 pending_titles: Vec::new(),
                 selection_revision: baseline,
+                uncommitted_native_events: Vec::new(),
+                uncommitted_closures: Vec::new(),
+                native_persistence_error: None,
             },
             baseline,
         ))
@@ -842,6 +875,15 @@ impl UiController {
         mut worker: Self,
         baseline: u64,
     ) -> Result<(), String> {
+        if (!worker.uncommitted_native_events.is_empty() || !worker.uncommitted_closures.is_empty())
+            && worker.native_persistence_error.is_some()
+        {
+            self.native_persistence_error = worker.native_persistence_error.take();
+        }
+        self.uncommitted_native_events
+            .append(&mut worker.uncommitted_native_events);
+        self.uncommitted_closures
+            .append(&mut worker.uncommitted_closures);
         self.runtime_manager
             .return_attempts(&plan.attempt_ids, std::mem::take(&mut worker.runtime_manager))
             .map_err(|error| error.to_string())?;
@@ -865,13 +907,44 @@ impl UiController {
     /// This is called by the Core-owned flusher as well as before each snapshot.
     pub fn flush_runtime_events(&mut self) -> Result<usize, String> {
         self.flush_titles();
-        let pending = self
-            .runtime_manager
-            .poll_all_events()
-            .map_err(|error| error.to_string())?;
-        let count = pending.len();
-        for event in pending {
+        // Poll errors are transport/protocol failures, not evidence of a failed write.
+        let polled = self.runtime_manager.poll_all_events().map_err(|error| error.to_string())?;
+        self.uncommitted_native_events.extend(polled);
+        let outcome = self.flush_runtime_events_inner();
+        self.native_persistence_error = outcome.as_ref().err().cloned();
+        outcome
+    }
+
+    fn native_persistence_facts(&self) -> Value {
+        json!({
+            "error": self.native_persistence_error,
+            "pendingEvents": self.uncommitted_native_events.len(),
+            "pendingClosures": self.uncommitted_closures.len(),
+        })
+    }
+
+    fn has_pending_native_persistence(&self, attempt_id: &str) -> bool {
+        self.uncommitted_native_events.iter().any(|event| event.attempt_id == attempt_id)
+            || self.uncommitted_closures.iter().any(|pending| pending.closure.attempt_id == attempt_id)
+    }
+
+    fn snapshot_notices(&self) -> Vec<String> {
+        let mut notices = self.notices.clone();
+        if let Some(error) = &self.native_persistence_error {
+            notices.insert(0, format!("Recent Runtime updates have not been saved yet. GoalPort will retry. Details: {error}"));
+        }
+        notices
+    }
+
+    fn flush_runtime_events_inner(&mut self) -> Result<usize, String> {
+        let mut committed = 0;
+        while let Some(event) = self.uncommitted_native_events.first().cloned() {
+            // The envelope stays queued until the journal row and its Decision
+            // both succeed. A later flush sees the same event id and does not
+            // append a second row.
             self.persist_agent_event(&event)?;
+            self.uncommitted_native_events.remove(0);
+            committed += 1;
         }
         // Increment 6: a Codex output-transport closure observed since the last drain is recorded
         // ONCE. `take_transport_closures` returns only registrations whose session was actually
@@ -881,11 +954,16 @@ impl UiController {
         // state without touching history: the process is kept, nothing is killed or replaced, and a
         // retry is never automatic.
         for closure in self.runtime_manager.take_transport_closures() {
-            let identity = self
-                .runtime_manager
-                .registration_identity(&closure.attempt_id)
-                .unwrap_or_default();
-            self.persist_event(
+            let registration_identity = self.runtime_manager
+                .registration_identity(&closure.attempt_id).unwrap_or_default();
+            self.uncommitted_closures.push(PendingTransportClosure { closure, registration_identity });
+        }
+        while let Some(pending) = self.uncommitted_closures.first().cloned() {
+            let closure = pending.closure;
+            let identity = pending.registration_identity;
+            let stable_id = native_transport_journal_id(&closure.attempt_id, &identity);
+            self.persist_identified_event(
+                Some(&stable_id),
                 &closure.attempt_id,
                 "runtime.transport.closed",
                 json!({
@@ -902,8 +980,9 @@ impl UiController {
                 }),
                 None,
             )?;
+            self.uncommitted_closures.remove(0);
         }
-        Ok(count)
+        Ok(committed)
     }
 
     fn flush_titles(&mut self) {
@@ -925,13 +1004,17 @@ impl UiController {
     }
 
     pub fn snapshot(&mut self, after_cursor: Option<i64>) -> Result<CoreSnapshot, String> {
+        self.snapshot_with_runtime_flush(after_cursor, true)
+    }
+
+    fn snapshot_with_runtime_flush(&mut self, after_cursor: Option<i64>, flush_runtime: bool) -> Result<CoreSnapshot, String> {
         let projects = self.store.list_projects().map_err(store_message)?;
         if projects.is_empty() {
             self.selected_project_id.clear();
             self.selected_campaign_id = None;
             self.selected_task_id = None;
             self.selected_attempt_id = None;
-            self.flush_runtime_events()?;
+            if flush_runtime { let _ = self.flush_runtime_events(); }
             let mut snapshot = CoreSnapshot {
                 protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
                 build_id: self.build_id.clone(),
@@ -986,7 +1069,7 @@ impl UiController {
                 },
                 turn_results: Vec::new(),
                 preview: false,
-                notices: self.notices.clone(),
+                notices: self.snapshot_notices(),
                 bounds: ProjectionBounds::default(),
             };
             crate::response_bounds::bound_snapshot(&mut snapshot)?;
@@ -1001,7 +1084,7 @@ impl UiController {
             self.selected_task_id = None;
             self.selected_attempt_id = None;
         }
-        self.flush_runtime_events()?;
+        if flush_runtime { let _ = self.flush_runtime_events(); }
         let selected_project = projects
             .iter()
             .find(|project| project.id == self.selected_project_id)
@@ -1160,7 +1243,7 @@ impl UiController {
             .store
             .campaign_first_user_message(&active_campaign_id)
             .map_err(store_message)?;
-        let product_conversation = product_conversation(
+        let mut product_conversation = product_conversation(
             &self.store,
             &mut self.runtime_manager,
             &ProductConversationContext {
@@ -1173,6 +1256,15 @@ impl UiController {
             first_user_message.as_deref(),
             conversation_page_info,
         )?;
+        if self.native_persistence_error.is_some()
+            && self.has_pending_native_persistence(&active_attempt.id)
+        {
+            // Keep the native turn fact and Stop capability honest. Only further sends
+            // wait for local storage; the existing composer renders this reason.
+            product_conversation.turn.can_send = false;
+            product_conversation.turn.reason = Some("Recent Runtime updates have not been saved yet. GoalPort will retry; wait before sending another message.".into());
+            product_conversation.turn.reason_code = Some("native-persistence".into());
+        }
         let (turn_results, omitted_turns) = crate::turn_results::project_turn_result_window(&self.store, &active_attempt.id)?;
         let mut snapshot = CoreSnapshot {
             related_holds,
@@ -1198,7 +1290,7 @@ impl UiController {
             preview: active_attempt.id != UNASSIGNED_ATTEMPT_ID
                 && active_attempt.provider.eq_ignore_ascii_case("scenario"),
             notices: {
-                let mut notices = self.notices.clone();
+                let mut notices = self.snapshot_notices();
                 self.merge_permission_denied_notices(&mut notices, &active_attempt.id)?;
                 if let Ok(queued) = self.store.pending_admissions() {
                     for row in queued.iter().filter(|row| row.override_reason.is_none()) {
@@ -5593,9 +5685,31 @@ impl UiController {
         payload: Value,
         state: Option<AttemptState>,
     ) -> Result<(), String> {
+        self.persist_identified_event(None, attempt_id, kind, payload, state)
+            .map(|_| ())
+    }
+
+    /// `stable_id` is the provider event's identity. A retry after a partial
+    /// commit finds that row and continues with the Decision instead of
+    /// allocating a new sequence.
+    fn persist_identified_event(
+        &self,
+        stable_id: Option<&str>,
+        attempt_id: &str,
+        kind: &str,
+        payload: Value,
+        state: Option<AttemptState>,
+    ) -> Result<bool, String> {
+        if let Some(id) = stable_id
+            && self.store.contains_event(id).map_err(store_message)?
+        {
+            return Ok(false);
+        }
         let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
         let event = Event {
-            id: format!("core-event-{}-{}", attempt_id, attempt.last_event_seq + 1),
+            id: stable_id.map(str::to_owned).unwrap_or_else(|| {
+                format!("core-event-{}-{}", attempt_id, attempt.last_event_seq + 1)
+            }),
             attempt_id: attempt_id.into(),
             seq: attempt.last_event_seq + 1,
             kind: kind.into(),
@@ -5606,7 +5720,7 @@ impl UiController {
             .append_event_with_state(&event, state, Some(&payload))
             .map_err(store_message)?
         {
-            AppendEventOutcome::Inserted(_) | AppendEventOutcome::Duplicate(_) => Ok(()),
+            AppendEventOutcome::Inserted(_) | AppendEventOutcome::Duplicate(_) => Ok(true),
         }
     }
 
@@ -5799,7 +5913,14 @@ impl UiController {
                 runtime_binding_payload(&binding, &event.occurred_at, &event.received_at),
             );
         }
-        self.persist_event(&event.attempt_id, kind, payload, state)?;
+        let stable_id = native_journal_id(&event.attempt_id, &event.process_epoch_id, &event.event_id, event.sequence);
+        self.persist_identified_event(
+            Some(&stable_id),
+            &event.attempt_id,
+            kind,
+            payload,
+            state,
+        )?;
         if is_turn_terminal(kind) {
             self.settle_turn_result(&event.attempt_id)?;
         }
@@ -5857,6 +5978,17 @@ impl UiController {
         }
         Ok(Vec::new())
     }
+}
+
+fn native_journal_id(attempt_id: &str, process_epoch_id: &str, event_id: &str, sequence: i64) -> String {
+    // Tag the fallback and encode the tuple, rather than joining ambiguous delimiters.
+    // The original envelope epoch stays stable across a partial-commit retry.
+    let identity = if event_id.is_empty() { json!(["sequence", sequence]) } else { json!(["event", event_id]) };
+    format!("native-{}", sha256_hex(json!([attempt_id, process_epoch_id, identity]).to_string().as_bytes()))
+}
+
+fn native_transport_journal_id(attempt_id: &str, registration_identity: &str) -> String {
+    format!("native-transport-{}", sha256_hex(json!([attempt_id, registration_identity]).to_string().as_bytes()))
 }
 
 fn runtime_binding_payload(
@@ -7676,4 +7808,365 @@ mod resolve_admission_attempt_id_tests {
         assert_ne!(queued, first);
         assert_ne!(queued, "attempt-old");
     }
+}
+#[cfg(test)]
+mod native_event_retention_tests {
+    use super::*;
+    use crate::domain::AgentEventType;
+    use crate::store::{testing_fail_next_appends, testing_fail_next_decision_inserts};
+
+    struct ResetFaults;
+    impl Drop for ResetFaults {
+        fn drop(&mut self) {
+            testing_fail_next_decision_inserts(0);
+            crate::store::testing_fail_next_appends(0);
+        }
+    }
+
+    fn envelope(
+        attempt_id: &str,
+        task_id: &str,
+        event_id: &str,
+        sequence: i64,
+        event_type: AgentEventType,
+        payload: Value,
+    ) -> AgentEventEnvelope {
+        AgentEventEnvelope {
+            event_id: event_id.into(),
+            campaign_id: None,
+            task_id: task_id.into(),
+            attempt_id: attempt_id.into(),
+            process_epoch_id: String::new(),
+            sequence,
+            occurred_at: "2026-10-02T00:00:00Z".into(),
+            received_at: "2026-10-02T00:00:01Z".into(),
+            provider_event_reference: Some(event_id.into()),
+            event_type,
+            payload,
+        }
+    }
+
+    fn permission(attempt_id: &str, task_id: &str) -> AgentEventEnvelope {
+        envelope(
+            attempt_id,
+            task_id,
+            "permission-1",
+            2,
+            AgentEventType::PermissionRequest,
+            json!({
+                "request_id": "decision-permission-1",
+                "kind": "native-permission",
+                "text": "echo fixture"
+            }),
+        )
+    }
+
+    fn active_attempt(store: &Store, task_id: &str, attempt_id: &str) {
+        store
+            .insert_attempt(&Attempt::new(
+                attempt_id,
+                task_id,
+                "scenario",
+                "scenario-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event_with_state(
+                &Event {
+                    id: format!("activate-{attempt_id}"),
+                    attempt_id: attempt_id.into(),
+                    seq: 1,
+                    kind: "attempt.active".into(),
+                    payload_ref: None,
+                },
+                Some(AttemptState::Active),
+                None,
+            )
+            .unwrap();
+    }
+
+    fn kind_count(store: &Store, attempt_id: &str, kind: &str) -> usize {
+        store
+            .list_event_records(attempt_id, 0)
+            .unwrap()
+            .iter()
+            .filter(|record| record.event.kind == kind)
+            .count()
+    }
+
+    #[test]
+    fn decision_insert_failure_then_retry_keeps_one_permission_event() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller =
+            UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture")
+                .unwrap();
+        let snapshot = controller.snapshot(None).unwrap();
+        let attempt_id = "attempt-native-retention";
+        active_attempt(&store, &snapshot.active_task.id, attempt_id);
+        let event = permission(attempt_id, &snapshot.active_task.id);
+        testing_fail_next_decision_inserts(1);
+        let failed = controller.persist_agent_event(&event).unwrap_err();
+        assert!(failed.contains("injected persistence failure"), "{failed}");
+        let after_failure = store.list_event_records(attempt_id, 0).unwrap();
+        let permission_events = after_failure
+            .iter()
+            .filter(|record| record.event.kind == "runtime.permission.request")
+            .count();
+        assert_eq!(
+            permission_events, 1,
+            "the journal write landed: {after_failure:?}"
+        );
+        assert!(store.get_decision("decision-permission-1").is_err());
+
+        testing_fail_next_decision_inserts(0);
+        controller.persist_agent_event(&event).unwrap();
+        let after_retry = store.list_event_records(attempt_id, 0).unwrap();
+        assert_eq!(
+            after_retry
+                .iter()
+                .filter(|record| record.event.kind == "runtime.permission.request")
+                .count(),
+            1,
+            "retry must not journal the permission again: {after_retry:?}"
+        );
+        assert_eq!(
+            store.get_decision("decision-permission-1").unwrap().state,
+            DecisionState::Pending
+        );
+    }
+
+    #[test]
+    fn failed_append_keeps_permission_reply_and_terminal_for_one_later_commit() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller =
+            UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture")
+                .unwrap();
+        let snapshot = controller.snapshot(None).unwrap();
+        let attempt_id = "attempt-native-batch";
+        let task_id = snapshot.active_task.id.clone();
+        active_attempt(&store, &task_id, attempt_id);
+        controller.uncommitted_native_events = vec![
+            permission(attempt_id, &task_id),
+            envelope(
+                attempt_id,
+                &task_id,
+                "reply-1",
+                3,
+                AgentEventType::MessageDelta,
+                json!({"text": "the reply", "status": "completed"}),
+            ),
+            envelope(
+                attempt_id,
+                &task_id,
+                "terminal-1",
+                4,
+                AgentEventType::TurnCompleted,
+                json!({"status": "completed", "text": "the reply"}),
+            ),
+        ];
+        testing_fail_next_appends(1);
+        let failed = controller.flush_runtime_events().unwrap_err();
+        assert!(failed.contains("injected persistence failure"), "{failed}");
+        assert_eq!(
+            controller
+                .uncommitted_native_events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["permission-1", "reply-1", "terminal-1"]
+        );
+        assert_eq!(
+            kind_count(&store, attempt_id, "runtime.permission.request"),
+            0
+        );
+        assert_eq!(kind_count(&store, attempt_id, "runtime.reply.delta"), 0);
+        assert_eq!(kind_count(&store, attempt_id, "runtime.turn.completed"), 0);
+        testing_fail_next_appends(1);
+        assert!(
+            controller.snapshot(None).is_ok(),
+            "a failed event write must not make the workbench unreadable"
+        );
+        assert_eq!(controller.uncommitted_native_events.len(), 3);
+        assert_eq!(
+            kind_count(&store, attempt_id, "runtime.permission.request"),
+            0
+        );
+
+        testing_fail_next_appends(0);
+        testing_fail_next_decision_inserts(1);
+        let partial = controller.flush_runtime_events().unwrap_err();
+        assert!(
+            partial.contains("injected persistence failure"),
+            "{partial}"
+        );
+        assert_eq!(
+            kind_count(&store, attempt_id, "runtime.permission.request"),
+            1
+        );
+        assert!(store.get_decision("decision-permission-1").is_err());
+        assert_eq!(
+            controller.uncommitted_native_events.len(),
+            3,
+            "a committed event with a missing Decision stays queued"
+        );
+
+        testing_fail_next_decision_inserts(0);
+        assert_eq!(controller.flush_runtime_events().unwrap(), 3);
+        assert!(controller.uncommitted_native_events.is_empty());
+        assert_eq!(
+            kind_count(&store, attempt_id, "runtime.permission.request"),
+            1
+        );
+        assert_eq!(kind_count(&store, attempt_id, "runtime.reply.delta"), 1);
+        assert_eq!(kind_count(&store, attempt_id, "runtime.turn.completed"), 1);
+        assert_eq!(kind_count(&store, attempt_id, "workspace.turn_result"), 1);
+        assert_eq!(
+            store.get_decision("decision-permission-1").unwrap().state,
+            DecisionState::Pending
+        );
+        assert_eq!(controller.flush_runtime_events().unwrap(), 0);
+        assert_eq!(
+            kind_count(&store, attempt_id, "runtime.permission.request"),
+            1
+        );
+        assert_eq!(kind_count(&store, attempt_id, "runtime.reply.delta"), 1);
+        assert_eq!(kind_count(&store, attempt_id, "runtime.turn.completed"), 1);
+        assert_eq!(kind_count(&store, attempt_id, "workspace.turn_result"), 1);
+    }
+    #[test]
+    fn native_identity_separates_epochs_attempts_and_fallbacks() {
+        let store = Store::memory().unwrap();
+        let controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let task_id = "task-synthetic-preview";
+        let attempt = "attempt-native-epochs";
+        active_attempt(&store, task_id, attempt);
+        let mut first = envelope(attempt, task_id, "codex-event-1", 1, AgentEventType::MessageDelta, json!({"text":"first process"}));
+        first.process_epoch_id = "process-first".into();
+        let mut second = first.clone();
+        second.process_epoch_id = "process-second".into();
+        second.payload = json!({"text":"second process"});
+        controller.persist_agent_event(&first).unwrap();
+        controller.persist_agent_event(&second).unwrap();
+        controller.persist_agent_event(&second).unwrap();
+        assert_eq!(kind_count(&store, attempt, "runtime.reply.delta"), 2);
+        for (a, p, e, s) in [
+            ("other-attempt", "process-first", "codex-event-1", 1),
+            (attempt, "process-second", "codex-event-1", 1),
+            (attempt, "process-first", "grok-event-1", 1),
+            (attempt, "process-first", "", 1),
+        ] {
+            assert_ne!(native_journal_id(attempt, "process-first", "codex-event-1", 1), native_journal_id(a,p,e,s));
+        }
+        assert_ne!(native_journal_id(attempt,"process-first","",1), native_journal_id(attempt,"process-first","sequence-1",1));
+        assert_ne!(native_journal_id("a-b","c","d",1), native_journal_id("a","b-c","d",1));
+    }
+
+    #[test]
+    fn closure_retry_keeps_original_registration_and_separates_later_close() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-native-closures";
+        active_attempt(&store, "task-synthetic-preview", attempt);
+        let pending = |identity: &str| PendingTransportClosure {
+            closure: TransportClosure { attempt_id: attempt.into(), reason: "stream-closed", pid: Some(1), turn_failed: false },
+            registration_identity: identity.into(),
+        };
+        controller.uncommitted_closures.push(pending("registration-first"));
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert_eq!(controller.uncommitted_closures[0].registration_identity, "registration-first");
+        assert_eq!(kind_count(&store, attempt, "runtime.transport.closed"), 0);
+        controller.flush_runtime_events().unwrap();
+        // RuntimeManager has no registration here: retry must use the captured identity.
+        controller.uncommitted_closures.push(pending("registration-first"));
+        controller.uncommitted_closures.push(pending("registration-second"));
+        controller.flush_runtime_events().unwrap();
+        let closes = store.list_event_records(attempt,0).unwrap().into_iter().filter(|r|r.event.kind=="runtime.transport.closed").collect::<Vec<_>>();
+        assert_eq!(closes.len(),2);
+        assert_eq!(closes[0].payload.as_ref().unwrap()["registration_identity"],"registration-first");
+        assert_eq!(closes[1].payload.as_ref().unwrap()["registration_identity"],"registration-second");
+        assert_ne!(closes[0].event.id,closes[1].event.id);
+    }
+
+    #[test]
+    fn missing_turn_result_remains_visible_until_recovery_and_changes_revisions() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        // Establish the ordinary selection before measuring persistence-only revisions.
+        controller.snapshot(None).unwrap();
+        let attempt = "attempt-native-result-fault";
+        let task = "task-synthetic-preview";
+        active_attempt(&store,task,attempt);
+        controller.selected_attempt_id = Some(attempt.into());
+        let event = envelope(attempt,task,"terminal-1",1,AgentEventType::TurnCompleted,json!({"status":"completed","text":"saved reply"}));
+        controller.persist_identified_event(Some(&native_journal_id(attempt,&event.process_epoch_id,&event.event_id,event.sequence)),attempt,"runtime.turn.completed",event.payload.clone(),Some(AttemptState::AwaitingReview)).unwrap();
+        controller.uncommitted_native_events.push(event);
+        let clean = controller.current_view_revision().unwrap();
+        let clean_scoped = controller.scoped_view_revision("campaign-synthetic-preview").unwrap();
+        let clean_shell = controller.shell_revision().unwrap();
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert_eq!(kind_count(&store,attempt,"runtime.turn.completed"),1);
+        assert_eq!(kind_count(&store,attempt,"workspace.turn_result"),0);
+        assert_eq!(controller.uncommitted_native_events.len(),1);
+        let failed = controller.current_view_revision().unwrap();
+        assert_ne!(failed,clean);
+        assert_ne!(controller.scoped_view_revision("campaign-synthetic-preview").unwrap(),clean_scoped);
+        assert_ne!(controller.shell_revision().unwrap(),clean_shell);
+        testing_fail_next_appends(1);
+        let response = controller.snapshot_if_changed(Some(&clean),None).unwrap();
+        assert_eq!(response["unchanged"],false);
+        assert!(response["snapshot"]["notices"].as_array().unwrap().iter().any(|v|v.as_str().unwrap().contains("have not been saved")));
+        assert_eq!(response["snapshot"]["productConversation"]["turn"]["canSend"],false);
+        assert_eq!(response["snapshot"]["productConversation"]["turn"]["reasonCode"],"native-persistence");
+        assert_eq!(kind_count(&store,attempt,"workspace.turn_result"),0);
+        assert_eq!(controller.uncommitted_native_events.len(),1);
+        assert_eq!(response["revision"], controller.current_view_revision().unwrap());
+        // Repeated storage failure does not produce an ever-changing revision or notices.
+        testing_fail_next_appends(1);
+        let unchanged = controller.snapshot_if_changed(Some(&failed),None).unwrap();
+        assert_eq!(unchanged["unchanged"],true);
+        testing_fail_next_appends(0);
+        let recovered = controller.snapshot_if_changed(Some(&failed),None).unwrap();
+        assert_eq!(recovered["unchanged"],false);
+        assert_ne!(recovered["revision"],failed);
+        assert!(!recovered["snapshot"]["notices"].as_array().unwrap().iter().any(|v|v.as_str().unwrap().contains("have not been saved")));
+        assert!(controller.native_persistence_error.is_none());
+        assert!(controller.uncommitted_native_events.is_empty());
+        assert_eq!(kind_count(&store,attempt,"workspace.turn_result"),1);
+        assert_eq!(controller.flush_runtime_events().unwrap(),0);
+        assert_eq!(kind_count(&store,attempt,"runtime.turn.completed"),1);
+        assert_eq!(kind_count(&store,attempt,"workspace.turn_result"),1);
+    }
+
+    #[test]
+    fn returning_worker_preserves_failed_native_persistence() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),"synthetic://goalport-fixture").unwrap();
+        let plan = NativeWorkerPlan { attempt_ids:vec!["attempt-scenario-preview".into()], startup_target:None };
+        let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
+        worker.uncommitted_native_events.push(envelope("attempt-scenario-preview","task-synthetic-preview","reply-worker",2,AgentEventType::MessageDelta,json!({"text":"worker reply"})));
+        worker.uncommitted_closures.push(PendingTransportClosure {
+            closure: TransportClosure { attempt_id:"attempt-scenario-preview".into(), reason:"stream-closed", pid:None, turn_failed:false },
+            registration_identity:"original-worker-registration".into(),
+        });
+        testing_fail_next_appends(1);
+        assert!(worker.flush_runtime_events().is_err());
+        controller.merge_native_worker(&plan,worker,baseline).unwrap();
+        assert!(controller.native_persistence_error.is_some());
+        assert_eq!(controller.uncommitted_native_events.len(),1);
+        assert_eq!(controller.uncommitted_closures[0].registration_identity,"original-worker-registration");
+        testing_fail_next_appends(1);
+        assert!(controller.snapshot(None).unwrap().notices.iter().any(|n|n.contains("have not been saved")));
+        controller.flush_runtime_events().unwrap();
+        assert!(controller.native_persistence_error.is_none());
+        assert_eq!(kind_count(&store,"attempt-scenario-preview","runtime.reply.delta"),1);
+        assert_eq!(kind_count(&store,"attempt-scenario-preview","runtime.transport.closed"),1);
+    }
+
 }
