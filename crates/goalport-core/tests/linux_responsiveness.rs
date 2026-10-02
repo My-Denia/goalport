@@ -14,8 +14,12 @@ use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::{Duration, Instant},
 };
+
+// Both fake peers change process-wide PATH and launch metadata.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct TestEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
@@ -128,6 +132,7 @@ fn await_turn(sock: &Path, state: &str) -> Value {
 
 #[test]
 fn stalled_native_initialize_does_not_block_snapshot_other_session_or_cancel() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = tempfile::tempdir().unwrap();
     let first_workspace = home.path().join("first");
     let second_workspace = home.path().join("second");
@@ -601,6 +606,7 @@ fn stalled_native_initialize_does_not_block_snapshot_other_session_or_cancel() {
 
 #[test]
 fn bad_frame_and_permission_wait_leave_other_goals_usable() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = tempfile::tempdir().unwrap();
     let permission_workspace = home.path().join("permission");
     let other_workspace = home.path().join("other");
