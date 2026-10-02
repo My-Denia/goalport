@@ -3491,6 +3491,9 @@ impl UiController {
                         if closed_reason.is_some() || write_unknown {
                             if write_unknown {
                                 delivery = "UNKNOWN";
+                                // A possibly delivered new prompt ends the prior Stop's
+                                // lifetime even if its failure record cannot be saved.
+                                self.native_stop_outcomes.remove(&attempt_id);
                             }
                             self.persist_event(
                                 &attempt_id,
