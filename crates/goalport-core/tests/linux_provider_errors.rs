@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use goalport_core::{
-    domain::{AttemptState, Command, CommandState},
+    domain::{AttemptState, Command, CommandState, DecisionState},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     process_identity::{ProcessIdentity, ProcessObservation, observe_process},
     product_receipts::{begin_startup_epoch, complete_startup_epoch},
@@ -642,6 +642,313 @@ fn native_permission_denial_reaches_peer_and_turn_continues() {
         fs::read_to_string(workspace.path().join("permission-decision")).unwrap(),
         "decline"
     );
+}
+
+fn open_codex_permission(scenario: &str) -> (tempfile::TempDir, Store, CoreServer, String) {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py"),
+        workspace.path().join("app-server"),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("peer-scenario"), scenario).unwrap();
+    let store = Store::memory().unwrap();
+    seed_core_epoch(&store, workspace.path(), scenario);
+    let server = CoreServer::new(store.clone());
+    let created = accepted(
+        &server,
+        &format!("{scenario}-create"),
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.path(),
+            "goal": "Permission local case",
+            "title": "Permission"
+        }),
+    );
+    let campaign_id = created["activeCampaignId"].as_str().unwrap().to_owned();
+    let task_id = created["activeTask"]["id"].as_str().unwrap().to_owned();
+    let selected = accepted(
+        &server,
+        &format!("{scenario}-select"),
+        "select_runtime",
+        json!({
+            "campaignId": campaign_id,
+            "taskId": task_id,
+            "provider": "codex",
+            "version": "local-peer",
+            "executable": "python3"
+        }),
+    );
+    let attempt_id = selected["attempt"]["id"].as_str().unwrap().to_owned();
+    accepted(
+        &server,
+        &format!("{scenario}-send"),
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "request a local permission"
+        }),
+    );
+    (workspace, store, server, attempt_id)
+}
+
+fn snapshot_of(server: &CoreServer, label: &str) -> Value {
+    accepted(server, label, "snapshot", json!({}))
+}
+
+#[test]
+fn permission_wait_drains_later_stdout() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_workspace, _store, server, _attempt_id) = open_codex_permission("permission-drain");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "drain-snapshot");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["state"] == "pending");
+        let drained = snapshot.to_string().contains("drained-while-pending");
+        if pending && drained {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stdout after the approval was not visible while the decision stayed pending: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn permission_answer_binds_live_identity() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-identity");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let decision_id = loop {
+        let snapshot = snapshot_of(&server, "identity-snapshot");
+        if let Some(id) = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|decision| decision["state"] == "pending")
+            .and_then(|decision| decision["id"].as_str())
+        {
+            break id.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native permission never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(decision_id, "rpc-A");
+    let records = store.list_event_records(&attempt_id, 0).unwrap();
+    let payload = records
+        .iter()
+        .find_map(|record| {
+            record.payload.as_ref().filter(|payload| {
+                payload.get("request_id").and_then(Value::as_str) == Some("rpc-A")
+            })
+        })
+        .expect("permission event");
+    assert_eq!(payload["threadId"], "T");
+    assert_eq!(payload["turnId"], "U");
+    assert_eq!(payload["itemId"], "I");
+    assert_eq!(payload["providerRequestId"], "other");
+    accepted(
+        &server,
+        "identity-allow",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    let file = workspace.path().join("permission-decision");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if file.is_file() && fs::read_to_string(&file).unwrap() == "rpc-A accept\n" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer did not record one rpc-A accept"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = request(
+        &server,
+        "identity-allow-again",
+        "permission_response",
+        json!({"decisionId": "rpc-A", "allow": true}),
+    );
+    assert_eq!(second["ok"], false, "{second}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "rpc-A accept\n");
+    assert_eq!(
+        store.get_decision("rpc-A").unwrap().state,
+        DecisionState::Approved
+    );
+}
+
+#[test]
+fn stop_during_permission_does_not_accept() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-stop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-wait");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["id"] == "local-approval" && decision["state"] == "pending");
+        if pending {
+            break;
+        }
+        assert!(Instant::now() < deadline, "permission never became pending");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = request(
+        &server,
+        "stop-during-permission",
+        "interrupt",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-settled");
+        let turn = snapshot["productConversation"]["turn"]["state"]
+            .as_str()
+            .unwrap_or("");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["state"] == "pending");
+        if !pending && turn != "waiting-permission" && turn != "running" && turn != "stopping" {
+            assert_eq!(
+                snapshot["productConversation"]["turn"]["canSend"], true,
+                "{snapshot}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop left the turn waiting: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        store.get_decision("local-approval").unwrap().state,
+        DecisionState::Cancelled
+    );
+    assert_ne!(
+        store.get_decision("local-approval").unwrap().state,
+        DecisionState::Approved
+    );
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
+}
+
+#[test]
+fn permission_eof_clears_pending() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_workspace, store, server, attempt_id) = open_codex_permission("permission-eof");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let decision = store.get_decision("local-approval");
+        let attempt = store.get_attempt(&attempt_id).unwrap();
+        if decision
+            .as_ref()
+            .is_ok_and(|row| row.state == DecisionState::Cancelled)
+            && attempt.state == AttemptState::Failed
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "eof left decision {decision:?} attempt {:?}",
+            attempt.state
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        let _ = snapshot_of(&server, "eof-poll");
+    }
+    let snapshot = snapshot_of(&server, "eof-final");
+    let turn = snapshot["productConversation"]["turn"]["state"]
+        .as_str()
+        .unwrap();
+    assert_ne!(turn, "waiting-permission");
+    assert_ne!(turn, "running");
+    assert_eq!(
+        store.get_decision("local-approval").unwrap().state,
+        DecisionState::Cancelled
+    );
+}
+
+#[test]
+fn stop_before_approval_is_drained_does_not_leave_pending() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-stop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-early-wait");
+        if snapshot["productConversation"]["turn"]["canStop"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "turn never became stoppable");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = request(
+        &server,
+        "stop-before-drain",
+        "interrupt",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "stop-early-settle");
+        let decision = store.get_decision("local-approval");
+        let pending = decision.as_ref().is_ok_and(|row| row.state == DecisionState::Pending);
+        let attempt = store.get_attempt(&attempt_id).unwrap();
+        if !pending && attempt.state.is_terminal() {
+            if let Ok(row) = decision {
+                assert_ne!(row.state, DecisionState::Approved);
+            }
+            for _ in 0..20 {
+                let _ = snapshot_of(&server, "stop-early-after");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let decision = store.get_decision("local-approval");
+            assert!(
+                decision.as_ref().is_ok_and(|row| row.state != DecisionState::Pending),
+                "approval became pending after stop settled: {decision:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop left a pending approval: {decision:?} attempt {:?}",
+            attempt.state
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
 }
 
 fn admission_failure(executable: String, scenario: Option<&str>) -> Value {

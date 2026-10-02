@@ -57,7 +57,8 @@ for line in sys.stdin:
                 stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=subprocess.DEVNULL,
             )
             (workspace / "stdout-holder-pid").write_text(str(holder.pid))
-        send({"id": request_id, "result": {"thread": {"id": "local-thread"}}})
+        thread_id = "T" if scenario == "permission-identity" else "local-thread"
+        send({"id": request_id, "result": {"thread": {"id": thread_id}}})
         if scenario == "exit-parent-stdout-open":
             (workspace / "parent-ready-to-exit").write_text("ready")
             while not (workspace / "release-parent-exit").exists():
@@ -79,14 +80,30 @@ for line in sys.stdin:
         (workspace / "turn-count").write_text(str(turns))
         with (workspace / "turn-starts").open("a") as starts:
             starts.write(f"{os.getpid()}\n")
-        turn_id = f"local-turn-{turns}"
+        turn_id = "U" if scenario == "permission-identity" else f"local-turn-{turns}"
         send({"id": request_id, "result": {"turn": {"id": turn_id}}})
-        send({"method": "turn/started", "params": {"threadId": "local-thread", "turnId": turn_id}})
+        started_thread = "T" if scenario == "permission-identity" else "local-thread"
+        send({"method": "turn/started", "params": {"threadId": started_thread, "turnId": turn_id}})
         if scenario == "stall-turn" or scenario.startswith("stop-cache-"):
             continue
         elif scenario == "permission-deny":
             pending_permission_turn = turn_id
             send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+        elif scenario == "permission-drain":
+            pending_permission_turn = turn_id
+            send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+            send({"method": "item/agentMessage/delta", "params": {"threadId": "local-thread", "turnId": turn_id, "delta": "drained-while-pending"}})
+        elif scenario == "permission-stop":
+            pending_permission_turn = turn_id
+            send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+        elif scenario == "permission-eof":
+            send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+            sys.stdout.flush()
+            os.close(1)
+            raise SystemExit(0)
+        elif scenario == "permission-identity":
+            pending_permission_turn = turn_id
+            send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "T", "turnId": turn_id, "itemId": "I", "requestId": "other", "command": "echo fixture"}})
         elif turns == 1 and scenario != "complete-first":
             error = {"message": "fixture limit reached", "codexErrorInfo": "usageLimitExceeded"}
             send({"method": "error", "params": {"threadId": "local-thread", "turnId": turn_id, "error": error, "willRetry": True}})
@@ -96,6 +113,11 @@ for line in sys.stdin:
             send({"method": "item/commandExecution/started", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "commandExecution"}}})
             send({"method": "item/agentMessage/completed", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "agentMessage", "text": "local peer completed"}}})
             send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": turn_id, "status": "completed"}}})
+    elif method == "turn/interrupt" and scenario == "permission-stop" and request_id is not None:
+        send({"id": request_id, "result": {}})
+        if pending_permission_turn:
+            send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": pending_permission_turn, "status": "interrupted"}}})
+            pending_permission_turn = None
     elif method == "turn/interrupt" and request_id is not None:
         if scenario.startswith("stop-cache-"):
             counter = workspace / "interrupt-count"
@@ -112,9 +134,15 @@ for line in sys.stdin:
                 while not (workspace / "release-stop-peer").exists() and time.monotonic() < deadline:
                     time.sleep(0.01)
                 sys.exit(0)
-    elif method is None and request_id == "local-approval" and pending_permission_turn:
+    elif method is None and request_id is not None and pending_permission_turn:
         decision = (message.get("result") or {}).get("decision", "unknown")
-        (workspace / "permission-decision").write_text(decision)
-        send({"method": "item/agentMessage/completed", "params": {"threadId": "local-thread", "turnId": pending_permission_turn, "item": {"type": "agentMessage", "text": "Permission decision received"}}})
-        send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": pending_permission_turn, "status": "completed"}}})
+        record = workspace / "permission-decision"
+        if request_id == "local-approval":
+            record.write_text(decision)
+        else:
+            previous = record.read_text() if record.exists() else ""
+            record.write_text(previous + f"{request_id} {decision}\n")
+        answered_thread = "T" if scenario == "permission-identity" else "local-thread"
+        send({"method": "item/agentMessage/completed", "params": {"threadId": answered_thread, "turnId": pending_permission_turn, "item": {"type": "agentMessage", "text": "Permission decision received"}}})
+        send({"method": "turn/completed", "params": {"threadId": answered_thread, "turn": {"id": pending_permission_turn, "status": "completed"}}})
         pending_permission_turn = None
