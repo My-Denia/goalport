@@ -2160,6 +2160,8 @@ impl CodexProcess {
             )));
         }
         self.pending_start_request_id = Some(id);
+        // A Stop or a finished turn must not cancel the approval of this new turn.
+        self.release_stop_for_new_turn();
         // The reader thread now owns the provider stdout. Returning after the
         // request is flushed keeps the UI responsive and lets Core snapshots
         // persist pre-terminal events while the native turn is still active.
@@ -2199,6 +2201,19 @@ impl CodexProcess {
             published
         };
         self.queued_permission_cancel = Some(taken);
+    }
+
+    fn release_stop_for_new_turn(&mut self) {
+        if let Ok(mut slot) = self.approval.lock() {
+            slot.stop_requested = true;
+        }
+        self.queue_permission_cancel();
+        if let Ok(mut slot) = self.approval.lock() {
+            slot.stop_requested = false;
+            slot.published = None;
+            slot.live = None;
+        }
+        self.emitted_permission_ids.clear();
     }
 
     fn push_queued_permission_cancel(
@@ -2374,8 +2389,12 @@ impl CodexProcess {
             if terminal && terminal_matches {
                 // R3: a terminal for the bound turn clears BOTH facts. A stale or
                 // unsolicited response arriving afterwards finds no pending and
-                // no native turn and can never resurrect one. A permission still
-                // open at that boundary is cancelled, never approved.
+                // no native turn and can never resurrect one. A permission that
+                // shows up after this frame is cancelled once its request event
+                // is emitted, and it is never approved.
+                if let Ok(mut slot) = self.approval.lock() {
+                    slot.stop_requested = true;
+                }
                 self.queue_permission_cancel();
                 self.push_queued_permission_cancel(attempt_id, &mut events);
                 self.native_turn_id = None;
@@ -7298,6 +7317,57 @@ mod tests {
             slot.live = Some(published);
         }
         expect_stdin(process.permission_response(answer).unwrap_err());
+    }
+
+    #[test]
+    fn new_turn_clears_stop_so_the_next_approval_can_be_answered() {
+        let mut process = CodexProcess::new(
+            PathBuf::from("codex"),
+            "test".into(),
+            PathBuf::from("/tmp"),
+            "on-request".into(),
+        );
+        process.thread_id = Some("T".into());
+        process.native_turn_id = Some("U".into());
+        let old = ApprovalBinding {
+            rpc_id: "rpc-A".into(),
+            rpc_json: json!("rpc-A"),
+            thread_id: "T".into(),
+            turn_id: "U".into(),
+            item_id: Some("I".into()),
+        };
+        {
+            let mut slot = process.approval.lock().unwrap();
+            slot.stop_requested = true;
+            slot.published = Some(old.clone());
+            slot.live = Some(old);
+        }
+        process.emitted_permission_ids.insert("rpc-A".into());
+        process.release_stop_for_new_turn();
+        assert!(process.queued_permission_cancel.is_some());
+        let next = ApprovalBinding {
+            rpc_id: "rpc-B".into(),
+            rpc_json: json!("rpc-B"),
+            thread_id: "T".into(),
+            turn_id: "U2".into(),
+            item_id: Some("I2".into()),
+        };
+        process.native_turn_id = Some("U2".into());
+        {
+            let mut slot = process.approval.lock().unwrap();
+            assert!(!slot.stop_requested);
+            slot.published = Some(next.clone());
+            slot.live = Some(next);
+        }
+        let err = process
+            .permission_response(crate::adapters::PermissionResponse {
+                request_id: "rpc-B".into(),
+                allow: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stdin is closed"), "{err}");
+        assert!(!err.contains("permission binding does not match"), "{err}");
     }
 
     #[test]

@@ -951,6 +951,49 @@ fn stop_before_approval_is_drained_does_not_leave_pending() {
     }
 }
 
+#[test]
+fn approval_after_terminal_is_not_left_pending() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-after-terminal");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if workspace.path().join("terminal-visible").is_file() {
+            let attempt = store.get_attempt(&attempt_id).unwrap();
+            if attempt.state == AttemptState::AwaitingReview || attempt.state.is_terminal() {
+                break;
+            }
+        }
+        let _ = snapshot_of(&server, "late-approval-wait");
+        assert!(
+            Instant::now() < deadline,
+            "turn never finished before the late approval; files={:?}",
+            std::fs::read_dir(workspace.path())
+                .map(|entries| entries.filter_map(|entry| entry.ok()).map(|entry| entry.file_name()).collect::<Vec<_>>())
+                .ok()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(workspace.path().join("release-late-approval"), "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "late-approval-settle");
+        let decision = store.get_decision("local-approval");
+        if decision.as_ref().is_ok_and(|row| row.state == DecisionState::Cancelled) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "late approval stayed unresolved: {decision:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(record).unwrap().contains("accept"));
+    }
+}
+
+
 fn admission_failure(executable: String, scenario: Option<&str>) -> Value {
     let workspace = tempfile::tempdir().unwrap();
     if let Some(scenario) = scenario {

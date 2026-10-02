@@ -96,6 +96,13 @@ for line in sys.stdin:
         elif scenario == "permission-stop":
             pending_permission_turn = turn_id
             send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+        elif scenario == "permission-after-terminal":
+            send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": turn_id, "status": "completed"}}})
+            (workspace / "terminal-visible").write_text("ready")
+            while not (workspace / "release-late-approval").exists():
+                time.sleep(0.01)
+            pending_permission_turn = turn_id
+            send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
         elif scenario == "permission-eof":
             send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
             sys.stdout.flush()
