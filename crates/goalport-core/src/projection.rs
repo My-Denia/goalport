@@ -6,7 +6,7 @@
 
 use crate::{
     async_title::{TitleRequest, TitleResult, spawn_title},
-    adapters::{AdapterError, PermissionResponse, PromptRequest, SessionRequest},
+    adapters::{AdapterError, CancelResult, PermissionResponse, PromptRequest, SessionRequest},
     assurance::{ActionAuthority, ApprovalContext},
     commands::{CoreCommand, CoreOperation, sha256_hex},
     domain::{
@@ -38,6 +38,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, mpsc::{Receiver, TryRecvError}},
@@ -322,6 +323,14 @@ struct PendingTransportClosure {
     registration_identity: String,
 }
 
+#[derive(Debug, Clone)]
+struct RetainedNativeStop {
+    request_id: String,
+    registration_identity: String,
+    result: CancelResult,
+    journaled: bool,
+}
+
 #[derive(Debug)]
 pub struct UiController {
     store: Store,
@@ -336,8 +345,12 @@ pub struct UiController {
     selection_revision: u64,
     /// Provider events already taken from the Runtime and not yet committed
     /// with their Decision. A failed write leaves them here for the next flush.
-    uncommitted_native_events: Vec<AgentEventEnvelope>,
-    uncommitted_closures: Vec<PendingTransportClosure>,
+    uncommitted_native_events: VecDeque<AgentEventEnvelope>,
+    uncommitted_closures: VecDeque<PendingTransportClosure>,
+    // A terminal comparison is frozen once it is computed, even if its write fails.
+    uncommitted_turn_results: BTreeMap<(String, String), Option<Value>>,
+    // Remember dispatched Stop effects until saved and the native turn settles.
+    native_stop_outcomes: BTreeMap<String, RetainedNativeStop>,
     native_persistence_error: Option<String>,
 }
 
@@ -380,8 +393,10 @@ impl UiController {
             build_id: current_executable_build_id(),
             pending_titles: Vec::new(),
             selection_revision: 0,
-            uncommitted_native_events: Vec::new(),
-            uncommitted_closures: Vec::new(),
+            uncommitted_native_events: VecDeque::new(),
+            uncommitted_closures: VecDeque::new(),
+            uncommitted_turn_results: BTreeMap::new(),
+            native_stop_outcomes: BTreeMap::new(),
             native_persistence_error: None,
         };
         if let Some(workspace_root) = seed_workspace {
@@ -755,6 +770,16 @@ impl UiController {
                     startup_target: new_native.then_some(target),
                 })
             }
+            "conversation_send" => {
+                let target = self.native_worker_target(request)?;
+                let campaign_id = request.payload.get("campaignId")?.as_str()?;
+                let campaign = self.store.get_campaign(campaign_id).ok()?;
+                let source = request.payload.get("attemptId").and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| self.store.attempts_for_task(&campaign.root_task_id).ok()?.last().map(|attempt| attempt.id.clone()))?;
+                let attempt_ids = if source == target { vec![target] } else { vec![source, target] };
+                Some(NativeWorkerPlan { attempt_ids, startup_target: None })
+            }
             "queue_override" => {
                 let queue_id = request.payload.get("queueId")?.as_str()?;
                 let queued = self.store.get_admission(queue_id).ok()?;
@@ -856,6 +881,12 @@ impl UiController {
         let (uncommitted_closures, retained_closures) = std::mem::take(&mut self.uncommitted_closures)
             .into_iter().partition(|pending| plan.attempt_ids.contains(&pending.closure.attempt_id));
         self.uncommitted_closures = retained_closures;
+        let (uncommitted_turn_results, retained_results) = std::mem::take(&mut self.uncommitted_turn_results)
+            .into_iter().partition(|(key, _)| plan.attempt_ids.contains(&key.0));
+        self.uncommitted_turn_results = retained_results;
+        let (native_stop_outcomes, retained_stops) = std::mem::take(&mut self.native_stop_outcomes)
+            .into_iter().partition(|(attempt, _)| plan.attempt_ids.contains(attempt));
+        self.native_stop_outcomes = retained_stops;
         let baseline = self.selection_revision;
         Ok((
             Self {
@@ -871,6 +902,8 @@ impl UiController {
                 selection_revision: baseline,
                 uncommitted_native_events,
                 uncommitted_closures,
+                uncommitted_turn_results,
+                native_stop_outcomes,
                 native_persistence_error: self.native_persistence_error.clone(),
             },
             baseline,
@@ -883,8 +916,7 @@ impl UiController {
         mut worker: Self,
         baseline: u64,
     ) -> Result<(), String> {
-        if (!worker.uncommitted_native_events.is_empty() || !worker.uncommitted_closures.is_empty())
-            && worker.native_persistence_error.is_some()
+        if worker.has_uncommitted_native_persistence() && worker.native_persistence_error.is_some()
         {
             self.native_persistence_error = worker.native_persistence_error.take();
         }
@@ -892,8 +924,9 @@ impl UiController {
             .append(&mut worker.uncommitted_native_events);
         self.uncommitted_closures
             .append(&mut worker.uncommitted_closures);
-        if self.uncommitted_native_events.is_empty() && self.uncommitted_closures.is_empty()
-            && worker.native_persistence_error.is_none()
+        self.uncommitted_turn_results.append(&mut worker.uncommitted_turn_results);
+        self.native_stop_outcomes.append(&mut worker.native_stop_outcomes);
+        if !self.has_uncommitted_native_persistence() && worker.native_persistence_error.is_none()
         {
             self.native_persistence_error = None;
         }
@@ -933,12 +966,26 @@ impl UiController {
             "error": self.native_persistence_error,
             "pendingEvents": self.uncommitted_native_events.len(),
             "pendingClosures": self.uncommitted_closures.len(),
+            "pendingStopRecords": self.native_stop_outcomes.values().filter(|stop| !stop.journaled).count(),
         })
+    }
+
+    fn has_uncommitted_native_persistence(&self) -> bool {
+        !self.uncommitted_native_events.is_empty() || !self.uncommitted_closures.is_empty()
+            || self.native_stop_outcomes.values().any(|stop| !stop.journaled)
+    }
+
+    fn ensure_native_persistence_ready(&self, attempt_id: &str) -> Result<(), String> {
+        if self.has_pending_native_persistence(attempt_id) {
+            return Err("Recent Runtime updates have not been saved yet. Wait for recovery before sending another message; no new message was recorded or sent.".into());
+        }
+        Ok(())
     }
 
     fn has_pending_native_persistence(&self, attempt_id: &str) -> bool {
         self.uncommitted_native_events.iter().any(|event| event.attempt_id == attempt_id)
             || self.uncommitted_closures.iter().any(|pending| pending.closure.attempt_id == attempt_id)
+            || self.native_stop_outcomes.get(attempt_id).is_some_and(|stop| !stop.journaled)
     }
 
     fn snapshot_notices(&self) -> Vec<String> {
@@ -951,12 +998,17 @@ impl UiController {
 
     fn flush_runtime_events_inner(&mut self) -> Result<usize, String> {
         let mut committed = 0;
-        while let Some(event) = self.uncommitted_native_events.first().cloned() {
+        while let Some(event) = self.uncommitted_native_events.front().cloned() {
             // The envelope stays queued until the journal row and its Decision
             // both succeed. A later flush sees the same event id and does not
             // append a second row.
-            self.persist_agent_event(&event)?;
-            self.uncommitted_native_events.remove(0);
+            let key = (event.attempt_id.clone(), native_journal_id(&event.attempt_id, &event.process_epoch_id, &event.event_id, event.sequence));
+            let mut frozen = self.uncommitted_turn_results.remove(&key);
+            if let Err(error) = self.persist_agent_event_with_settlement(&event, &mut frozen) {
+                if let Some(payload) = frozen { self.uncommitted_turn_results.insert(key, payload); }
+                return Err(error);
+            }
+            self.uncommitted_native_events.pop_front();
             committed += 1;
         }
         // Increment 6: a Codex output-transport closure observed since the last drain is recorded
@@ -969,9 +1021,9 @@ impl UiController {
         for closure in self.runtime_manager.take_transport_closures() {
             let registration_identity = self.runtime_manager
                 .registration_identity(&closure.attempt_id).unwrap_or_default();
-            self.uncommitted_closures.push(PendingTransportClosure { closure, registration_identity });
+            self.uncommitted_closures.push_back(PendingTransportClosure { closure, registration_identity });
         }
-        while let Some(pending) = self.uncommitted_closures.first().cloned() {
+        while let Some(pending) = self.uncommitted_closures.front().cloned() {
             let closure = pending.closure;
             let identity = pending.registration_identity;
             let stable_id = native_transport_journal_id(&closure.attempt_id, &identity);
@@ -993,7 +1045,30 @@ impl UiController {
                 }),
                 None,
             )?;
-            self.uncommitted_closures.remove(0);
+            self.uncommitted_closures.pop_front();
+        }
+        // Save Stop records only after older provider observations. The saved
+        // outcome remains reusable until a new turn or registration supersedes it.
+        let attempts = self.native_stop_outcomes.keys().cloned().collect::<Vec<_>>();
+        for attempt_id in attempts {
+            let stop = self.native_stop_outcomes[&attempt_id].clone();
+            if !stop.journaled {
+                let stable_id = format!("native-stop-{}", sha256_hex(serde_json::to_string(&(
+                    &attempt_id, &stop.request_id, &stop.registration_identity,
+                )).expect("Stop identity serialization").as_bytes()));
+                let state = (stop.result.confirmed && !self.store.get_attempt(&attempt_id).map_err(store_message)?.state.is_terminal())
+                    .then_some(AttemptState::Cancelled);
+                self.persist_identified_event(Some(&stable_id), &attempt_id,
+                    if stop.result.confirmed { "attempt.cancelled" } else { "attempt.interrupt.requested" },
+                    json!({"requested":stop.result.requested,"confirmed":stop.result.confirmed,"reason":stop.result.reason,
+                        "requestId":stop.request_id,"registration_identity":stop.registration_identity}), state)?;
+                self.native_stop_outcomes.get_mut(&attempt_id).expect("retained Stop").journaled = true;
+            }
+            // A failed native write did not dispatch Stop. Preserve its pending
+            // record, then allow a real retry once that record has been saved.
+            if !stop.result.requested && !stop.result.confirmed {
+                self.native_stop_outcomes.remove(&attempt_id);
+            }
         }
         Ok(committed)
     }
@@ -1394,7 +1469,7 @@ impl UiController {
                 self.resolve_decision(&request)?;
             }
             "interrupt" | "safe_stop" | "cancel" => {
-                self.interrupt(&request)?;
+                receipt = Some(self.interrupt(&request)?);
             }
             "reconnect" => {
                 self.reconnect_ui(&request)?;
@@ -1454,6 +1529,7 @@ impl UiController {
             None
         };
         let snapshot = self.response_snapshot(&request, after_cursor)?;
+        self.reconcile_stop_receipt(&request, &mut receipt);
         Ok(UiCommandResult {
             request_id: request.request_id,
             duplicate,
@@ -1461,6 +1537,16 @@ impl UiController {
             snapshot,
             receipt,
         })
+    }
+
+    pub(crate) fn reconcile_stop_receipt(&self, request: &UiCommandRequest, receipt: &mut Option<Value>) {
+        if let Some(receipt) = receipt.as_mut()
+            && receipt.get("persistence").is_some()
+            && matches!(request.message_type.as_str(), "interrupt" | "safe_stop" | "cancel")
+        {
+            let attempt_id = payload_text_default(&request.payload, "attemptId", self.selected_attempt_id.as_deref().unwrap_or_default());
+            receipt["persistence"] = json!(if self.has_pending_native_persistence(&attempt_id) { "pending" } else { "saved" });
+        }
     }
 
     /// Send, stop and approval answers show the goal they named, then restore
@@ -3161,6 +3247,7 @@ impl UiController {
             Err(StoreError::NotFound(_)) => {}
             Err(error) => return Err(store_message(error)),
         }
+        self.ensure_native_persistence_ready(&attempt_id)?;
         let workspace = self.workspace_for_campaign(&campaign.id)?;
         self.ensure_workspace_ingress_allowed(&workspace, "message send")?;
         // A terminal Attempt is finished: nothing is persisted, no Runtime is
@@ -3375,7 +3462,10 @@ impl UiController {
                 idempotency_key: request.request_id.clone(),
             };
             let sent = match self.runtime_manager.send_prompt(&attempt_id, &prompt) {
-                Ok(sent) => sent,
+                Ok(sent) => {
+                    self.native_stop_outcomes.remove(&attempt_id);
+                    sent
+                },
                 Err(error) => {
                     let first = error.to_string();
                     eprintln!("goalport-core: send_prompt failed: {first}");
@@ -4046,12 +4136,14 @@ impl UiController {
                     "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
                 ));
             }
+            self.ensure_native_persistence_ready(&source.id)?;
             rearmed_row = Some(
                 self.store
                     .rearm_failed_conversation_request(&request_id, &payload_hash, &claim_token)
                     .map_err(store_message)?,
             );
         }
+        self.ensure_native_persistence_ready(&source.id)?;
         let workspace = self.workspace_for_campaign(&task.campaign_id)?;
         self.ensure_workspace_ingress_allowed(&workspace, "continue after Stop")?;
         let auth = self
@@ -4338,7 +4430,7 @@ impl UiController {
         Ok(())
     }
 
-    fn interrupt(&mut self, request: &UiCommandRequest) -> Result<(), String> {
+    fn interrupt(&mut self, request: &UiCommandRequest) -> Result<Value, String> {
         let attempt_id = payload_text_default(
             &request.payload,
             "attemptId",
@@ -4350,7 +4442,19 @@ impl UiController {
             // Save earlier observations before starting that existing protocol.
             self.flush_runtime_events()?;
             self.stop_claude_with_operation(&attempt_id, &request.request_id, "ui.stop", None)?;
-            return Ok(());
+            return Ok(json!({"nativeStop":"durable-claude-protocol"}));
+        }
+        let registration_identity = self.runtime_manager.registration_identity(&attempt_id).unwrap_or_default();
+        if self.native_stop_outcomes.get(&attempt_id).is_some_and(|stop|
+            stop.journaled && stop.registration_identity != registration_identity)
+        {
+            self.native_stop_outcomes.remove(&attempt_id);
+        }
+        if let Some(stop) = self.native_stop_outcomes.get(&attempt_id).cloned() {
+            let persisted = self.flush_runtime_events().is_ok();
+            return Ok(json!({"requested":stop.result.requested,"confirmed":stop.result.confirmed,
+                "persistence":if persisted {"saved"} else {"pending"},"duplicateDispatch":true,
+                "originalRequestId":stop.request_id,"reason":stop.result.reason}));
         }
         // R2: Stop is offered only for a proven cancellable live turn. For Codex
         // that means an acknowledged native turn with an open transport — a
@@ -4375,25 +4479,14 @@ impl UiController {
             .runtime_manager
             .interrupt(&attempt_id)
             .map_err(|error| error.to_string())?;
-        // Attempt native Stop even while storage is unavailable. Its later
-        // journal record must not overtake previously retained observations.
-        self.flush_runtime_events()?;
-        if result.confirmed {
-            self.persist_event(
-                &attempt_id,
-                "attempt.cancelled",
-                json!({ "requested": result.requested, "confirmed": true, "reason": result.reason }),
-                Some(AttemptState::Cancelled),
-            )?;
-        } else {
-            self.persist_event(
-                &attempt_id,
-                "attempt.interrupt.requested",
-                json!({ "requested": result.requested, "confirmed": false, "reason": result.reason }),
-                None,
-            )?;
-        }
-        Ok(())
+        self.native_stop_outcomes.insert(attempt_id.clone(), RetainedNativeStop {
+            request_id: request.request_id.clone(),
+            registration_identity: self.runtime_manager.registration_identity(&attempt_id).unwrap_or_default(),
+            result: result.clone(), journaled: false,
+        });
+        let persisted = self.flush_runtime_events().is_ok();
+        Ok(json!({"requested":result.requested,"confirmed":result.confirmed,
+            "persistence":if persisted {"saved"} else {"pending"},"duplicateDispatch":false,"reason":result.reason}))
     }
 
     fn stop_claude_with_operation(
@@ -5684,19 +5777,6 @@ impl UiController {
         self.persist_event(attempt_id, "workspace.baseline", payload, None)
     }
 
-    fn settle_turn_result(&self, attempt_id: &str) -> Result<(), String> {
-        let workspace = self.workspace_for_attempt(attempt_id)?;
-        let Some(payload) = crate::turn_results::settlement_payload(
-            &self.store,
-            attempt_id,
-            std::path::Path::new(&workspace),
-        )?
-        else {
-            return Ok(());
-        };
-        self.persist_event(attempt_id, "workspace.turn_result", payload, None)
-    }
-
     fn persist_event(
         &self,
         attempt_id: &str,
@@ -5744,6 +5824,10 @@ impl UiController {
     }
 
     fn persist_agent_event(&self, event: &AgentEventEnvelope) -> Result<(), String> {
+        self.persist_agent_event_with_settlement(event, &mut None)
+    }
+
+    fn persist_agent_event_with_settlement(&self, event: &AgentEventEnvelope, frozen: &mut Option<Option<Value>>) -> Result<(), String> {
         let kind = match event.event_type {
             AgentEventType::SessionCreated => "runtime.session.created",
             AgentEventType::TurnStarted => "runtime.turn.started",
@@ -5941,7 +6025,20 @@ impl UiController {
             state,
         )?;
         if is_turn_terminal(kind) {
-            self.settle_turn_result(&event.attempt_id)?;
+            if frozen.is_none() {
+                let workspace = self.workspace_for_attempt(&event.attempt_id)?;
+                *frozen = Some(crate::turn_results::settlement_payload(&self.store, &event.attempt_id, Path::new(&workspace))?);
+            }
+            if let Some(Some(result)) = frozen.as_ref() {
+                // Another settlement path may already have committed this terminal.
+                let already_saved = self.store.list_event_records(&event.attempt_id, 0).map_err(store_message)?
+                    .iter().any(|record| record.event.kind == "workspace.turn_result"
+                        && record.payload.as_ref().is_some_and(|payload| payload["terminalSeq"] == result["terminalSeq"]));
+                if !already_saved {
+                    self.persist_identified_event(Some(&format!("result-{stable_id}")), &event.attempt_id,
+                        "workspace.turn_result", result.clone(), None)?;
+                }
+            }
         }
         // A native permission answered `cancelled` (Safe stop while the prompt was
         // pending) must not leave its Decision pending for ever: no option was selected,
@@ -7984,7 +8081,7 @@ mod native_event_retention_tests {
                 AgentEventType::TurnCompleted,
                 json!({"status": "completed", "text": "the reply"}),
             ),
-        ];
+        ].into();
         testing_fail_next_appends(1);
         let failed = controller.flush_runtime_events().unwrap_err();
         assert!(failed.contains("injected persistence failure"), "{failed}");
@@ -8093,15 +8190,15 @@ mod native_event_retention_tests {
             closure: TransportClosure { attempt_id: attempt.into(), reason: "stream-closed", pid: Some(1), turn_failed: false },
             registration_identity: identity.into(),
         };
-        controller.uncommitted_closures.push(pending("registration-first"));
+        controller.uncommitted_closures.push_back(pending("registration-first"));
         testing_fail_next_appends(1);
         assert!(controller.flush_runtime_events().is_err());
         assert_eq!(controller.uncommitted_closures[0].registration_identity, "registration-first");
         assert_eq!(kind_count(&store, attempt, "runtime.transport.closed"), 0);
         controller.flush_runtime_events().unwrap();
         // RuntimeManager has no registration here: retry must use the captured identity.
-        controller.uncommitted_closures.push(pending("registration-first"));
-        controller.uncommitted_closures.push(pending("registration-second"));
+        controller.uncommitted_closures.push_back(pending("registration-first"));
+        controller.uncommitted_closures.push_back(pending("registration-second"));
         controller.flush_runtime_events().unwrap();
         let closes = store.list_event_records(attempt,0).unwrap().into_iter().filter(|r|r.event.kind=="runtime.transport.closed").collect::<Vec<_>>();
         assert_eq!(closes.len(),2);
@@ -8123,7 +8220,7 @@ mod native_event_retention_tests {
         controller.selected_attempt_id = Some(attempt.into());
         let event = envelope(attempt,task,"terminal-1",1,AgentEventType::TurnCompleted,json!({"status":"completed","text":"saved reply"}));
         controller.persist_identified_event(Some(&native_journal_id(attempt,&event.process_epoch_id,&event.event_id,event.sequence)),attempt,"runtime.turn.completed",event.payload.clone(),Some(AttemptState::AwaitingReview)).unwrap();
-        controller.uncommitted_native_events.push(event);
+        controller.uncommitted_native_events.push_back(event);
         let clean = controller.current_view_revision().unwrap();
         let clean_scoped = controller.scoped_view_revision("campaign-synthetic-preview").unwrap();
         let clean_shell = controller.shell_revision().unwrap();
@@ -8173,8 +8270,8 @@ mod native_event_retention_tests {
         controller.runtime_manager.select_runtime(attempt, "scenario", None, "fixture", Path::new(".")).unwrap();
         let mut retained = permission(attempt, task);
         retained.process_epoch_id = "original-loan-process".into();
-        controller.uncommitted_native_events.push(retained);
-        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 3, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        controller.uncommitted_native_events.push_back(retained);
+        controller.uncommitted_native_events.push_back(envelope(attempt, task, "older-reply", 3, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
         testing_fail_next_decision_inserts(1);
         assert!(controller.flush_runtime_events().is_err());
         assert_eq!(kind_count(&store, attempt, "runtime.permission.request"), 1);
@@ -8212,14 +8309,14 @@ mod native_event_retention_tests {
         let task = "task-synthetic-preview";
         active_attempt(&store, task, attempt);
         controller.runtime_manager.select_runtime(attempt, "scenario", None, "fixture", Path::new(".")).unwrap();
-        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
-        controller.uncommitted_closures.push(PendingTransportClosure {
+        controller.uncommitted_native_events.push_back(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        controller.uncommitted_closures.push_back(PendingTransportClosure {
             closure: TransportClosure { attempt_id: attempt.into(), reason: "stream-closed", pid: None, turn_failed: false },
             registration_identity: "original-stop-registration".into(),
         });
         let sibling = "attempt-native-unlent";
         active_attempt(&store, task, sibling);
-        controller.uncommitted_native_events.push(envelope(sibling, task, "sibling-reply", 1, AgentEventType::MessageDelta, json!({"text":"other goal"})));
+        controller.uncommitted_native_events.push_back(envelope(sibling, task, "sibling-reply", 1, AgentEventType::MessageDelta, json!({"text":"other goal"})));
         let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
         let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
         assert_eq!(controller.uncommitted_native_events[0].attempt_id, sibling);
@@ -8229,8 +8326,8 @@ mod native_event_retention_tests {
             "protocolVersion":CONNECTED_UI_PROTOCOL_VERSION,"requestId":"stop-while-save-fails",
             "entityVersion":1,"messageType":"cancel","payload":{"attemptId":attempt}
         })).unwrap();
-        testing_fail_next_appends(1);
-        assert!(worker.handle(request).unwrap_err().contains("injected persistence failure"));
+        testing_fail_next_appends(2);
+        assert_eq!(worker.handle(request).unwrap().receipt.unwrap()["persistence"], "pending");
         assert_eq!(kind_count(&store, attempt, "attempt.cancelled"), 0);
         assert_eq!(worker.uncommitted_native_events.len(), 1);
         assert_eq!(worker.uncommitted_closures.len(), 1);
@@ -8254,7 +8351,7 @@ mod native_event_retention_tests {
         store.insert_attempt(&Attempt::new(attempt, task, "claude", "claude-cap-v1")).unwrap();
         store.append_event_with_state(&Event { id: "activate-claude-loan".into(), attempt_id: attempt.into(), seq: 1,
             kind: "attempt.active".into(), payload_ref: None }, Some(AttemptState::Active), None).unwrap();
-        controller.uncommitted_native_events.push(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
+        controller.uncommitted_native_events.push_back(envelope(attempt, task, "older-reply", 1, AgentEventType::MessageDelta, json!({"text":"before Stop"})));
         let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
         let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
         let request: UiCommandRequest = serde_json::from_value(json!({
@@ -8280,14 +8377,229 @@ mod native_event_retention_tests {
     }
 
     #[test]
+    fn pending_terminal_gates_commands_but_keeps_recorded_send_replay() {
+        let _reset = ResetFaults;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), directory.path().to_string_lossy()).unwrap();
+        let attempt = "attempt-scenario-preview";
+        let campaign = "campaign-synthetic-preview";
+        let request = |id: &str, kind: &str| UiCommandRequest {
+            protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(), request_id: id.into(), entity_version: 0,
+            message_type: kind.into(), payload: json!({"attemptId":attempt,"campaignId":campaign,"message":"next prompt"}),
+        };
+        assert!(!controller.send_message(&request("saved-first", "send_message")).unwrap());
+        controller.uncommitted_native_events.push_back(envelope(attempt, "task-synthetic-preview", "retained-terminal", 20,
+            AgentEventType::TurnCompleted, json!({"status":"completed"})));
+        assert!(!controller.runtime_manager.turn_in_flight(attempt));
+        assert!(controller.send_message(&request("saved-first", "send_message")).unwrap());
+        assert!(controller.send_message(&request("blocked-direct", "send_message")).unwrap_err().contains("not been saved"));
+        assert!(controller.conversation_send(&request("blocked-conversation", "conversation_send")).unwrap_err().contains("not been saved"));
+        assert_eq!(kind_count(&store, attempt, "message.user"), 1);
+        assert!(store.get_command("ui-send-blocked-direct").is_err());
+        assert!(store.get_command("ui-send-blocked-conversation").is_err());
+        controller.flush_runtime_events().unwrap();
+        assert!(!controller.send_message(&request("recovered", "send_message")).unwrap());
+    }
+
+    #[test]
+    fn failed_turn_result_save_freezes_the_first_workspace_comparison() {
+        let _reset = ResetFaults;
+        let directory = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(directory.path()).status().unwrap().success());
+        fs::write(directory.path().join("observed.txt"), "at completion").unwrap();
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), directory.path().to_string_lossy()).unwrap();
+        let attempt = "attempt-frozen-result";
+        active_attempt(&store, "task-synthetic-preview", attempt);
+        controller.record_workspace_baseline(attempt, "frozen-turn").unwrap();
+        let event = envelope(attempt, "task-synthetic-preview", "terminal-frozen", 1, AgentEventType::TurnCompleted, json!({"status":"completed"}));
+        let native_id = native_journal_id(attempt, &event.process_epoch_id, &event.event_id, event.sequence);
+        controller.persist_identified_event(Some(&native_id), attempt, "runtime.turn.completed", event.payload.clone(), Some(AttemptState::AwaitingReview)).unwrap();
+        controller.uncommitted_native_events.push_back(event);
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert_eq!(controller.uncommitted_turn_results.len(), 1);
+        let frozen = controller.uncommitted_turn_results.values().next().unwrap().clone().unwrap();
+        fs::write(directory.path().join("observed.txt"), "external edit after failed save").unwrap();
+        let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
+        let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
+        assert_eq!(worker.uncommitted_turn_results.len(), 1);
+        assert!(controller.uncommitted_turn_results.is_empty());
+        worker.flush_runtime_events().unwrap();
+        controller.merge_native_worker(&plan, worker, baseline).unwrap();
+        let records = store.list_event_records(attempt, 0).unwrap();
+        let result = records.iter().find(|r|r.event.kind=="workspace.turn_result").unwrap().payload.as_ref().unwrap();
+        assert_eq!(result, &frozen, "recovery must not reread the external edit into the completed result");
+        assert!(result["during"].as_array().unwrap().iter().chain(result["unattributed"].as_array().unwrap()).all(|file|file["path"]!="observed.txt"));
+        assert!(controller.uncommitted_turn_results.is_empty());
+        assert_eq!(controller.flush_runtime_events().unwrap(), 0);
+        assert_eq!(kind_count(&store, attempt, "workspace.turn_result"), 1);
+    }
+
+    #[test]
+    fn dispatched_stop_is_retained_across_failed_save_and_runtime_loan() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-scenario-preview";
+        controller.uncommitted_native_events.push_back(envelope(attempt, "task-synthetic-preview", "before-stop", 20,
+            AgentEventType::MessageDelta, json!({"text":"older output"})));
+        let request = |id: &str| UiCommandRequest { protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(), request_id:id.into(),
+            entity_version:0,message_type:"cancel".into(),payload:json!({"attemptId":attempt}) };
+        testing_fail_next_appends(2);
+        let first = controller.handle(request("original-stop")).unwrap();
+        assert!(first.accepted);
+        assert_eq!(first.receipt.unwrap()["persistence"], "pending");
+        assert_eq!(controller.native_stop_outcomes[attempt].request_id, "original-stop");
+        let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
+        let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
+        assert!(controller.native_stop_outcomes.is_empty());
+        testing_fail_next_appends(2);
+        let retry = worker.handle(request("retry-new-id")).unwrap().receipt.unwrap();
+        assert_eq!(retry["duplicateDispatch"], true);
+        assert_eq!(retry["originalRequestId"], "original-stop");
+        assert_eq!(retry["persistence"], "pending");
+        controller.merge_native_worker(&plan, worker, baseline).unwrap();
+        controller.flush_runtime_events().unwrap();
+        let records = store.list_event_records(attempt,0).unwrap();
+        let reply = records.iter().find(|r|r.event.kind=="runtime.reply.delta").unwrap();
+        let stop = records.iter().find(|r|r.event.kind=="attempt.cancelled").unwrap();
+        assert!(reply.event.seq < stop.event.seq);
+        assert_eq!(stop.payload.as_ref().unwrap()["requestId"], "original-stop");
+        assert_eq!(kind_count(&store,attempt,"attempt.cancelled"),1);
+        assert_eq!(controller.flush_runtime_events().unwrap(),0);
+    }
+
+    #[test]
+    fn saved_stop_is_reused_after_completion() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), directory.path().to_string_lossy()).unwrap();
+        let attempt = "attempt-scenario-preview";
+        let request = UiCommandRequest { protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"saved-stop-retry".into(),
+            entity_version:0,message_type:"cancel".into(),payload:json!({"attemptId":attempt}) };
+        controller.handle(request.clone()).unwrap();
+        assert!(!controller.runtime_manager.turn_in_flight(attempt));
+        let records = store.list_event_records(attempt,0).unwrap().len();
+        let retry = controller.handle(request).unwrap().receipt.unwrap();
+        assert_eq!(retry["duplicateDispatch"],true);
+        assert_eq!(store.list_event_records(attempt,0).unwrap().len(),records);
+    }
+
+    #[test]
+    fn cancelled_native_successor_lends_source_recovery_and_refuses_before_reservation() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-cancelled-native-source";
+        store.insert_attempt(&Attempt::new(source,"task-synthetic-preview","codex","codex-app-server-v1")).unwrap();
+        store.append_event_with_state(&Event {id:"cancel-native-source".into(),attempt_id:source.into(),seq:1,
+            kind:"attempt.cancelled".into(),payload_ref:None},Some(AttemptState::Cancelled),None).unwrap();
+        let event = envelope(source,"task-synthetic-preview","source-terminal",1,AgentEventType::Cancelled,json!({}));
+        let key = (source.to_owned(),native_journal_id(source,&event.process_epoch_id,&event.event_id,event.sequence));
+        controller.uncommitted_native_events.push_back(event);
+        controller.uncommitted_turn_results.insert(key,Some(json!({"frozen":"source result"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"blocked-native-successor".into(),
+            entity_version:0,message_type:"conversation_send".into(),payload:json!({"attemptId":source,"campaignId":"campaign-synthetic-preview","message":"continue"})};
+        let plan = controller.native_worker_plan(&request).unwrap();
+        assert_eq!(plan.attempt_ids.len(),2);
+        assert_eq!(plan.attempt_ids[0],source);
+        assert!(plan.startup_target.is_none());
+        let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
+        assert!(controller.uncommitted_native_events.is_empty());
+        assert_eq!(worker.uncommitted_native_events.len(),1);
+        assert_eq!(worker.uncommitted_turn_results.len(),1);
+        assert!(worker.conversation_send(&request).unwrap_err().contains("not been saved"));
+        assert!(store.get_attempt(&plan.attempt_ids[1]).is_err());
+        assert!(store.get_command("ui-send-blocked-native-successor").is_err());
+        assert_eq!(kind_count(&store,source,"message.user"),0);
+        controller.merge_native_worker(&plan,worker,baseline).unwrap();
+        assert_eq!(controller.uncommitted_turn_results.len(),1);
+    }
+
+    #[test]
+    fn unsent_stop_is_retained_until_saved_then_allows_a_real_retry() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),"synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-scenario-preview";
+        controller.native_stop_outcomes.insert(attempt.into(),RetainedNativeStop {
+            request_id:"unsent-stop".into(),registration_identity:controller.runtime_manager.registration_identity(attempt).unwrap_or_default(),
+            result:CancelResult {requested:false,confirmed:false,reason:Some("cancel write failed".into())},journaled:false,
+        });
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert!(controller.native_stop_outcomes.contains_key(attempt));
+        assert_eq!(kind_count(&store,attempt,"attempt.interrupt.requested"),0);
+        controller.flush_runtime_events().unwrap();
+        assert!(!controller.native_stop_outcomes.contains_key(attempt));
+        assert_eq!(kind_count(&store,attempt,"attempt.interrupt.requested"),1);
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"retry-unsent-stop".into(),
+            entity_version:0,message_type:"cancel".into(),payload:json!({"attemptId":attempt})};
+        let receipt = controller.handle(request).unwrap().receipt.unwrap();
+        assert_eq!(receipt["duplicateDispatch"],false);
+        assert_eq!(receipt["requested"],true);
+        assert_eq!(kind_count(&store,attempt,"attempt.cancelled"),1);
+        assert!(controller.native_stop_outcomes.contains_key(attempt));
+    }
+
+    #[test]
+    fn post_merge_snapshot_reconciles_stop_receipt_after_two_failed_flushes() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store,"synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-scenario-preview";
+        controller.uncommitted_native_events.push_back(envelope(attempt,"task-synthetic-preview","old-before-merge",20,
+            AgentEventType::MessageDelta,json!({"text":"older output"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"merge-receipt".into(),
+            entity_version:0,message_type:"cancel".into(),payload:json!({"attemptId":attempt})};
+        let plan = NativeWorkerPlan {attempt_ids:vec![attempt.into()],startup_target:None};
+        let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
+        testing_fail_next_appends(2);
+        let mut result = worker.handle(request.clone()).unwrap();
+        assert_eq!(result.receipt.as_ref().unwrap()["persistence"],"pending");
+        controller.merge_native_worker(&plan,worker,baseline).unwrap();
+        result.snapshot = controller.response_snapshot(&request,None).unwrap();
+        controller.reconcile_stop_receipt(&request,&mut result.receipt);
+        assert!(!controller.has_pending_native_persistence(attempt));
+        assert_eq!(result.receipt.unwrap()["persistence"],"saved");
+    }
+
+    #[test]
+    fn large_retained_queue_drains_in_order_and_keeps_a_failed_head() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture").unwrap();
+        let attempt = "attempt-large-queue";
+        active_attempt(&store,"task-synthetic-preview",attempt);
+        const COUNT: usize = 4096;
+        controller.uncommitted_native_events.extend((0..COUNT).map(|index|envelope(attempt,"task-synthetic-preview",
+            &format!("delta-{index}"),index as i64,AgentEventType::MessageDelta,json!({"text":index.to_string()}))));
+        testing_fail_next_appends(1);
+        assert!(controller.flush_runtime_events().is_err());
+        assert_eq!(controller.uncommitted_native_events.len(),COUNT);
+        assert_eq!(controller.uncommitted_native_events.front().unwrap().event_id,"delta-0");
+        assert_eq!(controller.flush_runtime_events().unwrap(),COUNT);
+        assert!(controller.uncommitted_native_events.is_empty());
+        let records = store.list_event_records(attempt,0).unwrap().into_iter().filter(|r|r.event.kind=="runtime.reply.delta").collect::<Vec<_>>();
+        assert_eq!(records.len(),COUNT);
+        for (index,record) in records.iter().enumerate() {
+            assert_eq!(record.payload.as_ref().unwrap()["text"],index.to_string());
+            assert_eq!(record.event.seq,index as i64+2);
+        }
+        assert_eq!(controller.flush_runtime_events().unwrap(),0);
+    }
+
+    #[test]
     fn returning_worker_preserves_failed_native_persistence() {
         let _reset = ResetFaults;
         let store = Store::memory().unwrap();
         let mut controller = UiController::new_seeded_fixture(store.clone(),"synthetic://goalport-fixture").unwrap();
         let plan = NativeWorkerPlan { attempt_ids:vec!["attempt-scenario-preview".into()], startup_target:None };
         let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
-        worker.uncommitted_native_events.push(envelope("attempt-scenario-preview","task-synthetic-preview","reply-worker",2,AgentEventType::MessageDelta,json!({"text":"worker reply"})));
-        worker.uncommitted_closures.push(PendingTransportClosure {
+        worker.uncommitted_native_events.push_back(envelope("attempt-scenario-preview","task-synthetic-preview","reply-worker",2,AgentEventType::MessageDelta,json!({"text":"worker reply"})));
+        worker.uncommitted_closures.push_back(PendingTransportClosure {
             closure: TransportClosure { attempt_id:"attempt-scenario-preview".into(), reason:"stream-closed", pid:None, turn_failed:false },
             registration_identity:"original-worker-registration".into(),
         });
