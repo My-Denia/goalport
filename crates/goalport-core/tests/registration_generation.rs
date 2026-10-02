@@ -731,7 +731,9 @@ fn restart_after_kept_failure(case_name: &str, scenario: &str) -> (Case, Restart
     let server1 = CoreServer::new(store.clone());
     let case = case_project(&server1, case_name, scenario);
     write_loader(&case.workspace);
+    if case_name == "g1" { eprintln!("G1 phase=setup elapsed={:?}", began.elapsed()); }
     let (attempt, first) = kept_failure(&server1, &case);
+    if case_name == "g1" { eprintln!("G1 phase=first-admission elapsed={:?}", began.elapsed()); }
     let kept_before = kept_record(&server1, &attempt);
     drop(server1); // the "Core restart": the in-memory registration is gone
 
@@ -741,8 +743,10 @@ fn restart_after_kept_failure(case_name: &str, scenario: &str) -> (Case, Restart
         &case.workspace,
         &format!("{case_name}-restart"),
     );
+    if case_name == "g1" { eprintln!("G1 phase=restart-epoch elapsed={:?}", began.elapsed()); }
     let appdata = FakeAppData::install(&first.exec_path);
     appdata.assert_armed();
+    if case_name == "g1" { eprintln!("G1 phase=appdata-ready elapsed={:?}", began.elapsed()); }
     (
         case,
         Restarted {
@@ -774,6 +778,7 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         "resume_native_session",
         json!({ "attemptId": r.attempt }),
     );
+    eprintln!("G1 phase=resume-returned elapsed={:?}", r.began.elapsed());
     let second = new_instance(&case.workspace, &[r.first.clone()]);
     r.appdata.assert_synthetic(&second);
     assert_eq!(resumed["ok"], true, "{resumed}");
@@ -786,6 +791,8 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         "{after_resume:?}"
     );
 
+    eprintln!("G1 phase=resume-verified elapsed={:?}", r.began.elapsed());
+
     // Inside the APPDATA window (binding equality depends on it): the fresh, live, legitimately
     // resumed registration is selectable again.
     r.appdata.assert_armed();
@@ -795,6 +802,7 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         "a registration re-established through resume must not be refused by the old kept record: {selected}"
     );
     assert_eq!(selected_attempt(server, "g1-view"), r.attempt);
+    eprintln!("G1 phase=reuse-selected elapsed={:?}", r.began.elapsed());
 
     let established: Vec<Value> = records_of(&after_resume, ESTABLISHED_KIND)
         .into_iter()
@@ -821,6 +829,8 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
     );
     assert!(is_live(second.pid), "nothing may kill the resumed process");
 
+    eprintln!("G1 phase=reuse-verified elapsed={:?}", r.began.elapsed());
+
     // Boundary (3) at path level: the re-established registration bypasses no revocation. A
     // revoked provider authorization is refused before the reuse decision is ever reached.
     let revoked = call(
@@ -830,6 +840,7 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         json!({ "campaignId": case.campaign, "scope": "provider" }),
     );
     assert_eq!(revoked["ok"], true, "{revoked}");
+    eprintln!("G1 phase=authorization-revoked elapsed={:?}", r.began.elapsed());
     r.appdata.assert_armed();
     let denied = error_of(&select_codex(server, "g1-select-revoked", &case, None));
     assert!(
@@ -837,12 +848,15 @@ fn g1_restart_then_successful_resume_makes_the_fresh_registration_reusable() {
         "the authorization refusal must precede the reuse, not be bypassed by it: {denied}"
     );
     assert!(is_live(second.pid), "a refusal kills nothing");
+    eprintln!("G1 phase=revocation-verified elapsed={:?}", r.began.elapsed());
     assert!(
         r.began.elapsed() < WATCHDOG,
-        "the case must finish inside fixture 1's watchdog"
+        "the case must finish inside fixture 1's watchdog: elapsed={:?}, budget={WATCHDOG:?}",
+        r.began.elapsed(),
     );
 
     stop_fixtures(&case.workspace, &[r.first.pid, second.pid]);
+    eprintln!("G1 phase=fixtures-stopped elapsed={:?}", r.began.elapsed());
 }
 
 // ---------------------------------------------------------------------------------------------

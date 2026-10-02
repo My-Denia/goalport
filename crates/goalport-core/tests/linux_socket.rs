@@ -738,15 +738,21 @@ fn linux_child_identity_is_observable_and_exit_is_distinct_from_unknown() {
         .spawn()
         .expect("spawn local sleep fixture"));
     let pid = child.0.id();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let observation_started = Instant::now();
+    let deadline = observation_started + Duration::from_secs(2);
     let first = loop {
         let observed = observe_process(pid);
-        if let ProcessObservation::Live(identity) = observed {
-            if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
-                break identity;
-            }
+        match observed {
+            ProcessObservation::Live(identity)
+                if std::path::Path::new(&identity.executable_path).file_name()
+                    == Some(std::ffi::OsStr::new("sleep")) => break identity,
+            observed => assert!(
+                Instant::now() < deadline,
+                "spawned sleep did not finish exec: pid={pid}, elapsed={:?}, last_observation={observed:?}, proc_exe={:?}",
+                observation_started.elapsed(),
+                std::fs::read_link(format!("/proc/{pid}/exe")),
+            ),
         }
-        assert!(Instant::now() < deadline, "spawned sleep did not finish exec");
         std::thread::yield_now();
     };
     assert_eq!(first.parent_pid, std::process::id());
