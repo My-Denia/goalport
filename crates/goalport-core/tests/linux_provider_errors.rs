@@ -1113,3 +1113,91 @@ fn stop_cache_tracks_next_send_delivery_boundary() {
         fs::write(workspace.path().join("release-stop-peer"), "release").unwrap();
     }
 }
+
+
+#[test]
+fn terminal_workspace_is_frozen_before_any_append_retry() {
+    use goalport_core::{ipc::UiCommandRequest, projection::UiController};
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(output.status.success(), "fixture git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    fn command(id: &str, kind: &str, payload: Value) -> UiCommandRequest {
+        UiCommandRequest { protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(), request_id: id.into(),
+            entity_version: 0, message_type: kind.into(), payload }
+    }
+    fn count(store: &Store, attempt: &str, kind: &str) -> usize {
+        store.list_event_records(attempt, 0).unwrap().iter().filter(|record| record.event.kind == kind).count()
+    }
+    for stage in ["terminal", "result", "earlier", "unavailable", "missing-baseline", "disappeared"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        fs::write(root.join("tracked.txt"), "unchanged at completion\n").unwrap();
+        if stage != "missing-baseline" {
+            git(root, &["init", "--quiet"]);
+            git(root, &["add", "--", "tracked.txt"]);
+            git(root, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture baseline"]);
+        }
+        if stage == "disappeared" { fs::write(root.join("observed.txt"), "dirty baseline\n").unwrap(); }
+        let mut peer = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py")).unwrap();
+        let completion = "            send({\"method\": \"turn/completed\", \"params\": {\"threadId\": \"local-thread\", \"turn\": {\"id\": turn_id, \"status\": \"completed\"}}})";
+        assert!(peer.contains(completion));
+        let before = if stage == "unavailable" { "            (workspace / \".git\").rename(workspace / \".git-paused\")\n" }
+            else if stage == "disappeared" { "            (workspace / \"observed.txt\").unlink()\n" } else { "" };
+        peer = peer.replace(completion, &format!("{before}{completion}\n            (workspace / \"completion-written\").write_text(\"yes\")"));
+        fs::write(root.join("app-server"), peer).unwrap();
+        fs::write(root.join("peer-scenario"), "complete-first").unwrap();
+        let db = root.join("test.sqlite");
+        let store = Store::open(&db).unwrap();
+        let sql = rusqlite::Connection::open(&db).unwrap();
+        let _nonce = LaunchNonceGuard::set(format!("terminal-freeze-{stage}"));
+        let epoch = begin_startup_epoch(&store, stage, &db).unwrap();
+        complete_startup_epoch(&store, stage, &db, &epoch, &json!({"status":"completed"})).unwrap();
+        let mut ui = UiController::new(store.clone()).unwrap();
+        let created = ui.handle(command("create-freeze", "create_campaign", json!({"workspaceRoot":root,"goal":"Local result recovery","title":"Result recovery"}))).unwrap().snapshot;
+        let selected = ui.handle(command("select-freeze", "select_runtime", json!({"campaignId":created.active_campaign_id,"taskId":created.active_task.id,"provider":"codex","executable":"python3","version":"local-peer"}))).unwrap().snapshot;
+        let attempt = selected.attempt.id;
+        let kind = if stage == "result" { "workspace.turn_result" } else if stage == "earlier" { "runtime.reply.delta" } else { "runtime.turn.completed" };
+        sql.execute_batch(&format!("CREATE TRIGGER block_terminal_result BEFORE INSERT ON events WHEN NEW.kind='{kind}' BEGIN SELECT RAISE(ABORT,'selected append failure'); END;")).unwrap();
+        ui.handle(command("send-freeze", "send_message", json!({"attemptId":attempt,"campaignId":selected.active_campaign_id,"message":"one local turn"}))).unwrap();
+        await_file(&root.join("completion-written"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if ui.flush_runtime_events().is_err() { break; }
+            assert!(Instant::now() < deadline, "{stage}: selected append did not fail");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if stage == "earlier" {
+            // The terminal is behind the failed head. Keep the fault active
+            // while the reader consumes the peer's already-written completion.
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(ui.flush_runtime_events().is_err());
+        }
+        assert_eq!(count(&store, &attempt, "runtime.turn.completed"), usize::from(stage == "result"));
+        assert_eq!(count(&store, &attempt, "workspace.turn_result"), 0);
+        fs::write(root.join("tracked.txt"), "external edit during failed persistence\n").unwrap();
+        if stage == "unavailable" { fs::rename(root.join(".git-paused"), root.join(".git")).unwrap(); }
+        if stage == "missing-baseline" { git(root, &["init", "--quiet"]); }
+        if stage == "disappeared" { fs::write(root.join("observed.txt"), "external recreation\n").unwrap(); }
+        sql.execute_batch("DROP TRIGGER block_terminal_result;").unwrap();
+        ui.flush_runtime_events().unwrap();
+        let records = store.list_event_records(&attempt, 0).unwrap();
+        let result = records.iter().find(|record| record.event.kind == "workspace.turn_result").unwrap().payload.as_ref().unwrap();
+        let changed: Vec<&Value> = result["during"].as_array().unwrap().iter().chain(result["unattributed"].as_array().unwrap()).collect();
+        assert!(changed.iter().all(|file| file["path"] != "tracked.txt"), "{stage}: later edit entered completed result: {result}");
+        assert_eq!(result["baselineRecorded"], stage != "missing-baseline");
+        assert_eq!(result["comparisonUnavailable"], stage == "unavailable");
+        if stage == "disappeared" {
+            assert!(changed.iter().any(|file| file["path"] == "observed.txt" && file["change"] == "deleted"), "first-observed deletion must survive later recreation: {result}");
+        }
+        let terminal = records.iter().find(|record| record.event.kind == "runtime.turn.completed").unwrap();
+        assert_eq!(result["terminalSeq"], terminal.event.seq);
+        assert_eq!(count(&store, &attempt, "runtime.turn.completed"), 1);
+        assert_eq!(count(&store, &attempt, "workspace.turn_result"), 1);
+        assert_eq!(ui.flush_runtime_events().unwrap(), 0);
+        assert_eq!(ui.flush_runtime_events().unwrap(), 0);
+        assert_eq!(fs::read_to_string(root.join("turn-count")).unwrap(), "1");
+        println!("TERMINAL_FREEZE {stage} PASSED");
+    }
+}

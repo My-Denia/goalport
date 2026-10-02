@@ -331,6 +331,12 @@ struct RetainedNativeStop {
     journaled: bool,
 }
 
+#[derive(Debug, Clone)]
+struct FrozenTurnSettlement {
+    workspace: crate::turn_results::WorkspaceSnapshot,
+    payload: Option<Option<Value>>,
+}
+
 #[derive(Debug)]
 pub struct UiController {
     store: Store,
@@ -347,8 +353,8 @@ pub struct UiController {
     /// with their Decision. A failed write leaves them here for the next flush.
     uncommitted_native_events: VecDeque<AgentEventEnvelope>,
     uncommitted_closures: VecDeque<PendingTransportClosure>,
-    // A terminal comparison is frozen once it is computed, even if its write fails.
-    uncommitted_turn_results: BTreeMap<(String, String), Option<Value>>,
+    // First-observed workspace facts and computed payload survive every write retry.
+    uncommitted_turn_results: BTreeMap<(String, String), FrozenTurnSettlement>,
     // Remember dispatched Stop effects until saved and the native turn settles.
     native_stop_outcomes: BTreeMap<String, RetainedNativeStop>,
     native_persistence_error: Option<String>,
@@ -961,6 +967,16 @@ impl UiController {
         // Poll errors are transport/protocol failures, not evidence of a failed write.
         let polled = self.runtime_manager.poll_all_events().map_err(|error| error.to_string())?;
         self.uncommitted_native_events.extend(polled);
+        // Observe every queued terminal before an earlier event can fail to save.
+        for event in &self.uncommitted_native_events {
+            if matches!(event.event_type, AgentEventType::TurnCompleted | AgentEventType::TurnFailed | AgentEventType::Cancelled) {
+                let key = (event.attempt_id.clone(), native_journal_id(&event.attempt_id, &event.process_epoch_id, &event.event_id, event.sequence));
+                if !self.uncommitted_turn_results.contains_key(&key) {
+                    let frozen = self.sample_turn_settlement(&event.attempt_id);
+                    self.uncommitted_turn_results.insert(key, frozen);
+                }
+            }
+        }
         let outcome = self.flush_runtime_events_inner();
         self.native_persistence_error = outcome.as_ref().err().cloned();
         outcome
@@ -5856,7 +5872,15 @@ impl UiController {
         self.persist_agent_event_with_settlement(event, &mut None)
     }
 
-    fn persist_agent_event_with_settlement(&self, event: &AgentEventEnvelope, frozen: &mut Option<Option<Value>>) -> Result<(), String> {
+    fn sample_turn_settlement(&self, attempt_id: &str) -> FrozenTurnSettlement {
+        let workspace = match self.workspace_for_attempt(attempt_id) {
+            Ok(workspace) => crate::turn_results::sample_workspace(&self.store, attempt_id, Path::new(&workspace)),
+            Err(_) => crate::turn_results::WorkspaceSnapshot::unavailable(),
+        };
+        FrozenTurnSettlement { workspace, payload: None }
+    }
+
+    fn persist_agent_event_with_settlement(&self, event: &AgentEventEnvelope, frozen: &mut Option<FrozenTurnSettlement>) -> Result<(), String> {
         let kind = match event.event_type {
             AgentEventType::SessionCreated => "runtime.session.created",
             AgentEventType::TurnStarted => "runtime.turn.started",
@@ -5873,6 +5897,9 @@ impl UiController {
             }
             AgentEventType::Unknown => "runtime.event.unknown",
         };
+        if is_turn_terminal(kind) && frozen.is_none() {
+            *frozen = Some(self.sample_turn_settlement(&event.attempt_id));
+        }
         let state = match event.event_type {
             AgentEventType::TurnFailed
                 if matches!(
@@ -6053,12 +6080,12 @@ impl UiController {
             payload,
             state,
         )?;
-        if is_turn_terminal(kind) {
-            if frozen.is_none() {
-                let workspace = self.workspace_for_attempt(&event.attempt_id)?;
-                *frozen = Some(crate::turn_results::settlement_payload(&self.store, &event.attempt_id, Path::new(&workspace))?);
+        if let Some(frozen) = frozen.as_mut() {
+            if frozen.payload.is_none() {
+                frozen.payload = Some(crate::turn_results::settlement_payload_with_snapshot(
+                    &self.store, &event.attempt_id, Some(&stable_id), &frozen.workspace)?);
             }
-            if let Some(Some(result)) = frozen.as_ref() {
+            if let Some(Some(result)) = frozen.payload.as_ref() {
                 // Another settlement path may already have committed this terminal.
                 let already_saved = self.store.list_event_records(&event.attempt_id, 0).map_err(store_message)?
                     .iter().any(|record| record.event.kind == "workspace.turn_result"
@@ -8449,7 +8476,7 @@ mod native_event_retention_tests {
         testing_fail_next_appends(1);
         assert!(controller.flush_runtime_events().is_err());
         assert_eq!(controller.uncommitted_turn_results.len(), 1);
-        let frozen = controller.uncommitted_turn_results.values().next().unwrap().clone().unwrap();
+        let frozen = controller.uncommitted_turn_results.values().next().unwrap().payload.clone().unwrap().unwrap();
         fs::write(directory.path().join("observed.txt"), "external edit after failed save").unwrap();
         let plan = NativeWorkerPlan { attempt_ids: vec![attempt.into()], startup_target: None };
         let (mut worker, baseline) = controller.fork_native_worker(&plan).unwrap();
@@ -8528,7 +8555,7 @@ mod native_event_retention_tests {
         let event = envelope(source,"task-synthetic-preview","source-terminal",1,AgentEventType::Cancelled,json!({}));
         let key = (source.to_owned(),native_journal_id(source,&event.process_epoch_id,&event.event_id,event.sequence));
         controller.uncommitted_native_events.push_back(event);
-        controller.uncommitted_turn_results.insert(key,Some(json!({"frozen":"source result"})));
+        controller.uncommitted_turn_results.insert(key,FrozenTurnSettlement {workspace: crate::turn_results::WorkspaceSnapshot::unavailable(),payload: Some(Some(json!({"frozen":"source result"})))});
         let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"blocked-native-successor".into(),
             entity_version:0,message_type:"conversation_send".into(),payload:json!({"attemptId":source,"campaignId":"campaign-synthetic-preview","message":"continue"})};
         let plan = controller.native_worker_plan(&request).unwrap();
