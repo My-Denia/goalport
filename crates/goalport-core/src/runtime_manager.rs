@@ -1605,14 +1605,10 @@ struct CodexProcess {
     stdin: Option<Arc<Mutex<ChildStdin>>>,
     stdout: Option<BufReader<ChildStdout>>,
     event_rx: Option<Receiver<NativeMessage>>,
-    /// Published when the approval frame is first seen. A later frame updates
-    /// `live` only, so an answer cannot grant a different turn or item.
-    approval: Arc<Mutex<CodexApprovalSlot>>,
-    queued_permission_cancel: Option<ApprovalBinding>,
-    /// Permission request ids already handed to the projection. Stop may cancel
-    /// only these. Cancelling a binding whose frame is not queued yet would
-    /// leave the later insert Pending.
-    emitted_permission_ids: HashSet<String>,
+    /// One entry per provider callback. A new turn does not clear this map.
+    approval: Arc<Mutex<CodexApprovals>>,
+    /// Cancels for approvals already shown to the user. Drained by poll.
+    queued_permission_cancels: Vec<ApprovalBinding>,
     next_id: u64,
     thread_id: Option<String>,
     /// R3 turn facts, deliberately split so a locally generated request id can
@@ -1668,19 +1664,33 @@ struct PermissionCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApprovalBinding {
+    decision_id: String,
     rpc_id: String,
     rpc_json: Value,
     thread_id: String,
     turn_id: String,
     item_id: Option<String>,
+    /// The request event has been handed to the projection.
+    projected: bool,
+    /// Turn closed or the registration ended. Accept must not be written.
+    unanswerable: bool,
 }
 
 #[derive(Debug, Default)]
-struct CodexApprovalSlot {
-    published: Option<ApprovalBinding>,
-    live: Option<ApprovalBinding>,
-    /// Turns whose approvals must be closed. Later turns are not in this set.
-    closed_turn_ids: HashSet<String>,
+struct CodexApprovals {
+    /// Keyed by GoalPort decision id, never by the raw provider rpc id alone.
+    by_decision: HashMap<String, ApprovalBinding>,
+    closed_turns: HashSet<String>,
+    /// Set by the reader at EOF, before `Closed` is queued for poll.
+    registration_closed: bool,
+    registration: String,
+}
+
+fn codex_decision_id(registration: &str, turn_id: &str, rpc_id: &str) -> String {
+    format!(
+        "codex-decision-{}",
+        &sha256_hex(format!("{registration}\n{turn_id}\n{rpc_id}").as_bytes())[..32]
+    )
 }
 
 const PERMISSION_BINDING_ERROR: &str =
@@ -1708,12 +1718,60 @@ fn approval_binding_from_frame(value: &Value) -> Option<ApprovalBinding> {
             .filter(|text| !text.is_empty())
     };
     Some(ApprovalBinding {
+        decision_id: String::new(),
         rpc_id,
         rpc_json: id.clone(),
         thread_id: field("threadId").unwrap_or_default(),
         turn_id: field("turnId").unwrap_or_default(),
         item_id: field("itemId"),
+        projected: false,
+        unanswerable: false,
     })
+}
+
+fn codex_terminal_turn(value: &Value) -> Option<String> {
+    let method = value.get("method")?.as_str()?.to_ascii_lowercase();
+    if !(method.contains("turn/completed")
+        || method.contains("turn_completed")
+        || method.contains("turn/failed")
+        || method.contains("turn_failed"))
+    {
+        return None;
+    }
+    let params = value.get("params")?;
+    let turn = params
+        .get("turnId")
+        .or_else(|| params.get("turn").and_then(|turn| turn.get("id")))?;
+    let id = bounded_scalar(turn);
+    if id.is_empty() { None } else { Some(id) }
+}
+
+fn observe_codex_frame(state: &mut CodexApprovals, value: &Value) {
+    if let Some(turn) = codex_terminal_turn(value) {
+        state.closed_turns.insert(turn.clone());
+        for binding in state.by_decision.values_mut() {
+            if binding.turn_id == turn {
+                binding.unanswerable = true;
+            }
+        }
+    }
+    if let Some(mut binding) = approval_binding_from_frame(value) {
+        binding.decision_id =
+            codex_decision_id(&state.registration, &binding.turn_id, &binding.rpc_id);
+        binding.unanswerable = state.registration_closed
+            || state.closed_turns.contains(&binding.turn_id);
+        state
+            .by_decision
+            .entry(binding.decision_id.clone())
+            .or_insert(binding);
+    }
+}
+
+fn observe_codex_eof(state: &mut CodexApprovals) {
+    state.registration_closed = true;
+    for binding in state.by_decision.values_mut() {
+        binding.unanswerable = true;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1738,9 +1796,8 @@ impl CodexProcess {
             stdin: None,
             stdout: None,
             event_rx: None,
-            approval: Arc::new(Mutex::new(CodexApprovalSlot::default())),
-            queued_permission_cancel: None,
-            emitted_permission_ids: HashSet::new(),
+            approval: Arc::new(Mutex::new(CodexApprovals::default())),
+            queued_permission_cancels: Vec::new(),
             next_id: 1,
             thread_id: None,
             pending_start_request_id: None,
@@ -2170,43 +2227,13 @@ impl CodexProcess {
         })
     }
 
-    fn queue_permission_cancel(&mut self) {
-        if self.queued_permission_cancel.is_some() {
-            return;
-        }
-        let (rpc_id, turn_id) = {
-            let Ok(slot) = self.approval.lock() else {
-                return;
-            };
-            let Some(published) = slot.published.as_ref() else {
-                return;
-            };
-            (published.rpc_id.clone(), published.turn_id.clone())
-        };
-        if !self.turn_is_closed(&turn_id) || !self.emitted_permission_ids.contains(&rpc_id) {
-            return;
-        }
-        let taken = {
-            let Ok(mut slot) = self.approval.lock() else {
-                return;
-            };
-            if slot.published.as_ref().is_none_or(|binding| binding.rpc_id != rpc_id) {
-                return;
-            }
-            let published = slot.published.take().expect("checked");
-            slot.live = None;
-            published
-        };
-        self.queued_permission_cancel = Some(taken);
-    }
-
     fn turn_is_closed(&self, turn_id: &str) -> bool {
         !turn_id.is_empty()
             && self
                 .approval
                 .lock()
                 .ok()
-                .is_some_and(|slot| slot.closed_turn_ids.contains(turn_id))
+                .is_some_and(|slot| slot.closed_turns.contains(turn_id))
     }
 
     fn close_turn_id(&self, turn_id: &str) {
@@ -2214,7 +2241,127 @@ impl CodexProcess {
             return;
         }
         if let Ok(mut slot) = self.approval.lock() {
-            slot.closed_turn_ids.insert(turn_id.to_owned());
+            slot.closed_turns.insert(turn_id.to_owned());
+            for binding in slot.by_decision.values_mut() {
+                if binding.turn_id == turn_id {
+                    binding.unanswerable = true;
+                }
+            }
+        }
+    }
+
+    fn queue_projected_cancels(&mut self) {
+        let Ok(slot) = self.approval.lock() else {
+            return;
+        };
+        let extra: Vec<ApprovalBinding> = slot
+            .by_decision
+            .values()
+            .filter(|binding| binding.projected && binding.unanswerable)
+            .filter(|binding| {
+                !self
+                    .queued_permission_cancels
+                    .iter()
+                    .any(|queued| queued.decision_id == binding.decision_id)
+            })
+            .cloned()
+            .collect();
+        drop(slot);
+        self.queued_permission_cancels.extend(extra);
+    }
+
+    fn note_frame(&self, value: &Value) {
+        let Ok(mut slot) = self.approval.lock() else {
+            return;
+        };
+        if slot.registration.is_empty() {
+            slot.registration = self
+                .process_binding
+                .as_ref()
+                .map(|binding| binding.process_epoch.clone())
+                .filter(|id| !id.is_empty())
+                .or_else(|| self.attempt_id.clone())
+                .unwrap_or_else(|| "unbound".into());
+        }
+        observe_codex_frame(&mut slot, value);
+    }
+
+    /// Rewrites the provider callback into a GoalPort decision id. A closed
+    /// callback is projected and then cancelled in the same batch.
+    /// Returns true when the caller must not push `event` again.
+    fn stamp_permission(
+        &mut self,
+        attempt_id: &str,
+        event: &mut AgentEventEnvelope,
+        events: &mut Vec<AgentEventEnvelope>,
+    ) -> bool {
+        if event.event_type != AgentEventType::PermissionRequest {
+            return false;
+        }
+        let rpc_id = event
+            .payload
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let turn_id = event
+            .payload
+            .get("turnId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let found = self.approval.lock().ok().and_then(|slot| {
+            slot.by_decision
+                .values()
+                .find(|binding| binding.rpc_id == rpc_id && binding.turn_id == turn_id)
+                .cloned()
+        });
+        let Some(binding) = found else {
+            return false;
+        };
+        if let Some(object) = event.payload.as_object_mut() {
+            object.insert("providerRpcId".into(), json!(binding.rpc_id));
+            object.insert("request_id".into(), json!(binding.decision_id));
+        }
+        let decision_id = binding.decision_id.clone();
+        enum Stamp {
+            Project,
+            Cancel,
+            Duplicate,
+        }
+        let stamp = self.approval.lock().ok().and_then(|mut slot| {
+            let registration_closed = slot.registration_closed;
+            let (projected, unanswerable, turn_id) = {
+                let stored = slot.by_decision.get(&decision_id)?;
+                (
+                    stored.projected,
+                    stored.unanswerable,
+                    stored.turn_id.clone(),
+                )
+            };
+            let turn_closed = slot.closed_turns.contains(&turn_id);
+            if projected {
+                return Some(Stamp::Duplicate);
+            }
+            let stored = slot.by_decision.get_mut(&decision_id)?;
+            stored.projected = true;
+            let cancel = unanswerable || registration_closed || turn_closed;
+            if cancel {
+                stored.unanswerable = true;
+            }
+            Some(if cancel { Stamp::Cancel } else { Stamp::Project })
+        });
+        match stamp {
+            Some(Stamp::Cancel) => {
+                events.push(event.clone());
+                self.push_permission_cancel(attempt_id, &binding, events);
+                if let Ok(mut slot) = self.approval.lock() {
+                    slot.by_decision.remove(&decision_id);
+                }
+                true
+            }
+            Some(Stamp::Duplicate) => true,
+            Some(Stamp::Project) | None => false,
         }
     }
 
@@ -2241,7 +2388,7 @@ impl CodexProcess {
             provider_event_reference: Some(format!("codex-permission:{}", binding.rpc_id)),
             event_type: AgentEventType::PermissionResponse,
             payload: json!({
-                "request_id": binding.rpc_id,
+                "request_id": binding.decision_id,
                 "kind": "native-permission",
                 "allow": false,
                 "cancelled": true,
@@ -2255,10 +2402,13 @@ impl CodexProcess {
         attempt_id: &str,
         events: &mut Vec<AgentEventEnvelope>,
     ) {
-        let Some(binding) = self.queued_permission_cancel.take() else {
-            return;
-        };
-        self.push_permission_cancel(attempt_id, &binding, events);
+        let queued = std::mem::take(&mut self.queued_permission_cancels);
+        for binding in queued {
+            self.push_permission_cancel(attempt_id, &binding, events);
+            if let Ok(mut slot) = self.approval.lock() {
+                slot.by_decision.remove(&binding.decision_id);
+            }
+        }
     }
 
     fn poll_events(&mut self, attempt_id: &str) -> Result<Vec<AgentEventEnvelope>, AdapterError> {
@@ -2276,10 +2426,13 @@ impl CodexProcess {
                 // completion, never a respawn); the closure is latched so `TurnFailed` is emitted
                 // at most once. `take_transport_closures` reports the closure to the projection.
                 NativeMessage::Closed => {
+                    if let Ok(mut slot) = self.approval.lock() {
+                        observe_codex_eof(&mut slot);
+                    }
                     if let Some(turn_id) = self.native_turn_id.clone() {
                         self.close_turn_id(&turn_id);
                     }
-                    self.queue_permission_cancel();
+                    self.queue_projected_cancels();
                     self.push_queued_permission_cancel(attempt_id, &mut events);
                     if !self.stream_closed {
                         self.stream_closed = true;
@@ -2360,6 +2513,7 @@ impl CodexProcess {
                 // provider event: one rejected start produces one terminal fact.
                 continue;
             }
+            self.note_frame(&value);
             let method = value
                 .get("method")
                 .and_then(Value::as_str)
@@ -2393,49 +2547,19 @@ impl CodexProcess {
                 let mut event = event;
                 event.sequence = self.sequence;
                 event.event_id = format!("codex-event-{}", self.sequence);
-                if event.event_type == AgentEventType::PermissionRequest {
-                    if let Some(id) = event.payload.get("request_id").and_then(Value::as_str) {
-                        self.emitted_permission_ids.insert(id.to_owned());
-                        let turn = event
-                            .payload
-                            .get("turnId")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if self.turn_is_closed(turn) {
-                            let binding = ApprovalBinding {
-                                rpc_id: id.to_owned(),
-                                rpc_json: json!(id),
-                                thread_id: event
-                                    .payload
-                                    .get("threadId")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_owned(),
-                                turn_id: turn.to_owned(),
-                                item_id: event
-                                    .payload
-                                    .get("itemId")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_owned),
-                            };
-                            events.push(event);
-                            self.push_permission_cancel(attempt_id, &binding, &mut events);
-                            continue;
-                        }
-                    }
+                if self.stamp_permission(attempt_id, &mut event, &mut events) {
+                    continue;
                 }
                 events.push(event);
             }
             if terminal && terminal_matches {
-                // R3: a terminal for the bound turn clears BOTH facts. A stale or
-                // unsolicited response arriving afterwards finds no pending and
-                // no native turn and can never resurrect one. A permission that
-                // shows up after this frame is cancelled once its request event
-                // is emitted, and it is never approved.
+                // A matching terminal closes that turn before any later approval
+                // in this batch is projected. Already projected callbacks are
+                // cancelled here; nothing in this path writes accept.
                 if let Some(turn_id) = self.native_turn_id.clone() {
                     self.close_turn_id(&turn_id);
                 }
-                self.queue_permission_cancel();
+                self.queue_projected_cancels();
                 self.push_queued_permission_cancel(attempt_id, &mut events);
                 self.native_turn_id = None;
                 self.pending_start_request_id = None;
@@ -2450,18 +2574,7 @@ impl CodexProcess {
         attempt_id: &str,
         events: &mut Vec<AgentEventEnvelope>,
     ) {
-        let ready = self
-            .approval
-            .lock()
-            .ok()
-            .and_then(|slot| slot.published.clone())
-            .is_some_and(|binding| {
-                self.turn_is_closed(&binding.turn_id)
-                    && self.emitted_permission_ids.contains(&binding.rpc_id)
-            });
-        if ready {
-            self.queue_permission_cancel();
-        }
+        self.queue_projected_cancels();
         self.push_queued_permission_cancel(attempt_id, events);
     }
 
@@ -2560,6 +2673,17 @@ impl CodexProcess {
         // it. First observation wins (see `CodexTransport::mark`).
         let transport = Arc::clone(&self.transport);
         let approval = Arc::clone(&self.approval);
+        if let Ok(mut slot) = self.approval.lock() {
+            if slot.registration.is_empty() {
+                slot.registration = self
+                    .process_binding
+                    .as_ref()
+                    .map(|binding| binding.process_epoch.clone())
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| self.attempt_id.clone())
+                    .unwrap_or_else(|| "unbound".into());
+            }
+        }
         let spawned = std::thread::Builder::new()
             .name("goalport-codex-reader".into())
             .spawn(move || {
@@ -2568,6 +2692,9 @@ impl CodexProcess {
                     match stdout.read_line(&mut line) {
                         Ok(0) => {
                             transport.mark(TRANSPORT_EOF);
+                            if let Ok(mut slot) = approval.lock() {
+                                observe_codex_eof(&mut slot);
+                            }
                             let _ = event_tx.send(NativeMessage::Closed);
                             break;
                         }
@@ -2586,23 +2713,10 @@ impl CodexProcess {
                     let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
                         continue;
                     };
-                    // Record the approval and keep reading. The answer is written
-                    // on the Core thread; this loop must not wait for it.
-                    if let Some(binding) = approval_binding_from_frame(&value) {
-                        if let Ok(mut slot) = approval.lock() {
-                            let closed_turn = slot.closed_turn_ids.contains(&binding.turn_id);
-                            let published_turn = slot.published.as_ref().map(|item| item.turn_id.clone());
-                            let keep_open_turn = closed_turn
-                                && published_turn.as_deref().is_some_and(|turn| turn != binding.turn_id);
-                            if !keep_open_turn {
-                                if published_turn.as_deref() != Some(binding.turn_id.as_str()) {
-                                    slot.published = Some(binding.clone());
-                                } else if slot.published.is_none() {
-                                    slot.published = Some(binding.clone());
-                                }
-                                slot.live = Some(binding);
-                            }
-                        }
+                    // Record the approval and keep reading. Terminal and EOF
+                    // update this map before the line is queued for poll.
+                    if let Ok(mut slot) = approval.lock() {
+                        observe_codex_frame(&mut slot, &value);
                     }
                     if event_tx.send(NativeMessage::Json(value)).is_err() {
                         break;
@@ -2627,41 +2741,25 @@ impl CodexProcess {
             ));
         }
         let thread = self.thread_id.clone().unwrap_or_default();
-        let turn = self.native_turn_id.clone().unwrap_or_default();
         let approval = Arc::clone(&self.approval);
         let mut slot = approval.lock().map_err(|_| {
             AdapterError::Connection("Codex permission slot is poisoned".into())
         })?;
-        let published_turn = slot
-            .published
-            .as_ref()
-            .map(|binding| binding.turn_id.clone())
-            .unwrap_or_default();
-        if slot.closed_turn_ids.contains(&published_turn) {
+        let Some(binding) = slot.by_decision.get(request_id).cloned() else {
             return Err(AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into()));
-        }
-        let published = slot.published.as_ref().ok_or_else(|| {
-            AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into())
-        })?;
-        let live = slot.live.as_ref().ok_or_else(|| {
-            AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into())
-        })?;
-        if published != live
-            || published.rpc_id != request_id
-            || published.thread_id != thread
-            || published.turn_id != turn
+        };
+        if binding.unanswerable
+            || slot.registration_closed
+            || slot.closed_turns.contains(&binding.turn_id)
+            || (!binding.thread_id.is_empty() && binding.thread_id != thread)
         {
             return Err(AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into()));
         }
-        let binding = published.clone();
-        // Hold the slot across the write so a later approval frame cannot
-        // change `live` underneath an accept that was already checked.
         self.send_json(&json!({
             "id": binding.rpc_json,
             "result": { "decision": if response.allow { "accept" } else { "decline" } }
         }))?;
-        slot.published = None;
-        slot.live = None;
+        slot.by_decision.remove(request_id);
         Ok(())
     }
 
@@ -7301,8 +7399,7 @@ mod tests {
         assert_eq!(payload["itemId"], "item-1");
     }
 
-    #[test]
-    fn same_callback_rejects_turn_or_item_mismatch() {
+    fn codex_under_test(registration: &str) -> CodexProcess {
         let mut process = CodexProcess::new(
             PathBuf::from("codex"),
             "test".into(),
@@ -7310,119 +7407,225 @@ mod tests {
             "on-request".into(),
         );
         process.thread_id = Some("T".into());
-        let published = ApprovalBinding {
-            rpc_id: "rpc-A".into(),
-            rpc_json: json!("rpc-A"),
-            thread_id: "T".into(),
-            turn_id: "U".into(),
-            item_id: Some("I".into()),
-        };
-        let answer = crate::adapters::PermissionResponse {
-            request_id: "rpc-A".into(),
-            allow: true,
-        };
-        let expect_binding = |err: crate::adapters::AdapterError| {
-            let text = err.to_string();
-            assert!(text.contains("permission binding does not match"), "{text}");
-            assert!(!text.contains("stdin is closed"), "{text}");
-        };
-        let expect_stdin = |err: crate::adapters::AdapterError| {
-            let text = err.to_string();
-            assert!(text.contains("stdin is closed"), "{text}");
-            assert!(!text.contains("permission binding does not match"), "{text}");
-        };
-
-        process.native_turn_id = Some("V".into());
-        {
-            let mut slot = process.approval.lock().unwrap();
-            slot.published = Some(published.clone());
-            slot.live = Some(published.clone());
-        }
-        expect_binding(process.permission_response(answer.clone()).unwrap_err());
-
         process.native_turn_id = Some("U".into());
+        process.attempt_id = Some(registration.into());
+        process.campaign_id = Some("campaign".into());
+        process.task_id = Some("task".into());
+        process.process_binding = Some(RuntimeProcessBinding {
+            process_epoch: registration.into(),
+            pid: 7,
+            parent_pid: 0,
+            creation_date: "/Date(1788307200000)/".into(),
+            executable_path: "/usr/bin/codex".into(),
+            executable_sha256: "c".repeat(64),
+        });
         {
             let mut slot = process.approval.lock().unwrap();
-            let mut live = published.clone();
-            live.item_id = Some("J".into());
-            slot.published = Some(published.clone());
-            slot.live = Some(live);
+            slot.registration = registration.into();
         }
-        expect_binding(process.permission_response(answer.clone()).unwrap_err());
+        process
+    }
 
-        let no_item = ApprovalBinding { item_id: None, ..published.clone() };
-        {
-            let mut slot = process.approval.lock().unwrap();
-            slot.published = Some(no_item.clone());
-            slot.live = Some(no_item);
-        }
-        expect_stdin(process.permission_response(answer.clone()).unwrap_err());
+    fn approval_frame(id: &str, turn: &str) -> Value {
+        json!({
+            "id": id,
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "threadId": "T",
+                "turnId": turn,
+                "itemId": id,
+                "command": "echo fixture"
+            }
+        })
+    }
 
-        {
-            let mut slot = process.approval.lock().unwrap();
-            slot.published = Some(published.clone());
-            slot.live = Some(published);
-        }
-        expect_stdin(process.permission_response(answer).unwrap_err());
+    fn terminal_frame(turn: &str) -> Value {
+        json!({
+            "method": "turn/completed",
+            "params": {"threadId": "T", "turn": {"id": turn, "status": "completed"}}
+        })
+    }
+
+    fn decision_ids(process: &CodexProcess) -> Vec<String> {
+        let mut ids: Vec<String> = process
+            .approval
+            .lock()
+            .unwrap()
+            .by_decision
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn answer_error(process: &mut CodexProcess, decision_id: &str) -> String {
+        process
+            .permission_response(crate::adapters::PermissionResponse {
+                request_id: decision_id.into(),
+                allow: true,
+            })
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]
-    fn new_turn_clears_stop_so_the_next_approval_can_be_answered() {
-        let mut process = CodexProcess::new(
-            PathBuf::from("codex"),
-            "test".into(),
-            PathBuf::from("/tmp"),
-            "on-request".into(),
-        );
-        process.thread_id = Some("T".into());
-        process.native_turn_id = Some("U".into());
-        let old = ApprovalBinding {
-            rpc_id: "rpc-A".into(),
-            rpc_json: json!("rpc-A"),
-            thread_id: "T".into(),
-            turn_id: "U".into(),
-            item_id: Some("I".into()),
-        };
+    fn same_turn_two_approvals_are_independently_answerable() {
+        let mut process = codex_under_test("epoch-one");
+        process.note_frame(&approval_frame("rpc-A", "U"));
+        process.note_frame(&approval_frame("rpc-B", "U"));
+        let ids = decision_ids(&process);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.iter().all(|id| id.starts_with("codex-decision-")));
+        assert!(ids.iter().all(|id| id != "rpc-A" && id != "rpc-B"));
+        for id in &ids {
+            let err = answer_error(&mut process, id);
+            assert!(err.contains("stdin is closed"), "{err}");
+            assert!(!err.contains("permission binding"), "{err}");
+        }
+        assert_eq!(decision_ids(&process).len(), 2);
+    }
+
+    #[test]
+    fn stop_cancels_each_projected_approval_without_accept() {
+        let mut process = codex_under_test("epoch-one");
+        process.note_frame(&approval_frame("rpc-A", "U"));
+        process.note_frame(&approval_frame("rpc-B", "U"));
         {
             let mut slot = process.approval.lock().unwrap();
-            slot.closed_turn_ids.insert("U".into());
-            slot.published = Some(old.clone());
-            slot.live = Some(old.clone());
+            for binding in slot.by_decision.values_mut() {
+                binding.projected = true;
+            }
         }
-        let old_answer = process
-            .permission_response(crate::adapters::PermissionResponse {
-                request_id: "rpc-A".into(),
-                allow: true,
+        let ids = decision_ids(&process);
+        process.close_turn_id("U");
+        process.queue_projected_cancels();
+        let mut events = Vec::new();
+        process.push_queued_permission_cancel("attempt", &mut events);
+        assert_eq!(events.len(), 2, "{events:?}");
+        for event in &events {
+            assert_eq!(event.event_type, AgentEventType::PermissionResponse);
+            assert_eq!(event.payload["cancelled"], true);
+            assert_eq!(event.payload["allow"], false);
+            let request_id = event.payload["request_id"].as_str().unwrap();
+            assert!(ids.contains(&request_id.to_owned()), "{request_id}");
+        }
+        assert!(decision_ids(&process).is_empty());
+        for id in &ids {
+            let err = answer_error(&mut process, id);
+            assert!(err.contains("permission binding"), "{err}");
+            assert!(!err.contains("stdin is closed"), "{err}");
+        }
+    }
+
+    #[test]
+    fn approval_terminal_approval_in_one_batch_cannot_be_accepted() {
+        let mut process = codex_under_test("epoch-one");
+        let frames = [
+            approval_frame("rpc-A", "U"),
+            terminal_frame("U"),
+            approval_frame("rpc-B", "U"),
+        ];
+        for frame in &frames {
+            process.note_frame(frame);
+        }
+        let ids = decision_ids(&process);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        for id in &ids {
+            let err = answer_error(&mut process, id);
+            assert!(err.contains("permission binding"), "{err}");
+            assert!(!err.contains("stdin is closed"), "{err}");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        for frame in frames {
+            tx.send(NativeMessage::Json(frame)).unwrap();
+        }
+        process.event_rx = Some(rx);
+        let events = process.poll_events("attempt").unwrap();
+        let requests: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == AgentEventType::PermissionRequest)
+            .map(|event| event.payload["request_id"].as_str().unwrap().to_owned())
+            .collect();
+        let cancels: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["cancelled"] == true
             })
-            .unwrap_err()
-            .to_string();
+            .map(|event| event.payload["request_id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(requests.len(), 2, "{events:?}");
+        assert_eq!(cancels.len(), 2, "{events:?}");
+        assert_eq!(requests, cancels);
+        assert!(requests.iter().all(|id| id.starts_with("codex-decision-")));
+        assert!(events.iter().all(|event| event.payload["allow"] != true));
+    }
+
+    #[test]
+    fn approval_then_eof_is_unanswerable_before_poll() {
+        let mut process = codex_under_test("epoch-one");
+        let frame = approval_frame("rpc-A", "U");
+        process.note_frame(&frame);
+        {
+            let mut slot = process.approval.lock().unwrap();
+            observe_codex_eof(&mut slot);
+        }
+        let id = decision_ids(&process).into_iter().next().unwrap();
+        let err = answer_error(&mut process, &id);
+        assert!(err.contains("permission binding"), "{err}");
+        assert!(!err.contains("stdin is closed"), "{err}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(NativeMessage::Json(frame)).unwrap();
+        tx.send(NativeMessage::Closed).unwrap();
+        process.event_rx = Some(rx);
+        let events = process.poll_events("attempt").unwrap();
         assert!(
-            old_answer.contains("permission binding does not match"),
-            "{old_answer}"
+            events.iter().any(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["cancelled"] == true
+                    && event.payload["request_id"] == id
+            }),
+            "{events:?}"
         );
-        let next = ApprovalBinding {
-            rpc_id: "rpc-B".into(),
-            rpc_json: json!("rpc-B"),
-            thread_id: "T".into(),
-            turn_id: "U2".into(),
-            item_id: Some("I2".into()),
-        };
+        assert!(decision_ids(&process).is_empty());
+    }
+
+    #[test]
+    fn same_rpc_id_on_two_registrations_has_distinct_decision_ids() {
+        let mut first = codex_under_test("epoch-a");
+        let mut second = codex_under_test("epoch-b");
+        let frame = approval_frame("local-approval", "local-turn-1");
+        first.note_frame(&frame);
+        second.note_frame(&frame);
+        let id_a = decision_ids(&first).into_iter().next().unwrap();
+        let id_b = decision_ids(&second).into_iter().next().unwrap();
+        assert_ne!(id_a, id_b);
+        assert_ne!(id_a, "local-approval");
+        assert_ne!(id_b, "local-approval");
+        assert_eq!(
+            id_a,
+            codex_decision_id("epoch-a", "local-turn-1", "local-approval")
+        );
+    }
+
+    #[test]
+    fn next_turn_reusing_rpc_id_keeps_the_previous_callback() {
+        let mut process = codex_under_test("epoch-one");
+        process.note_frame(&approval_frame("rpc-A", "U"));
+        let first = decision_ids(&process).into_iter().next().unwrap();
         process.native_turn_id = Some("U2".into());
-        {
-            let mut slot = process.approval.lock().unwrap();
-            assert!(slot.closed_turn_ids.contains("U"));
-            slot.published = Some(next.clone());
-            slot.live = Some(next);
-        }
-        let err = process
-            .permission_response(crate::adapters::PermissionResponse {
-                request_id: "rpc-B".into(),
-                allow: true,
-            })
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("stdin is closed"), "{err}");
-        assert!(!err.contains("permission binding does not match"), "{err}");
+        process.note_frame(&approval_frame("rpc-A", "U2"));
+        let ids = decision_ids(&process);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids.contains(&first));
+        let second = ids.into_iter().find(|id| id != &first).unwrap();
+        assert_ne!(first, second);
+        let slot = process.approval.lock().unwrap();
+        assert_eq!(slot.by_decision[&first].turn_id, "U");
+        assert_eq!(slot.by_decision[&second].turn_id, "U2");
+        assert_eq!(slot.by_decision[&first].rpc_id, "rpc-A");
+        assert_eq!(slot.by_decision[&second].rpc_id, "rpc-A");
     }
 
     #[test]
