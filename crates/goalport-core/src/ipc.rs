@@ -602,6 +602,7 @@ impl CoreServer {
             // approval shows that goal and leaves the shared selection as it
             // was; anything else keeps the single-window snapshot.
             result.snapshot = ui.response_snapshot(request, None)?;
+            ui.reconcile_stop_receipt(request, &mut result.receipt);
             Ok(result)
         })?
     }
