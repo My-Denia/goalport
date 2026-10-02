@@ -109,6 +109,23 @@ for line in sys.stdin:
             sys.stdout.flush()
             os.close(1)
             raise SystemExit(0)
+        elif scenario == "permission-terminal-error":
+            pending_permission_turn = turn_id
+            send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "itemId": "rpc-A", "command": "echo fixture"}})
+            while not (workspace / "release-terminal-error").exists():
+                time.sleep(0.01)
+            send({"method": "error", "params": {"threadId": "local-thread", "turnId": turn_id, "willRetry": False, "error": {"message": "failed"}}})
+            time.sleep(0.05)
+            (workspace / "error-visible").write_text("ready")
+        elif scenario == "permission-reader-oversize":
+            pending_permission_turn = turn_id
+            send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "itemId": "rpc-A", "command": "echo fixture"}})
+            while not (workspace / "release-oversize").exists():
+                time.sleep(0.01)
+            sys.stdout.buffer.write(b"x" * (16 * 1024 * 1024 + 1) + b"\n")
+            sys.stdout.flush()
+            time.sleep(0.05)
+            (workspace / "oversize-visible").write_text("ready")
         elif scenario == "permission-identity":
             pending_permission_turn = turn_id
             send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "T", "turnId": turn_id, "itemId": "I", "requestId": "other", "command": "echo fixture"}})

@@ -1188,6 +1188,67 @@ fn next_turn_same_rpc_id_leaves_the_settled_decision() {
     assert_eq!(text, "rpc-A accept\n");
 }
 
+fn approval_answer_before_next_poll_is_refused(
+    scenario: &str,
+    release: &str,
+    visible: &str,
+) {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission(scenario);
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let decision_id = rows[0].id.clone();
+    fs::write(workspace.path().join(release), "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.path().join(visible).is_file() {
+        assert!(Instant::now() < deadline, "{visible} never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let response = request(
+        &server,
+        "answer-before-poll",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(response["ok"], false, "{response}");
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(&record).unwrap().contains("accept"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "settle-closed-approval");
+        let rows = decisions_for(&store, &attempt_id);
+        if rows.len() == 1 && rows[0].state != DecisionState::Pending {
+            assert_ne!(rows[0].state, DecisionState::Approved);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed approval stayed pending: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn approval_then_terminal_error_is_not_acceptable() {
+    approval_answer_before_next_poll_is_refused(
+        "permission-terminal-error",
+        "release-terminal-error",
+        "error-visible",
+    );
+}
+
+#[test]
+fn approval_then_oversized_stdout_is_not_acceptable() {
+    approval_answer_before_next_poll_is_refused(
+        "permission-reader-oversize",
+        "release-oversize",
+        "oversize-visible",
+    );
+}
+
 #[test]
 fn two_attempts_sharing_a_raw_rpc_id_do_not_collide() {
     let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

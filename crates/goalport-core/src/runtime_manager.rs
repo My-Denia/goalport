@@ -1729,21 +1729,33 @@ fn approval_binding_from_frame(value: &Value) -> Option<ApprovalBinding> {
     })
 }
 
-fn codex_terminal_turn(value: &Value) -> Option<String> {
-    let method = value.get("method")?.as_str()?.to_ascii_lowercase();
-    if !(method.contains("turn/completed")
-        || method.contains("turn_completed")
-        || method.contains("turn/failed")
-        || method.contains("turn_failed"))
-    {
-        return None;
-    }
+fn codex_frame_is_terminal(value: &Value) -> bool {
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("notification");
+    matches!(
+        classify_codex_method(method, value),
+        AgentEventType::TurnCompleted | AgentEventType::TurnFailed | AgentEventType::Cancelled
+    )
+}
+
+fn codex_frame_turn_id(value: &Value) -> Option<String> {
     let params = value.get("params")?;
     let turn = params
         .get("turnId")
         .or_else(|| params.get("turn").and_then(|turn| turn.get("id")))?;
     let id = bounded_scalar(turn);
     if id.is_empty() { None } else { Some(id) }
+}
+
+/// The reader and `poll_events` share `classify_codex_method`. A terminal
+/// frame closes only the turn it names; an error with `willRetry` stays open.
+fn codex_terminal_turn(value: &Value) -> Option<String> {
+    if !codex_frame_is_terminal(value) {
+        return None;
+    }
+    codex_frame_turn_id(value)
 }
 
 fn observe_codex_frame(state: &mut CodexApprovals, value: &Value) {
@@ -1772,6 +1784,19 @@ fn observe_codex_eof(state: &mut CodexApprovals) {
     for binding in state.by_decision.values_mut() {
         binding.unanswerable = true;
     }
+}
+
+fn end_codex_reader(
+    transport: &CodexTransport,
+    approval: &Mutex<CodexApprovals>,
+    reason: u8,
+    event_tx: &Sender<NativeMessage>,
+) {
+    transport.mark(reason);
+    if let Ok(mut slot) = approval.lock() {
+        observe_codex_eof(&mut slot);
+    }
+    let _ = event_tx.send(NativeMessage::Closed);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2227,15 +2252,6 @@ impl CodexProcess {
         })
     }
 
-    fn turn_is_closed(&self, turn_id: &str) -> bool {
-        !turn_id.is_empty()
-            && self
-                .approval
-                .lock()
-                .ok()
-                .is_some_and(|slot| slot.closed_turns.contains(turn_id))
-    }
-
     fn close_turn_id(&self, turn_id: &str) {
         if turn_id.is_empty() {
             return;
@@ -2518,26 +2534,16 @@ impl CodexProcess {
                 .get("method")
                 .and_then(Value::as_str)
                 .unwrap_or("notification");
-            let terminal = matches!(
-                classify_codex_method(method, &value),
-                AgentEventType::TurnCompleted
-                    | AgentEventType::TurnFailed
-                    | AgentEventType::Cancelled
-            );
+            let terminal = codex_frame_is_terminal(&value);
             // Never let an old/foreign terminal finish the current turn or
             // transition its durable Attempt. Preserve unmatched frames as raw evidence.
-            let params = value.get("params");
-            let terminal_turn = params
-                .and_then(|p| {
-                    p.get("turnId")
-                        .or_else(|| p.get("turn").and_then(|t| t.get("id")))
-                })
-                .and_then(Value::as_str);
-            let terminal_thread = params
-                .and_then(|p| p.get("threadId"))
+            let terminal_turn = codex_frame_turn_id(&value);
+            let terminal_thread = value
+                .get("params")
+                .and_then(|params| params.get("threadId"))
                 .and_then(Value::as_str);
             let terminal_matches = terminal_turn.is_some()
-                && terminal_turn == self.native_turn_id.as_deref()
+                && terminal_turn.as_deref() == self.native_turn_id.as_deref()
                 && terminal_thread == self.thread_id.as_deref();
             if let Some(mut event) = self.native_event(attempt_id, method, &value) {
                 if terminal && !terminal_matches {
@@ -2691,22 +2697,16 @@ impl CodexProcess {
                     let mut line = String::new();
                     match stdout.read_line(&mut line) {
                         Ok(0) => {
-                            transport.mark(TRANSPORT_EOF);
-                            if let Ok(mut slot) = approval.lock() {
-                                observe_codex_eof(&mut slot);
-                            }
-                            let _ = event_tx.send(NativeMessage::Closed);
+                            end_codex_reader(&transport, &approval, TRANSPORT_EOF, &event_tx);
                             break;
                         }
                         Ok(size) if size > MAX_NATIVE_LINE_BYTES => {
-                            transport.mark(TRANSPORT_OVERSIZED);
-                            let _ = event_tx.send(NativeMessage::Closed);
+                            end_codex_reader(&transport, &approval, TRANSPORT_OVERSIZED, &event_tx);
                             break;
                         }
                         Ok(_) => {}
                         Err(_) => {
-                            transport.mark(TRANSPORT_READ_ERROR);
-                            let _ = event_tx.send(NativeMessage::Closed);
+                            end_codex_reader(&transport, &approval, TRANSPORT_READ_ERROR, &event_tx);
                             break;
                         }
                     }
@@ -2719,12 +2719,18 @@ impl CodexProcess {
                         observe_codex_frame(&mut slot, &value);
                     }
                     if event_tx.send(NativeMessage::Json(value)).is_err() {
+                        if let Ok(mut slot) = approval.lock() {
+                            observe_codex_eof(&mut slot);
+                        }
                         break;
                     }
                 }
             });
         if let Err(error) = spawned {
             self.transport.mark(TRANSPORT_READ_ERROR);
+            if let Ok(mut slot) = self.approval.lock() {
+                observe_codex_eof(&mut slot);
+            }
             return Err(AdapterError::Connection(format!(
                 "unable to start Codex reader: {error}"
             )));
@@ -2752,6 +2758,7 @@ impl CodexProcess {
             || slot.registration_closed
             || slot.closed_turns.contains(&binding.turn_id)
             || (!binding.thread_id.is_empty() && binding.thread_id != thread)
+            || self.transport.ended()
         {
             return Err(AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into()));
         }
@@ -7626,6 +7633,237 @@ mod tests {
         assert_eq!(slot.by_decision[&second].turn_id, "U2");
         assert_eq!(slot.by_decision[&first].rpc_id, "rpc-A");
         assert_eq!(slot.by_decision[&second].rpc_id, "rpc-A");
+    }
+
+    struct KillChild(Option<Child>);
+
+    impl Drop for KillChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn attach_python_reader(process: &mut CodexProcess, dir: &Path, script: &str) -> KillChild {
+        fs::write(dir.join("peer.py"), script).unwrap();
+        let mut child = Command::new("python3")
+            .arg(dir.join("peer.py"))
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("python3");
+        process.stdout = Some(BufReader::new(child.stdout.take().unwrap()));
+        process.stdin = Some(Arc::new(Mutex::new(child.stdin.take().unwrap())));
+        process.start_reader().unwrap();
+        KillChild(Some(child))
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out waiting for the reader");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn approval_then_terminal_error_cannot_be_accepted_before_poll() {
+        let mut shape = codex_under_test("epoch-error-shape");
+        shape.note_frame(&approval_frame("rpc-A", "U"));
+        shape.note_frame(&json!({
+            "method": "error",
+            "params": {"threadId": "T", "willRetry": false, "error": {"message": "no turn"}}
+        }));
+        shape.note_frame(&json!({
+            "method": "error",
+            "params": {"threadId": "T", "turnId": "U", "willRetry": true, "error": {"message": "retry"}}
+        }));
+        {
+            let slot = shape.approval.lock().unwrap();
+            let binding = slot.by_decision.values().next().unwrap();
+            assert!(!binding.unanswerable, "retry or an unbound error must leave the turn open");
+        }
+        shape.note_frame(&json!({
+            "method": "error",
+            "params": {"threadId": "T", "turnId": "U", "willRetry": false, "error": {"message": "failed"}}
+        }));
+        {
+            let slot = shape.approval.lock().unwrap();
+            assert!(slot.by_decision.values().next().unwrap().unanswerable);
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-codex-error-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut process = codex_under_test("epoch-error");
+        let _child = attach_python_reader(
+            &mut process,
+            &dir,
+            r#"
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).resolve().parent
+def send(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+send({"id":"rpc-A","method":"item/commandExecution/requestApproval","params":{"threadId":"T","turnId":"U","itemId":"I","command":"echo"}})
+while not (root / "release-retry").exists():
+    time.sleep(0.01)
+send({"method":"error","params":{"threadId":"T","turnId":"U","willRetry":True,"error":{"message":"retry"}}})
+time.sleep(0.05)
+(root / "retry-visible").write_text("ready")
+while not (root / "release-fatal").exists():
+    time.sleep(0.01)
+send({"method":"error","params":{"threadId":"T","turnId":"U","willRetry":False,"error":{"message":"failed"}}})
+time.sleep(30)
+"#,
+        );
+        wait_until(|| {
+            process
+                .approval
+                .lock()
+                .unwrap()
+                .by_decision
+                .values()
+                .any(|binding| binding.rpc_id == "rpc-A" && !binding.unanswerable)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = process.poll_events("attempt").unwrap();
+            if events
+                .iter()
+                .any(|event| event.event_type == AgentEventType::PermissionRequest)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "approval was not projected");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(dir.join("release-retry"), "go").unwrap();
+        wait_until(|| dir.join("retry-visible").is_file());
+        let id = {
+            let slot = process.approval.lock().unwrap();
+            let binding = slot
+                .by_decision
+                .values()
+                .find(|binding| binding.rpc_id == "rpc-A")
+                .unwrap();
+            assert!(binding.projected);
+            assert!(!binding.unanswerable);
+            binding.decision_id.clone()
+        };
+        fs::write(dir.join("release-fatal"), "go").unwrap();
+        wait_until(|| {
+            process
+                .approval
+                .lock()
+                .unwrap()
+                .by_decision
+                .get(&id)
+                .is_some_and(|binding| binding.unanswerable)
+        });
+        let err = answer_error(&mut process, &id);
+        assert!(err.contains("permission binding"), "{err}");
+        assert!(!err.contains("stdin is closed"), "{err}");
+        let events = process.poll_events("attempt").unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["cancelled"] == true
+                    && event.payload["request_id"] == id
+                    && event.payload["allow"] == false
+            }),
+            "{events:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn approval_then_reader_exit_cannot_be_accepted_before_poll() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-codex-oversize-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut process = codex_under_test("epoch-oversize");
+        let script = format!(
+            r#"
+import json, pathlib, sys, time
+root = pathlib.Path(__file__).resolve().parent
+def send(value):
+    sys.stdout.write(json.dumps(value) + "\n")
+    sys.stdout.flush()
+send({{"id":"rpc-A","method":"item/commandExecution/requestApproval","params":{{"threadId":"T","turnId":"U","itemId":"I","command":"echo"}}}})
+while not (root / "release-oversize").exists():
+    time.sleep(0.01)
+sys.stdout.buffer.write(b"x" * ({max} + 1) + b"\n")
+sys.stdout.flush()
+time.sleep(30)
+"#,
+            max = MAX_NATIVE_LINE_BYTES
+        );
+        let _child = attach_python_reader(&mut process, &dir, &script);
+        wait_until(|| {
+            process
+                .approval
+                .lock()
+                .unwrap()
+                .by_decision
+                .values()
+                .any(|binding| binding.rpc_id == "rpc-A")
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = process.poll_events("attempt").unwrap();
+            if events
+                .iter()
+                .any(|event| event.event_type == AgentEventType::PermissionRequest)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "approval was not projected");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let id = decision_ids(&process).into_iter().next().unwrap();
+        fs::write(dir.join("release-oversize"), "go").unwrap();
+        wait_until(|| {
+            process
+                .approval
+                .lock()
+                .unwrap()
+                .registration_closed
+        });
+        let err = answer_error(&mut process, &id);
+        assert!(err.contains("permission binding"), "{err}");
+        assert!(!err.contains("stdin is closed"), "{err}");
+        let events = process.poll_events("attempt").unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["cancelled"] == true
+                    && event.payload["request_id"] == id
+            }),
+            "{events:?}"
+        );
+
+        let mut unread = codex_under_test("epoch-read-error");
+        unread.note_frame(&approval_frame("rpc-A", "U"));
+        let unread_id = decision_ids(&unread).into_iter().next().unwrap();
+        unread.transport.mark(TRANSPORT_READ_ERROR);
+        let err = answer_error(&mut unread, &unread_id);
+        assert!(err.contains("permission binding"), "{err}");
+        assert!(!err.contains("stdin is closed"), "{err}");
+        assert!(!unread.approval.lock().unwrap().registration_closed);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
