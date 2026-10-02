@@ -1679,9 +1679,9 @@ struct ApprovalBinding {
 struct CodexApprovalSlot {
     published: Option<ApprovalBinding>,
     live: Option<ApprovalBinding>,
-    /// Set by Stop. A later approval frame is cancelled on the next poll and
-    /// cannot be answered with accept.
-    stop_requested: bool,
+    /// The turn whose approvals must be closed. A later turn uses a different
+    /// turn id, so its approval is not cancelled with this one.
+    stopped_turn_id: Option<String>,
 }
 
 const PERMISSION_BINDING_ERROR: &str =
@@ -2160,8 +2160,6 @@ impl CodexProcess {
             )));
         }
         self.pending_start_request_id = Some(id);
-        // A Stop or a finished turn must not cancel the approval of this new turn.
-        self.release_stop_for_new_turn();
         // The reader thread now owns the provider stdout. Returning after the
         // request is flushed keeps the UI responsive and lets Core snapshots
         // persist pre-terminal events while the native turn is still active.
@@ -2177,16 +2175,22 @@ impl CodexProcess {
         if self.queued_permission_cancel.is_some() {
             return;
         }
-        let rpc_id = {
+        let (rpc_id, turn_id, stopped) = {
             let Ok(slot) = self.approval.lock() else {
                 return;
             };
             let Some(published) = slot.published.as_ref() else {
                 return;
             };
-            published.rpc_id.clone()
+            (
+                published.rpc_id.clone(),
+                published.turn_id.clone(),
+                slot.stopped_turn_id.clone(),
+            )
         };
-        if !self.emitted_permission_ids.contains(&rpc_id) {
+        if stopped.as_deref() != Some(turn_id.as_str())
+            || !self.emitted_permission_ids.contains(&rpc_id)
+        {
             return;
         }
         let taken = {
@@ -2201,19 +2205,6 @@ impl CodexProcess {
             published
         };
         self.queued_permission_cancel = Some(taken);
-    }
-
-    fn release_stop_for_new_turn(&mut self) {
-        if let Ok(mut slot) = self.approval.lock() {
-            slot.stop_requested = true;
-        }
-        self.queue_permission_cancel();
-        if let Ok(mut slot) = self.approval.lock() {
-            slot.stop_requested = false;
-            slot.published = None;
-            slot.live = None;
-        }
-        self.emitted_permission_ids.clear();
     }
 
     fn push_queued_permission_cancel(
@@ -2265,6 +2256,11 @@ impl CodexProcess {
                 // completion, never a respawn); the closure is latched so `TurnFailed` is emitted
                 // at most once. `take_transport_closures` reports the closure to the projection.
                 NativeMessage::Closed => {
+                    if let Ok(mut slot) = self.approval.lock() {
+                        if slot.stopped_turn_id.is_none() {
+                            slot.stopped_turn_id = self.native_turn_id.clone();
+                        }
+                    }
                     self.queue_permission_cancel();
                     self.push_queued_permission_cancel(attempt_id, &mut events);
                     if !self.stream_closed {
@@ -2382,6 +2378,36 @@ impl CodexProcess {
                 if event.event_type == AgentEventType::PermissionRequest {
                     if let Some(id) = event.payload.get("request_id").and_then(Value::as_str) {
                         self.emitted_permission_ids.insert(id.to_owned());
+                        let turn = event
+                            .payload
+                            .get("turnId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let stopped = self
+                            .approval
+                            .lock()
+                            .ok()
+                            .and_then(|slot| slot.stopped_turn_id.clone());
+                        if stopped.as_deref() == Some(turn)
+                            && self.queued_permission_cancel.is_none()
+                        {
+                            self.queued_permission_cancel = Some(ApprovalBinding {
+                                rpc_id: id.to_owned(),
+                                rpc_json: json!(id),
+                                thread_id: event
+                                    .payload
+                                    .get("threadId")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                turn_id: turn.to_owned(),
+                                item_id: event
+                                    .payload
+                                    .get("itemId")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                            });
+                        }
                     }
                 }
                 events.push(event);
@@ -2393,7 +2419,7 @@ impl CodexProcess {
                 // shows up after this frame is cancelled once its request event
                 // is emitted, and it is never approved.
                 if let Ok(mut slot) = self.approval.lock() {
-                    slot.stop_requested = true;
+                    slot.stopped_turn_id = self.native_turn_id.clone();
                 }
                 self.queue_permission_cancel();
                 self.push_queued_permission_cancel(attempt_id, &mut events);
@@ -2410,18 +2436,21 @@ impl CodexProcess {
         attempt_id: &str,
         events: &mut Vec<AgentEventEnvelope>,
     ) {
-        let stop_requested = self
+        let stopped_turn = self
             .approval
             .lock()
             .ok()
-            .is_some_and(|slot| slot.stop_requested);
-        if stop_requested {
+            .and_then(|slot| slot.stopped_turn_id.clone());
+        if let Some(stopped_turn) = stopped_turn {
             let ready = self
                 .approval
                 .lock()
                 .ok()
-                .and_then(|slot| slot.published.as_ref().map(|binding| binding.rpc_id.clone()))
-                .is_some_and(|id| self.emitted_permission_ids.contains(&id));
+                .and_then(|slot| slot.published.clone())
+                .is_some_and(|binding| {
+                    binding.turn_id == stopped_turn
+                        && self.emitted_permission_ids.contains(&binding.rpc_id)
+                });
             if ready {
                 self.queue_permission_cancel();
             }
@@ -2554,10 +2583,18 @@ impl CodexProcess {
                     // on the Core thread; this loop must not wait for it.
                     if let Some(binding) = approval_binding_from_frame(&value) {
                         if let Ok(mut slot) = approval.lock() {
-                            if slot.published.is_none() {
-                                slot.published = Some(binding.clone());
+                            let closed_turn = slot.stopped_turn_id.as_deref() == Some(binding.turn_id.as_str());
+                            let published_turn = slot.published.as_ref().map(|item| item.turn_id.clone());
+                            let keep_open_turn = closed_turn
+                                && published_turn.as_deref().is_some_and(|turn| turn != binding.turn_id);
+                            if !keep_open_turn {
+                                if published_turn.as_deref() != Some(binding.turn_id.as_str()) {
+                                    slot.published = Some(binding.clone());
+                                } else if slot.published.is_none() {
+                                    slot.published = Some(binding.clone());
+                                }
+                                slot.live = Some(binding);
                             }
-                            slot.live = Some(binding);
                         }
                     }
                     if event_tx.send(NativeMessage::Json(value)).is_err() {
@@ -2588,7 +2625,12 @@ impl CodexProcess {
         let mut slot = approval.lock().map_err(|_| {
             AdapterError::Connection("Codex permission slot is poisoned".into())
         })?;
-        if slot.stop_requested {
+        let published_turn = slot
+            .published
+            .as_ref()
+            .map(|binding| binding.turn_id.clone())
+            .unwrap_or_default();
+        if slot.stopped_turn_id.as_deref() == Some(published_turn.as_str()) {
             return Err(AdapterError::InvalidRequest(PERMISSION_BINDING_ERROR.into()));
         }
         let published = slot.published.as_ref().ok_or_else(|| {
@@ -2643,7 +2685,7 @@ impl CodexProcess {
         }))?;
         // Later polls cancel the approval only after its request event exists.
         if let Ok(mut slot) = self.approval.lock() {
-            slot.stop_requested = true;
+            slot.stopped_turn_id = Some(turn_id);
         }
         // A background reader will receive the JSON-RPC acknowledgement. The
         // Core records the request immediately; no provider effect is claimed
@@ -7338,13 +7380,21 @@ mod tests {
         };
         {
             let mut slot = process.approval.lock().unwrap();
-            slot.stop_requested = true;
+            slot.stopped_turn_id = Some("U".into());
             slot.published = Some(old.clone());
-            slot.live = Some(old);
+            slot.live = Some(old.clone());
         }
-        process.emitted_permission_ids.insert("rpc-A".into());
-        process.release_stop_for_new_turn();
-        assert!(process.queued_permission_cancel.is_some());
+        let old_answer = process
+            .permission_response(crate::adapters::PermissionResponse {
+                request_id: "rpc-A".into(),
+                allow: true,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            old_answer.contains("permission binding does not match"),
+            "{old_answer}"
+        );
         let next = ApprovalBinding {
             rpc_id: "rpc-B".into(),
             rpc_json: json!("rpc-B"),
@@ -7355,7 +7405,7 @@ mod tests {
         process.native_turn_id = Some("U2".into());
         {
             let mut slot = process.approval.lock().unwrap();
-            assert!(!slot.stop_requested);
+            assert_eq!(slot.stopped_turn_id.as_deref(), Some("U"));
             slot.published = Some(next.clone());
             slot.live = Some(next);
         }
