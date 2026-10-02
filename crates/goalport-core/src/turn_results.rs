@@ -83,7 +83,7 @@ pub struct CommandFact {
     pub output: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Fingerprint {
     path: String,
     from_path: Option<String>,
@@ -138,13 +138,51 @@ pub fn project_turn_result_window(store: &Store, attempt_id: &str) -> Result<(Ve
     Ok((results, omitted))
 }
 
+/// Filesystem facts captured at the first observation of a native terminal.
+/// An unavailable sample stays unavailable on persistence retries.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSnapshot {
+    end: Option<StatusRead>,
+    disappeared: BTreeMap<String, Fingerprint>,
+}
+
+impl WorkspaceSnapshot {
+    pub(crate) fn unavailable() -> Self {
+        Self { end: None, disappeared: BTreeMap::new() }
+    }
+}
+
+pub(crate) fn sample_workspace(store: &Store, attempt_id: &str, workspace: &Path) -> WorkspaceSnapshot {
+    let Ok(records) = store.list_event_records(attempt_id, 0) else {
+        return WorkspaceSnapshot::unavailable();
+    };
+    sample_workspace_at_baseline(&records, None, workspace)
+}
+
+fn sample_workspace_at_baseline(records: &[EventRecord], before_seq: Option<i64>, workspace: &Path) -> WorkspaceSnapshot {
+    let Some(end) = read_fingerprints(workspace) else {
+        return WorkspaceSnapshot::unavailable();
+    };
+    let baseline = records.iter().rev().find(|record| record.event.kind == "workspace.baseline"
+        && before_seq.is_none_or(|seq| record.event.seq < seq));
+    let disappeared = fingerprints_from_payload(baseline.and_then(|record| record.payload.as_ref()))
+        .into_iter().filter(|entry| !end.truncated && !path_still_present(&end.entries, &entry.path))
+        .map(|entry| (entry.path.clone(), disappeared(workspace, &entry))).collect();
+    WorkspaceSnapshot { end: Some(end), disappeared }
+}
+
 /// Freeze the file comparison for a terminal turn that does not yet have one.
 /// Returns a payload to persist, or nothing when there is no new terminal turn.
 pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> Result<Option<Value>, String> {
-    let records = store
-        .list_event_records(attempt_id, 0)
-        .map_err(|error| error.to_string())?;
-    let Some(terminal) = records.iter().find(|record| {
+    let records = store.list_event_records(attempt_id, 0).map_err(|error| error.to_string())?;
+    let Some(terminal) = unsettled_terminal(&records, None) else { return Ok(None); };
+    let snapshot = sample_workspace_at_baseline(&records, Some(terminal.event.seq), workspace);
+    settlement_payload_with_snapshot(store, attempt_id, Some(&terminal.event.id), &snapshot)
+}
+
+fn unsettled_terminal<'a>(records: &'a [EventRecord], terminal_id: Option<&str>) -> Option<&'a EventRecord> {
+    records.iter().find(|record| {
+        terminal_id.is_none_or(|id| record.event.id == id) &&
         is_terminal(&record.event.kind)
             && !records.iter().any(|other| {
                 other.event.kind == "workspace.turn_result"
@@ -155,7 +193,16 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
                         .and_then(Value::as_i64)
                         == Some(record.event.seq)
             })
-    }) else {
+    })
+}
+
+pub(crate) fn settlement_payload_with_snapshot(
+    store: &Store, attempt_id: &str, terminal_id: Option<&str>, snapshot: &WorkspaceSnapshot,
+) -> Result<Option<Value>, String> {
+    let records = store
+        .list_event_records(attempt_id, 0)
+        .map_err(|error| error.to_string())?;
+    let Some(terminal) = unsettled_terminal(&records, terminal_id) else {
         return Ok(None);
     };
     if records.iter().any(|record| {
@@ -190,7 +237,7 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
             .and_then(|payload| payload.get("entriesTruncated"))
             .and_then(Value::as_bool)
             == Some(true);
-        match read_fingerprints(workspace) {
+        match snapshot.end.as_ref() {
             None => {
                 let before = start.iter().take(MAX_FILES).map(|entry| file_json(entry, "before")).collect();
                 (before, Vec::new(), Vec::new(), start_truncated, true)
@@ -200,7 +247,7 @@ pub fn settlement_payload(store: &Store, attempt_id: &str, workspace: &Path) -> 
                 // A truncated end window cannot prove that a baseline path
                 // disappeared. Absence from the first 80 rows is not a delete.
                 let (before, during, unattributed, dropped) = classify(
-                    workspace,
+                    &snapshot.disappeared,
                     &start,
                     &end.entries,
                     &attributed,
@@ -476,7 +523,7 @@ fn attributed_paths(records: &[EventRecord], start_seq: i64, end_seq: i64) -> BT
 }
 
 fn classify(
-    workspace: &Path,
+    disappeared: &BTreeMap<String, Fingerprint>,
     start: &[Fingerprint],
     end: &[Fingerprint],
     attributed: &BTreeMap<String, ()>,
@@ -517,7 +564,9 @@ fn classify(
         // dirty tracked file was restored to HEAD. Either way the user's
         // bytes changed and must show up as a turn change, not only as
         // "already in the workspace".
-        if !push_change(&mut during, &mut unattributed, attributed, &disappeared(workspace, entry)) {
+        if let Some(change) = disappeared.get(&entry.path)
+            && !push_change(&mut during, &mut unattributed, attributed, change)
+        {
             dropped = true;
         }
     }
@@ -635,6 +684,7 @@ fn file_json(entry: &Fingerprint, change: &str) -> Value {
     })
 }
 
+#[derive(Debug, Clone)]
 struct StatusRead {
     entries: Vec<Fingerprint>,
     truncated: bool,
@@ -1253,6 +1303,23 @@ mod tests {
             assert_eq!(records[0].from_path.as_deref(), *from);
             assert_eq!(change_kind(records[0].x, records[0].y), *change);
         }
+    }
+
+    #[test]
+    fn unsettled_terminal_uses_its_own_baseline_for_disappeared_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "--quiet"]);
+        fs::write(root.join("earlier.txt"), "earlier dirty baseline\n").unwrap();
+        let store = prepared(&root.join("core.sqlite"), root, "attempt-older-terminal");
+        append_on(&store, "attempt-older-terminal", 1, "workspace.baseline", &baseline_payload(root, "older-turn"));
+        fs::remove_file(root.join("earlier.txt")).unwrap();
+        append_on(&store, "attempt-older-terminal", 2, "runtime.turn.completed", &json!({"status":"completed"}));
+        append_on(&store, "attempt-older-terminal", 3, "workspace.baseline", &baseline_payload(root, "later-turn"));
+        let result = settlement_payload(&store, "attempt-older-terminal", root).unwrap().unwrap();
+        assert_eq!(result["terminalSeq"], 2);
+        assert_eq!(result["requestId"], "older-turn");
+        assert!(result["unattributed"].as_array().unwrap().iter().any(|file| file["path"] == "earlier.txt" && file["change"] == "deleted"), "older terminal must retain its baseline disappearance: {result}");
     }
 
     #[test]
