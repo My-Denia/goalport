@@ -4679,6 +4679,10 @@ impl UiController {
         self.runtime_manager
             .ensure_provider_allowed(&provider)
             .map_err(|error| error.to_string())?;
+        // Earlier source observations must precede Stop and handoff records.
+        // Recovery can commit a terminal event, so use the resulting state.
+        self.flush_runtime_events()?;
+        let old = self.store.get_attempt(&old_attempt_id).map_err(store_message)?;
         if old.state == AttemptState::Active && old.provider.eq_ignore_ascii_case("claude") {
             self.stop_claude_with_operation(
                 &old_attempt_id,
@@ -8564,6 +8568,65 @@ mod native_event_retention_tests {
         controller.reconcile_stop_receipt(&request,&mut result.receipt);
         assert!(!controller.has_pending_native_persistence(attempt));
         assert_eq!(result.receipt.unwrap()["persistence"],"saved");
+    }
+
+    #[test]
+    fn handoff_saves_retained_reply_before_source_stop_and_boundary() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","before-handoff",20,
+            AgentEventType::MessageDelta,json!({"text":"older output"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"ordered-handoff".into(),
+            entity_version:0,message_type:"handoff".into(),payload:json!({"oldAttemptId":source,"provider":"scenario"})};
+        let plan = NativeWorkerPlan {attempt_ids:vec![source.into(),format!("attempt-handoff-{}",stable_suffix(&request.request_id))],startup_target:None};
+        let (mut worker,baseline) = controller.fork_native_worker(&plan).unwrap();
+        worker.handle(request).unwrap();
+        controller.merge_native_worker(&plan,worker,baseline).unwrap();
+        let records = store.list_event_records(source,0).unwrap();
+        let reply = records.iter().find(|r|r.event.kind=="runtime.reply.delta").unwrap();
+        let stop = records.iter().find(|r|r.event.kind=="attempt.cancelled").unwrap();
+        let boundary = records.iter().find(|r|r.event.kind=="handoff.completed").unwrap();
+        assert!(reply.event.seq<stop.event.seq && stop.event.seq<boundary.event.seq,"{records:?}");
+    }
+
+    #[test]
+    fn handoff_failed_recovery_defers_stop_and_successor() {
+        let _reset = ResetFaults;
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-scenario-preview";
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","unsaved-handoff-reply",20,
+            AgentEventType::MessageDelta,json!({"text":"older output"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"deferred-handoff".into(),
+            entity_version:0,message_type:"reassign".into(),payload:json!({"oldAttemptId":source,"provider":"scenario"})};
+        testing_fail_next_appends(1);
+        assert!(controller.handle(request.clone()).unwrap_err().contains("injected persistence failure"));
+        assert!(controller.runtime_manager.poll_all_events().unwrap().iter().all(|event|event.event_type!=AgentEventType::Cancelled),"native Stop must not precede failed source recovery");
+        assert_eq!(kind_count(&store,source,"attempt.cancelled"),0);
+        assert_eq!(kind_count(&store,source,"handoff.completed"),0);
+        assert!(store.get_attempt(&format!("attempt-handoff-{}",stable_suffix(&request.request_id))).is_err());
+        assert_eq!(controller.uncommitted_native_events.len(),1);
+    }
+
+    #[test]
+    fn handoff_reloads_source_state_after_retained_terminal_is_saved() {
+        let store = Store::memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut controller = UiController::new_seeded_fixture(store.clone(),directory.path().to_string_lossy()).unwrap();
+        let source = "attempt-terminal-handoff-source";
+        active_attempt(&store,"task-synthetic-preview",source);
+        controller.uncommitted_native_events.push_back(envelope(source,"task-synthetic-preview","completed-source-stop",1,
+            AgentEventType::Cancelled,json!({"reason":"native Stop completed"})));
+        let request = UiCommandRequest {protocol_version:CONNECTED_UI_PROTOCOL_VERSION.into(),request_id:"terminal-handoff".into(),
+            entity_version:0,message_type:"handoff".into(),payload:json!({"oldAttemptId":source,"provider":"scenario"})};
+        controller.handle(request).unwrap();
+        assert_eq!(store.get_attempt(source).unwrap().state,AttemptState::Cancelled);
+        assert_eq!(kind_count(&store,source,"runtime.turn.cancelled"),1);
+        assert_eq!(kind_count(&store,source,"attempt.cancelled"),0);
+        assert_eq!(kind_count(&store,source,"handoff.completed"),1);
     }
 
     #[test]
