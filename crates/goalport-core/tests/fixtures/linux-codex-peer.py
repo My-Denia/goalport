@@ -104,6 +104,9 @@ for line in sys.stdin:
                 time.sleep(0.01)
             pending_permission_turn = turn_id
             send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
+        elif scenario == "permission-drop":
+            pending_permission_turn = turn_id
+            send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "itemId": "rpc-A", "command": "echo fixture"}})
         elif scenario == "permission-eof":
             send({"id": "local-approval", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "command": "echo fixture"}})
             sys.stdout.flush()
@@ -201,3 +204,6 @@ for line in sys.stdin:
         send({"method": "item/agentMessage/completed", "params": {"threadId": answered_thread, "turnId": pending_permission_turn, "item": {"type": "agentMessage", "text": "Permission decision received"}}})
         send({"method": "turn/completed", "params": {"threadId": answered_thread, "turn": {"id": pending_permission_turn, "status": "completed"}}})
         pending_permission_turn = None
+
+if scenario == "permission-drop":
+    time.sleep(30)

@@ -1779,7 +1779,7 @@ fn observe_codex_frame(state: &mut CodexApprovals, value: &Value) {
     }
 }
 
-fn observe_codex_eof(state: &mut CodexApprovals) {
+fn close_codex_registration(state: &mut CodexApprovals) {
     state.registration_closed = true;
     for binding in state.by_decision.values_mut() {
         binding.unanswerable = true;
@@ -1794,7 +1794,7 @@ fn end_codex_reader(
 ) {
     transport.mark(reason);
     if let Ok(mut slot) = approval.lock() {
-        observe_codex_eof(&mut slot);
+        close_codex_registration(&mut slot);
     }
     let _ = event_tx.send(NativeMessage::Closed);
 }
@@ -2443,7 +2443,7 @@ impl CodexProcess {
                 // at most once. `take_transport_closures` reports the closure to the projection.
                 NativeMessage::Closed => {
                     if let Ok(mut slot) = self.approval.lock() {
-                        observe_codex_eof(&mut slot);
+                        close_codex_registration(&mut slot);
                     }
                     if let Some(turn_id) = self.native_turn_id.clone() {
                         self.close_turn_id(&turn_id);
@@ -2720,7 +2720,7 @@ impl CodexProcess {
                     }
                     if event_tx.send(NativeMessage::Json(value)).is_err() {
                         if let Ok(mut slot) = approval.lock() {
-                            observe_codex_eof(&mut slot);
+                            close_codex_registration(&mut slot);
                         }
                         break;
                     }
@@ -2729,7 +2729,7 @@ impl CodexProcess {
         if let Err(error) = spawned {
             self.transport.mark(TRANSPORT_READ_ERROR);
             if let Ok(mut slot) = self.approval.lock() {
-                observe_codex_eof(&mut slot);
+                close_codex_registration(&mut slot);
             }
             return Err(AdapterError::Connection(format!(
                 "unable to start Codex reader: {error}"
@@ -2823,7 +2823,11 @@ impl CodexProcess {
         // `stream_closed` is deliberately NOT set: the caller of this path
         // (`close_adapter_transport`) already persists its own `transport_lost` event and a BLOCKED
         // recovery row, so emitting a second `runtime.transport.closed` for the same deliberate act
-        // would duplicate the journal.
+        // would duplicate the journal. The approval registration still closes, so a later poll
+        // with no receiver can cancel callbacks that were already shown.
+        if let Ok(mut slot) = self.approval.lock() {
+            close_codex_registration(&mut slot);
+        }
         self.transport.mark(TRANSPORT_DROPPED);
         Ok(())
     }
@@ -7576,7 +7580,7 @@ mod tests {
         process.note_frame(&frame);
         {
             let mut slot = process.approval.lock().unwrap();
-            observe_codex_eof(&mut slot);
+            close_codex_registration(&mut slot);
         }
         let id = decision_ids(&process).into_iter().next().unwrap();
         let err = answer_error(&mut process, &id);
@@ -7864,6 +7868,38 @@ time.sleep(30)
         assert!(!err.contains("stdin is closed"), "{err}");
         assert!(!unread.approval.lock().unwrap().registration_closed);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropping_stdio_cancels_a_projected_approval_without_a_second_close() {
+        let mut process = codex_under_test("epoch-drop");
+        process.note_frame(&approval_frame("rpc-A", "U"));
+        {
+            let mut slot = process.approval.lock().unwrap();
+            for binding in slot.by_decision.values_mut() {
+                binding.projected = true;
+            }
+        }
+        let id = decision_ids(&process).into_iter().next().unwrap();
+        process.drop_stdio().unwrap();
+        assert!(!process.stream_closed);
+        {
+            let slot = process.approval.lock().unwrap();
+            assert!(slot.registration_closed);
+            assert!(slot.by_decision[&id].unanswerable);
+        }
+        let events = process.poll_events("attempt").unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["cancelled"] == true
+                    && event.payload["allow"] == false
+                    && event.payload["request_id"] == id
+            }),
+            "{events:?}"
+        );
+        assert!(!process.stream_closed);
+        assert!(process.transport.ended());
     }
 
     #[test]

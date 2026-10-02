@@ -1232,6 +1232,61 @@ fn approval_answer_before_next_poll_is_refused(
 }
 
 #[test]
+#[test]
+fn close_adapter_transport_cancels_the_shown_approval_without_killing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-drop");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let pid: i32 = fs::read_to_string(workspace.path().join("process-starts"))
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let closed = request(
+        &server,
+        "drop-transport",
+        "close_adapter_transport",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(closed["ok"], true, "{closed}");
+    let snapshot = snapshot_of(&server, "after-drop");
+    let decision = snapshot["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decision| decision["id"] == rows[0].id)
+        .unwrap();
+    assert_eq!(decision["state"], "resolved");
+    assert_eq!(
+        store.get_decision(&rows[0].id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(&record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+        assert!(!text.contains("decline"), "{text}");
+    }
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the runtime child is still alive");
+    let recovery = store.get_attempt_recovery(&attempt_id).unwrap().unwrap();
+    assert_eq!(recovery.recovery_class.as_deref(), Some("BLOCKED"));
+    let kinds = store
+        .list_event_records(&attempt_id, 0)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event.kind)
+        .collect::<Vec<_>>();
+    assert!(kinds.iter().any(|kind| kind == "transport_lost"), "{kinds:?}");
+    assert!(
+        !kinds.iter().any(|kind| kind == "runtime.transport.closed"),
+        "{kinds:?}"
+    );
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+}
+
 fn approval_then_terminal_error_is_not_acceptable() {
     approval_answer_before_next_poll_is_refused(
         "permission-terminal-error",
