@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use goalport_core::{
-    domain::{AttemptState, Command, CommandState},
+    domain::{AttemptState, Command, CommandState, Decision, DecisionState},
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, CoreServer},
     process_identity::{ProcessIdentity, ProcessObservation, observe_process},
     product_receipts::{begin_startup_epoch, complete_startup_epoch},
@@ -642,6 +642,795 @@ fn native_permission_denial_reaches_peer_and_turn_continues() {
         fs::read_to_string(workspace.path().join("permission-decision")).unwrap(),
         "decline"
     );
+}
+
+fn open_codex_permission(scenario: &str) -> (tempfile::TempDir, Store, CoreServer, String) {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py"),
+        workspace.path().join("app-server"),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("peer-scenario"), scenario).unwrap();
+    let store = Store::memory().unwrap();
+    seed_core_epoch(&store, workspace.path(), scenario);
+    let server = CoreServer::new(store.clone());
+    let created = accepted(
+        &server,
+        &format!("{scenario}-create"),
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.path(),
+            "goal": "Permission local case",
+            "title": "Permission"
+        }),
+    );
+    let campaign_id = created["activeCampaignId"].as_str().unwrap().to_owned();
+    let task_id = created["activeTask"]["id"].as_str().unwrap().to_owned();
+    let selected = accepted(
+        &server,
+        &format!("{scenario}-select"),
+        "select_runtime",
+        json!({
+            "campaignId": campaign_id,
+            "taskId": task_id,
+            "provider": "codex",
+            "version": "local-peer",
+            "executable": "python3"
+        }),
+    );
+    let attempt_id = selected["attempt"]["id"].as_str().unwrap().to_owned();
+    accepted(
+        &server,
+        &format!("{scenario}-send"),
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "request a local permission"
+        }),
+    );
+    (workspace, store, server, attempt_id)
+}
+
+fn snapshot_of(server: &CoreServer, label: &str) -> Value {
+    accepted(server, label, "snapshot", json!({}))
+}
+
+fn decisions_for(store: &Store, attempt_id: &str) -> Vec<Decision> {
+    let mut rows = store
+        .list_decisions()
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.attempt_id == attempt_id)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.id.cmp(&right.id));
+    rows
+}
+
+#[test]
+fn permission_wait_drains_later_stdout() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_workspace, _store, server, _attempt_id) = open_codex_permission("permission-drain");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "drain-snapshot");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["state"] == "pending");
+        let drained = snapshot.to_string().contains("drained-while-pending");
+        if pending && drained {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stdout after the approval was not visible while the decision stayed pending: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn permission_answer_binds_live_identity() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-identity");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let decision_id = loop {
+        let snapshot = snapshot_of(&server, "identity-snapshot");
+        if let Some(id) = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|decision| decision["state"] == "pending")
+            .and_then(|decision| decision["id"].as_str())
+        {
+            break id.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native permission never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        decision_id.starts_with("codex-decision-"),
+        "{decision_id}"
+    );
+    assert_ne!(decision_id, "rpc-A");
+    let records = store.list_event_records(&attempt_id, 0).unwrap();
+    let payload = records
+        .iter()
+        .find_map(|record| {
+            record.payload.as_ref().filter(|payload| {
+                payload.get("providerRpcId").and_then(Value::as_str) == Some("rpc-A")
+            })
+        })
+        .expect("permission event");
+    assert_eq!(payload["request_id"], decision_id);
+    assert_eq!(payload["threadId"], "T");
+    assert_eq!(payload["turnId"], "U");
+    assert_eq!(payload["itemId"], "I");
+    assert_eq!(payload["providerRequestId"], "other");
+    accepted(
+        &server,
+        "identity-allow",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    let file = workspace.path().join("permission-decision");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if file.is_file() && fs::read_to_string(&file).unwrap() == "rpc-A accept\n" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer did not record one rpc-A accept"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let second = request(
+        &server,
+        "identity-allow-again",
+        "permission_response",
+        json!({"decisionId": "rpc-A", "allow": true}),
+    );
+    assert_eq!(second["ok"], false, "{second}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "rpc-A accept\n");
+    assert_eq!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Approved
+    );
+}
+
+#[test]
+fn stop_during_permission_does_not_accept() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-stop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-wait");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["state"] == "pending");
+        if pending {
+            break;
+        }
+        assert!(Instant::now() < deadline, "permission never became pending");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = request(
+        &server,
+        "stop-during-permission",
+        "interrupt",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-settled");
+        let turn = snapshot["productConversation"]["turn"]["state"]
+            .as_str()
+            .unwrap_or("");
+        let pending = snapshot["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|decision| decision["state"] == "pending");
+        if !pending && turn != "waiting-permission" && turn != "running" && turn != "stopping" {
+            assert_eq!(
+                snapshot["productConversation"]["turn"]["canSend"], true,
+                "{snapshot}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop left the turn waiting: {snapshot}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let rows = decisions_for(&store, &attempt_id);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].state, DecisionState::Cancelled);
+    assert_ne!(rows[0].state, DecisionState::Approved);
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
+}
+
+#[test]
+fn permission_eof_clears_pending() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_workspace, store, server, attempt_id) = open_codex_permission("permission-eof");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = decisions_for(&store, &attempt_id);
+        let attempt = store.get_attempt(&attempt_id).unwrap();
+        if rows.first().is_some_and(|row| row.state == DecisionState::Cancelled)
+            && attempt.state == AttemptState::Failed
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "eof left decisions {rows:?} attempt {:?}",
+            attempt.state
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        let _ = snapshot_of(&server, "eof-poll");
+    }
+    let snapshot = snapshot_of(&server, "eof-final");
+    let turn = snapshot["productConversation"]["turn"]["state"]
+        .as_str()
+        .unwrap();
+    assert_ne!(turn, "waiting-permission");
+    assert_ne!(turn, "running");
+    let rows = decisions_for(&store, &attempt_id);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].state, DecisionState::Cancelled);
+}
+
+#[test]
+fn stop_before_approval_is_drained_does_not_leave_pending() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-stop");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = snapshot_of(&server, "stop-early-wait");
+        if snapshot["productConversation"]["turn"]["canStop"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "turn never became stoppable");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = request(
+        &server,
+        "stop-before-drain",
+        "interrupt",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "stop-early-settle");
+        let rows = decisions_for(&store, &attempt_id);
+        let pending = rows.iter().any(|row| row.state == DecisionState::Pending);
+        let attempt = store.get_attempt(&attempt_id).unwrap();
+        if !pending && attempt.state.is_terminal() {
+            if let Some(row) = rows.first() {
+                assert_ne!(row.state, DecisionState::Approved);
+            }
+            for _ in 0..20 {
+                let _ = snapshot_of(&server, "stop-early-after");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let rows = decisions_for(&store, &attempt_id);
+            assert!(
+                rows.len() == 1 && rows[0].state != DecisionState::Pending,
+                "approval became pending after stop settled: {rows:?}"
+            );
+            assert_ne!(rows[0].state, DecisionState::Approved);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop left a pending approval: {rows:?} attempt {:?}",
+            attempt.state
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
+}
+
+#[test]
+fn approval_after_terminal_is_not_left_pending() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-after-terminal");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if workspace.path().join("terminal-visible").is_file() {
+            let attempt = store.get_attempt(&attempt_id).unwrap();
+            if attempt.state == AttemptState::AwaitingReview || attempt.state.is_terminal() {
+                break;
+            }
+        }
+        let _ = snapshot_of(&server, "late-approval-wait");
+        assert!(
+            Instant::now() < deadline,
+            "turn never finished before the late approval; files={:?}",
+            std::fs::read_dir(workspace.path())
+                .map(|entries| entries.filter_map(|entry| entry.ok()).map(|entry| entry.file_name()).collect::<Vec<_>>())
+                .ok()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(workspace.path().join("release-late-approval"), "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "late-approval-settle");
+        let rows = decisions_for(&store, &attempt_id);
+        if rows.first().is_some_and(|row| row.state == DecisionState::Cancelled) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "late approval stayed unresolved: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(record).unwrap().contains("accept"));
+    }
+}
+
+
+fn wait_for_decisions(store: &Store, server: &CoreServer, attempt_id: &str, count: usize) -> Vec<Decision> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(server, "decision-wait");
+        let rows = decisions_for(store, attempt_id);
+        if rows.len() >= count {
+            return rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {count} decisions, saw {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn two_approvals_on_one_turn_are_answered_separately() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-two");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 2);
+    assert!(rows.iter().all(|row| row.state == DecisionState::Pending));
+    assert!(rows.iter().all(|row| row.id.starts_with("codex-decision-")));
+    let records = store.list_event_records(&attempt_id, 0).unwrap();
+    let decision_for = |rpc: &str| -> String {
+        records
+            .iter()
+            .find_map(|record| {
+                let payload = record.payload.as_ref()?;
+                (payload.get("providerRpcId").and_then(Value::as_str) == Some(rpc))
+                    .then(|| payload["request_id"].as_str().unwrap().to_owned())
+            })
+            .unwrap_or_else(|| panic!("missing {rpc}"))
+    };
+    let allow_id = decision_for("rpc-A");
+    let deny_id = decision_for("rpc-B");
+    assert_ne!(allow_id, deny_id);
+    accepted(
+        &server,
+        "two-allow",
+        "permission_response",
+        json!({"decisionId": allow_id, "allow": true}),
+    );
+    accepted(
+        &server,
+        "two-deny",
+        "permission_response",
+        json!({"decisionId": deny_id, "allow": false}),
+    );
+    let file = workspace.path().join("permission-decision");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if file.is_file() {
+            let text = fs::read_to_string(&file).unwrap();
+            if text.contains("rpc-A accept\n") && text.contains("rpc-B decline\n") {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "peer did not record both answers");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(store.get_decision(&allow_id).unwrap().state, DecisionState::Approved);
+    assert_eq!(store.get_decision(&deny_id).unwrap().state, DecisionState::Denied);
+}
+
+#[test]
+fn stop_after_two_approvals_writes_no_accept() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-two-stop");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 2);
+    assert!(rows.iter().all(|row| row.state == DecisionState::Pending));
+    let stopped = request(
+        &server,
+        "two-stop",
+        "interrupt",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "two-stop-settle");
+        let rows = decisions_for(&store, &attempt_id);
+        if rows.len() == 2 && rows.iter().all(|row| row.state == DecisionState::Cancelled) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop left approvals answerable: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(&record).unwrap().contains("accept"));
+    }
+}
+
+#[test]
+fn approval_terminal_approval_batch_leaves_nothing_pending() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-batch");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let rows = loop {
+        let _ = snapshot_of(&server, "batch-settle");
+        let rows = decisions_for(&store, &attempt_id);
+        if rows.len() == 2 && rows.iter().all(|row| row.state != DecisionState::Pending) {
+            break rows;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "batch left a pending approval: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(rows.iter().all(|row| row.state != DecisionState::Approved));
+    for row in &rows {
+        let response = request(
+            &server,
+            &format!("batch-accept-{}", row.id),
+            "permission_response",
+            json!({"decisionId": row.id, "allow": true}),
+        );
+        assert_eq!(response["ok"], false, "{response}");
+    }
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(&record).unwrap().contains("accept"));
+    }
+}
+
+#[test]
+fn next_turn_same_rpc_id_leaves_the_settled_decision() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-reuse");
+    let first = wait_for_decisions(&store, &server, &attempt_id, 1);
+    let first_id = first[0].id.clone();
+    assert_ne!(first_id, "rpc-A");
+    accepted(
+        &server,
+        "reuse-allow",
+        "permission_response",
+        json!({"decisionId": first_id, "allow": true}),
+    );
+    let snapshot = wait_for_turn(&server, "completed");
+    assert_eq!(
+        store.get_decision(&first_id).unwrap().state,
+        DecisionState::Approved
+    );
+    let campaign_id = snapshot["activeCampaignId"].as_str().unwrap();
+    accepted(
+        &server,
+        "reuse-send",
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "ask again"
+        }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let second_id = loop {
+        let _ = snapshot_of(&server, "reuse-second");
+        let pending: Vec<_> = store
+            .list_decisions()
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.state == DecisionState::Pending)
+            .collect();
+        if let Some(row) = pending.first() {
+            break row.id.clone();
+        }
+        assert!(Instant::now() < deadline, "second approval never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_ne!(second_id, first_id);
+    assert_ne!(second_id, "rpc-A");
+    assert_eq!(
+        store.get_decision(&first_id).unwrap().state,
+        DecisionState::Approved
+    );
+    let text = fs::read_to_string(workspace.path().join("permission-decision")).unwrap();
+    assert_eq!(text, "rpc-A accept\n");
+}
+
+fn approval_answer_before_next_poll_is_refused(
+    scenario: &str,
+    release: &str,
+    visible: &str,
+) {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission(scenario);
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let decision_id = rows[0].id.clone();
+    fs::write(workspace.path().join(release), "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.path().join(visible).is_file() {
+        assert!(Instant::now() < deadline, "{visible} never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let response = request(
+        &server,
+        "answer-before-poll",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(response["ok"], false, "{response}");
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        assert!(!fs::read_to_string(&record).unwrap().contains("accept"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = snapshot_of(&server, "settle-closed-approval");
+        let rows = decisions_for(&store, &attempt_id);
+        if rows.len() == 1 && rows[0].state != DecisionState::Pending {
+            assert_ne!(rows[0].state, DecisionState::Approved);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "closed approval stayed pending: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[test]
+fn close_adapter_transport_cancels_the_shown_approval_without_killing() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-drop");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let pid: i32 = fs::read_to_string(workspace.path().join("process-starts"))
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let closed = request(
+        &server,
+        "drop-transport",
+        "close_adapter_transport",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(closed["ok"], true, "{closed}");
+    let snapshot = snapshot_of(&server, "after-drop");
+    let decision = snapshot["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|decision| decision["id"] == rows[0].id)
+        .unwrap();
+    assert_eq!(decision["state"], "resolved");
+    assert_eq!(
+        store.get_decision(&rows[0].id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(&record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+        assert!(!text.contains("decline"), "{text}");
+    }
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the runtime child is still alive");
+    let recovery = store.get_attempt_recovery(&attempt_id).unwrap().unwrap();
+    assert_eq!(recovery.recovery_class.as_deref(), Some("BLOCKED"));
+    let kinds = store
+        .list_event_records(&attempt_id, 0)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.event.kind)
+        .collect::<Vec<_>>();
+    assert!(kinds.iter().any(|kind| kind == "transport_lost"), "{kinds:?}");
+    assert!(
+        !kinds.iter().any(|kind| kind == "runtime.transport.closed"),
+        "{kinds:?}"
+    );
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+}
+
+#[test]
+fn uncertain_permission_write_does_not_approve_or_replay() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (workspace, store, server, attempt_id) = open_codex_permission("permission-write-unknown");
+    let rows = wait_for_decisions(&store, &server, &attempt_id, 1);
+    let decision_id = rows[0].id.clone();
+    assert_eq!(rows[0].state, DecisionState::Pending);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !workspace.path().join("stdin-closed").is_file() {
+        assert!(Instant::now() < deadline, "stdin was not closed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let first = request(
+        &server,
+        "allow-unknown",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(first["ok"], false, "{first}");
+    let error = first["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("permission response delivery could not be confirmed"),
+        "{first}"
+    );
+    assert_eq!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    let records = store.list_event_records(&attempt_id, 0).unwrap();
+    let unknown = records.iter().any(|record| {
+        record.event.kind == "permission.response"
+            && record.payload.as_ref().is_some_and(|payload| {
+                payload["deliveryState"] == "UNKNOWN"
+                    && payload["text"] == "permission response delivery could not be confirmed"
+                    && payload["decisionId"] == decision_id
+            })
+    });
+    assert!(unknown, "journal did not keep the unknown delivery: {records:?}");
+    let second = request(
+        &server,
+        "allow-unknown-again",
+        "permission_response",
+        json!({"decisionId": decision_id, "allow": true}),
+    );
+    assert_eq!(second["ok"], false, "{second}");
+    let again = second["error"].as_str().unwrap_or("");
+    assert!(
+        again.contains("only pending decisions can be resolved"),
+        "{second}"
+    );
+    assert!(
+        !again.contains("permission response delivery could not be confirmed"),
+        "{second}"
+    );
+    assert_eq!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Cancelled
+    );
+    assert_ne!(
+        store.get_decision(&decision_id).unwrap().state,
+        DecisionState::Approved
+    );
+    let record = workspace.path().join("permission-decision");
+    if record.exists() {
+        let text = fs::read_to_string(&record).unwrap();
+        assert!(!text.contains("accept"), "{text}");
+    }
+    if let Ok(text) = fs::read_to_string(workspace.path().join("process-starts")) {
+        if let Ok(pid) = text.lines().next().unwrap_or("").parse::<i32>() {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
+fn approval_then_terminal_error_is_not_acceptable() {
+    approval_answer_before_next_poll_is_refused(
+        "permission-terminal-error",
+        "release-terminal-error",
+        "error-visible",
+    );
+}
+
+#[test]
+fn approval_then_oversized_stdout_is_not_acceptable() {
+    approval_answer_before_next_poll_is_refused(
+        "permission-reader-oversize",
+        "release-oversize",
+        "oversize-visible",
+    );
+}
+
+#[test]
+fn two_attempts_sharing_a_raw_rpc_id_do_not_collide() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (_workspace, store, server, first_attempt) = open_codex_permission("permission-deny");
+    let workspace = tempfile::tempdir().unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py"),
+        workspace.path().join("app-server"),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("peer-scenario"), "permission-deny").unwrap();
+    let created = accepted(
+        &server,
+        "second-attempt-create",
+        "create_campaign",
+        json!({
+            "workspaceRoot": workspace.path(),
+            "goal": "Second permission",
+            "title": "Second"
+        }),
+    );
+    let campaign_id = created["activeCampaignId"].as_str().unwrap().to_owned();
+    let task_id = created["activeTask"]["id"].as_str().unwrap().to_owned();
+    let selected = accepted(
+        &server,
+        "second-attempt-select",
+        "select_runtime",
+        json!({
+            "campaignId": campaign_id,
+            "taskId": task_id,
+            "provider": "codex",
+            "version": "local-peer",
+            "executable": "python3"
+        }),
+    );
+    let second_attempt = selected["attempt"]["id"].as_str().unwrap().to_owned();
+    accepted(
+        &server,
+        "second-attempt-send",
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": second_attempt,
+            "message": "request a local permission"
+        }),
+    );
+    let first = wait_for_decisions(&store, &server, &first_attempt, 1);
+    let second = wait_for_decisions(&store, &server, &second_attempt, 1);
+    assert_ne!(first[0].id, second[0].id);
+    assert_ne!(first[0].id, "local-approval");
+    assert_ne!(second[0].id, "local-approval");
+    assert_eq!(store.get_decision(&first[0].id).unwrap().state, DecisionState::Pending);
+    assert_eq!(store.get_decision(&second[0].id).unwrap().state, DecisionState::Pending);
 }
 
 fn admission_failure(executable: String, scenario: Option<&str>) -> Value {

@@ -4405,15 +4405,41 @@ impl UiController {
         if allow && (!auth.action_authorized || !auth.provider_authorized) {
             return Err("current campaign authorization denies permission approval; historical PolicySnapshot is explanatory only".into());
         }
-        self.runtime_manager
-            .permission_response(
-                &decision.attempt_id,
-                PermissionResponse {
-                    request_id: decision_id.clone(),
-                    allow,
-                },
-            )
-            .map_err(|error| format!("native permission response was not delivered: {error}"))?;
+        if let Err(error) = self.runtime_manager.permission_response(
+            &decision.attempt_id,
+            PermissionResponse {
+                request_id: decision_id.clone(),
+                allow,
+            },
+        ) {
+            let text = error.to_string();
+            if text.contains("permission response delivery could not be confirmed") {
+                self.store
+                    .update_decision_state(&decision_id, DecisionState::Cancelled)
+                    .map_err(store_message)?;
+                self.persist_event(
+                    &decision.attempt_id,
+                    "permission.response",
+                    json!({
+                        "decisionId": decision_id,
+                        "allow": allow,
+                        "deliveryState": "UNKNOWN",
+                        "text": "permission response delivery could not be confirmed",
+                        "attemptId": decision.attempt_id,
+                        "campaignId": task.campaign_id,
+                        "taskId": attempt.task_id
+                    }),
+                    None,
+                )?;
+                self.insert_notice_unique(
+                    "permission response delivery could not be confirmed".into(),
+                );
+                return Err(text);
+            }
+            return Err(format!(
+                "native permission response was not delivered: {error}"
+            ));
+        }
         let state = if allow {
             DecisionState::Approved
         } else {
