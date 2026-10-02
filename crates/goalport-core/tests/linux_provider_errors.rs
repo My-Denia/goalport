@@ -1026,3 +1026,90 @@ fn startup_cancel_stops_the_owned_shim_before_exec_or_prompt() {
     );
     worker.join().unwrap();
 }
+
+
+#[test]
+fn stop_cache_tracks_next_send_delivery_boundary() {
+    let _serial = SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for outcome in ["success", "closed", "unknown"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(workspace.path().join("release-stop-peer"));
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/linux-codex-peer.py"), workspace.path().join("app-server")).unwrap();
+        fs::write(workspace.path().join("peer-scenario"), format!("stop-cache-{outcome}")).unwrap();
+        let store = Store::memory().unwrap();
+        seed_core_epoch(&store, workspace.path(), "stop-cache-fixture");
+        let server = CoreServer::new(store.clone());
+        let created = accepted(&server, "create-stop-cache", "create_campaign", json!({"workspaceRoot":workspace.path(),"goal":"Local Stop boundary","title":"Stop boundary"}));
+        let campaign = created["activeCampaignId"].as_str().unwrap();
+        let selected = accepted(&server, "select-stop-peer", "select_runtime", json!({"campaignId":campaign,"taskId":created["activeTask"]["id"],"provider":"codex","version":"local-peer","executable":"python3"}));
+        let attempt = selected["attempt"]["id"].as_str().unwrap();
+        accepted(&server, "first-stop-turn", "conversation_send", json!({"campaignId":campaign,"attemptId":attempt,"message":"first turn"}));
+        wait_for_turn(&server, "running");
+        let first_stop = request(&server, "original-implicit-stop", "safe_stop", json!({}));
+        assert_eq!(first_stop["ok"], true, "{first_stop}");
+        assert_eq!(first_stop["payload"]["receipt"]["requested"], true);
+        assert_eq!(first_stop["payload"]["receipt"]["confirmed"], false);
+        wait_for_turn(&server, "completed");
+        assert_eq!(store.get_attempt(attempt).unwrap().state, AttemptState::AwaitingReview);
+        if outcome != "success" { await_file(&workspace.path().join("pipe-closed")); }
+        let sibling_workspace = tempfile::tempdir().unwrap();
+        let sibling_campaign = accepted(&server, "create-stop-sibling", "create_campaign", json!({"workspaceRoot":sibling_workspace.path(),"goal":"Independent selection","title":"Sibling"}));
+        let sibling = accepted(&server, "select-stop-sibling", "select_runtime", json!({"campaignId":sibling_campaign["activeCampaignId"],"taskId":sibling_campaign["activeTask"]["id"],"provider":"scenario","version":"scenario-1"}));
+        let sibling_id = sibling["attempt"]["id"].as_str().unwrap();
+        assert_ne!(sibling_id, attempt);
+        let replay = request(&server, "original-implicit-stop", "safe_stop", json!({}));
+        assert_eq!(replay["ok"], true, "{replay}");
+        assert_eq!(replay["payload"]["receipt"]["duplicateDispatch"], true);
+        assert_eq!(replay["payload"]["receipt"]["attemptId"], attempt);
+        assert_eq!(fs::read_to_string(workspace.path().join("interrupt-count")).unwrap(), "1");
+        let payload = json!({"campaignId":campaign,"attemptId":attempt,"message":"next user turn"});
+        let next = request(&server, "next-stop-turn", "conversation_send", payload.clone());
+        println!("STOP_BOUNDARY {outcome} next_ok={} delivery={}", next["ok"], next["payload"]["rejection"]["deliveryState"]);
+        if outcome == "success" {
+            assert_eq!(next["ok"], true, "{next}");
+            // Selection stays on the sibling, so inspect this explicit target.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                accepted(&server, "poll-next-stop-turn", "snapshot", json!({}));
+                if store.list_event_records(attempt, 0).unwrap().iter().filter(|r|r.event.kind=="runtime.turn.started").count() == 2 { break; }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let stop = request(&server, "stop-next-turn", "cancel", json!({"attemptId":attempt}));
+            assert_eq!(stop["ok"], true, "{stop}");
+            assert_eq!(stop["payload"]["receipt"]["duplicateDispatch"], false);
+            await_file(&workspace.path().join("interrupt-count"));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while fs::read_to_string(workspace.path().join("interrupt-count")).unwrap() != "2" {
+                assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            assert_eq!(next["ok"], false, "{next}");
+            let command = store.command_result("ui-send-next-stop-turn").unwrap().unwrap();
+            assert_eq!(command["deliveryState"], if outcome=="unknown" {"UNKNOWN"} else {"FAILED"});
+            let records = store.list_event_records(attempt, 0).unwrap().len();
+            let retry = request(&server, "next-stop-turn", "conversation_send", payload);
+            assert_eq!(retry["ok"], false, "{retry}");
+            assert_eq!(store.list_event_records(attempt, 0).unwrap().len(), records, "recorded failed/UNKNOWN send must not execute again");
+            let stop = request(&server, "stop-next-turn", "cancel", json!({"attemptId":attempt}));
+            println!("STOP_BOUNDARY {outcome} stop_ok={} receipt={} error={}", stop["ok"], stop["payload"]["receipt"], stop["error"]);
+            if outcome == "unknown" {
+                assert_eq!(stop["ok"], false, "old Stop cannot stand in for an unacknowledged potentially new turn: {stop}");
+                assert!(stop["error"].as_str().unwrap().contains("no proven cancellable live turn"));
+            } else {
+                assert_eq!(stop["ok"], true, "{stop}");
+                assert_eq!(stop["payload"]["receipt"]["duplicateDispatch"], true, "definitely unsent input preserves the previous Stop outcome");
+                assert_eq!(stop["payload"]["receipt"]["originalRequestId"], "original-implicit-stop");
+            }
+            assert_eq!(fs::read_to_string(workspace.path().join("turn-count")).unwrap(), "1");
+            assert_eq!(fs::read_to_string(workspace.path().join("interrupt-count")).unwrap(), "1");
+        }
+        let snapshot = accepted(&server, "selection-after-stop-boundary", "snapshot", json!({}));
+        assert_eq!(snapshot["attempt"]["id"], sibling_id);
+        assert_eq!(store.get_attempt(sibling_id).unwrap().state, AttemptState::Active);
+        println!("STOP_BOUNDARY {outcome} PASSED");
+        // Drop closes only the fixture-owned Runtime. Close Session correctly
+        // refuses while a Stop acknowledgement/UNKNOWN delivery is outstanding.
+        fs::write(workspace.path().join("release-stop-peer"), "release").unwrap();
+    }
+}

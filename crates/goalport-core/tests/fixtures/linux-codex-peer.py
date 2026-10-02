@@ -82,7 +82,7 @@ for line in sys.stdin:
         turn_id = f"local-turn-{turns}"
         send({"id": request_id, "result": {"turn": {"id": turn_id}}})
         send({"method": "turn/started", "params": {"threadId": "local-thread", "turnId": turn_id}})
-        if scenario == "stall-turn":
+        if scenario == "stall-turn" or scenario.startswith("stop-cache-"):
             continue
         elif scenario == "permission-deny":
             pending_permission_turn = turn_id
@@ -97,7 +97,21 @@ for line in sys.stdin:
             send({"method": "item/agentMessage/completed", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "agentMessage", "text": "local peer completed"}}})
             send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": turn_id, "status": "completed"}}})
     elif method == "turn/interrupt" and request_id is not None:
+        if scenario.startswith("stop-cache-"):
+            counter = workspace / "interrupt-count"
+            counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
         send({"id": request_id, "result": {}})
+        if scenario.startswith("stop-cache-") and turns == 1:
+            # A valid completion wins the race with Stop. Core may continue
+            # this same session after its ordinary review checkpoint.
+            send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": "local-turn-1", "status": "completed"}}})
+            if scenario != "stop-cache-success":
+                os.close(0 if scenario == "stop-cache-unknown" else 1)
+                (workspace / "pipe-closed").write_text("ready")
+                deadline = time.monotonic() + 10
+                while not (workspace / "release-stop-peer").exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                sys.exit(0)
     elif method is None and request_id == "local-approval" and pending_permission_turn:
         decision = (message.get("result") or {}).get("decision", "unknown")
         (workspace / "permission-decision").write_text(decision)
