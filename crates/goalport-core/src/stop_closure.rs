@@ -9,8 +9,11 @@ use crate::turn_results::{WorkspaceDelta, WorkspaceSample, compare_workspace_sam
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -289,6 +292,66 @@ pub(crate) fn sample_workspace(workspace: &Path) -> Option<WorkspaceSample> {
     filesystem_sample(workspace)
 }
 
+/// A snapshot request must not walk the tree. `Pending` means a scan is
+/// still running; the caller leaves the previous quiet observation alone.
+/// `Unreadable` is a completed failure and holds. `Ready` is one completed
+/// sample, consumed once.
+#[derive(Debug)]
+pub(crate) enum ReleaseSample {
+    Pending,
+    Unreadable,
+    Ready(WorkspaceSample),
+}
+
+struct ScanSlot {
+    running: bool,
+    ready: Option<Result<WorkspaceSample, ()>>,
+}
+
+static RELEASE_SCANS: LazyLock<Mutex<HashMap<PathBuf, ScanSlot>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
+    let Ok(mut slots) = RELEASE_SCANS.lock() else {
+        return ReleaseSample::Unreadable;
+    };
+    let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
+        running: false,
+        ready: None,
+    });
+    if let Some(result) = slot.ready.take() {
+        spawn_release_scan(workspace, slot);
+        return match result {
+            Ok(sample) => ReleaseSample::Ready(sample),
+            Err(()) => ReleaseSample::Unreadable,
+        };
+    }
+    if !slot.running {
+        spawn_release_scan(workspace, slot);
+    }
+    ReleaseSample::Pending
+}
+
+fn spawn_release_scan(workspace: &Path, slot: &mut ScanSlot) {
+    let path = workspace.to_path_buf();
+    slot.running = true;
+    let spawned = thread::Builder::new()
+        .name("goalport-quiet-scan".into())
+        .spawn(move || {
+            let result = sample_workspace(&path).ok_or(());
+            if let Ok(mut slots) = RELEASE_SCANS.lock() {
+                if let Some(slot) = slots.get_mut(&path) {
+                    slot.running = false;
+                    slot.ready = Some(result);
+                }
+            }
+        });
+    if spawned.is_err() {
+        slot.running = false;
+        slot.ready = Some(Err(()));
+    }
+}
+
 fn filesystem_sample(workspace: &Path) -> Option<WorkspaceSample> {
     let mut records = Vec::new();
     if walk_files(workspace, workspace, &mut records).is_err() {
@@ -323,6 +386,17 @@ fn walk_files(root: &Path, dir: &Path, records: &mut Vec<Vec<u8>>) -> std::io::R
             continue;
         }
         if meta.is_dir() {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|time| time.as_nanos())
+                .unwrap_or(0);
+            let mut record = path_bytes(relative);
+            record.extend_from_slice(b"\0dir\0");
+            record.extend_from_slice(modified.to_string().as_bytes());
+            records.push(record);
             walk_files(root, &path, records)?;
             continue;
         }
@@ -605,6 +679,40 @@ mod tests {
         std::fs::write(dir.path().join("f0.txt"), "changed").unwrap();
         let changed = sample_workspace(dir.path()).expect("changed folder");
         assert_ne!(sample.ignored_digest, changed.ignored_digest);
+    }
+
+    #[test]
+    fn an_empty_directory_changes_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
+        let before = sample_workspace(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        let after = sample_workspace(dir.path()).unwrap();
+        assert_ne!(before.ignored_digest, after.ignored_digest);
+    }
+
+    #[test]
+    fn a_release_sample_does_not_walk_on_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
+        assert!(matches!(
+            take_release_sample(dir.path()),
+            ReleaseSample::Pending
+        ));
+        let started = std::time::Instant::now();
+        loop {
+            match take_release_sample(dir.path()) {
+                ReleaseSample::Ready(sample) => {
+                    assert!(sample.ignored_digest.is_some());
+                    return;
+                }
+                ReleaseSample::Pending => {
+                    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+                    thread::yield_now();
+                }
+                ReleaseSample::Unreadable => panic!("walk failed"),
+            }
+        }
     }
 
     #[test]
