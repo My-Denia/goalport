@@ -703,6 +703,15 @@ pub(crate) struct WorkspaceEntry {
 pub(crate) struct WorkspaceSample {
     pub entries: Vec<WorkspaceEntry>,
     pub truncated: bool,
+    /// Aggregate digest over git-ignored content, computed only on the Stop
+    /// quiet path (see stop_closure::sample_workspace): sha256 over the
+    /// sorted (path, size, mtime_nanos) triples of ignored entries. `None`
+    /// on samples from the shared hot helper (tracked-files only); the quiet
+    /// comparator treats absent-vs-present as a change.
+    pub ignored_digest: Option<String>,
+    /// True when the ignored enumeration exceeded its record cap and the
+    /// digest was NOT computed — an honest unknown, never a quiet proof.
+    pub ignored_truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -732,6 +741,8 @@ pub(crate) fn sample_workspace_entries(workspace: &Path) -> Option<WorkspaceSamp
     }
     Some(WorkspaceSample {
         truncated: read.truncated,
+        ignored_digest: None,
+        ignored_truncated: false,
         entries,
     })
 }

@@ -463,19 +463,10 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
 }
 
 fn provider_issue_message(reason_code: &str) -> &'static str {
-    match reason_code {
-        "provider-quota" => "This Runtime has reached its usage limit. You can continue after the limit resets.",
-        "provider-auth-required" => "Sign in to this Runtime, then try again.",
-        "provider-not-installed" => "This Runtime is not installed. Install it or choose another Runtime.",
-        "provider-version" => "This Runtime could not accept the request. Update it or choose another Runtime.",
-        "provider-request-invalid" => "This Runtime rejected the request. Check Technical details before trying again.",
-        "provider-startup" => "This Runtime could not start. Check Technical details, then choose it again.",
-        "provider-overloaded" => "This Runtime is busy. Try another message later.",
-        "provider-transport" => "The Runtime connection failed. Check its session before continuing.",
-        "provider-permission" => "The Runtime denied this request. Check Technical details before continuing.",
-        "delivery-unknown" => "Message delivery is uncertain. Check the session before sending again.",
-        _ => "The Runtime could not finish this response. Check Technical details before continuing.",
-    }
+    // The closed typed mapping owns the copy (AGENTS.md §3 prerequisite);
+    // unknown codes degrade to the generic failure, never a guessed
+    // specialty.
+    crate::provider_failure::ProviderFailure::parse(reason_code).message()
 }
 
 fn describe_turn(
@@ -534,8 +525,20 @@ fn describe_turn(
     if turn.can_stop {
         turn.actions.push("stop".into());
     }
+    // Merge-review P2: a spawn-only pending-resume successor (claude, QUEUED,
+    // never activated, still unverified) must not offer Close — closing it
+    // would leave the task's latest attempt closed with no session and no
+    // retry marker. Close returns once the resume verifies (activation).
+    let unverified_pending_resume = context.attempt.provider.eq_ignore_ascii_case("claude")
+        && matches!(context.attempt.state, AttemptState::Queued)
+        && context.attempt.provider_session.is_none()
+        && matches!(
+            store.closed_claude_successor_source(&context.attempt.id),
+            Ok(Some(_))
+        );
     if session.state == "attached"
         && matches!(turn.state.as_str(), "idle" | "completed" | "failed" | "stopped")
+        && !unverified_pending_resume
     {
         turn.actions.push("close-session".into());
     }
@@ -605,10 +608,7 @@ fn describe_turn(
                 .registered_binding(&context.attempt.id)
                 .is_none()
             && matches!(
-                store.attempt_has_event_kind(
-                    &context.attempt.id,
-                    "runtime.resume.verification.failed"
-                ),
+                store.resume_retry_generation_dead(&context.attempt.id),
                 Ok(true)
             )
             && {
@@ -636,7 +636,7 @@ fn describe_turn(
         {
             turn.reason_code = Some("resume-verification-failed".into());
             turn.reason = Some(
-                "The last resume did not verify the stored session id. Resume to try again; earlier messages will not be sent again."
+                "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again."
                     .into(),
             );
             "resume-session"

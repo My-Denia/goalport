@@ -1376,3 +1376,156 @@ fn a_failed_resume_successor_detaches_and_can_be_retried() {
     assert_eq!(source.state, AttemptState::Closed);
     assert!(store.stop_responsibilities().unwrap().is_empty());
 }
+
+#[test]
+fn a_spawn_failed_resume_retires_and_is_retryable() {
+    let (_lock, _env) = begin();
+    let (store, server, attempt_id, root) = closed_claude("spawn-fail", "end_turn");
+    let task_id = store.get_attempt(&attempt_id).unwrap().task_id;
+
+    // Resume with an executable that cannot spawn: the failure must retire
+    // the process, journal the spawn-failed marker, and offer the retry.
+    let bad = serde_json::json!({
+        "attemptId": attempt_id,
+        "executable": "/nonexistent/goalport-test-claude"
+    });
+    let wire = serde_json::to_vec(&serde_json::json!({
+        "protocolVersion": goalport_core::ipc::CONNECTED_UI_PROTOCOL_VERSION,
+        "requestId": "spawn-fail-resume-1",
+        "entityVersion": 0,
+        "messageType": "resume_native_session",
+        "payload": bad
+    })).unwrap();
+    let response = server.handle_json(&wire).unwrap();
+    assert_eq!(response["ok"], false, "{response}");
+    let successor = store.attempts_for_task(&task_id).unwrap().pop().unwrap();
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        records.iter().any(|record| record.event.kind == "runtime.resume.spawn.failed"),
+        "the spawn failure is journaled: {records:#?}"
+    );
+    let row = store.get_attempt(&successor.id).unwrap();
+    assert_eq!(row.state, AttemptState::Queued);
+    assert!(row.provider_session.is_none());
+
+    // The dead view offers the retry through the generation-bound gate.
+    let snapshot = server.handle_json(&snapshot_message("spawn-fail")).unwrap();
+    let view = &snapshot["payload"]["snapshot"];
+    assert_eq!(view["attempt"]["id"], successor.id, "selection moves to the successor row: {snapshot}");
+    let turn = &view["productConversation"]["turn"];
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action == "resume-session"),
+        "a spawn-failed resume must offer the retry: {turn}"
+    );
+    assert!(
+        !actions.iter().any(|action| action == "close-session"),
+        "an unverified pending-resume successor must not offer close: {turn}"
+    );
+
+    // Retry through the SAME command path with the real fixture: respawns,
+    // verifies on the first send, and completes.
+    let good = resume_message("spawn-fail", &successor.id);
+    let retry = server.handle_json(&good).unwrap();
+    assert_eq!(retry["ok"], true, "the retry must respawn: {retry}");
+    let send = server
+        .handle_json(&server_send("spawn-fail", "campaign-spawn-fail", &successor.id, "reply with the single word recovered"))
+        .unwrap();
+    assert_eq!(send["ok"], true, "{send}");
+    let mut recovered = false;
+    for _ in 0..80 {
+        let snap = server.handle_json(&snapshot_message("spawn-fail")).unwrap();
+        let text = snap["payload"]["snapshot"]["productConversation"]["items"]
+            .as_array()
+            .map(|items| items.iter().map(|item| item["body"].as_str().unwrap_or("")).collect::<String>())
+            .unwrap_or_default();
+        if text.to_lowercase().contains("recovered") {
+            recovered = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(recovered, "the retried resume must verify and complete");
+}
+
+// --- merge-review P1: every tool_use block enters the admission ledger -----
+
+#[test]
+fn an_assistant_frame_with_two_tool_use_blocks_ledgers_both() {
+    let (_lock, _env) = begin();
+    let root = workspace("multi-tool", "two_tool_frame");
+    let attempt = "attempt-multi-tool";
+    let mut manager = attach(attempt, &root);
+
+    // Drive the scenario: the fixture's first turn emits ONE assistant frame
+    // containing a Bash tool_use AND a Write tool_use. Both must be ledgered
+    // (Bash into unrequested_bash at frame time, Write as a pending mutating
+    // record) and both ToolActivity events must journal in frame order.
+    send(&mut manager, attempt, "use two tools in one frame");
+    let events = drain(&mut manager, attempt, |seen| {
+        events_with(seen, AgentEventType::ToolActivity) >= 2
+    });
+    let started: Vec<&AgentEventEnvelope> = events
+        .iter()
+        .filter(|event| {
+            event.event_type == AgentEventType::ToolActivity
+                && event.payload.get("status") == Some(&serde_json::json!("started"))
+        })
+        .collect();
+    assert_eq!(started.len(), 2, "{events:#?}");
+    assert_eq!(started[0].payload["tool"], "Bash", "frame order kept: {events:#?}");
+    assert_eq!(started[1].payload["tool"], "Write", "frame order kept: {events:#?}");
+    // The denial evidence covers both: stop the turn and inspect the trace.
+    manager.interrupt_with_operation(attempt, "gui-multi-tool").unwrap();
+    let _ = drain(&mut manager, attempt, |seen| {
+        has(seen, AgentEventType::TurnFailed) || has(seen, AgentEventType::Cancelled)
+    });
+    manager.close_attempt(attempt).ok();
+}
+
+// --- merge-review P1: close owns the process tree --------------------------
+
+#[test]
+fn close_terminates_the_runtime_descendants() {
+    let (_lock, _env) = begin();
+    let root = workspace("close-tree", "stop_descendant");
+    let attempt = "attempt-close-tree";
+    let mut manager = attach(attempt, &root);
+    send(&mut manager, attempt, "leave a descendant behind");
+    let events = drain(&mut manager, attempt, |seen| {
+        has(seen, AgentEventType::ToolActivity)
+    });
+    assert!(has(&events, AgentEventType::ToolActivity), "{events:#?}");
+    // Wait for the fixture's surviving (non-dumpable) descendant.
+    let mut descendant_pid = None;
+    for _ in 0..50 {
+        if let Ok(text) = fs::read_to_string(root.join(".fake-claude-descendant.pid")) {
+            descendant_pid = text.trim().parse::<u32>().ok();
+            if descendant_pid.is_some() {
+                break;
+            }
+        }
+        let _ = manager.poll_events(attempt);
+        thread::sleep(Duration::from_millis(100));
+    }
+    let descendant_pid =
+        descendant_pid.expect("fixture descendant pid file");
+    // Stop the turn (the fixture CLI then ends its turn), then close: the
+    // close must terminate the surviving descendant, not just the CLI.
+    manager.interrupt_with_operation(attempt, "gui-close-tree").unwrap();
+    let mut closed = false;
+    for _ in 0..40 {
+        let _ = manager.poll_events(attempt);
+        if manager.close_idle_session(attempt).is_ok() {
+            closed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(closed, "close must succeed once the turn settled");
+    let alive = std::path::Path::new(&format!("/proc/{descendant_pid}")).exists();
+    assert!(
+        !alive,
+        "close must terminate the Runtime's surviving descendant ({descendant_pid})"
+    );
+}

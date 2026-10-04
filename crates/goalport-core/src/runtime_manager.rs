@@ -4613,6 +4613,11 @@ struct ClaudeStopRequest {
     /// Stop's own boundary, not a foreign refusal, and the confirmation
     /// predicate accepts exactly this set and nothing wider.
     denied_pending_tool_use_ids: Vec<String>,
+    /// Descendants of the CLI process snapshotted at Stop time (while the
+    /// CLI was alive), with start-time identities. The release rules require
+    /// every recorded descendant identity-confirmed dead; a trace WITHOUT
+    /// this field is missing evidence and keeps the hold.
+    descendants: Option<Vec<crate::descendants::DescendantRecord>>,
 }
 
 impl ClaudeStopRequest {
@@ -5826,10 +5831,19 @@ impl ClaudeStreamProcess {
     fn map_assistant(&mut self, attempt_id: &str, value: &Value) -> Option<AgentEventEnvelope> {
         let content = value.pointer("/message/content")?;
         if let Some(blocks) = content.as_array() {
+            // Merge-review P1: EVERY tool_use block in the frame enters the
+            // admission ledger and gets a ToolActivity event. Because
+            // take_mapped drains pending_out before appending the returned
+            // envelope, blocks 1..N-1 are queued and the LAST block's
+            // envelope is returned, journaling [text, tool1..toolN] in frame
+            // order.
+            let mut saw_tool_use = false;
+            let mut last_envelope = None;
             for block in blocks {
                 if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                     continue;
                 }
+                saw_tool_use = true;
                 if let Some(text) = self.flush_assistant_text(attempt_id) {
                     self.pending_out.push(text);
                 }
@@ -5860,7 +5874,7 @@ impl ClaudeStreamProcess {
                         .or_insert_with(|| sample_workspace_entries(&workspace));
                 }
                 self.sequence += 1;
-                return self.envelope(
+                let envelope = self.envelope(
                     attempt_id,
                     AgentEventType::ToolActivity,
                     self.activity_payload(id, name, "started", None),
@@ -5870,6 +5884,17 @@ impl ClaudeStreamProcess {
                         Some(format!("claude-ref:{}", sha256_hex(id.as_bytes())))
                     },
                 );
+                if let Some(envelope) = envelope {
+                    // Keep the NEWEST envelope as the returned one; every
+                    // earlier block's envelope waits in pending_out, so the
+                    // journal order is [tool1..toolN].
+                    if let Some(previous) = last_envelope.replace(envelope) {
+                        self.pending_out.push(previous);
+                    }
+                }
+            }
+            if saw_tool_use {
+                return last_envelope;
             }
         }
         if let Some(text) = extract_cli_text(content) {
@@ -6351,6 +6376,11 @@ impl ClaudeStreamProcess {
             reason: None,
             terminal_emitted: false,
             denied_pending_tool_use_ids,
+            // Taken while the CLI is alive (interrupt() is the only caller):
+            // every descendant is parent-reachable now, and the durable
+            // record gives the release rules an identity-checked liveness
+            // leg that re-parenting after the CLI's death cannot evade.
+            descendants: Some(Vec::new()),
         };
         let live_pid = self.managed_pid();
         match (self.process_binding.as_ref(), live_pid) {
@@ -6369,6 +6399,11 @@ impl ClaudeStreamProcess {
                 );
             }
         }
+        // Snapshot descendants AFTER the identity match so stop.pid is the
+        // bound CLI (the walk needs the live CLI to reach its children).
+        // None (failed enumeration) persists NO field: missing evidence
+        // holds the release; Some(empty) is a recorded, provable empty set.
+        stop.descendants = crate::descendants::snapshot_descendants(stop.pid);
         stop
     }
 
@@ -6432,6 +6467,9 @@ impl ClaudeStreamProcess {
             "process_fallback_enabled": false,
             "reason": stop.reason,
             "stop_denied_tool_use_ids": stop.denied_pending_tool_use_ids,
+            "descendants": stop.descendants.as_ref().map(
+                |records| crate::descendants::descendants_json(records),
+            ),
             "admission": {
                 "mutatingToolsAllowed": self
                     .mutating_tools
@@ -6804,20 +6842,26 @@ impl ClaudeStreamProcess {
             return Ok(());
         };
         let pid = child.id();
-        match child.try_wait() {
-            Ok(Some(_)) => self.finish_confirmed_exit(pid),
+        // Snapshot descendants BEFORE killing: parent links hold while the
+        // CLI lives, so the set is complete even for detached children
+        // (merge-review P1 — close owns the process tree or refuses). A
+        // FAILED enumeration refuses the confirmed close outright: close
+        // must not claim containment it could not observe.
+        let descendants = crate::descendants::snapshot_descendants(pid);
+        let exited = match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
             Ok(None) => {
                 if let Err(error) = child.kill() {
                     self.child = Some(child);
-                    return Err(AdapterError::Connection(format!(
+                    Err(AdapterError::Connection(format!(
                         "Claude session close could not signal the process: {error}"
-                    )));
-                }
-                match child.wait() {
-                    Ok(_) => self.finish_confirmed_exit(pid),
-                    Err(error) => Err(AdapterError::Connection(format!(
-                        "Claude session close could not confirm process exit: {error}"
-                    ))),
+                    )))
+                } else {
+                    child.wait().map(|_| ()).map_err(|error| {
+                        AdapterError::Connection(format!(
+                            "Claude session close could not confirm process exit: {error}"
+                        ))
+                    })
                 }
             }
             Err(error) => {
@@ -6826,7 +6870,25 @@ impl ClaudeStreamProcess {
                     "Claude session close could not observe the process: {error}"
                 )))
             }
+        };
+        exited?;
+        // Contain the tree: terminate identity-matched survivors, then verify.
+        // A refusal keeps the session open and close retryable.
+        let survivors = match descendants.as_ref() {
+            None => {
+                return Err(AdapterError::Connection(
+                    "Claude session close could not observe the Runtime's process tree; close is not confirmed"
+                        .into(),
+                ));
+            }
+            Some(records) => crate::descendants::terminate_descendants(records),
+        };
+        if survivors > 0 {
+            return Err(AdapterError::Connection(format!(
+                "Claude session close could not confirm containment: {survivors} descendant(s) of the Runtime are still running"
+            )));
         }
+        self.finish_confirmed_exit(pid)
     }
 
     fn finish_confirmed_exit(&mut self, pid: u32) -> Result<(), AdapterError> {
@@ -8734,6 +8796,7 @@ time.sleep(30)
             reason: None,
             terminal_emitted: false,
             denied_pending_tool_use_ids: Vec::new(),
+            descendants: Some(Vec::new()),
         });
         process
     }

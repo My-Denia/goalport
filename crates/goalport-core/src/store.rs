@@ -1467,6 +1467,44 @@ impl Store {
         Ok(())
     }
 
+    /// The latest resume-lifecycle event kind on an attempt, by sequence:
+    /// one of `runtime.registration.established`, `runtime.resume.verification.failed`
+    /// or `runtime.resume.spawn.failed`. Retry eligibility is bound to this
+    /// latest generation (merge review P1): a failure marker is retryable
+    /// only while no LATER registration exists.
+    pub fn latest_resume_lifecycle(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT kind FROM events
+             WHERE attempt_id=?1 AND kind IN (
+                 'runtime.registration.established',
+                 'runtime.resume.verification.failed',
+                 'runtime.resume.spawn.failed')
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        let kind = statement
+            .query_row(params![attempt_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        Ok(kind)
+    }
+
+    /// True when the attempt's latest resume generation ended in a proven
+    /// dead process (either failure marker), i.e. a deterministic retry may
+    /// spawn on the same row. `None`/Some(established) means no retryable
+    /// generation — a live or never-proven-dead resume.
+    pub fn resume_retry_generation_dead(
+        &self,
+        attempt_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(matches!(
+            self.latest_resume_lifecycle(attempt_id)?.as_deref(),
+            Some("runtime.resume.verification.failed" | "runtime.resume.spawn.failed")
+        ))
+    }
+
     /// Whether the attempt's journal already contains an event of this kind.
     pub fn attempt_has_event_kind(
         &self,

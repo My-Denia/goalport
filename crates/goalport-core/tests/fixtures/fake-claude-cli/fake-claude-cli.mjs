@@ -459,6 +459,32 @@ function beginTurn() {
       });
       waitingInterrupt = true;
       return;
+    // Merge-review P1 (descendant leg): the CLI leaves behind a child that
+    // turns itself non-dumpable (its /proc cwd becomes unreadable), with the
+    // workspace as its cwd, surviving the Stop. The stop-time snapshot must
+    // record it (parent links are readable regardless) and the release must
+    // hold until it is gone.
+    case "two_tool_frame": {
+      send({
+        type: "assistant",
+        message: { role: "assistant", content: [
+          { type: "tool_use", id: "toolu_frame_bash", name: "Bash", input: { command: "echo probe" } },
+          { type: "tool_use", id: "toolu_frame_write", name: "Write", input: { file_path: writeTarget, contents: "X\n" } }
+        ] }
+      });
+      emitText("working");
+      waitingInterrupt = true;
+      return;
+    }
+    case "stop_descendant": {
+      emitToolUse("Read", "toolu_native_stop_read", { file_path: "README.md" });
+      emitToolResult("toolu_native_stop_read", "before Stop");
+      emitText("working");
+      const child = spawn("python3", ["-c", "import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0);open('.fake-claude-descendant.pid','w').write(str(__import__('os').getpid()));time.sleep(300)"], { cwd: process.cwd(), stdio: "ignore" });
+      child.unref();
+      waitingInterrupt = true;
+      return;
+    }
     case "native_stop_after_allow":
       if (userCount === 1) {
         emitText("ASKING_FOR_BASH");
@@ -670,6 +696,13 @@ rl.on("line", (line) => {
           send(result);
         },100);
       }
+      return;
+    }
+    if (scenario === "two_tool_frame" || scenario === "stop_descendant") {
+      send({type:"control_response",response:{subtype:"success",request_id:obj.request_id,response:{still_queued:[]}}});
+      send({type:"result",uuid:randomUUID(),session_id:sessionId,
+        user_message_uuid:currentInputUuid,user_message_uuids:[currentInputUuid],
+        terminal_reason:"aborted_tools",subtype:"error_during_execution",is_error:true,permission_denials:[]});
       return;
     }
     if (scenario === "interrupt_eof" || scenario === "allow_then_unconfirmed_stop") {
