@@ -311,6 +311,19 @@ struct ScanSlot {
 static RELEASE_SCANS: LazyLock<Mutex<HashMap<PathBuf, ScanSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub(crate) fn ensure_release_scan(workspace: &Path) {
+    let Ok(mut slots) = RELEASE_SCANS.lock() else {
+        return;
+    };
+    let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
+        running: false,
+        ready: None,
+    });
+    if slot.ready.is_none() && !slot.running {
+        spawn_release_scan(workspace, slot);
+    }
+}
+
 pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
     let Ok(mut slots) = RELEASE_SCANS.lock() else {
         return ReleaseSample::Unreadable;
