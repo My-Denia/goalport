@@ -25,8 +25,8 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 
 ## Safety and recovery
 
-- **Residual execution after a Claude Code Stop is not proven quiescent.** Write responsibility stays held.
-- **A held workspace cannot be released in this RC.** You can re-check it or continue in a new isolated workspace ([safety](safety.md#stop-and-held-responsibility)).
+- **Residual execution after a Claude Code Stop is not proven quiescent.** Release is evidence-based only: a confirmed cancel needs a quiet workspace, and an unconfirmed Stop additionally needs the bound Runtime observed gone with its recorded identity plus a durable record that no execution was ever admitted ([safety](safety.md#stop-and-held-responsibility)).
+- **An unconfirmed Stop whose process ever admitted execution stays held.** There is no evidence path to release such a hold; continue in a new isolated workspace instead. Holds recorded before the admission ledger existed also stay held.
 - **Revocation was not blocking in one historical check.** A packaged-GUI check found the next send was not blocked after a revoke (SEC-02 in [S/R/D acceptance](reference/acceptance-srd.md)).
 - **Outbound effects are not exactly-once.** A missing receipt after an external effect stays unknown.
 - **Reconnecting the window is not recovery of native execution.** A restarted Core does not re-attach to earlier Runtime processes.
