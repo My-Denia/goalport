@@ -534,7 +534,7 @@ fn windows_spawn_in_job(
     };
     use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
     use winapi::um::namedpipeapi::CreatePipe;
-    use winapi::um::processthreadsapi::{CreateProcessW, ResumeThread, PROCESS_INFORMATION, STARTUPINFOW};
+    use winapi::um::processthreadsapi::{CreateProcessW, ResumeThread, TerminateProcess, PROCESS_INFORMATION, STARTUPINFOW};
     use winapi::um::winbase::{
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, HANDLE_FLAG_INHERIT,
         STARTF_USESTDHANDLES,
@@ -639,7 +639,9 @@ fn windows_spawn_in_job(
             return Err(io::Error::last_os_error());
         }
         if AssignProcessToJobObject(job, process_info.hProcess) == 0 {
-            TerminateJobObject(job, 1);
+            // The process is not in the job, so the job terminator cannot
+            // reach it. It is still suspended; end it directly.
+            TerminateProcess(process_info.hProcess, 1);
             CloseHandle(process_info.hThread);
             CloseHandle(process_info.hProcess);
             CloseHandle(in_write);
