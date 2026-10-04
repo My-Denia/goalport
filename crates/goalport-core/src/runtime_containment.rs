@@ -94,7 +94,7 @@ impl ContainedChild {
                 return Ok(None);
             }
             self.reaped = true;
-            return Ok(Some(ExitStatus::from_raw(code as i32)));
+            return Ok(Some(ExitStatus::from_raw(code)));
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
@@ -403,7 +403,7 @@ fn inherited_env(remove: &[&str]) -> io::Result<Vec<std::ffi::CString>> {
     Ok(out)
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(target_os = "linux")]
 fn pipe() -> io::Result<(RawFd, RawFd)> {
     let mut fds = [0; 2];
     #[cfg(target_os = "linux")]
