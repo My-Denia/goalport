@@ -1400,6 +1400,24 @@ impl RuntimeManager {
         }
     }
 
+    /// True when a process other than the recorded root is still inside the
+    /// spawn-time ownership domain. `None` means this attempt has no live
+    /// contained child to ask. An observation error is occupied: missing
+    /// evidence is not an empty domain.
+    pub fn claude_domain_has_extra(&mut self, attempt_id: &str) -> Option<bool> {
+        let process = match self.attempts.get_mut(attempt_id) {
+            Some(ManagedRuntime::Claude(process)) => process,
+            _ => return None,
+        };
+        let Some(child) = process.child.as_ref() else {
+            return None;
+        };
+        match child.extras_alive() {
+            Ok(alive) => Some(alive),
+            Err(_) => Some(true),
+        }
+    }
+
     pub fn claude_resume_hold(&self, attempt_id: &str) -> bool {
         match self.attempts.get(attempt_id) {
             Some(ManagedRuntime::Claude(process)) => process.resume_hold,
@@ -4815,7 +4833,7 @@ struct ClaudeStreamProcess {
     executable: PathBuf,
     version: String,
     workspace_root: PathBuf,
-    child: Option<Child>,
+    child: Option<crate::runtime_containment::ContainedChild>,
     /// The transient Claude-only broker, when the brokered console topology is
     /// selected. `child` stays `None` in that mode: the Claude process handle is
     /// deliberately owned by the broker, which is the only process that can be
@@ -5087,31 +5105,20 @@ impl ClaudeStreamProcess {
                 self.resume_abandoned = false;
                 (pid, Box::new(stdin), Box::new(stdout))
             } else {
-                let mut command = Command::new(&program);
-                command
-                    .args(&flags)
-                    .current_dir(&self.workspace_root)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null());
-                for key in CLAUDE_ENV_REMOVED {
-                    command.env_remove(key);
-                }
-                hide_native_console(&mut command);
-                let mut child = command
-                    .spawn()
-                    .map_err(|error| native_spawn_error("claude stream-json", error))?;
+                let spawned = crate::runtime_containment::spawn_contained(
+                    Path::new(&program),
+                    &flags,
+                    &self.workspace_root,
+                    CLAUDE_ENV_REMOVED,
+                )
+                .map_err(|error| native_spawn_error("claude stream-json", error))?;
                 self.spawned = true;
                 self.resume_abandoned = false;
-                let stdin = child.stdin.take().ok_or_else(|| {
-                    AdapterError::Connection("Claude stream-json stdin unavailable".into())
-                })?;
-                let stdout = child.stdout.take().ok_or_else(|| {
-                    AdapterError::Connection("Claude stream-json stdout unavailable".into())
-                })?;
-                let pid = child.id();
-                self.child = Some(child);
-                (pid, Box::new(stdin), Box::new(stdout))
+                let pid = spawned.child.id();
+                let stdin = spawned.stdin;
+                let stdout = spawned.stdout;
+                self.child = Some(spawned.child);
+                (pid, Box::new(stdin) as Box<dyn Write + Send>, Box::new(stdout) as Box<dyn Read + Send>)
             };
         // A startup snapshot authorizes a spawn-failure marker only when it is
         // taken while this Child is still alive. try_wait Ok(Some) has already
@@ -7345,7 +7352,21 @@ impl ClaudeStreamProcess {
                     )))
                 }
                 Ok(()) => match child.wait() {
-                    Ok(_) => Ok(()),
+                    Ok(_) => match child.extras_alive() {
+                        Ok(false) => Ok(()),
+                        Ok(true) => {
+                            self.child = Some(child);
+                            Err(AdapterError::Connection(
+                                "Claude session close killed the ownership domain, but a process is still inside it".into(),
+                            ))
+                        }
+                        Err(error) => {
+                            self.child = Some(child);
+                            Err(AdapterError::Connection(format!(
+                                "Claude session close could not observe the ownership domain: {error}"
+                            )))
+                        }
+                    },
                     Err(error) => {
                         self.child = Some(child);
                         Err(AdapterError::Connection(format!(

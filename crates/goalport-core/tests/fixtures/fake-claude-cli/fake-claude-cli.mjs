@@ -46,9 +46,21 @@ let currentInputUuid = null;
 let nativePermissionSeq = 0;
 let currentNativePermissionId = nativePermissionId;
 
+function hostPid() {
+  try {
+    const status = readFileSync("/proc/self/status", "utf8");
+    const line = status.split("\n").find((row) => row.startsWith("NSpid:"));
+    const host = line && line.split(/\s+/)[1];
+    if (host) return Number(host);
+  } catch {
+    // Non-Linux fixtures keep the process pid.
+  }
+  return process.pid;
+}
+
 writeFileSync(
   resolve(process.cwd(), ".fake-claude-argv.json"),
-  `${JSON.stringify({ argv, scenario, cwd: process.cwd(), pid: process.pid }, null, 2)}\n`
+  `${JSON.stringify({ argv, scenario, cwd: process.cwd(), pid: hostPid() }, null, 2)}\n`
 );
 
 function send(obj) {
@@ -278,9 +290,14 @@ function beginTurn() {
   if (userCount === 1 && scenario === "resume_mismatch_with_child") {
     // Spawn before the mismatch init frame so the post-send snapshot, taken
     // while this process is still alive, includes the descendant.
-    const child = spawn("sleep", ["300"], { cwd: process.cwd(), stdio: "ignore" });
-    writeFileSync(resolve(process.cwd(), ".fake-claude-descendant.pid"), String(child.pid));
+    // Host pid, not the pid-namespace local pid. /proc on the host is what
+    // Core's snapshot walks; getpid() inside the namespace is not that number.
+    const child = spawn("python3", ["-c", "import time\nstatus=open('/proc/self/status').read()\nhost=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0]\nopen('.fake-claude-descendant.pid','w').write(host)\ntime.sleep(300)"], { cwd: process.cwd(), stdio: "ignore" });
     child.unref();
+    const marker = resolve(process.cwd(), ".fake-claude-descendant.pid");
+    for (let i = 0; i < 50 && !existsSync(marker); i += 1) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
   }
   if (userCount === 1) {
     emitInit();
@@ -487,7 +504,7 @@ function beginTurn() {
       emitToolUse("Read", "toolu_native_stop_read", { file_path: "README.md" });
       emitToolResult("toolu_native_stop_read", "before Stop");
       emitText("working");
-      const child = spawn("python3", ["-c", "import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0);open('.fake-claude-descendant.pid','w').write(str(__import__('os').getpid()));time.sleep(300)"], { cwd: process.cwd(), stdio: "ignore" });
+      const child = spawn("python3", ["-c", "import ctypes,time;ctypes.CDLL(None).prctl(4,0);status=open('/proc/self/status').read();host=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0];open('.fake-claude-descendant.pid','w').write(host);time.sleep(300)"], { cwd: process.cwd(), stdio: "ignore" });
       child.unref();
       waitingInterrupt = true;
       return;
