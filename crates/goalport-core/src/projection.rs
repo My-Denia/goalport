@@ -2081,6 +2081,7 @@ impl UiController {
             let Some(descendants) = descendant_snapshot else {
                 continue;
             };
+            crate::stop_closure::ensure_release_scan(&workspace);
             if descendants.iter().any(|record| {
                 !matches!(
                     crate::descendants::classify_descendant(record),

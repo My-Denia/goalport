@@ -186,6 +186,12 @@ pub fn descendants_from_json(value: &Value) -> Option<Vec<DescendantRecord>> {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_process_state(pid: u32) -> Option<char> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = text.rsplit(')').next()?;
+    after.split_whitespace().next()?.chars().next()
+}
+
 fn linux_stat_fields(pid: u32) -> Option<(u32, String)> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // Field 4 is ppid and field 22 is starttime; the comm field (2) may
@@ -260,10 +266,16 @@ fn linux_classify(record: &DescendantRecord) -> DescendantState {
             }
         }
         Some((_, tick)) => {
-            if tick == record.start_tick {
-                DescendantState::Alive
+            if tick != record.start_tick {
+                return DescendantState::Reused;
+            }
+            // A zombie is not executing. Holding until its parent reaps it
+            // keeps a killed descendant blocking release after the workspace
+            // is already quiet.
+            if linux_process_state(record.pid) == Some('Z') {
+                DescendantState::Dead
             } else {
-                DescendantState::Reused
+                DescendantState::Alive
             }
         }
     }
