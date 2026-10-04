@@ -99,15 +99,9 @@ pub(crate) fn snapshot(root_pid: u32) -> Option<Vec<DescendantRecord>> {
             }
         }
         in_tree.remove(&root_pid);
-        let mut records: Vec<DescendantRecord> = in_tree
-            .into_iter()
-            .filter_map(|pid| {
-                creation_tick(pid)
-                    .map(|tick| DescendantRecord { pid, start_tick: tick })
-            })
-            .collect();
-        records.sort_by_key(|record| record.pid);
-        Some(records)
+        // Do not filter_map a pid away when creation identity is missing.
+        // The shared assembler returns None for the whole tree.
+        crate::descendants::assemble_descendant_records(in_tree, |pid| creation_tick(pid))
     }
 }
 
@@ -152,42 +146,27 @@ const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
 /// Terminate identity-matched survivors, bounded; returns how many remain
 /// Alive/Unknown afterwards (see descendants::terminate_descendants).
+///
+/// `OpenProcess(PROCESS_TERMINATE)` runs only inside the signaller, and the
+/// shared helper calls that signaller only for a record that classifies Alive
+/// immediately before the call. Unknown never reaches it.
 pub(crate) fn terminate(records: &[crate::descendants::DescendantRecord]) -> usize {
-    let live = |record: &crate::descendants::DescendantRecord| {
-        matches!(
-            crate::descendants::classify_descendant(record),
-            crate::descendants::DescendantState::Alive
-                | crate::descendants::DescendantState::Unknown
-        )
-    };
-    unsafe {
-        for record in records {
-            if live(record) {
-                let process = OpenProcess(PROCESS_TERMINATE, 0, record.pid);
-                if !process.is_null() {
-                    TerminateProcess(process, 1);
-                    CloseHandle(process);
-                }
-            }
-        }
-        // Bounded reap wait.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
-        while std::time::Instant::now() < deadline && records.iter().any(|r| live(r)) {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        for record in records {
-            if live(record) {
-                let process = OpenProcess(PROCESS_TERMINATE, 0, record.pid);
-                if !process.is_null() {
-                    TerminateProcess(process, 1);
-                    // A hard kill gets one synchronous wait.
+    crate::descendants::terminate_alive_only(
+        records,
+        crate::descendants::classify_descendant,
+        |record, phase| unsafe {
+            let process = OpenProcess(PROCESS_TERMINATE, 0, record.pid);
+            if !process.is_null() {
+                TerminateProcess(process, 1);
+                if phase == crate::descendants::TerminatePhase::Kill {
                     WaitForSingleObject(process, 2_000);
-                    CloseHandle(process);
                 }
+                CloseHandle(process);
             }
-        }
-    }
-    records.iter().filter(|record| live(record)).count()
+        },
+        std::time::Duration::from_millis(2_000),
+        std::time::Duration::from_millis(2_000),
+    )
 }
 
 // Keep c_void linked in parity with the sibling modules' extern style.

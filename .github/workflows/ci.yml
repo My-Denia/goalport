@@ -35,7 +35,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm test:unit
-      - run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs
+      - run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs scripts/pnpm-test-entry.test.mjs
 
   core:
     runs-on: windows-latest

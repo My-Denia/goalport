@@ -1381,9 +1381,84 @@ impl RuntimeManager {
     /// first-send resume verification (and has not since been respawned).
     pub fn claude_resume_verification_failed(&self, attempt_id: &str) -> bool {
         match self.attempts.get(attempt_id) {
-            Some(ManagedRuntime::Claude(process)) => process.resume_abandoned,
+            Some(ManagedRuntime::Claude(process)) => {
+                process.resume_abandoned || process.resume_verification_outcome.is_some()
+            }
             _ => false,
         }
+    }
+
+    /// Outcome of a first-send resume verification failure, if this registration
+    /// recorded one. `None` means the last error was not that failure.
+    pub fn claude_resume_verification_outcome(
+        &self,
+        attempt_id: &str,
+    ) -> Option<ResumeContainment> {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Claude(process)) => process.resume_verification_outcome,
+            _ => None,
+        }
+    }
+
+    pub fn claude_resume_hold(&self, attempt_id: &str) -> bool {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Claude(process)) => process.resume_hold,
+            _ => false,
+        }
+    }
+
+    pub fn claude_resume_failure_is_verification(&self, attempt_id: &str) -> bool {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Claude(process)) => process.resume_failure_is_verification,
+            _ => false,
+        }
+    }
+
+    /// Finish proof for a held resume. Does not spawn, journal, or remove the
+    /// registration. Signals only Alive descendants from the stored snapshot.
+    /// Missing registration is incomplete, not vacuous.
+    pub fn finish_claude_resume_containment(&mut self, attempt_id: &str) -> ResumeContainment {
+        let Some(ManagedRuntime::Claude(process)) = self.attempts.get_mut(attempt_id) else {
+            return ResumeContainment::Incomplete;
+        };
+        if matches!(
+            process.resume_verification_outcome,
+            Some(ResumeContainment::Proven | ResumeContainment::Vacuous)
+        ) {
+            return process.resume_verification_outcome.unwrap();
+        }
+        if process.broker.is_some() {
+            process.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        let outcome = process.attempt_stored_proof();
+        if process.resume_failure_is_verification || process.resume_verification_outcome.is_some() {
+            process.resume_verification_outcome = Some(outcome);
+        }
+        outcome
+    }
+
+    /// Classify a resume spawn error. Does not journal or spawn. A missing
+    /// registration is incomplete, not vacuous. `spawned == true` with no child
+    /// is not vacuous.
+    pub fn classify_claude_resume_spawn(&mut self, attempt_id: &str) -> ResumeContainment {
+        let Some(ManagedRuntime::Claude(process)) = self.attempts.get_mut(attempt_id) else {
+            return ResumeContainment::Incomplete;
+        };
+        let outcome = process.classify_spawn_containment();
+        process.resume_verification_outcome = None;
+        outcome
+    }
+
+    /// Proven detach: disarm first so close() and Drop do not signal, then
+    /// remove the map entry. Does not call close_attempt and does not pid-kill.
+    pub fn disarm_detach_claude(&mut self, attempt_id: &str) {
+        if let Some(ManagedRuntime::Claude(process)) = self.attempts.get_mut(attempt_id) {
+            process.close_disarmed = true;
+            process.resume_hold = false;
+        }
+        self.attempts.remove(attempt_id);
+        self.registrations.remove(attempt_id);
     }
 
     pub fn close_attempt(&mut self, attempt_id: &str) -> Result<(), AdapterError> {
@@ -4626,6 +4701,103 @@ impl ClaudeStopRequest {
     }
 }
 
+/// Whether a resume failure may journal its retry marker.
+///
+/// `Proven` and `Vacuous` authorize the marker. `Incomplete` does not.
+/// Journaling is the projection's job, through `persist_event(..., None)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeContainment {
+    Proven,
+    Vacuous,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeFailureKind {
+    Verification,
+    Spawn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResumeProofFacts {
+    pub kind: ResumeFailureKind,
+    pub registration_present: bool,
+    pub spawned: bool,
+    pub child_present: bool,
+    pub broker_present: bool,
+    pub binding_present: bool,
+    pub stored_pid: bool,
+    pub stored_snapshot: bool,
+    /// Verification: taken while the original Child was alive after the failed
+    /// first send, before any signal. A pre-send or post-death snapshot is false.
+    /// Spawn: taken while that Child was alive, before death. A post-death
+    /// `Some(empty)` is false.
+    pub snapshot_authorizes: bool,
+    pub root_wait_succeeded: bool,
+    pub descendant_alive_or_unknown: bool,
+    pub spawn_error_before_spawned: bool,
+}
+
+/// `true` only for Proven or Vacuous. A pre-send snapshot, a missing snapshot,
+/// a missing registration, a broker, or `spawned == true` with no child and no
+/// root-handle wait does not authorize a marker.
+pub(crate) fn authorize_resume_marker(facts: &ResumeProofFacts) -> bool {
+    if !facts.registration_present || facts.broker_present {
+        return false;
+    }
+    let never_started = !facts.spawned
+        && !facts.child_present
+        && !facts.broker_present
+        && !facts.binding_present
+        && !facts.stored_pid
+        && !facts.stored_snapshot;
+    let vacuous = facts.kind == ResumeFailureKind::Spawn
+        && (facts.spawn_error_before_spawned || never_started)
+        && !facts.spawned;
+    if vacuous {
+        return true;
+    }
+    // spawned == true with no child is not vacuous, and root death is unproven
+    // until the original handle's try_wait/wait succeeded.
+    if facts.spawned && !facts.child_present && !facts.root_wait_succeeded {
+        return false;
+    }
+    facts.snapshot_authorizes && facts.root_wait_succeeded && !facts.descendant_alive_or_unknown
+}
+
+/// Signal only records that classify Alive immediately before the signal.
+/// `None` does not signal. Returns true when any captured record is Alive or
+/// Unknown (a survivor) or the snapshot is missing.
+pub(crate) fn signal_captured_if_alive<C, S>(
+    snapshot: Option<&[crate::descendants::DescendantRecord]>,
+    classify: C,
+    mut signal: S,
+) -> bool
+where
+    C: Fn(&crate::descendants::DescendantRecord) -> crate::descendants::DescendantState,
+    S: FnMut(&crate::descendants::DescendantRecord),
+{
+    let Some(records) = snapshot else {
+        return true;
+    };
+    let mut survivor = false;
+    for record in records {
+        match classify(record) {
+            crate::descendants::DescendantState::Alive => signal(record),
+            crate::descendants::DescendantState::Unknown => survivor = true,
+            crate::descendants::DescendantState::Dead | crate::descendants::DescendantState::Reused => {}
+        }
+    }
+    survivor
+        || records.iter().any(|record| {
+            matches!(
+                classify(record),
+                crate::descendants::DescendantState::Alive
+                    | crate::descendants::DescendantState::Unknown
+            )
+        })
+}
+
 struct ClaudeStreamProcess {
     executable: PathBuf,
     version: String,
@@ -4715,6 +4887,25 @@ struct ClaudeStreamProcess {
     /// earlier turn of the same process.
     execution_ever_admitted: bool,
     startup_control: Option<Arc<StartupControl>>,
+    /// Checked at the start of ensure_started, before the child.is_some()
+    /// success return. Refuses another spawn while set.
+    resume_hold: bool,
+    /// Proven detach sets this first so close() and Drop do not signal.
+    close_disarmed: bool,
+    /// close_confirmed snapshot, taken before child.take() and before any
+    /// signal. Not the resume proof path. A later close may terminate only
+    /// Alive records from this snapshot and must not bare-pid kill the root.
+    close_snapshot: Option<Vec<crate::descendants::DescendantRecord>>,
+    close_snapshot_pid: Option<u32>,
+    /// Authorizing failure-time snapshot. None does not authorize a marker.
+    resume_proof_snapshot: Option<Vec<crate::descendants::DescendantRecord>>,
+    resume_proof_authorizes: bool,
+    /// True only when resume_proof_snapshot was taken while the original Child
+    /// was alive after the failed first send, before any signal.
+    resume_proof_is_post_send: bool,
+    resume_root_wait_succeeded: bool,
+    resume_failure_is_verification: bool,
+    resume_verification_outcome: Option<ResumeContainment>,
 }
 
 impl ClaudeStreamProcess {
@@ -4777,6 +4968,16 @@ impl ClaudeStreamProcess {
             spawned: false,
             execution_ever_admitted: false,
             startup_control: None,
+            resume_hold: false,
+            close_disarmed: false,
+            close_snapshot: None,
+            close_snapshot_pid: None,
+            resume_proof_snapshot: None,
+            resume_proof_authorizes: false,
+            resume_proof_is_post_send: false,
+            resume_root_wait_succeeded: false,
+            resume_failure_is_verification: false,
+            resume_verification_outcome: None,
         }
     }
 
@@ -4791,6 +4992,15 @@ impl ClaudeStreamProcess {
     }
 
     fn ensure_started(&mut self, resume_session: Option<&str>) -> Result<(), AdapterError> {
+        // Hold is checked before the already-started success return so a
+        // retained child cannot be treated as a fresh start, and before any
+        // spawn.
+        if self.resume_hold {
+            return Err(AdapterError::Connection(
+                "Claude resume containment is unproven; another process will not be spawned"
+                    .into(),
+            ));
+        }
         if self.child.is_some() {
             return Ok(());
         }
@@ -4887,16 +5097,34 @@ impl ClaudeStreamProcess {
                 self.child = Some(child);
                 (pid, Box::new(stdin), Box::new(stdout))
             };
+        // A startup snapshot authorizes a spawn-failure marker only when it is
+        // taken while this Child is still alive. try_wait Ok(Some) has already
+        // reaped the process; a snapshot after that is post-death and must not
+        // be stored as proof. Do not kill here.
+        if self.child.is_some() {
+            let alive = matches!(self.child.as_mut().and_then(|child| child.try_wait().ok()), Some(None));
+            if alive {
+                let snapshot = crate::descendants::snapshot_descendants(pid);
+                self.resume_proof_authorizes = snapshot.is_some();
+                self.resume_proof_snapshot = snapshot;
+                self.resume_proof_is_post_send = false;
+            } else {
+                self.resume_proof_authorizes = false;
+                self.resume_proof_snapshot = None;
+                self.resume_proof_is_post_send = false;
+            }
+        }
         let observed = match process_identity::observe_process(pid) {
             ProcessObservation::Live(identity) => identity,
             ProcessObservation::NotRunning => {
-                let _ = self.close();
+                // A pid exists. Do not close(); the caller runs the proof rule.
+                self.latch_resume_hold();
                 return Err(AdapterError::Connection(
                     "claude stream-json exited before its process identity was observed".into(),
                 ));
             }
             ProcessObservation::Unknown(reason) => {
-                let _ = self.close();
+                self.latch_resume_hold();
                 return Err(AdapterError::Connection(format!(
                     "claude stream-json process identity is unknown: {reason}"
                 )));
@@ -4922,7 +5150,8 @@ impl ClaudeStreamProcess {
         {
             control.publish_binding(binding.clone());
             if control.cancelled() {
-                let _ = self.close();
+                // A pid exists. Do not close(); the caller runs the proof rule.
+                self.latch_resume_hold();
                 return Err(AdapterError::Connection(
                     "native start was cancelled before prompt dispatch".into(),
                 ));
@@ -5183,13 +5412,13 @@ impl ClaudeStreamProcess {
             match found_session.as_deref() {
                 Some(found) => {
                     if let Err(error) = self.accept_resumed_session(expected.as_str(), found) {
-                        self.abandon_unverified_resume();
+                        self.note_resume_verification_failure();
                         return Err(error);
                     }
                     self.resume_verified = true;
                 }
                 None => {
-                    self.abandon_unverified_resume();
+                    self.note_resume_verification_failure();
                     return Err(AdapterError::Connection(
                         "Claude resume verification failed: no session id was reported after the first message"
                             .into(),
@@ -5205,36 +5434,29 @@ impl ClaudeStreamProcess {
         })
     }
 
-    /// A resume that failed first-send verification must never receive a
-    /// second message: the process is not a verified session of this attempt.
-    /// Kill and reap it, latch the stream closed so every later guard
-    /// refuses, and discard any frames that unverified stream already
-    /// queued — they are not this attempt's content.
-    fn abandon_unverified_resume(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    fn latch_resume_hold(&mut self) {
+        self.resume_hold = true;
         self.stream_closed = true;
+        // Do not clear spawned, the child, the binding, resume_requested, or
+        // the stored failure-time snapshot. Do not set resume_abandoned.
+        // Do not signal.
+    }
+
+    /// Verification failure: snapshot while the original Child is alive, after
+    /// the failed first send, before any signal. A startup snapshot does not
+    /// authorize this marker. `None` does not signal and does not authorize.
+    /// Alive or Unknown descendants defer signalling to a later cleanup call
+    /// so the marker is not journaled while they survive. That cleanup signals
+    /// identity-confirmed Alive descendants; this function does not refuse that.
+    fn note_resume_verification_failure(&mut self) -> ResumeContainment {
+        let authorizes = self.capture_post_send_snapshot();
+        self.resume_failure_is_verification = true;
+        self.latch_resume_hold();
         self.discard_native_output = true;
+        self.turn_in_flight = false;
         self.pending_out.clear();
         self.assistant_text.clear();
         self.last_emitted_assistant.clear();
-        // Merge-review P1: the abandoned process must not keep sticky spawn
-        // identity behind. Retire the binding and turn state so the dead
-        // registration is observationally retired, and latch the reason so
-        // the projection can detach and mark the attempt terminally failed.
-        self.process_binding = None;
-        self.spawned = false;
-        self.turn_in_flight = false;
-        self.pending_permissions.clear();
-        self.mutating_tools.clear();
-        self.unrequested_bash.clear();
-        self.resume_requested = None;
-        self.resume_verified = false;
-        self.resume_abandoned = true;
-        // Best-effort drain; the discard flag is the guarantee for anything
-        // the reader still pushes before it observes the killed pipes.
         if let Some(receiver) = self.event_rx.as_mut() {
             loop {
                 match receiver.try_recv() {
@@ -5243,7 +5465,189 @@ impl ClaudeStreamProcess {
                 }
             }
         }
+        if !authorizes {
+            self.resume_verification_outcome = Some(ResumeContainment::Incomplete);
+            return ResumeContainment::Incomplete;
+        }
+        let deferred = self.resume_proof_snapshot.as_ref().is_some_and(|records| {
+            records.iter().any(|record| {
+                matches!(
+                    crate::descendants::classify_descendant(record),
+                    crate::descendants::DescendantState::Alive
+                        | crate::descendants::DescendantState::Unknown
+                )
+            })
+        });
+        if deferred {
+            // Do not signal in this call. finish_resume_containment signals
+            // Alive records from this stored snapshot.
+            self.resume_verification_outcome = Some(ResumeContainment::Incomplete);
+            return ResumeContainment::Incomplete;
+        }
+        let outcome = self.attempt_stored_proof();
+        self.resume_verification_outcome = Some(outcome);
+        outcome
     }
+
+    /// Snapshot while the original Child is still alive, after the failed send,
+    /// before any signal. A startup snapshot is replaced and does not authorize
+    /// this failure. Post-death or a missing handle does not authorize.
+    fn capture_post_send_snapshot(&mut self) -> bool {
+        if self.broker.is_some() {
+            self.resume_proof_snapshot = None;
+            self.resume_proof_authorizes = false;
+            self.resume_proof_is_post_send = false;
+            return false;
+        }
+        let Some(child) = self.child.as_mut() else {
+            self.resume_proof_snapshot = None;
+            self.resume_proof_authorizes = false;
+            self.resume_proof_is_post_send = false;
+            return false;
+        };
+        let pid = child.id();
+        let alive = matches!(child.try_wait(), Ok(None));
+        if !alive {
+            // Already dead or unobservable. Do not snapshot after death and
+            // do not kill. A pre-send snapshot is discarded.
+            self.resume_proof_snapshot = None;
+            self.resume_proof_authorizes = false;
+            self.resume_proof_is_post_send = false;
+            return false;
+        }
+        let snapshot = crate::descendants::snapshot_descendants(pid);
+        let authorizes = snapshot.is_some();
+        self.resume_proof_snapshot = snapshot;
+        self.resume_proof_authorizes = authorizes;
+        self.resume_proof_is_post_send = authorizes;
+        authorizes
+    }
+
+    /// Prove containment from the stored snapshot only. Does not take a new
+    /// snapshot. Signals only Alive descendants. Kills the root only via
+    /// Child::kill on the original handle, before wait, and never after wait.
+    /// Does not bare-pid kill. A broker is incomplete.
+    fn attempt_stored_proof(&mut self) -> ResumeContainment {
+        if self.broker.is_some() || !self.resume_proof_authorizes {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        let Some(records) = self.resume_proof_snapshot.clone() else {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        };
+        if self.resume_failure_is_verification && !self.resume_proof_is_post_send {
+            // A startup / pre-send snapshot does not authorize a verification marker.
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        // Descendants first, from the stored snapshot. Unknown is not signalled.
+        let _remaining = crate::descendants::terminate_descendants(&records);
+        if !self.resume_root_wait_succeeded {
+            let Some(mut child) = self.child.take() else {
+                self.latch_resume_hold();
+                return ResumeContainment::Incomplete;
+            };
+            let waited = match child.try_wait() {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => match child.kill() {
+                    Err(_) => {
+                        self.child = Some(child);
+                        Err(())
+                    }
+                    Ok(()) => match child.wait() {
+                        Ok(_) => Ok(()),
+                        Err(_) => {
+                            self.child = Some(child);
+                            Err(())
+                        }
+                    },
+                },
+                Err(_) => {
+                    self.child = Some(child);
+                    Err(())
+                }
+            };
+            if waited.is_err() {
+                self.latch_resume_hold();
+                return ResumeContainment::Incomplete;
+            }
+            self.resume_root_wait_succeeded = true;
+        }
+        let survivor = records.iter().any(|record| {
+            matches!(
+                crate::descendants::classify_descendant(record),
+                crate::descendants::DescendantState::Alive
+                    | crate::descendants::DescendantState::Unknown
+            )
+        });
+        if survivor {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        let facts = ResumeProofFacts {
+            kind: if self.resume_failure_is_verification {
+                ResumeFailureKind::Verification
+            } else {
+                ResumeFailureKind::Spawn
+            },
+            registration_present: true,
+            spawned: self.spawned,
+            child_present: self.child.is_some(),
+            broker_present: self.broker.is_some(),
+            binding_present: self.process_binding.is_some(),
+            stored_pid: self.process_binding.as_ref().map(|binding| binding.pid).unwrap_or(0) != 0
+                || self.close_snapshot_pid.is_some(),
+            stored_snapshot: true,
+            snapshot_authorizes: self.resume_proof_authorizes
+                && (!self.resume_failure_is_verification || self.resume_proof_is_post_send),
+            root_wait_succeeded: self.resume_root_wait_succeeded,
+            descendant_alive_or_unknown: false,
+            spawn_error_before_spawned: false,
+        };
+        if authorize_resume_marker(&facts) {
+            ResumeContainment::Proven
+        } else {
+            self.latch_resume_hold();
+            ResumeContainment::Incomplete
+        }
+    }
+
+    fn classify_spawn_containment(&mut self) -> ResumeContainment {
+        if self.broker.is_some() {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        let stored_pid = self
+            .process_binding
+            .as_ref()
+            .map(|binding| binding.pid)
+            .unwrap_or(0)
+            != 0
+            || self.close_snapshot_pid.is_some();
+        let vacuous = !self.spawned
+            && self.child.is_none()
+            && self.broker.is_none()
+            && self.process_binding.is_none()
+            && !stored_pid
+            && self.resume_proof_snapshot.is_none();
+        if vacuous {
+            return ResumeContainment::Vacuous;
+        }
+        if self.spawned && self.child.is_none() && !self.resume_root_wait_succeeded {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        // A post-send snapshot does not prove a spawn failure. A post-death
+        // empty snapshot was not stored. None does not authorize.
+        if self.resume_proof_is_post_send || !self.resume_proof_authorizes {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
+        self.resume_failure_is_verification = false;
+        self.attempt_stored_proof()
+    }
+
 
     fn drain_until_session(
         &mut self,
@@ -5908,8 +6312,12 @@ impl ClaudeStreamProcess {
         attempt_id: &str,
         value: &Value,
     ) -> Option<AgentEventEnvelope> {
-        let content = value.pointer("/message/content")?.as_array()?;
-        for block in content {
+        let content = value.pointer("/message/content")?.as_array()?.clone();
+        // Walk every tool_result. Do not return from inside the loop. A None
+        // envelope does not stop later accounting. Earlier envelopes are queued
+        // on pending_out; the last is returned so frame order is preserved.
+        let mut last_envelope = None;
+        for block in &content {
             if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
             }
@@ -5931,6 +6339,7 @@ impl ClaudeStreamProcess {
                 .pending_stop
                 .as_ref()
                 .is_some_and(|stop| stop.denied_pending_tool_use_ids.contains(&tool_use_id));
+            let mut produced = None;
             if let Some(record) = self.mutating_tools.get(&tool_use_id).cloned() {
                 match record.decision {
                     MutatingToolDecision::Pending => {
@@ -5939,24 +6348,35 @@ impl ClaudeStreamProcess {
                             "mutating Claude tool ran without a host Decision",
                         );
                         self.sequence += 1;
-                        return self.fail_open_envelope(attempt_id);
+                        produced = self.fail_open_envelope(attempt_id);
                     }
-                    MutatingToolDecision::Denied if denied_by_current_stop => {}
+                    MutatingToolDecision::Denied if denied_by_current_stop => {
+                        // Stop-denied clean result: do not fail-open this block
+                        // and do not skip a later block.
+                        self.sequence += 1;
+                        produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
+                    }
                     MutatingToolDecision::Denied => match self.denied_effect(&record) {
                         DeniedEffect::FailOpen => {
                             self.note_fail_open(false, "denied tool still changed the workspace");
                             self.sequence += 1;
-                            return self.fail_open_envelope(attempt_id);
+                            produced = self.fail_open_envelope(attempt_id);
                         }
                         DeniedEffect::Unknown => {
                             self.unknown_effect = true;
                             self.execution_ever_admitted = true;
                             self.sequence += 1;
-                            return self.unknown_effect_envelope(attempt_id);
+                            produced = self.unknown_effect_envelope(attempt_id);
                         }
-                        DeniedEffect::Clean => {}
+                        DeniedEffect::Clean => {
+                            self.sequence += 1;
+                            produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
+                        }
                     },
-                    MutatingToolDecision::Allowed => {}
+                    MutatingToolDecision::Allowed => {
+                        self.sequence += 1;
+                        produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
+                    }
                 }
             } else if let Some(sample) = self.unrequested_bash.get(&tool_use_id).cloned() {
                 // A tool_result for a Bash that never went through a host
@@ -5964,36 +6384,54 @@ impl ClaudeStreamProcess {
                 // effect.
                 self.admit_execution();
                 match self.unrequested_bash_effect(sample.as_ref()) {
-                    UnrequestedBashEffect::Complete => {}
+                    UnrequestedBashEffect::Complete => {
+                        self.sequence += 1;
+                        produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
+                    }
                     UnrequestedBashEffect::FailOpen => {
                         self.note_fail_open(
                             true,
                             "mutating Claude tool ran without a host Decision",
                         );
                         self.sequence += 1;
-                        return self.fail_open_envelope(attempt_id);
+                        produced = self.fail_open_envelope(attempt_id);
                     }
                     UnrequestedBashEffect::Unknown => {
                         self.unknown_effect = true;
                         self.execution_ever_admitted = true;
                         self.sequence += 1;
-                        return self.unknown_effect_envelope(attempt_id);
+                        produced = self.unknown_effect_envelope(attempt_id);
                     }
                 }
+            } else {
+                self.sequence += 1;
+                produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
             }
-            self.sequence += 1;
-            return self.envelope(
-                attempt_id,
-                AgentEventType::ToolActivity,
-                self.activity_payload(&tool_use_id, "tool_result", "completed", Some(block)),
-                if tool_use_id.is_empty() {
-                    None
-                } else {
-                    Some(format!("claude-ref:{}", sha256_hex(tool_use_id.as_bytes())))
-                },
-            );
+            if let Some(envelope) = produced {
+                if let Some(previous) = last_envelope.replace(envelope) {
+                    self.pending_out.push(previous);
+                }
+            }
         }
-        None
+        last_envelope
+    }
+
+    fn completed_tool_result(
+        &mut self,
+        attempt_id: &str,
+        tool_use_id: &str,
+        block: &Value,
+    ) -> Option<AgentEventEnvelope> {
+        self.envelope(
+            attempt_id,
+            AgentEventType::ToolActivity,
+            self.activity_payload(tool_use_id, "tool_result", "completed", Some(block)),
+            if tool_use_id.is_empty() {
+                None
+            } else {
+                Some(format!("claude-ref:{}", sha256_hex(tool_use_id.as_bytes())))
+            },
+        )
     }
 
     fn note_host_decision_request(&mut self, tool_use_id: Option<&str>, input: &Value) {
@@ -6832,7 +7270,18 @@ impl ClaudeStreamProcess {
                 "Claude session close is not confirmed for the brokered launch".into(),
             ));
         }
-        let Some(mut child) = self.child.take() else {
+        if self.close_disarmed {
+            return Err(AdapterError::Connection(
+                "Claude session close will not signal a disarmed registration".into(),
+            ));
+        }
+        // A later close, after the root handle was waited, terminates only
+        // Alive records from the stored snapshot. It must not bare-pid kill
+        // the root. This is not the resume proof path.
+        if self.child.is_none() {
+            if let Some(records) = self.close_snapshot.clone() {
+                return self.contain_stored_close_snapshot(records);
+            }
             if self.spawned {
                 return Err(AdapterError::Connection(
                     "Claude session close could not confirm process exit: the child handle is gone"
@@ -6840,30 +7289,49 @@ impl ClaudeStreamProcess {
                 ));
             }
             return Ok(());
-        };
-        let pid = child.id();
-        // Snapshot descendants BEFORE killing: parent links hold while the
-        // CLI lives, so the set is complete even for detached children
-        // (merge-review P1 — close owns the process tree or refuses). A
-        // FAILED enumeration refuses the confirmed close outright: close
-        // must not claim containment it could not observe.
+        }
+        let pid = self.child.as_ref().map(|child| child.id()).ok_or_else(|| {
+            AdapterError::Connection(
+                "Claude session close could not confirm process exit: the child handle is gone"
+                    .into(),
+            )
+        })?;
+        // Snapshot before child.take() and before any signal. None leaves the
+        // handle installed and does not store a partial set.
         let descendants = crate::descendants::snapshot_descendants(pid);
+        let Some(records) = descendants else {
+            return Err(AdapterError::Connection(
+                "Claude session close could not observe the Runtime's process tree; close is not confirmed"
+                    .into(),
+            ));
+        };
+        self.close_snapshot = Some(records.clone());
+        self.close_snapshot_pid = Some(pid);
+        let Some(mut child) = self.child.take() else {
+            return Err(AdapterError::Connection(
+                "Claude session close could not confirm process exit: the child handle is gone"
+                    .into(),
+            ));
+        };
         let exited = match child.try_wait() {
             Ok(Some(_)) => Ok(()),
-            Ok(None) => {
-                if let Err(error) = child.kill() {
+            Ok(None) => match child.kill() {
+                Err(error) => {
                     self.child = Some(child);
                     Err(AdapterError::Connection(format!(
                         "Claude session close could not signal the process: {error}"
                     )))
-                } else {
-                    child.wait().map(|_| ()).map_err(|error| {
-                        AdapterError::Connection(format!(
-                            "Claude session close could not confirm process exit: {error}"
-                        ))
-                    })
                 }
-            }
+                Ok(()) => match child.wait() {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        self.child = Some(child);
+                        Err(AdapterError::Connection(format!(
+                            "Claude session close could not confirm process exit: {error}"
+                        )))
+                    }
+                },
+            },
             Err(error) => {
                 self.child = Some(child);
                 Err(AdapterError::Connection(format!(
@@ -6871,24 +7339,28 @@ impl ClaudeStreamProcess {
                 )))
             }
         };
-        exited?;
-        // Contain the tree: terminate identity-matched survivors, then verify.
-        // A refusal keeps the session open and close retryable.
-        let survivors = match descendants.as_ref() {
-            None => {
-                return Err(AdapterError::Connection(
-                    "Claude session close could not observe the Runtime's process tree; close is not confirmed"
-                        .into(),
-                ));
-            }
-            Some(records) => crate::descendants::terminate_descendants(records),
-        };
+        if let Err(error) = exited {
+            return Err(error);
+        }
+        self.contain_stored_close_snapshot(records)
+    }
+
+    fn contain_stored_close_snapshot(
+        &mut self,
+        records: Vec<crate::descendants::DescendantRecord>,
+    ) -> Result<(), AdapterError> {
+        // terminate_descendants signals only Alive records. It does not
+        // bare-pid kill the root.
+        let survivors = crate::descendants::terminate_descendants(&records);
         if survivors > 0 {
             return Err(AdapterError::Connection(format!(
                 "Claude session close could not confirm containment: {survivors} descendant(s) of the Runtime are still running"
             )));
         }
-        self.finish_confirmed_exit(pid)
+        if let Some(pid) = self.close_snapshot_pid {
+            self.finish_confirmed_exit(pid)?;
+        }
+        Ok(())
     }
 
     fn finish_confirmed_exit(&mut self, pid: u32) -> Result<(), AdapterError> {
@@ -6910,6 +7382,13 @@ impl ClaudeStreamProcess {
     }
 
     fn close(&mut self) -> Result<(), AdapterError> {
+        if self.close_disarmed {
+            // Proven detach already set this. Do not signal the child, the
+            // root pid, or the broker.
+            self.stdin = None;
+            self.stdout = None;
+            return Ok(());
+        }
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
@@ -9440,5 +9919,292 @@ mod pr24_p1_confirm_tests {
             &shape_result(json!([{ "tool_use_id": "other" }])),
             &denied(&["a"]),
         ));
+    }
+}
+
+#[cfg(test)]
+mod resume_proof_and_tool_result_tests {
+    use super::*;
+    use crate::descendants::{DescendantRecord, DescendantState};
+
+    fn facts(kind: ResumeFailureKind) -> ResumeProofFacts {
+        ResumeProofFacts {
+            kind,
+            registration_present: true,
+            spawned: true,
+            child_present: true,
+            broker_present: false,
+            binding_present: true,
+            stored_pid: true,
+            stored_snapshot: true,
+            snapshot_authorizes: true,
+            root_wait_succeeded: true,
+            descendant_alive_or_unknown: false,
+            spawn_error_before_spawned: false,
+        }
+    }
+
+    #[test]
+    fn pre_send_snapshot_does_not_authorize_a_verification_marker() {
+        let mut proof = facts(ResumeFailureKind::Verification);
+        proof.snapshot_authorizes = false;
+        assert!(!authorize_resume_marker(&proof));
+    }
+
+    #[test]
+    fn snapshot_none_does_not_signal_and_does_not_authorize_a_marker() {
+        let mut proof = facts(ResumeFailureKind::Verification);
+        proof.snapshot_authorizes = false;
+        proof.stored_snapshot = false;
+        assert!(!authorize_resume_marker(&proof));
+        let mut signalled = Vec::new();
+        let survivor = signal_captured_if_alive(
+            None,
+            |_| DescendantState::Alive,
+            |record| signalled.push(record.pid),
+        );
+        assert!(survivor);
+        assert!(signalled.is_empty(), "None must not reach the signaller");
+    }
+
+    #[test]
+    fn unknown_does_not_reach_the_resume_signaller() {
+        let records = [DescendantRecord {
+            pid: 9,
+            start_tick: "u".into(),
+        }];
+        let mut signalled = Vec::new();
+        let survivor = signal_captured_if_alive(
+            Some(&records),
+            |_| DescendantState::Unknown,
+            |record| signalled.push(record.pid),
+        );
+        assert!(survivor);
+        assert!(signalled.is_empty());
+        let mut proof = facts(ResumeFailureKind::Verification);
+        proof.descendant_alive_or_unknown = true;
+        assert!(!authorize_resume_marker(&proof));
+    }
+
+    #[test]
+    fn spawned_true_with_no_child_is_not_vacuous() {
+        let mut proof = facts(ResumeFailureKind::Spawn);
+        proof.spawned = true;
+        proof.child_present = false;
+        proof.root_wait_succeeded = false;
+        proof.snapshot_authorizes = false;
+        proof.stored_snapshot = false;
+        proof.spawn_error_before_spawned = true;
+        assert!(!authorize_resume_marker(&proof));
+    }
+
+    #[test]
+    fn missing_registration_is_not_vacuous() {
+        let mut proof = facts(ResumeFailureKind::Spawn);
+        proof.registration_present = false;
+        proof.spawned = false;
+        proof.child_present = false;
+        proof.binding_present = false;
+        proof.stored_pid = false;
+        proof.stored_snapshot = false;
+        proof.spawn_error_before_spawned = true;
+        assert!(!authorize_resume_marker(&proof));
+    }
+
+    #[test]
+    fn a_true_spawn_error_before_spawned_is_vacuous() {
+        let mut proof = facts(ResumeFailureKind::Spawn);
+        proof.spawned = false;
+        proof.child_present = false;
+        proof.binding_present = false;
+        proof.stored_pid = false;
+        proof.stored_snapshot = false;
+        proof.snapshot_authorizes = false;
+        proof.root_wait_succeeded = false;
+        proof.spawn_error_before_spawned = true;
+        assert!(authorize_resume_marker(&proof));
+    }
+
+    fn tool_process(with_binding: bool) -> ClaudeStreamProcess {
+        let mut process = ClaudeStreamProcess::new(
+            PathBuf::from("claude"),
+            "test".into(),
+            PathBuf::from("."),
+        );
+        process.attempt_id = Some("attempt-tools".into());
+        if with_binding {
+            process.process_binding = Some(RuntimeProcessBinding {
+                process_epoch: "runtime-epoch:abc".into(),
+                pid: 1,
+                parent_pid: 1,
+                creation_date: "date".into(),
+                executable_path: "claude".into(),
+                executable_sha256: "abc".into(),
+            });
+        }
+        process
+    }
+
+    fn tool_frame(blocks: Value) -> Value {
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": blocks }
+        })
+    }
+
+    #[test]
+    fn every_tool_result_is_accounted_and_a_pending_write_fails_after_completion() {
+        let mut process = tool_process(true);
+        process.mutating_tools.insert(
+            "write-1".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        let frame = tool_frame(json!([
+            { "type": "tool_result", "tool_use_id": "read-1", "content": "ok" },
+            { "type": "tool_result", "tool_use_id": "write-1", "content": "wrote" }
+        ]));
+        let last = process.map_user_tool_result("attempt-tools", &frame);
+        let queued = process.pending_out.clone();
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(queued[0].event_type, AgentEventType::ToolActivity);
+        assert_eq!(queued[0].payload["status"], "completed");
+        let last = last.expect("pending write returns TurnFailed");
+        assert_eq!(last.event_type, AgentEventType::TurnFailed);
+        assert_eq!(last.payload["fail_open"], true);
+        assert!(process.fail_open);
+        assert!(process.execution_ever_admitted);
+        let journal = process.take_mapped("attempt-tools", &frame);
+        let positions: Vec<_> = journal
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event_type,
+                    AgentEventType::ToolActivity | AgentEventType::TurnFailed
+                )
+            })
+            .map(|event| event.event_type)
+            .collect();
+        // take_mapped was called after map_user_tool_result already consumed the
+        // frame's accounting into pending_out, which take_mapped then drains.
+        // Re-run on a fresh process so journal order is the mapped order.
+        let _ = positions;
+        let mut fresh = tool_process(true);
+        fresh.mutating_tools.insert(
+            "write-1".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        let journal = fresh.take_mapped("attempt-tools", &frame);
+        let interesting: Vec<_> = journal
+            .iter()
+            .filter(|event| {
+                event.event_type == AgentEventType::ToolActivity
+                    || event.event_type == AgentEventType::TurnFailed
+            })
+            .collect();
+        assert!(
+            interesting.len() >= 2,
+            "both blocks must journal: {journal:?}"
+        );
+        let tool_at = interesting
+            .iter()
+            .position(|event| event.event_type == AgentEventType::ToolActivity)
+            .unwrap();
+        let fail_at = interesting
+            .iter()
+            .position(|event| event.event_type == AgentEventType::TurnFailed)
+            .unwrap();
+        assert!(tool_at < fail_at, "ToolActivity completed must precede TurnFailed: {journal:?}");
+        assert_eq!(interesting[fail_at].payload["fail_open"], true);
+        assert!(fresh.execution_ever_admitted);
+    }
+
+    #[test]
+    fn an_earlier_none_envelope_does_not_stop_later_tool_result_accounting() {
+        let mut process = tool_process(false);
+        process.mutating_tools.insert(
+            "write-1".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        let frame = tool_frame(json!([
+            { "type": "tool_result", "tool_use_id": "read-1", "content": "ok" },
+            { "type": "tool_result", "tool_use_id": "write-1", "content": "wrote" }
+        ]));
+        let last = process.map_user_tool_result("attempt-tools", &frame);
+        assert!(last.is_none(), "no process binding means no envelope");
+        assert!(process.fail_open, "the later Pending Write must still be accounted");
+        assert!(process.execution_ever_admitted);
+    }
+
+    #[test]
+    fn a_stop_denied_clean_result_does_not_fail_open_or_skip_a_later_block() {
+        let mut process = tool_process(true);
+        process.pending_stop = Some(ClaudeStopRequest {
+            request_id: "stop".into(),
+            operation_id: "op".into(),
+            input_uuid: None,
+            requested_ns: 0,
+            send_succeeded: true,
+            raw_receipt: None,
+            raw_result: None,
+            requested_at: Instant::now(),
+            attempt_id: "attempt-tools".into(),
+            session_id: None,
+            turn_epoch: 1,
+            process_epoch: "epoch".into(),
+            pid: 1,
+            creation_date: "date".into(),
+            executable_path: "claude".into(),
+            executable_sha256: "abc".into(),
+            disposition: ClaudeStopDisposition::Pending,
+            signal_attempted: false,
+            signal_count: 0,
+            signal_sent: false,
+            exact_child_alive_at_deadline: None,
+            post_stop_activity: false,
+            result_seen: false,
+            result_stop_reason: None,
+            result_subtype: None,
+            reason: None,
+            terminal_emitted: false,
+            denied_pending_tool_use_ids: vec!["write-denied".into()],
+            descendants: Some(vec![]),
+        });
+        process.mutating_tools.insert(
+            "write-denied".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Denied,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        process.mutating_tools.insert(
+            "write-later".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        let frame = tool_frame(json!([
+            { "type": "tool_result", "tool_use_id": "write-denied", "content": "denied" },
+            { "type": "tool_result", "tool_use_id": "write-later", "content": "wrote" }
+        ]));
+        let last = process.map_user_tool_result("attempt-tools", &frame).unwrap();
+        assert_eq!(process.pending_out[0].event_type, AgentEventType::ToolActivity);
+        assert_ne!(process.pending_out[0].event_type, AgentEventType::TurnFailed);
+        assert_eq!(last.event_type, AgentEventType::TurnFailed);
+        assert_eq!(last.payload["fail_open"], true);
     }
 }
