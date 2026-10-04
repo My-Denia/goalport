@@ -45,7 +45,27 @@ The window shows this as **Blocked work**. From there you can:
 - **Re-check now.** A read-only observation of the bound Runtime, leases and pending outbox. It can report that the Runtime is live, not running, or that no observation was possible. It never concludes that residual work stopped.
 - **Continue in a new isolated workspace.** Starts a new Campaign, Task and Attempt with a new native session, in a workspace proven not to overlap the held one. It carries over the goal and acceptance text.
 
-Releasing the original workspace is **not implemented** in this RC. Held responsibility stays held. See the [runtime support matrix](reference/runtime-support-matrix.md) for the contract and its evidence.
+Held responsibility is released only by evidence, never by elapsed time or by
+the Runtime process disappearing from view:
+
+- **Confirmed cancel + quiet workspace.** When the native turn confirmed the
+  interrupt, Core releases once the workspace is observably quiet: no other
+  process has it as its working directory, and two workspace fingerprints
+  taken at least a second apart are equal.
+- **Unconfirmed Stop, nothing ever admitted.** A Stop whose interruption was
+  never confirmed releases only when all three legs hold together: the exact
+  bound Runtime identity recorded at Stop time is observed not running; the
+  durable admission ledger proves no tool execution was ever admitted during
+  that process binding (no host Allow, no ungated Bash result, no fail-open);
+  and the workspace is quiet as above. Any missing leg keeps the hold. A hold
+  whose Stop predates the admission ledger, or whose ledger records admitted
+  execution, stays held -- for those, the isolated-workspace continuation
+  remains the escape.
+
+Residual execution is still never concluded to be "quiescent": a re-check
+reports observations, and the release rules above are the only paths that
+drop a hold. See the [runtime support matrix](reference/runtime-support-matrix.md)
+for the contract and its evidence.
 
 ## Core restart
 
