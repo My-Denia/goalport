@@ -1446,7 +1446,20 @@ impl RuntimeManager {
             return ResumeContainment::Incomplete;
         };
         let outcome = process.classify_spawn_containment();
-        process.resume_verification_outcome = None;
+        if matches!(
+            outcome,
+            ResumeContainment::Proven | ResumeContainment::Vacuous
+        ) {
+            // Remember the proof before the caller journals it. A failed
+            // journal must not drop the registration, and the next resume
+            // retries the marker without spawning. A crash before the
+            // journal still has no marker and must not spawn.
+            process.resume_failure_is_verification = false;
+            process.resume_verification_outcome = Some(outcome);
+            process.latch_resume_hold();
+        } else {
+            process.resume_verification_outcome = None;
+        }
         outcome
     }
 
