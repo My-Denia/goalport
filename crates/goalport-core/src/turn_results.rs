@@ -9,7 +9,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::Path,
@@ -688,6 +688,120 @@ fn file_json(entry: &Fingerprint, change: &str) -> Value {
 struct StatusRead {
     entries: Vec<Fingerprint>,
     truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceEntry {
+    pub path: String,
+    pub area: String,
+    pub status: String,
+    pub content_hash: Option<String>,
+    pub content_inspection: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceSample {
+    pub entries: Vec<WorkspaceEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceDelta {
+    Equal,
+    Changed,
+    Unknown,
+}
+
+pub(crate) fn sample_workspace_entries(workspace: &Path) -> Option<WorkspaceSample> {
+    let read = read_fingerprints(workspace)?;
+    let mut entries = read
+        .entries
+        .into_iter()
+        .map(|entry| WorkspaceEntry {
+            path: entry.path,
+            area: entry.area,
+            status: entry.status,
+            content_hash: entry.content_hash,
+            content_inspection: entry.content_inspection,
+        })
+        .collect::<Vec<_>>();
+    for entry in &mut entries {
+        if entry.content_hash.is_none() && entry.content_inspection == "binary" {
+            entry.content_hash = hash_binary_for_effect(workspace, &entry.path);
+        }
+    }
+    Some(WorkspaceSample {
+        truncated: read.truncated,
+        entries,
+    })
+}
+
+/// Path appearance, disappearance, or a different area, status, or content hash
+/// is a change. A still-present path with no content hash, or a truncated
+/// sample, is unknown. An unchanged dirty file is equal.
+pub(crate) fn compare_workspace_samples(
+    before: &WorkspaceSample,
+    after: &WorkspaceSample,
+) -> WorkspaceDelta {
+    if before.truncated || after.truncated {
+        return WorkspaceDelta::Unknown;
+    }
+    let before_map = before
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let after_map = after
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut paths = BTreeSet::new();
+    paths.extend(before_map.keys().copied());
+    paths.extend(after_map.keys().copied());
+    let mut changed = false;
+    let mut unknown = false;
+    for path in paths {
+        match (before_map.get(path), after_map.get(path)) {
+            (Some(left), Some(right)) => {
+                if left.area != right.area || left.status != right.status {
+                    changed = true;
+                    continue;
+                }
+                if left.content_inspection == "not-applicable"
+                    && right.content_inspection == "not-applicable"
+                {
+                    continue;
+                }
+                match (&left.content_hash, &right.content_hash) {
+                    (Some(earlier), Some(later)) if earlier == later => {}
+                    (Some(_), Some(_)) => changed = true,
+                    _ => unknown = true,
+                }
+            }
+            _ => changed = true,
+        }
+    }
+    if changed {
+        WorkspaceDelta::Changed
+    } else if unknown {
+        WorkspaceDelta::Unknown
+    } else {
+        WorkspaceDelta::Equal
+    }
+}
+
+fn hash_binary_for_effect(workspace: &Path, path: &str) -> Option<String> {
+    if path.starts_with('/') || path.split(['/', '\\']).any(|part| part == "..") {
+        return None;
+    }
+    let full = workspace.join(path);
+    let meta = fs::metadata(&full).ok()?;
+    if !meta.is_file() || meta.len() > CONTENT_LIMIT {
+        return None;
+    }
+    let bytes = fs::read(&full).ok()?;
+    Some(sha256_hex(&bytes))
 }
 
 fn read_fingerprints(workspace: &Path) -> Option<StatusRead> {

@@ -535,7 +535,6 @@ fn describe_turn(
         turn.actions.push("stop".into());
     }
     if session.state == "attached"
-        && context.attempt.provider != "claude"
         && matches!(turn.state.as_str(), "idle" | "completed" | "failed" | "stopped")
     {
         turn.actions.push("close-session".into());
@@ -566,17 +565,33 @@ fn describe_turn(
             && exited
             && settled
             && no_unsettled_effect
-            && context.attempt.provider != "claude"
         {
             turn.reason_code = Some("provider-exited".into());
             turn.reason = Some("The Runtime process ended. Close this session before starting new work; its history remains here.".into());
             "close-session"
         } else if turn.state == "uncertain" {
             "diagnose"
+        } else if session.state == "closed"
+            && context.attempt.state == AttemptState::Closed
+            && context.attempt.provider.eq_ignore_ascii_case("claude")
+            && session.native_id_known
+            && settled
+            && no_unsettled_effect
+            && store
+                .attempts_for_task(&context.attempt.task_id)
+                .map_err(|error| error.to_string())?
+                .last()
+                .is_some_and(|latest| latest.id == context.attempt.id)
+        {
+            turn.reason_code = Some("session-closed".into());
+            turn.reason = Some(
+                "Resume this session to continue. Earlier messages will not be sent again."
+                    .into(),
+            );
+            "resume-session"
         } else if !retained
             && session.native_id_known
             && !context.attempt.state.is_terminal()
-            && !context.attempt.provider.eq_ignore_ascii_case("claude")
             && settled
             && no_unsettled_effect
         {
@@ -854,6 +869,36 @@ fn project_turn(
         });
     }
     // 5. Terminal attempt states.
+    // A pending closed-session resume successor sits between spawn and its
+    // first send: the real CLI reports the session id only after that first
+    // message, so the composer must offer exactly that send. Every other
+    // Queued attempt keeps the admission reason below.
+    if attempt.state == AttemptState::Queued
+        && attempt.provider.eq_ignore_ascii_case("claude")
+        && runtime.state == "selected"
+        && runtime_manager.registered_binding(&attempt.id).is_some()
+        && runtime_manager.registration_live(&attempt.id) == Some(true)
+        && store
+            .list_event_records(&attempt.id, 0)
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|record| {
+                record.event.kind == "attempt.created"
+                    && record
+                        .payload
+                        .as_ref()
+                        .is_some_and(|payload| payload.get("rolledFrom").is_some())
+            })
+    {
+        return Ok(ProductTurn {
+            reason_code: None,
+            actions: Vec::new(),
+            state: "idle".into(),
+            can_stop: false,
+            can_send: true,
+            reason: None,
+        });
+    }
     let terminal = match attempt.state {
         AttemptState::Cancelled => Some(("stopped", None)),
         AttemptState::Failed => Some(("failed", None)),

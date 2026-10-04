@@ -2,7 +2,7 @@
 // Speaks the live 2.1.259 host-permission frames from
 // goal-runs/goalport-claude-native-control-admission/evidence/phase0/stream-json-probe-stdio.
 import { createInterface } from "node:readline";
-import { writeFileSync, readFileSync, mkdirSync, renameSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, renameSync, closeSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -17,11 +17,21 @@ function scenarioName() {
 
 const scenario = scenarioName();
 const argv = process.argv.slice(2);
+function resumeArg() {
+  const index = argv.indexOf("--resume");
+  if (index < 0) return null;
+  const value = argv[index + 1];
+  return value && !value.startsWith("-") ? value : null;
+}
+const requestedResume = resumeArg();
 // Frame the fixture emits when a console control event reaches its handler.
 // It is fixture output on the provider stream, not a broker acknowledgement:
 // the broker's channel is a separate private pipe this process cannot reach.
 const STOP_ACK_FRAME = "_goalport/fixture_stop_ack";
-const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+let sessionId = requestedResume || "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+if (scenario === "resume_mismatch" && requestedResume) {
+  sessionId = "bbbbbbbb-bbbb-4ccc-8ddd-ffffffffffff";
+}
 const nativePermissionId = "11111111-2222-4333-8444-555555555555";
 const toolUseId = "toolu_fake_edit_1";
 const writeTarget = resolve(process.cwd(), "notes/fixture-allow.txt");
@@ -38,7 +48,7 @@ let currentNativePermissionId = nativePermissionId;
 
 writeFileSync(
   resolve(process.cwd(), ".fake-claude-argv.json"),
-  `${JSON.stringify({ argv, scenario, cwd: process.cwd() }, null, 2)}\n`
+  `${JSON.stringify({ argv, scenario, cwd: process.cwd(), pid: process.pid }, null, 2)}\n`
 );
 
 function send(obj) {
@@ -46,6 +56,7 @@ function send(obj) {
 }
 
 function emitInit() {
+  writeFileSync(resolve(process.cwd(), ".fake-claude-session-id"), sessionId);
   send({
     type: "system",
     subtype: "init",
@@ -82,6 +93,7 @@ function emitToolUse(name, id, input) {
 function emitToolResult(id, content, extra = {}) {
   const block = { type: "tool_result", tool_use_id: id, content };
   if (extra.is_error) block.is_error = true;
+  if (Number.isInteger(extra.exitCode)) block.exitCode = extra.exitCode;
   send({
     type: "user",
     message: {
@@ -175,6 +187,23 @@ function handlePermissionResponse(obj) {
   waitingPermission = false;
   permissionAnswered = true;
   if (body.behavior === "allow") {
+    if (scenario === "native_stop_after_allow") {
+      emitToolResult(toolUseId, "probe output");
+      emitText("WORKING_AFTER_ALLOW");
+      waitingInterrupt = true;
+      return;
+    }
+    if (scenario === "allow_then_unconfirmed_stop" && userCount === 1) {
+      emitToolResult(toolUseId, "probe output");
+      emitText("ALLOWED_ONCE");
+      emitResult("end_turn", { result: "ALLOWED_ONCE" });
+      return;
+    }
+    if (scenario === "two_permissions" && nativePermissionSeq === 1) {
+      emitText("BETWEEN_PERMISSIONS");
+      emitCanUseTool("Read", { file_path: "README.md" });
+      return;
+    }
     if (body.updatedInput == null) {
       emitText("FAIL_NULL_UPDATED_INPUT");
       emitResult("error", { is_error: true, result: "updatedInput was null" });
@@ -210,10 +239,32 @@ function handlePermissionResponse(obj) {
     emitToolResult(toolUseId, "Write denied by interrupt", { is_error: true });
     return;
   }
+  if (scenario === "native_stop_pending_permission"
+    || scenario === "native_stop_denial_no_id") {
+    // The Stop's deny lands while the decision is pending; the denied tool
+    // never runs. Real Claude still answers the rejection with a tool_result
+    // for the rejected tool before the interrupt result ends the turn.
+    emitToolResult(toolUseId, "Permission denied by stop", { is_error: true });
+    return;
+  }
   if (scenario === "unknown_path") {
     emitToolResult(toolUseId, "User rejected Bash permission", { is_error: true });
     emitText("DENIED");
     emitResult("end_turn", { result: "DENIED_UNKNOWN_PATH" });
+    return;
+  }
+  if (scenario === "deny_bash_no_path") {
+    emitToolResult(toolUseId, "User rejected Bash permission", { is_error: true });
+    emitText("DENIED");
+    emitResult("end_turn", { result: "DENIED_BASH_NO_PATH" });
+    return;
+  }
+  if (scenario === "deny_bash_writes") {
+    mkdirSync(resolve(process.cwd(), "notes"), { recursive: true });
+    writeFileSync(resolve(process.cwd(), "notes/denied-write.txt"), "DENIED_BUT_WROTE\n");
+    emitToolResult(toolUseId, "wrote after deny");
+    emitText("DENIED_BUT_WROTE");
+    emitResult("end_turn", { result: "DENIED_BUT_WROTE" });
     return;
   }
   emitText("DENIED");
@@ -225,7 +276,10 @@ function beginTurn() {
   if (userCount === 1) {
     emitInit();
   }
-  if (scenario.startsWith("native_stop_")) {
+  if (scenario.startsWith("native_stop_")
+    && scenario !== "native_stop_pending_permission"
+    && scenario !== "native_stop_denial_no_id"
+    && scenario !== "native_stop_after_allow") {
     emitToolUse("Read", "toolu_native_stop_read", {file_path: "README.md"});
     emitToolResult("toolu_native_stop_read", "before Stop");
     emitText("working");
@@ -233,6 +287,21 @@ function beginTurn() {
     return;
   }
   switch (scenario) {
+    case "two_permissions":
+      emitText("BEFORE_FIRST_PERMISSION");
+      emitCanUseTool();
+      return;
+    case "permission_close_stdin":
+      emitText("BEFORE_CLOSED_STDIN");
+      emitCanUseTool();
+      closeSync(0);
+      return;
+    case "permission_then_exit":
+      emitText("BEFORE_EOF");
+      emitCanUseTool();
+      persistStdin();
+      process.exit(0);
+      return;
     case "permission":
     case "allow_once":
     case "deny":
@@ -261,6 +330,62 @@ function beginTurn() {
       emitToolUse("Bash", toolUseId, { command: "echo GOALPORT_UNKNOWN_PATH" });
       emitCanUseTool("Bash", { command: "echo GOALPORT_UNKNOWN_PATH" });
       return;
+    case "deny_bash_no_path":
+      emitToolUse("Bash", toolUseId, { command: "ls" });
+      emitCanUseTool("Bash", { command: "ls" });
+      return;
+    case "deny_bash_writes":
+      emitToolUse("Bash", toolUseId, { command: "printf mutated" });
+      emitCanUseTool("Bash", { command: "printf mutated" });
+      return;
+    case "approved_bash":
+      emitToolUse("Bash", toolUseId, { command: "pytest -q", cwd: process.cwd() });
+      emitCanUseTool("Bash", { command: "pytest -q", cwd: process.cwd() });
+      return;
+    case "readonly_bash":
+      emitToolUse("Bash", toolUseId, { command: "ls notes", cwd: process.cwd() });
+      emitToolResult(toolUseId, "notes\n");
+      emitText("LISTED");
+      emitResult("end_turn", { result: "LISTED" });
+      return;
+    case "bash_exit_fact":
+      emitToolUse("Bash", toolUseId, { command: "pytest -q", cwd: process.cwd() });
+      emitToolResult(toolUseId, "1 passed\n", { exitCode: 0 });
+      emitResult("end_turn", { result: "1 passed" });
+      return;
+    case "bash_rewrites_binary": {
+      emitToolUse("Bash", toolUseId, { command: "printf binary" });
+      const marker = resolve(process.cwd(), ".fake-claude-continue");
+      const deadline = Date.now() + 5000;
+      while (!existsSync(marker)) {
+        if (Date.now() > deadline) {
+          emitResult("error", { is_error: true, result: "continue marker missing" });
+          return;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+      writeFileSync(resolve(process.cwd(), "cache.bin"), Buffer.from([0, 1, 2, 3]));
+      emitToolResult(toolUseId, "rewrote cache");
+      emitResult("end_turn", { result: "REWROTE" });
+      return;
+    }
+    case "bash_writes_without_permission": {
+      emitToolUse("Bash", toolUseId, { command: "printf mutated" });
+      const marker = resolve(process.cwd(), ".fake-claude-continue");
+      const deadline = Date.now() + 5000;
+      while (!existsSync(marker)) {
+        if (Date.now() > deadline) {
+          emitResult("error", { is_error: true, result: "continue marker missing" });
+          return;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      }
+      mkdirSync(resolve(process.cwd(), "notes"), { recursive: true });
+      writeFileSync(resolve(process.cwd(), "notes/mutated.txt"), "mutated\n");
+      emitToolResult(toolUseId, "wrote mutated");
+      emitResult("end_turn", { result: "WROTE" });
+      return;
+    }
     case "interrupt":
     case "interrupt_eof":
     case "interrupt_error":
@@ -269,6 +394,23 @@ function beginTurn() {
       emitToolUse("Read", "toolu_fake_read_1", { file_path: "README.md" });
       emitToolResult("toolu_fake_read_1", "fixture");
       emitText("working");
+      waitingInterrupt = true;
+      return;
+    // Real claude 2.1.288 (live-fix-9): a Stop landing on a pending
+    // can_use_tool gets the permission denied by GoalPort, then the turn ends
+    // aborted_tools with that tool reported in permission_denials.
+    case "native_stop_pending_permission":
+    // Same shape, but the result reports a denial entry with NO tool_use_id:
+    // it must not match the stop-time denied set and must fail closed.
+    case "native_stop_denial_no_id":
+      emitToolUse("Bash", toolUseId, {
+        command: "bash -c 'while true; do date >> tick.txt; sleep 0.5; done'",
+        timeout: 600000
+      });
+      emitCanUseTool("Bash", {
+        command: "bash -c 'while true; do date >> tick.txt; sleep 0.5; done'",
+        timeout: 600000
+      });
       waitingInterrupt = true;
       return;
     case "interrupt_mutating":
@@ -280,6 +422,34 @@ function beginTurn() {
         file_path: writeTarget,
         contents: "PROBE_WRITE_OK\n"
       });
+      waitingInterrupt = true;
+      return;
+    // Turn 1: a Bash permission is ALLOWED by the host and runs; the turn
+    // stays in flight until a Stop arrives, which the fixture answers with
+    // the confirmed native_stop shape and NO denials (the allowed tool is
+    // not a denial). Models: Allow, then active-tool Stop.
+    case "native_stop_after_allow":
+      if (userCount === 1) {
+        emitText("ASKING_FOR_BASH");
+        emitCanUseTool("Bash", { command: "echo probe", cwd: process.cwd() });
+        return;
+      }
+      emitText("GOALPORT_FAKE_CLAUDE_OK");
+      emitResult("end_turn", { result: "GOALPORT_FAKE_CLAUDE_OK" });
+      return;
+    // Turn 1: an allowed Bash runs and the turn completes (the sticky
+    // admission latch is set). Turn 2: activity, and the Stop makes the
+    // process EXIT with no receipt and no result: an unconfirmed Stop with
+    // execution that WAS admitted earlier in the process binding.
+    case "allow_then_unconfirmed_stop":
+      if (userCount === 1) {
+        emitText("ASKING_FOR_BASH");
+        emitCanUseTool("Bash", { command: "echo probe", cwd: process.cwd() });
+        return;
+      }
+      emitToolUse("Read", "toolu_fake_read_1", { file_path: "README.md" });
+      emitToolResult("toolu_fake_read_1", "fixture");
+      emitText("working");
       waitingInterrupt = true;
       return;
     // AC6c console-topology target. The turn stays genuinely in flight with no
@@ -425,18 +595,22 @@ rl.on("line", (line) => {
   }
   stdinLog.push(obj);
   persistStdin();
-  if (obj.type === "control_request" && obj.request?.subtype === "initialize") {
-    initializeSeen = true;
-    send({
-      type: "control_response",
-      response: {
-        subtype: "success",
-        request_id: obj.request_id,
-        response: { commands: [], pid: process.pid }
-      }
-    });
-    return;
-  }
+    if (obj.type === "control_request" && obj.request?.subtype === "initialize") {
+      initializeSeen = true;
+      send({
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: obj.request_id,
+          response: { commands: [], pid: process.pid }
+        }
+      });
+      // Real claude 2.1.288 emits system/init only after the first user
+      // message, on fresh starts and on --resume alike (probes A/C in
+      // goal-runs/claude-native-session/evidence/resume-probe/). beginTurn's
+      // first-user-message emitInit models that for every path.
+      return;
+    }
   if (obj.type === "control_request" && obj.request?.subtype === "interrupt") {
     interruptSeen = true;
     waitingInterrupt = false;
@@ -448,6 +622,8 @@ rl.on("line", (line) => {
       if (scenario === "native_stop_foreign") result.user_message_uuids=[randomUUID()];
       if (scenario === "native_stop_missing") delete result.user_message_uuid;
       if (scenario === "native_stop_denial") result.permission_denials=[{tool_use_id:"other-denied-tool"}];
+      if (scenario === "native_stop_pending_permission") result.permission_denials=[{tool_name:"Bash", tool_use_id:toolUseId, tool_input:{command:"tick"}}];
+      if (scenario === "native_stop_denial_no_id") result.permission_denials=[{tool_name:"Bash", tool_input:{command:"tick"}}];
       if (scenario === "native_stop_error") {result.terminal_reason="api_error";result.subtype="success";result.api_error_status=404;}
       if (scenario === "native_stop_normal") {result.terminal_reason="completed";result.subtype="success";result.is_error=false;}
       if (scenario === "native_stop_origin") result.origin={kind:"background_task"};
@@ -463,7 +639,7 @@ rl.on("line", (line) => {
       }
       return;
     }
-    if (scenario === "interrupt_eof") {
+    if (scenario === "interrupt_eof" || scenario === "allow_then_unconfirmed_stop") {
       persistStdin();
       process.exit(0);
       return;
