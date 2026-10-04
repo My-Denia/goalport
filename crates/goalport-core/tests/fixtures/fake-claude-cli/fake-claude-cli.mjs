@@ -295,7 +295,7 @@ function beginTurn() {
     const child = spawn("python3", ["-c", "import time\nstatus=open('/proc/self/status').read()\nhost=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0]\nopen('.fake-claude-descendant.pid','w').write(host)\ntime.sleep(300)"], { cwd: process.cwd(), stdio: "ignore" });
     child.unref();
     const marker = resolve(process.cwd(), ".fake-claude-descendant.pid");
-    for (let i = 0; i < 50 && !existsSync(marker); i += 1) {
+    for (let i = 0; i < 250 && !existsSync(marker); i += 1) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }

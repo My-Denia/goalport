@@ -206,9 +206,16 @@ fn linux_spawn(
     cwd: &Path,
     env_remove: &[&str],
 ) -> io::Result<ContainedSpawn> {
-    let (stdin_read, stdin_write) = pipe()?;
-    let (stdout_read, stdout_write) = pipe()?;
-    let (sync_read, sync_write) = pipe()?;
+    // Closed on every early return, including clone and uid-map failure.
+    let (stdin_r, stdin_w) = pipe()?;
+    let mut stdin_read = FdGuard::new(stdin_r);
+    let mut stdin_write = FdGuard::new(stdin_w);
+    let (stdout_r, stdout_w) = pipe()?;
+    let mut stdout_read = FdGuard::new(stdout_r);
+    let mut stdout_write = FdGuard::new(stdout_w);
+    let (sync_r, sync_w) = pipe()?;
+    let mut sync_read = FdGuard::new(sync_r);
+    let mut sync_write = FdGuard::new(sync_w);
     let program = resolve_program(program)?;
     let program_c = std::ffi::CString::new(program.as_os_str().as_encoded_bytes())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -241,9 +248,9 @@ fn linux_spawn(
         argv: argv_ptrs.as_ptr(),
         envp: env_ptrs.as_ptr(),
         cwd: cwd_c.as_ptr(),
-        stdin_fd: stdin_read,
-        stdout_fd: stdout_write,
-        sync_fd: sync_read,
+        stdin_fd: stdin_read.fd(),
+        stdout_fd: stdout_write.fd(),
+        sync_fd: sync_read.fd(),
     };
     let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWPID | libc::SIGCHLD;
     let pid = unsafe {
@@ -264,9 +271,9 @@ fn linux_spawn(
     }
     // Parent. Close the ends the child owns.
     unsafe {
-        libc::close(stdin_read);
-        libc::close(stdout_write);
-        libc::close(sync_read);
+        libc::close(stdin_read.take());
+        libc::close(stdout_write.take());
+        libc::close(sync_read.take());
     }
     let pid = pid as u32;
     if let Err(error) = write_id_maps(pid) {
@@ -274,8 +281,8 @@ fn linux_spawn(
         return Err(error);
     }
     let mut go = [1u8];
-    let wrote = unsafe { libc::write(sync_write, go.as_mut_ptr().cast(), 1) };
-    unsafe { libc::close(sync_write) };
+    let wrote = unsafe { libc::write(sync_write.fd(), go.as_mut_ptr().cast(), 1) };
+    unsafe { libc::close(sync_write.take()) };
     if wrote != 1 {
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         return Err(io::Error::last_os_error());
@@ -288,8 +295,8 @@ fn linux_spawn(
             reaped: false,
             ns_inode,
         },
-        stdin: unsafe { File::from_raw_fd(stdin_write) },
-        stdout: unsafe { File::from_raw_fd(stdout_read) },
+        stdin: unsafe { File::from_raw_fd(stdin_write.take()) },
+        stdout: unsafe { File::from_raw_fd(stdout_read.take()) },
     })
 }
 
@@ -308,12 +315,26 @@ struct LinuxSpawnArg {
 fn linux_child(arg: &LinuxSpawnArg) -> ! {
     let mut buf = [0u8; 1];
     unsafe {
-        while libc::read(arg.sync_fd, buf.as_mut_ptr().cast(), 1) < 0 {
-            if *libc::__errno_location() != libc::EINTR {
+        // Arm parent-death before blocking. If Core dies while this read
+        // waits, the kernel delivers SIGKILL. A zero read is EOF: the parent
+        // closed the pipe, so exec would run with nobody holding the domain.
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+        if libc::getppid() == 1 {
+            libc::_exit(127);
+        }
+        loop {
+            let n = libc::read(arg.sync_fd, buf.as_mut_ptr().cast(), 1);
+            if n < 0 {
+                if *libc::__errno_location() == libc::EINTR {
+                    continue;
+                }
                 libc::_exit(127);
             }
+            if n == 0 {
+                libc::_exit(127);
+            }
+            break;
         }
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
         if libc::getppid() == 1 {
             libc::_exit(127);
         }
@@ -390,17 +411,49 @@ fn resolve_program(program: &Path) -> io::Result<std::path::PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn inherited_env(remove: &[&str]) -> io::Result<Vec<std::ffi::CString>> {
+    use std::os::unix::ffi::OsStrExt;
     let mut out = Vec::new();
-    for (key, value) in std::env::vars() {
+    for (key, value) in std::env::vars_os() {
         if remove.iter().any(|banned| key.eq_ignore_ascii_case(banned)) {
             continue;
         }
-        let pair = format!("{key}={value}");
+        let mut pair = key.as_bytes().to_vec();
+        pair.push(b'=');
+        pair.extend_from_slice(value.as_bytes());
         if let Ok(c) = std::ffi::CString::new(pair) {
             out.push(c);
         }
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+struct FdGuard(RawFd);
+
+#[cfg(target_os = "linux")]
+impl FdGuard {
+    fn new(fd: RawFd) -> Self {
+        Self(fd)
+    }
+
+    fn fd(&self) -> RawFd {
+        self.0
+    }
+
+    fn take(&mut self) -> RawFd {
+        let fd = self.0;
+        self.0 = -1;
+        fd
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe { libc::close(self.0) };
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -438,7 +491,7 @@ fn windows_spawn_in_job(
     program: &Path,
     args: &[String],
     cwd: &Path,
-    _env_remove: &[&str],
+    env_remove: &[&str],
 ) -> io::Result<ContainedSpawn> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
@@ -520,14 +573,15 @@ fn windows_spawn_in_job(
         startup.hStdInput = in_read;
         startup.hStdOutput = out_write;
         startup.hStdError = out_write;
+        let mut env_block = windows_env_block(env_remove);
         let ok = CreateProcessW(
             std::ptr::null(),
             wide.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-            std::ptr::null_mut(),
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | 0x0000_0400,
+            env_block.as_mut_ptr().cast(),
             cwd_wide.as_ptr(),
             &mut startup,
             &mut process_info,
@@ -576,6 +630,23 @@ fn windows_spawn_in_job(
 }
 
 #[cfg(windows)]
+fn windows_env_block(remove: &[&str]) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut block = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        if remove.iter().any(|banned| key.eq_ignore_ascii_case(banned)) {
+            continue;
+        }
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
+#[cfg(windows)]
 fn terminate_job(job: winapi::um::winnt::HANDLE) -> i32 {
     unsafe { winapi::um::jobapi2::TerminateJobObject(job, 1) }
 }
@@ -614,6 +685,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inherited_env_drops_provider_keys_without_utf8_panic() {
+        let env = inherited_env(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY"]).unwrap();
+        for entry in env {
+            let text = entry.to_string_lossy().to_ascii_uppercase();
+            assert!(!text.starts_with("ANTHROPIC_API_KEY="));
+            assert!(!text.starts_with("OPENAI_API_KEY="));
+            assert!(!text.starts_with("XAI_API_KEY="));
+        }
+    }
+
+    #[test]
     fn a_setsid_grandchild_dies_with_the_namespace_init() {
         let dir = std::env::temp_dir().join(format!("goalport-contain-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -627,7 +709,7 @@ mod tests {
         .expect("pid namespace spawn");
         let marker = dir.join("setsid.pid");
         let mut pid = None;
-        for _ in 0..50 {
+        for _ in 0..250 {
             if let Ok(text) = std::fs::read_to_string(&marker) {
                 pid = text.trim().parse::<u32>().ok();
                 if pid.is_some() {
