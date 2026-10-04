@@ -41,6 +41,85 @@ pub enum DescendantState {
     Unknown,
 }
 
+/// Assemble records for pids already known to be in the Runtime tree.
+///
+/// `None` if any of those pids has no creation tick. A partial set is not a
+/// snapshot: callers already treat `None` as unavailable and must not journal
+/// it. An empty pid list is `Some(vec![])`, a recorded empty set.
+pub(crate) fn assemble_descendant_records(
+    pids: impl IntoIterator<Item = u32>,
+    mut tick_of: impl FnMut(u32) -> Option<String>,
+) -> Option<Vec<DescendantRecord>> {
+    let mut records = Vec::new();
+    for pid in pids {
+        let start_tick = tick_of(pid)?;
+        records.push(DescendantRecord { pid, start_tick });
+    }
+    records.sort_by_key(|record| record.pid);
+    Some(records)
+}
+
+/// Which bounded signal pass a platform signaller is performing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminatePhase {
+    Term,
+    Kill,
+}
+
+/// Signal only a record that classifies `Alive` immediately before that signal.
+/// `Unknown` is never passed to `signal`. `Alive` and `Unknown` still count as
+/// remaining. `Dead` and `Reused` are neither signalled nor counted.
+///
+/// `term_wait` / `kill_wait` are the bounded reap waits. Production callers
+/// pass two seconds each. The classifier and signaller are injected by the
+/// platform wrappers and by tests; there is no production test hook.
+pub(crate) fn terminate_alive_only<C, S>(
+    records: &[DescendantRecord],
+    classify: C,
+    mut signal: S,
+    term_wait: std::time::Duration,
+    kill_wait: std::time::Duration,
+) -> usize
+where
+    C: Fn(&DescendantRecord) -> DescendantState,
+    S: FnMut(&DescendantRecord, TerminatePhase),
+{
+    let counts = |record: &DescendantRecord| {
+        matches!(
+            classify(record),
+            DescendantState::Alive | DescendantState::Unknown
+        )
+    };
+    for record in records {
+        if classify(record) == DescendantState::Alive {
+            signal(record, TerminatePhase::Term);
+        }
+    }
+    wait_while(term_wait, || records.iter().any(|record| counts(record)));
+    for record in records {
+        if classify(record) == DescendantState::Alive {
+            signal(record, TerminatePhase::Kill);
+        }
+    }
+    wait_while(kill_wait, || records.iter().any(|record| counts(record)));
+    records.iter().filter(|record| counts(record)).count()
+}
+
+fn wait_while(bound: std::time::Duration, mut pending: impl FnMut() -> bool) {
+    if bound.is_zero() || !pending() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + bound;
+    while std::time::Instant::now() < deadline && pending() {
+        let slice = std::time::Duration::from_millis(50)
+            .min(deadline.saturating_duration_since(std::time::Instant::now()));
+        if slice.is_zero() {
+            break;
+        }
+        std::thread::sleep(slice);
+    }
+}
+
 /// `None` means the enumeration FAILED: the caller must persist NO snapshot
 /// field (missing evidence holds the release — plan rev 4's default). A
 /// successful enumeration of a childless CLI yields `Some(vec![])`, which is
@@ -163,16 +242,9 @@ fn linux_snapshot(root_pid: u32) -> Option<Vec<DescendantRecord>> {
         }
     }
     in_tree.remove(&root_pid);
-    let mut records: Vec<DescendantRecord> = in_tree
-        .into_iter()
-        .filter_map(|pid| {
-            ticks
-                .get(&pid)
-                .map(|tick| DescendantRecord { pid, start_tick: tick.clone() })
-        })
-        .collect();
-    records.sort_by_key(|record| record.pid);
-    Some(records)
+    // Every pid inserted into this map already had a tick. The assembler still
+    // returns None if any in-tree pid lacks one, instead of dropping it.
+    assemble_descendant_records(in_tree, |pid| ticks.get(&pid).cloned())
 }
 
 #[cfg(target_os = "linux")]
@@ -270,39 +342,21 @@ pub fn terminate_descendants(records: &[DescendantRecord]) -> usize {
 
 #[cfg(target_os = "linux")]
 fn linux_terminate(records: &[DescendantRecord]) -> usize {
-    let live = |record: &DescendantRecord| {
-        matches!(
-            classify_descendant(record),
-            DescendantState::Alive | DescendantState::Unknown
-        )
-    };
-    let signal = |record: &DescendantRecord, sig: i32| {
-        // SAFETY: libc kill with a checked pid; errors (already gone) ignore.
-        unsafe { libc::kill(record.pid as i32, sig) };
-    };
-    for record in records {
-        if live(record) {
-            signal(record, libc::SIGTERM);
-        }
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
-    while std::time::Instant::now() < deadline
-        && records.iter().any(|record| live(record))
-    {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    for record in records {
-        if live(record) {
-            signal(record, libc::SIGKILL);
-        }
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2_000);
-    while std::time::Instant::now() < deadline
-        && records.iter().any(|record| live(record))
-    {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    records.iter().filter(|record| live(record)).count()
+    terminate_alive_only(
+        records,
+        classify_descendant,
+        |record, phase| {
+            let sig = match phase {
+                TerminatePhase::Term => libc::SIGTERM,
+                TerminatePhase::Kill => libc::SIGKILL,
+            };
+            // SAFETY: libc kill with a checked pid; errors (already gone) ignore.
+            // Only invoked for a record that classified Alive immediately before.
+            unsafe { libc::kill(record.pid as i32, sig) };
+        },
+        std::time::Duration::from_millis(2_000),
+        std::time::Duration::from_millis(2_000),
+    )
 }
 
 #[cfg(windows)]
@@ -382,5 +436,58 @@ mod starttime_identity_tests {
         assert_eq!(classify_descendant(&record), DescendantState::Alive);
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+#[cfg(test)]
+mod assembler_and_signal_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn assembler_returns_none_when_any_in_tree_pid_lacks_a_tick() {
+        let ticks = std::collections::HashMap::from([(1u32, "a".to_owned())]);
+        let partial = assemble_descendant_records([1, 2], |pid| ticks.get(&pid).cloned());
+        assert!(partial.is_none(), "a missing tick must not become a partial snapshot");
+        let complete = assemble_descendant_records([1], |pid| ticks.get(&pid).cloned()).unwrap();
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].start_tick, "a");
+        assert!(assemble_descendant_records(std::iter::empty(), |_| None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unknown_is_never_signalled_and_alive_unknown_remain() {
+        let records = vec![
+            DescendantRecord { pid: 1, start_tick: "alive".into() },
+            DescendantRecord { pid: 2, start_tick: "unknown".into() },
+            DescendantRecord { pid: 3, start_tick: "dead".into() },
+            DescendantRecord { pid: 4, start_tick: "reused".into() },
+        ];
+        let signalled = RefCell::new(Vec::new());
+        let remaining = terminate_alive_only(
+            &records,
+            |record| match record.pid {
+                1 => DescendantState::Alive,
+                2 => DescendantState::Unknown,
+                3 => DescendantState::Dead,
+                _ => DescendantState::Reused,
+            },
+            |record, phase| {
+                signalled.borrow_mut().push((record.pid, phase));
+            },
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        let signalled = signalled.into_inner();
+        assert!(
+            signalled.iter().all(|(pid, _)| *pid == 1),
+            "only the Alive record may be signalled: {signalled:?}"
+        );
+        assert!(
+            !signalled.iter().any(|(pid, _)| *pid == 2),
+            "Unknown must not reach the signaller: {signalled:?}"
+        );
+        assert_eq!(signalled.len(), 2, "Alive is signalled on both passes: {signalled:?}");
+        assert_eq!(remaining, 2, "Alive and Unknown still count; Dead and Reused do not");
     }
 }

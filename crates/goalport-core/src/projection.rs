@@ -2118,6 +2118,20 @@ impl UiController {
             else {
                 continue;
             };
+            // After the descendant gate: unknown, missing, or mismatched
+            // identity holds and is not treated as NotRunning. A live match
+            // holds on a failed fresh snapshot or any current Alive/Unknown
+            // descendant. Unrelated workspace-CWD pids are omitted only after
+            // that. The filtered list, even when empty, still runs decide_quiet.
+            // This gate does not signal.
+            let writers = match crate::stop_closure::gate_stop_release_writers(
+                &bound,
+                &descendants,
+                &writers,
+            ) {
+                crate::stop_closure::ReleaseWriterGate::Hold => continue,
+                crate::stop_closure::ReleaseWriterGate::Filtered(writers) => writers,
+            };
             let sample = crate::stop_closure::sample_workspace(&workspace);
             let decision = crate::stop_closure::decide_quiet(
                 row.detail.as_ref(),
@@ -3728,14 +3742,21 @@ impl UiController {
                     }
                     if provider.eq_ignore_ascii_case("claude") {
                         delivery = "UNKNOWN";
-                        // A failed resume verification is special: the
-                        // adapter killed and reaped the unverified process
-                        // itself, so residual execution is provably none and
-                        // no Stop responsibility is begun. The crossed
-                        // message is still recorded as an UNKNOWN delivery.
-                        let resume_verification_failed = self
+                        // A failed resume verification is not a Stop. The
+                        // marker is journaled only after proven containment.
+                        // Incomplete proof keeps the registration and does not
+                        // begin a stop responsibility, manufacture admission,
+                        // or close the process.
+                        let verification = self
                             .runtime_manager
-                            .claude_resume_verification_failed(&attempt_id);
+                            .claude_resume_verification_outcome(&attempt_id);
+                        let proven = matches!(
+                            verification,
+                            Some(
+                                crate::runtime_manager::ResumeContainment::Proven
+                                    | crate::runtime_manager::ResumeContainment::Vacuous
+                            )
+                        );
                         let _ = self.persist_event(
                             &attempt_id,
                             "runtime.send.failed",
@@ -3744,36 +3765,33 @@ impl UiController {
                                 "reasonCode": "delivery-unknown",
                                 "retry": false,
                                 "deliveryState": "UNKNOWN",
-                                "reason": if resume_verification_failed {
-                                    "Claude native resume did not verify the stored session id; the unverified process was closed"
+                                "reason": if proven {
+                                    "Claude native resume did not verify the stored session id; proven cleanup contained the process"
+                                } else if verification.is_some() {
+                                    "Claude native resume did not verify the stored session id; containment is unproven"
                                 } else {
                                     "Claude native send may have partially crossed the transport boundary"
                                 },
-                                "unverifiedResumeClosed": resume_verification_failed
+                                "unverifiedResumeClosed": proven
                             }),
                             None,
                         );
-                        if resume_verification_failed {
-                            // Merge-review P1: fully retire the failed resume.
-                            // The adapter already killed and reaped the child;
-                            // detach the dead registration so the successor is
-                            // not stuck as a zombie latest attempt, then
-                            // journal the failure. State stays QUEUED (the
-                            // machine has no Queued->Failed edge and the row
-                            // truthfully never activated); the journal event
-                            // AFTER the reap is the signal that makes the
-                            // deterministic retry eligible.
-                            let _ = self.runtime_manager.close_attempt(&attempt_id);
-                            self.persist_event(
-                                &attempt_id,
-                                "runtime.resume.verification.failed",
-                                json!({
-                                    "error": first,
-                                    "reasonCode": "resume-verification-failed",
-                                    "reason": "the stored session id was not verified; this resume can be retried and earlier messages will not be sent again"
-                                }),
-                                None,
-                            )?;
+                        if verification.is_some() {
+                            if proven {
+                                // Journal before disarm-detach so a restarted
+                                // Core can see the marker. Do not spawn here.
+                                self.persist_event(
+                                    &attempt_id,
+                                    "runtime.resume.verification.failed",
+                                    json!({
+                                        "error": first,
+                                        "reasonCode": "resume-verification-failed",
+                                        "reason": "proven cleanup: the resume process and its captured descendants were contained; this resume can be retried and earlier messages will not be sent again"
+                                    }),
+                                    None,
+                                )?;
+                                self.runtime_manager.disarm_detach_claude(&attempt_id);
+                            }
                             return Err(first);
                         }
                         let binding = self
@@ -5640,17 +5658,27 @@ impl UiController {
             Err(error) => spawn_error = Some(error.to_string()),
         }
         if let Some(error) = spawn_error.as_ref() {
-            let _ = self.runtime_manager.close_attempt(successor_id);
-            let _ = self.persist_event(
-                successor_id,
-                "runtime.resume.spawn.failed",
-                json!({
-                    "reasonCode": "resume-spawn-failed",
-                    "reason": "the stored session's resume process could not start or could not be recorded; the process was closed and this resume can be retried",
-                    "error": error
-                }),
-                None,
-            );
+            // Journal only after Proven or Vacuous. Do not close_attempt.
+            // Missing registration and spawned==true with no proven root wait
+            // are incomplete: no marker, no second spawn.
+            let outcome = self.runtime_manager.classify_claude_resume_spawn(successor_id);
+            if matches!(
+                outcome,
+                crate::runtime_manager::ResumeContainment::Proven
+                    | crate::runtime_manager::ResumeContainment::Vacuous
+            ) {
+                let _ = self.persist_event(
+                    successor_id,
+                    "runtime.resume.spawn.failed",
+                    json!({
+                        "reasonCode": "resume-spawn-failed",
+                        "reason": "proven cleanup: the resume process was contained or never spawned; this resume can be retried and earlier messages will not be sent again",
+                        "error": error
+                    }),
+                    None,
+                );
+                self.runtime_manager.disarm_detach_claude(successor_id);
+            }
         }
         if established {
             // Spawn-only resume: the CLI now runs with `--resume <stored
@@ -5679,6 +5707,43 @@ impl UiController {
         Err(format!("Native session resume failed: {reason}"))
     }
 
+    fn finish_held_resume_without_spawn(&mut self, attempt_id: &str) -> Result<(), String> {
+        let outcome = self
+            .runtime_manager
+            .finish_claude_resume_containment(attempt_id);
+        match outcome {
+            crate::runtime_manager::ResumeContainment::Proven
+            | crate::runtime_manager::ResumeContainment::Vacuous => {
+                let verification = self
+                    .runtime_manager
+                    .claude_resume_failure_is_verification(attempt_id);
+                let kind = if verification {
+                    "runtime.resume.verification.failed"
+                } else {
+                    "runtime.resume.spawn.failed"
+                };
+                self.persist_event(
+                    attempt_id,
+                    kind,
+                    json!({
+                        "reasonCode": if verification {
+                            "resume-verification-failed"
+                        } else {
+                            "resume-spawn-failed"
+                        },
+                        "reason": "proven cleanup: the resume process and its captured descendants were contained; this resume can be retried and earlier messages will not be sent again"
+                    }),
+                    None,
+                )?;
+                self.runtime_manager.disarm_detach_claude(attempt_id);
+                Err("resume containment was proven; no process was spawned in this call".into())
+            }
+            crate::runtime_manager::ResumeContainment::Incomplete => Err(
+                "resume containment is unproven; no process was spawned".into(),
+            ),
+        }
+    }
+
     fn resume_native_session(&mut self, request: &UiCommandRequest) -> Result<(), String> {
         let attempt_id = payload_text_default(
             &request.payload,
@@ -5694,6 +5759,12 @@ impl UiController {
             return Err(format!(
                 "Attempt {attempt_id} is closed or terminal; start a new Attempt instead of resuming its session"
             ));
+        }
+        // A held unproven resume may finish proof in this call. It must not
+        // spawn, even if proof now completes. The next resume command spawns
+        // only when the marker is latest and no registration remains.
+        if self.runtime_manager.claude_resume_hold(&attempt_id) {
+            return self.finish_held_resume_without_spawn(&attempt_id);
         }
         // Merge-review P1 (delta-audit routing): the UI sends the RENDERED
         // attempt's id, so the deterministic retry arrives here carrying the

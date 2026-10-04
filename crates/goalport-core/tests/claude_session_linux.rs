@@ -1529,3 +1529,196 @@ fn close_terminates_the_runtime_descendants() {
         "close must terminate the Runtime's surviving descendant ({descendant_pid})"
     );
 }
+
+fn argv_pid(root: &Path) -> u64 {
+    read_json(root, ".fake-claude-argv.json")["pid"].as_u64().unwrap()
+}
+
+fn resume_wire(label: &str, attempt_id: &str, request_id: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "protocolVersion": CONNECTED_UI_PROTOCOL_VERSION,
+        "requestId": request_id,
+        "entityVersion": 0,
+        "messageType": "resume_native_session",
+        "payload": {
+            "attemptId": attempt_id,
+            "executable": fake_cli()
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_live_resume_descendant_blocks_the_marker_and_a_second_spawn() {
+    let (_lock, _env) = begin();
+    let (store, server, attempt_id, root) = closed_claude("live-child", "resume_mismatch_with_child");
+    let response = server
+        .handle_json(&resume_wire("live-child", &attempt_id, "live-child-resume-1"))
+        .unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    let task_id = store.get_attempt(&attempt_id).unwrap().task_id;
+    let successor = store.attempts_for_task(&task_id).unwrap().pop().unwrap();
+    let first_pid = argv_pid(&root);
+    let send = server
+        .handle_json(&server_send(
+            "live-child",
+            "campaign-live-child",
+            &successor.id,
+            "first message on a mismatched resume",
+        ))
+        .unwrap();
+    assert_eq!(send["ok"], false, "{send}");
+    let descendant_pid = fs::read_to_string(root.join(".fake-claude-descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        Path::new(&format!("/proc/{descendant_pid}")).exists(),
+        "the descendant must still be alive after the unverified send"
+    );
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        !records.iter().any(|record| {
+            record.event.kind == "runtime.resume.verification.failed"
+                || record.event.kind == "runtime.resume.spawn.failed"
+        }),
+        "a live descendant must not authorize a retry marker: {records:#?}"
+    );
+    assert!(store.stop_responsibilities().unwrap().is_empty());
+    let retry = server
+        .handle_json(&resume_wire("live-child", &successor.id, "live-child-cleanup"))
+        .unwrap();
+    assert_eq!(retry["ok"], false, "cleanup must not spawn: {retry}");
+    assert_eq!(argv_pid(&root), first_pid, "cleanup must not spawn a second process");
+    // Cleanup must signal the identity-confirmed Alive descendant. This test
+    // does not kill it. Once that descendant is Dead and the root handle wait
+    // succeeded, the marker is journaled; the spawn is a subsequent command.
+    assert!(
+        !Path::new(&format!("/proc/{descendant_pid}")).exists(),
+        "cleanup must signal the Alive descendant rather than leave it running"
+    );
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        records.iter().any(|record| record.event.kind == "runtime.resume.verification.failed"),
+        "proven containment journals the marker: {records:#?}"
+    );
+    let spawned = server
+        .handle_json(&resume_wire("live-child", &successor.id, "live-child-spawn-after"))
+        .unwrap();
+    assert_eq!(spawned["ok"], true, "the subsequent command may spawn: {spawned}");
+    assert_ne!(argv_pid(&root), first_pid, "the spawn is a subsequent command");
+    let stdin = fs::read_to_string(root.join(".fake-claude-stdin.jsonl")).unwrap_or_default();
+    assert_eq!(
+        stdin.matches("first message on a mismatched resume").count(),
+        0,
+        "the crossed message must not be replayed: {stdin}"
+    );
+}
+
+#[test]
+fn core_restart_after_a_proven_marker_offers_retry_without_replay() {
+    let (_lock, _env) = begin();
+    let (store, server, attempt_id, root) = closed_claude("restart-after", "resume_mismatch");
+    assert_eq!(
+        server
+            .handle_json(&resume_wire("restart-after", &attempt_id, "restart-after-resume-1"))
+            .unwrap()["ok"],
+        true
+    );
+    let task_id = store.get_attempt(&attempt_id).unwrap().task_id;
+    let successor = store.attempts_for_task(&task_id).unwrap().pop().unwrap();
+    let send = server
+        .handle_json(&server_send(
+            "restart-after",
+            "campaign-restart-after",
+            &successor.id,
+            "crossed message must not replay",
+        ))
+        .unwrap();
+    assert_eq!(send["ok"], false, "{send}");
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        records.iter().any(|record| record.event.kind == "runtime.resume.verification.failed"),
+        "{records:#?}"
+    );
+    drop(server);
+    let restarted = CoreServer::new(store.clone());
+    let snapshot = restarted
+        .handle_json(&snapshot_message("restart-after"))
+        .unwrap();
+    let turn = &snapshot["payload"]["snapshot"]["productConversation"]["turn"];
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action == "resume-session"),
+        "a proven marker still offers deterministic retry after restart: {turn}"
+    );
+    assert!(!actions.iter().any(|action| action == "select-runtime"), "{turn}");
+    assert_eq!(turn["canSend"], false, "{turn}");
+    let retry = restarted
+        .handle_json(&resume_wire(
+            "restart-after",
+            &successor.id,
+            "restart-after-resume-2",
+        ))
+        .unwrap();
+    assert_eq!(retry["ok"], true, "{retry}");
+    let stdin = fs::read_to_string(root.join(".fake-claude-stdin.jsonl")).unwrap_or_default();
+    assert_eq!(
+        stdin.matches("crossed message must not replay").count(),
+        0,
+        "{stdin}"
+    );
+}
+
+#[test]
+fn core_restart_before_a_marker_does_not_offer_retry_or_spawn() {
+    let (_lock, _env) = begin();
+    let (store, server, attempt_id, root) = closed_claude("restart-before", "resume_mismatch_with_child");
+    assert_eq!(
+        server
+            .handle_json(&resume_wire("restart-before", &attempt_id, "restart-before-resume-1"))
+            .unwrap()["ok"],
+        true
+    );
+    let task_id = store.get_attempt(&attempt_id).unwrap().task_id;
+    let successor = store.attempts_for_task(&task_id).unwrap().pop().unwrap();
+    let first_pid = argv_pid(&root);
+    let send = server
+        .handle_json(&server_send(
+            "restart-before",
+            "campaign-restart-before",
+            &successor.id,
+            "unproven resume must not spawn again",
+        ))
+        .unwrap();
+    assert_eq!(send["ok"], false, "{send}");
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        !records.iter().any(|record| record.event.kind == "runtime.resume.verification.failed"),
+        "{records:#?}"
+    );
+    // Keep the original server alive so its process is not dropped, then a
+    // restarted Core must not offer retry or spawn while the marker is absent.
+    let restarted = CoreServer::new(store.clone());
+    let snapshot = restarted
+        .handle_json(&snapshot_message("restart-before"))
+        .unwrap();
+    let turn = &snapshot["payload"]["snapshot"]["productConversation"]["turn"];
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        !actions.iter().any(|action| action == "resume-session" || action == "select-runtime"),
+        "restart before a marker must not offer retry or a fresh session: {turn}"
+    );
+    assert_eq!(turn["canSend"], false, "{turn}");
+    let retry = restarted
+        .handle_json(&resume_wire(
+            "restart-before",
+            &successor.id,
+            "restart-before-resume-2",
+        ))
+        .unwrap();
+    assert_eq!(retry["ok"], false, "{retry}");
+    assert_eq!(argv_pid(&root), first_pid, "restart before a marker must not spawn");
+    drop(server);
+}

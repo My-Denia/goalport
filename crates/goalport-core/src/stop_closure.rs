@@ -365,6 +365,131 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
     IgnoredDigest::Digest(format!("{:x}", hasher.finalize()))
 }
 
+/// Writer filter at the Stop release gate. Does not signal. Does not change
+/// `decide_quiet` or `workspace_writers`.
+///
+/// `Hold` means do not release. `Filtered` is passed to `decide_quiet`; an
+/// empty list still runs the fingerprint window and is not itself a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReleaseWriterGate {
+    Hold,
+    Filtered(Vec<u32>),
+}
+
+/// Identity view of the bound runtime. Mismatch is not `NotRunning`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BoundRuntimeView {
+    MissingIdentity,
+    Unknown,
+    IdentityMismatch,
+    NotRunning,
+    LiveMatch { pid: u32 },
+}
+
+/// `fresh_snapshot` is consulted only for `LiveMatch`. `None` there means the
+/// fresh enumeration failed and the gate holds. Other views ignore it.
+pub(crate) fn gate_release_writers(
+    view: BoundRuntimeView,
+    stop_time: &[crate::descendants::DescendantRecord],
+    writers: &[u32],
+    fresh_snapshot: Option<&[crate::descendants::DescendantRecord]>,
+    classify: impl Fn(&crate::descendants::DescendantRecord) -> crate::descendants::DescendantState,
+) -> ReleaseWriterGate {
+    use crate::descendants::DescendantState;
+    match view {
+        BoundRuntimeView::MissingIdentity
+        | BoundRuntimeView::Unknown
+        | BoundRuntimeView::IdentityMismatch => ReleaseWriterGate::Hold,
+        BoundRuntimeView::NotRunning => ReleaseWriterGate::Filtered(
+            alive_stop_time_writers(writers, stop_time, classify),
+        ),
+        BoundRuntimeView::LiveMatch { .. } => {
+            let Some(fresh) = fresh_snapshot else {
+                return ReleaseWriterGate::Hold;
+            };
+            if fresh.iter().any(|record| {
+                matches!(
+                    classify(record),
+                    DescendantState::Alive | DescendantState::Unknown
+                )
+            }) {
+                return ReleaseWriterGate::Hold;
+            }
+            ReleaseWriterGate::Filtered(alive_stop_time_writers(writers, stop_time, classify))
+        }
+    }
+}
+
+fn alive_stop_time_writers(
+    writers: &[u32],
+    stop_time: &[crate::descendants::DescendantRecord],
+    classify: impl Fn(&crate::descendants::DescendantRecord) -> crate::descendants::DescendantState,
+) -> Vec<u32> {
+    writers
+        .iter()
+        .copied()
+        .filter(|pid| {
+            stop_time.iter().any(|record| {
+                record.pid == *pid
+                    && classify(record) == crate::descendants::DescendantState::Alive
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn gate_stop_release_writers(
+    bound: &Value,
+    stop_time: &[crate::descendants::DescendantRecord],
+    writers: &[u32],
+) -> ReleaseWriterGate {
+    let view = bound_runtime_view(bound);
+    if let BoundRuntimeView::LiveMatch { pid } = view {
+        let fresh = crate::descendants::snapshot_descendants(pid);
+        return gate_release_writers(
+            BoundRuntimeView::LiveMatch { pid },
+            stop_time,
+            writers,
+            fresh.as_deref(),
+            crate::descendants::classify_descendant,
+        );
+    }
+    gate_release_writers(
+        view,
+        stop_time,
+        writers,
+        None,
+        crate::descendants::classify_descendant,
+    )
+}
+
+fn bound_runtime_view(bound: &Value) -> BoundRuntimeView {
+    let pid = bound.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let creation = bound
+        .get("creationDate")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let sha = bound
+        .get("executableSha256")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if bound.is_null() || pid == 0 || creation.is_empty() || sha.is_empty() {
+        return BoundRuntimeView::MissingIdentity;
+    }
+    match crate::process_identity::observe_process(pid) {
+        crate::process_identity::ProcessObservation::NotRunning => BoundRuntimeView::NotRunning,
+        crate::process_identity::ProcessObservation::Unknown(_) => BoundRuntimeView::Unknown,
+        crate::process_identity::ProcessObservation::Live(identity) => {
+            if identity.creation_date() == creation && identity.executable_sha256 == sha {
+                BoundRuntimeView::LiveMatch { pid }
+            } else {
+                // A recycled pid or a different binary is not evidence the
+                // bound process ended. Do not treat it as NotRunning.
+                BoundRuntimeView::IdentityMismatch
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +677,125 @@ mod ignored_digest_tests {
         assert!(
             matches!(decision, QuietDecision::Hold { .. }),
             "absent-vs-present digest is a change: {decision:?}"
+        );
+    }
+
+    fn record(pid: u32, tick: &str) -> crate::descendants::DescendantRecord {
+        crate::descendants::DescendantRecord {
+            pid,
+            start_tick: tick.into(),
+        }
+    }
+
+    fn classify_fixed(
+        alive: u32,
+    ) -> impl Fn(&crate::descendants::DescendantRecord) -> crate::descendants::DescendantState {
+        move |record| {
+            if record.pid == alive {
+                crate::descendants::DescendantState::Alive
+            } else if record.start_tick == "unknown" {
+                crate::descendants::DescendantState::Unknown
+            } else if record.start_tick == "reused" {
+                crate::descendants::DescendantState::Reused
+            } else {
+                crate::descendants::DescendantState::Dead
+            }
+        }
+    }
+
+    #[test]
+    fn missing_unknown_or_mismatch_holds_without_a_release() {
+        let stop = [record(7, "tick")];
+        for view in [
+            BoundRuntimeView::MissingIdentity,
+            BoundRuntimeView::Unknown,
+            BoundRuntimeView::IdentityMismatch,
+        ] {
+            assert_eq!(
+                gate_release_writers(view, &stop, &[7, 9], None, classify_fixed(7)),
+                ReleaseWriterGate::Hold
+            );
+        }
+    }
+
+    #[test]
+    fn not_running_blocks_only_an_identity_confirmed_alive_snapshot_member() {
+        let stop = [record(7, "tick"), record(8, "dead")];
+        let gated = gate_release_writers(
+            BoundRuntimeView::NotRunning,
+            &stop,
+            &[7, 8, 99],
+            None,
+            classify_fixed(7),
+        );
+        assert_eq!(gated, ReleaseWriterGate::Filtered(vec![7]));
+    }
+
+    #[test]
+    fn live_match_holds_on_fresh_none_or_any_alive_or_unknown_descendant() {
+        let stop = [record(1, "old")];
+        assert_eq!(
+            gate_release_writers(
+                BoundRuntimeView::LiveMatch { pid: 4 },
+                &stop,
+                &[],
+                None,
+                classify_fixed(0),
+            ),
+            ReleaseWriterGate::Hold
+        );
+        let fresh_alive = [record(50, "alive")];
+        assert_eq!(
+            gate_release_writers(
+                BoundRuntimeView::LiveMatch { pid: 4 },
+                &stop,
+                &[],
+                Some(&fresh_alive),
+                |record| {
+                    if record.pid == 50 {
+                        crate::descendants::DescendantState::Alive
+                    } else {
+                        crate::descendants::DescendantState::Dead
+                    }
+                },
+            ),
+            ReleaseWriterGate::Hold,
+            "a current Alive descendant holds even if it is not a CWD writer"
+        );
+        let fresh_unknown = [record(51, "unknown")];
+        assert_eq!(
+            gate_release_writers(
+                BoundRuntimeView::LiveMatch { pid: 4 },
+                &stop,
+                &[99],
+                Some(&fresh_unknown),
+                |record| {
+                    if record.start_tick == "unknown" {
+                        crate::descendants::DescendantState::Unknown
+                    } else {
+                        crate::descendants::DescendantState::Dead
+                    }
+                },
+            ),
+            ReleaseWriterGate::Hold
+        );
+    }
+
+    #[test]
+    fn live_match_with_no_live_descendants_omits_unrelated_writers_and_still_fingerprints() {
+        let stop = [record(7, "dead")];
+        let fresh = [record(3, "dead")];
+        let gated = gate_release_writers(
+            BoundRuntimeView::LiveMatch { pid: 4 },
+            &stop,
+            &[99],
+            Some(&fresh),
+            |_| crate::descendants::DescendantState::Dead,
+        );
+        assert_eq!(
+            gated,
+            ReleaseWriterGate::Filtered(vec![]),
+            "an empty filtered list is not a Hold/release short-circuit"
         );
     }
 }

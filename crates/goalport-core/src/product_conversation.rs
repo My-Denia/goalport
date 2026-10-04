@@ -640,6 +640,26 @@ fn describe_turn(
                     .into(),
             );
             "resume-session"
+        } else if matches!(context.attempt.state, AttemptState::Queued)
+            && context.attempt.provider.eq_ignore_ascii_case("claude")
+            && context.attempt.provider_session.is_none()
+            && matches!(
+                store.closed_claude_successor_source(&context.attempt.id),
+                Ok(Some(_))
+            )
+            && !matches!(
+                store.resume_retry_generation_dead(&context.attempt.id),
+                Ok(true)
+            )
+        {
+            // Marker absent: do not offer retry or a fresh session, whether
+            // the registration is still held or was lost to a restart.
+            turn.reason_code = Some("resume-containment-unproven".into());
+            turn.reason = Some(
+                "This resume is not proven contained. It cannot be retried or replaced until containment is proven."
+                    .into(),
+            );
+            "diagnose"
         } else if !retained
             && matches!(context.attempt.state, AttemptState::Queued)
             && no_unsettled_effect

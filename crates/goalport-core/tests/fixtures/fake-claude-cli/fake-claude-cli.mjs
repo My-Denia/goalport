@@ -29,7 +29,7 @@ const requestedResume = resumeArg();
 // the broker's channel is a separate private pipe this process cannot reach.
 const STOP_ACK_FRAME = "_goalport/fixture_stop_ack";
 let sessionId = requestedResume || "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-if (scenario === "resume_mismatch" && requestedResume) {
+if ((scenario === "resume_mismatch" || scenario === "resume_mismatch_with_child") && requestedResume) {
   sessionId = "bbbbbbbb-bbbb-4ccc-8ddd-ffffffffffff";
 }
 const nativePermissionId = "11111111-2222-4333-8444-555555555555";
@@ -275,6 +275,13 @@ function handlePermissionResponse(obj) {
 
 function beginTurn() {
   userCount += 1;
+  if (userCount === 1 && scenario === "resume_mismatch_with_child") {
+    // Spawn before the mismatch init frame so the post-send snapshot, taken
+    // while this process is still alive, includes the descendant.
+    const child = spawn("sleep", ["300"], { cwd: process.cwd(), stdio: "ignore" });
+    writeFileSync(resolve(process.cwd(), ".fake-claude-descendant.pid"), String(child.pid));
+    child.unref();
+  }
   if (userCount === 1) {
     emitInit();
   }
