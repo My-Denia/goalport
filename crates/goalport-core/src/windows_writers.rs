@@ -45,6 +45,7 @@ struct UnicodeString {
 }
 
 unsafe extern "system" {
+    fn GetLastError() -> u32;
     fn NtQueryInformationProcess(
         process: HANDLE,
         info_class: i32,
@@ -210,6 +211,71 @@ mod tests {
             .expect("spawn sleeper")
     }
 
+    /// Step-by-step probe of one pid, for CI-side diagnosis.
+    #[cfg(test)]
+    unsafe fn probe_pid(pid: u32) -> String {
+        let process = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+            0,
+            pid,
+        );
+        if process.is_null() {
+            return format!("open failed (GetLastError {})", GetLastError());
+        }
+        let mut info = ProcessBasicInformation::default();
+        let status = NtQueryInformationProcess(
+            process,
+            0,
+            &mut info as *mut ProcessBasicInformation as *mut c_void,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            std::ptr::null_mut(),
+        );
+        if status != 0 {
+            CloseHandle(process);
+            return format!("ntquery status {status}");
+        }
+        let params = read_usize(process, info.peb_base_address + PEB_PROCESS_PARAMETERS);
+        let params = match params {
+            Some(value) => value,
+            None => {
+                CloseHandle(process);
+                return format!(
+                    "peb {:#x} params read failed",
+                    info.peb_base_address
+                );
+            }
+        };
+        let mut dos_path = UnicodeString::default();
+        let bytes = std::slice::from_raw_parts_mut(
+            &mut dos_path as *mut UnicodeString as *mut u8,
+            std::mem::size_of::<UnicodeString>(),
+        );
+        let read_ok = read_memory(process, params + PARAMS_CURDIR_DOSPATH, bytes);
+        let decoded = if read_ok && dos_path.length > 0 && dos_path.length % 2 == 0 {
+            let mut wide = vec![0u8; dos_path.length as usize];
+            let buf_ok = read_memory(process, dos_path.buffer, &mut wide);
+            if buf_ok {
+                let units: Vec<u16> = wide
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                    .collect();
+                Some(String::from_utf16_lossy(&units))
+            } else {
+                Some(format!("<buffer read failed len={}>", dos_path.length))
+            }
+        } else {
+            None
+        };
+        CloseHandle(process);
+        format!(
+            "peb {:#x} params {:#x} read_ok={read_ok} len={} decoded={:?}",
+            info.peb_base_address,
+            params,
+            dos_path.length,
+            decoded.unwrap_or_default()
+        )
+    }
+
     /// Merge-review P1: writer detection must observe a process whose cwd is
     /// INSIDE the workspace (a subdirectory), and must not observe a sibling.
     /// The excluded claude_pid is this test process, which is neither child,
@@ -236,9 +302,18 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        let workspace_shown = std::fs::canonicalize(workspace.path())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let observed = enumerate_cwds(std::process::id()).unwrap_or_default();
+        let observed_count = observed.len();
+        let inside_probe = unsafe { probe_pid(inside_child.id()) };
         assert!(
             writers.contains(&inside_child.id()),
-            "a process inside {inside:?} must be a writer (saw {writers:?})"
+            "a process inside {inside:?} must be a writer (saw {writers:?}); \
+             canonical workspace {workspace_shown:?}; observed {observed_count} cwds; \
+             child alive {} probe[{inside_probe}]",
+            inside_child.try_wait().unwrap().is_none(),
         );
         assert!(
             !writers.contains(&sibling_child.id()),
