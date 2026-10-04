@@ -185,8 +185,24 @@ function App() {
   const draft = draftCampaignId ? campaignDrafts[draftCampaignId] ?? "" : "";
   const product = snapshot.productConversation;
   const hasGoal = Boolean(draftCampaignId);
+  // The draft surface stays mounted across capacity-limited polls: unmounting
+  // it on a poll flip would re-run the composer's mount-focus effect and
+  // steal focus (and any in-flight typing) from the user. But a capacity
+  // view alone never proves a fresh profile (goals may exist beyond the
+  // capacity cut — review-debt contract), so the empty-profile draft only
+  // opens once a full projection has actually confirmed emptiness; sending
+  // stays blocked while the projection is unavailable. Only real transitions
+  // close the draft: explicit navigation, Discard, or Core creating/moving
+  // to a conversation (the snapshot-authority effect above).
+  const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
+  useLayoutEffect(() => {
+    // Only a full projection that actually arrived counts as evidence —
+    // never the pre-connect placeholder, never a capacity acknowledgement.
+    if (!booted || projectionUnavailable) return;
+    setConfirmedEmptyProfile(!hasGoal);
+  }, [booted, projectionUnavailable, hasGoal]);
   const draftActive = draftGoal !== null
-    || (!projectionUnavailable && !hasGoal && !draftDismissed);
+    || (confirmedEmptyProfile && !hasGoal && !draftDismissed);
   const activeSendIntent = sendIntents[draftCampaignId];
   const activeRetryLabel = retryLabel(activeSendIntent);
   const draftRetryLabel = retryLabel(draftGoal?.intent);

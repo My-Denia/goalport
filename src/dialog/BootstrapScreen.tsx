@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BootstrapAction, BootstrapActionType, BootstrapFacts, BootstrapState } from "../ipc";
+import { GoalLayer } from "../ui/GoalLayer";
 
 // Startup-continuity screens shown inside the boot shell before any business
 // data is trusted. The renderer displays facts pushed by the main process and
@@ -57,11 +58,21 @@ export function BootstrapScreen({ state }: { state: BootstrapState }) {
   const [, forceRefresh] = useState(0);
   useEffect(() => { forceRefresh((value) => value + 1); }, [state]);
 
+  // A modal dialog with no dismiss path: the screen IS the app until the
+  // profile decision is made, so Escape and outside presses have nothing to
+  // return to — the explicit buttons are the only way forward. The dialog
+  // layer owns the focus trap (keyboard users stay on the decision) and the
+  // dialog semantics.
   const shell = (children: React.ReactNode) => (
-    <div className="boot-shell bootstrap-screen" role="dialog" aria-label="GoalPort data profile">
+    <GoalLayer
+      variant="dialog"
+      open
+      label="GoalPort data profile"
+      surface={<div className="boot-shell bootstrap-screen" />}
+    >
       <span className="boot-mark" aria-hidden="true">◎</span>
       {children}
-    </div>
+    </GoalLayer>
   );
 
   if (state.phase === "import-offer") {

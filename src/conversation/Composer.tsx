@@ -1,8 +1,9 @@
-import { CompositionEvent, KeyboardEvent, useEffect, useRef, type FormEvent } from "react";
+import { useRef, type FormEvent } from "react";
 import type { CoreSnapshot, ProductRuntimeSelection, ProductTurn, RuntimeProfile } from "../types";
 import { runtimeSelectionDisplay } from "../lib/display";
 import { turnErrorCopy } from "../lib/turnErrorCopy";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
+import { useComposerInput } from "./useComposerInput";
 
 interface RuntimePickerProps {
   runtimes: RuntimeProfile[];
@@ -83,11 +84,6 @@ interface ComposerProps {
  */
 export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // IME composition guards. `composing` covers the active composition; the
-  // timestamp catches the stray Enter some IMEs emit right after
-  // compositionend with isComposing already false.
-  const composingRef = useRef(false);
-  const compositionEndedAtRef = useRef(0);
 
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
   const controlUnavailable = snapshot.bounds?.projectionUnavailable === true;
@@ -98,46 +94,15 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
   const pending = turn.state === "starting" || turn.state === "stopping";
   const turnProblem = turnErrorCopy(turn);
 
-  // Auto-grow: keep the textarea matched to its content within a sane maximum.
-  useEffect(() => {
-    const element = textareaRef.current;
-    if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
-  }, [draft]);
-
-  // The composer is the primary input of the app: it takes focus when it
-  // appears or a different goal is selected. Snapshot refresh keeps focusKey
-  // unchanged, so it cannot steal focus from a field the user chose.
-  useEffect(() => {
-    textareaRef.current?.focus();
-  }, [focusKey]);
-
-  const handleCompositionStart = () => { composingRef.current = true; };
-  const handleCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
-    composingRef.current = false;
-    compositionEndedAtRef.current = Date.now();
-    onChange(event.currentTarget.value);
-  };
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter") return;
-    // 229 is the keyCode IMEs use while composing; isComposing covers modern
-    // browsers. An Enter within 30ms after compositionend is the Korean-IME
-    // stray commit — never a send.
-    const stray = Date.now() - compositionEndedAtRef.current < 30;
-    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229 || stray) {
-      return;
-    }
-    if (event.shiftKey) return; // explicit newline
-    event.preventDefault();
-    if (!canSubmit) return;
-    if (typeof textareaRef.current?.form?.requestSubmit === "function") {
-      textareaRef.current.form.requestSubmit();
-    } else {
-      textareaRef.current?.form?.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
-    }
-  };
+  // One input layer, one copy: auto-grow, IME-safe Enter and focus-on-goal
+  // switch live in useComposerInput, shared with the draft composer.
+  const input = useComposerInput({
+    textareaRef,
+    value: draft,
+    onCompositionChange: onChange,
+    canSubmit,
+    focusKey
+  });
 
   const placeholder = "Ask the selected Runtime to continue…";
 
@@ -170,9 +135,9 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
           aria-label="Message composer"
           value={draft}
           onChange={(event) => onChange(event.target.value)}
-          onCompositionStart={handleCompositionStart}
-          onCompositionEnd={handleCompositionEnd}
-          onKeyDown={handleKeyDown}
+          onCompositionStart={input.onCompositionStart}
+          onCompositionEnd={input.onCompositionEnd}
+          onKeyDown={input.onKeyDown}
           placeholder={placeholder}
           rows={2}
           disabled={held && !reconciling}

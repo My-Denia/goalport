@@ -18,7 +18,7 @@ pnpm install --frozen-lockfile
 | `crates/goalport-launcher/` | Launcher that starts Core detached from the window |
 | `src-tauri/` | Tauri host, kept as a regression target for shared Core and protocol changes |
 | `scripts/desktop/` | Packaging helpers, package verification, start, packaged smoke tests |
-| `scripts/connected/` | Packaging entry point plus historical live-admission and GUI evidence drivers |
+| `scripts/connected/` | Packaging entry point, the maintained `ui-debug` driver (see below), plus historical live-admission and GUI evidence drivers |
 | `scripts/verify.mjs` | Original fail-closed M0–M5 verification gates (see [reference](reference/verification-gates.md)) |
 | `tests/scenarios/` | The 23 declared synthetic Scenario contracts (`manifest.json`) |
 | `docs/` | This documentation |
@@ -62,3 +62,37 @@ node scripts/preview/cli.mjs
 It starts an isolated headless Chromium profile and a local static server. Set `GOALPORT_PREVIEW_CHROME` to a local Chromium executable if discovery cannot find one. `node scripts/preview/acceptance.mjs --out goal-runs/ui-check` walks first use, input persistence, permissions and closing at 560, 1024 and 1440 pixels, saving screenshots and a JSON report. These are synthetic browser-preview checks; native task acceptance is separate.
 
 Before opening a pull request, run the checks in [testing](testing.md#local-checks).
+
+## UI debug tools
+
+`scripts/connected/ui-debug.mjs` is the same idea as the preview driver above, pointed at the **real connected app**: the built renderer served by the Linux workbench ([Linux development](linux-development.md#workbench)) and driven through the Chrome DevTools Protocol. Agents and CI scripts get `preview_snapshot`, `click`, `evaluate` and `screenshot` as first-class tools without shipping a browser runtime of their own. It is a developer tool that lives entirely in `scripts/`; the shipped app contains no debug hooks, test IDs or production-path instrumentation.
+
+Start Core and the workbench, then either attach to a Chromium that already shows the page (`--cdp-port`), or let the tool start an isolated headless Chromium at `--url`:
+
+```sh
+pnpm build
+python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.sock --port 4186
+node scripts/connected/ui-debug.mjs --url http://127.0.0.1:4186/
+```
+
+The default `--url` is `http://127.0.0.1:4186/`; pass the port your workbench actually uses (the workbench's own default is 4173). After a one-line `{"ready":true,...}` announcement, each stdin JSON line gets one stdout JSON line:
+
+- `{"method":"preview_snapshot"}` — the same semantic shape as the preview harness (`scripts/preview/harness.mjs`): `mode`, `width`, `height`, `title`, `connection`, `campaignId`, `heading`, `runtimeLabel`, `composer` (`characters`, `disabled`, `placeholder`, `sendDisabled`, `stopVisible`, `reason`), `pendingDecisions`, `activeElement`, `body`. `connection` and `campaignId` come from the live shell, so a disconnected or not-yet-booted page reports that honestly instead of pretending.
+- `{"method":"click","selector":"..."}` — scrolls the control into view, then refuses it (`Control missing, blocked or outside viewport`) unless it has visible area, its center is inside the viewport, and `elementFromPoint` at that center hits the control or a descendant. Only then does it dispatch real CDP mouse events.
+- `{"method":"evaluate","expression":"..."}` — evaluates in the page (awaits promises) and returns the JSON value.
+- `{"method":"screenshot","path":"..."}` — writes a viewport PNG.
+- `{"method":"quit"}` — closes the page (and the owned Chromium) and exits.
+
+One workbench session, driven end to end:
+
+```sh
+printf '%s\n' \
+  '{"method":"preview_snapshot"}' \
+  '{"method":"click","selector":".runtime-picker .runtime-picker-button"}' \
+  '{"method":"evaluate","expression":"document.querySelector(\".goalport-shell\")?.dataset.connection"}' \
+  '{"method":"screenshot","path":"goal-runs/ui-debug/connected.png"}' \
+  '{"method":"quit"}' \
+  | node scripts/connected/ui-debug.mjs --url http://127.0.0.1:4186/
+```
+
+Safety boundary: the tool refuses any `--url` whose host is not `127.0.0.1` or `localhost` (the workbench itself binds loopback only and checks Host and Origin the same way), and CDP attach only ever talks to `127.0.0.1`. Nothing in `scripts/connected/ui-debug.mjs` is imported by app code. `node scripts/connected/ui-debug.mjs --selftest` verifies the protocol wiring against a fake page with no network and no browser; `node --test scripts/connected/ui-debug.test.mjs` covers the snapshot derivation, the click hit test and the loopback refusal rules.

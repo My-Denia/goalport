@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { Menu } from "@base-ui/react/menu";
 import type { AppInfo } from "../ipc";
 import { connectionLabel } from "../lib/display";
 import type { CoreSnapshot } from "../types";
+import { GoalLayer } from "../ui/GoalLayer";
 
 interface TitleBarProps {
   browserPreview?: boolean;
@@ -34,24 +35,6 @@ export function TitleBar({
   browserPreview = false, snapshot, campaignTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return undefined;
-    const onDocClick = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDocClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
 
   return (
     <header className="titlebar" role="banner">
@@ -105,68 +88,35 @@ export function TitleBar({
           >
             <span aria-hidden="true">ⓘ</span>
           </button>
-          <div className="app-menu" ref={menuRef}>
-            <button
-              className="tb-button tb-icon"
-              type="button"
-              aria-label="Application menu"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              title="Application menu"
-              onClick={() => setMenuOpen((value) => !value)}
+          <div className="app-menu">
+            <GoalLayer
+              variant="menu"
+              label="Application menu"
+              positionerClassName="app-menu-pop"
+              trigger={(
+                <button className="tb-button tb-icon" type="button" aria-label="Application menu" title="Application menu">
+                  <span aria-hidden="true">⋯</span>
+                </button>
+              )}
             >
-              <span aria-hidden="true">⋯</span>
-            </button>
-            {menuOpen ? (
-              <div className="app-menu-pop" role="menu">
-                <button
-                  className="app-menu-item"
-                  type="button"
-                  role="menuitemcheckbox"
-                  aria-checked={detailsOpen}
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onToggleDetails();
-                  }}
-                >
-                  {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
-                </button>
-                <button
-                  className="app-menu-item"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onOpenDiagnostics();
-                  }}
-                >
-                  Developer diagnostics
-                </button>
-                <button
-                  className="app-menu-item"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onOpenAbout();
-                  }}
-                >
-                  About GoalPort
-                </button>
-                <button
-                  className="app-menu-item"
-                  type="button"
-                  role="menuitem"
-                  aria-label="Close window"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onCloseWindow();
-                  }}
-                >
-                  Close window
-                </button>
-              </div>
-            ) : null}
+              <Menu.CheckboxItem
+                className="app-menu-item"
+                checked={detailsOpen}
+                onCheckedChange={() => { onToggleDetails(); }}
+                closeOnClick
+              >
+                {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
+              </Menu.CheckboxItem>
+              <Menu.Item className="app-menu-item" onClick={() => { onOpenDiagnostics(); }}>
+                Developer diagnostics
+              </Menu.Item>
+              <Menu.Item className="app-menu-item" onClick={() => { onOpenAbout(); }}>
+                About GoalPort
+              </Menu.Item>
+              <Menu.Item className="app-menu-item" aria-label="Close window" onClick={() => { onCloseWindow(); }}>
+                Close window
+              </Menu.Item>
+            </GoalLayer>
           </div>
         </div>
       </div>

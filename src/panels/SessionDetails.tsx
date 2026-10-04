@@ -1,6 +1,6 @@
-import { useEffect } from "react";
 import type { CoreSnapshot, ProductConversation } from "../types";
 import { connectionLabel, headlineState, runtimeSelectionDisplay } from "../lib/display";
+import { GoalLayer } from "../ui/GoalLayer";
 
 interface SessionDetailsProps {
   browserPreview?: boolean;
@@ -24,17 +24,6 @@ interface SessionDetailsProps {
  * live in the separate Developer diagnostics surface.
  */
 export function SessionDetails({ browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder, closingSession = false }: SessionDetailsProps) {
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
   const pendingCount = snapshot.decisions.filter((decision) => decision.state === "pending").length;
   const state = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const runtime = product?.runtime ?? { state: "none" as const, provider: "", name: "" };
@@ -50,7 +39,13 @@ export function SessionDetails({ browserPreview = false, open, onClose, snapshot
     : product?.session?.state === "none" ? "Not started" : null;
 
   return (
-    <aside className={`inspector${open ? " inspector-open" : ""}`} aria-label="Session details" data-open={open ? "true" : "false"}>
+    <GoalLayer
+      variant="drawer"
+      open={open}
+      onOpenChange={(next) => { if (!next) onClose(); }}
+      label="Session details"
+      surface={<aside className={`inspector${open ? " inspector-open" : ""}`} role="complementary" data-open={open ? "true" : "false"} />}
+    >
       <div className="inspector-scroll">
         <div className="inspector-head">
           <h2>Session details</h2>
@@ -110,6 +105,6 @@ export function SessionDetails({ browserPreview = false, open, onClose, snapshot
           </section>
         ) : null}
       </div>
-    </aside>
+    </GoalLayer>
   );
 }

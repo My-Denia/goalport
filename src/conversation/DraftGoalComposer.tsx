@@ -1,6 +1,7 @@
-import { CompositionEvent, KeyboardEvent, useEffect, useRef, type FormEvent } from "react";
+import { useRef, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
+import { useComposerInput } from "./useComposerInput";
 
 export interface GoalDraftValue {
   workspace: string;
@@ -73,9 +74,6 @@ export function DraftGoalComposer({
   draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // IME composition guards, identical to the conversation composer.
-  const composingRef = useRef(false);
-  const compositionEndedAtRef = useRef(0);
 
   const canSubmit = !busy
     && (!blockedFromSending || Boolean(retryLabel))
@@ -84,41 +82,16 @@ export function DraftGoalComposer({
     && draft.provider.length > 0
     && draft.message.trim().length > 0;
 
-  useEffect(() => {
-    const element = textareaRef.current;
-    if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
-  }, [draft.message]);
-
-  // The draft opens ready for typing: focus the message box (workspace is
-  // prefilled from the current project when there is one).
-  useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
-
-  const handleCompositionStart = () => { composingRef.current = true; };
-  const handleCompositionEnd = (event: CompositionEvent<HTMLTextAreaElement>) => {
-    composingRef.current = false;
-    compositionEndedAtRef.current = Date.now();
-    onChange({ ...draft, message: event.currentTarget.value });
-  };
-
-  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter") return;
-    const stray = Date.now() - compositionEndedAtRef.current < 30;
-    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229 || stray) {
-      return;
-    }
-    if (event.shiftKey) return;
-    event.preventDefault();
-    if (!canSubmit) return;
-    if (typeof textareaRef.current?.form?.requestSubmit === "function") {
-      textareaRef.current.form.requestSubmit();
-    } else {
-      textareaRef.current?.form?.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
-    }
-  };
+  // One input layer, one copy: auto-grow, IME-safe Enter and the draft's
+  // ready-for-typing focus live in useComposerInput, shared with the
+  // conversation composer.
+  const input = useComposerInput({
+    textareaRef,
+    value: draft.message,
+    onCompositionChange: (message) => onChange({ ...draft, message }),
+    canSubmit
+    // No focusKey: the draft focuses its message box once, on mount.
+  });
 
   return (
     <section className="draft-composer" aria-label="New goal draft">
@@ -160,9 +133,9 @@ export function DraftGoalComposer({
           aria-label="Message composer"
           value={draft.message}
           onChange={(event) => onChange({ ...draft, message: event.target.value })}
-          onCompositionStart={handleCompositionStart}
-          onCompositionEnd={handleCompositionEnd}
-          onKeyDown={handleKeyDown}
+          onCompositionStart={input.onCompositionStart}
+          onCompositionEnd={input.onCompositionEnd}
+          onKeyDown={input.onKeyDown}
           placeholder={connected
             ? "Ask GoalPort…"
             : "Reconnect Core before sending…"}
