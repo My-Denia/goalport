@@ -6,7 +6,7 @@
 //! An unrelated process that only shares the workspace directory is not a hold.
 
 use crate::turn_results::{
-    WorkspaceDelta, WorkspaceEntry, WorkspaceSample, compare_workspace_samples,
+    WorkspaceDelta, WorkspaceSample, compare_workspace_samples,
     sample_workspace_entries,
 };
 use serde_json::{Value, json};
@@ -343,75 +343,73 @@ fn git_membership(workspace: &Path) -> GitMembership {
 
 fn filesystem_sample(workspace: &Path) -> Option<WorkspaceSample> {
     let mut records = Vec::new();
-    let mut truncated = false;
-    if walk_files(workspace, workspace, &mut records, &mut truncated).is_err() {
+    if walk_files(workspace, workspace, &mut records).is_err() {
         return None;
     }
     records.sort();
-    let digest = {
-        let mut hasher = Sha256::new();
-        for record in &records {
-            hasher.update(record.as_bytes());
-            hasher.update(b"\n");
-        }
-        format!("{:x}", hasher.finalize())
-    };
-    let entries = records
-        .into_iter()
-        .take(80)
-        .map(|record| {
-            let mut parts = record.split('\0');
-            let path = parts.next().unwrap_or("").to_owned();
-            let rest = parts.collect::<Vec<_>>().join(":");
-            WorkspaceEntry {
-                path,
-                area: "filesystem".into(),
-                status: "  ".into(),
-                content_hash: Some(rest),
-                content_inspection: "stat".into(),
-            }
-        })
-        .collect();
+    let mut hasher = Sha256::new();
+    for record in &records {
+        hasher.update(record);
+        hasher.update(b"\n");
+    }
     Some(WorkspaceSample {
-        truncated,
-        ignored_digest: Some(digest),
-        ignored_truncated: truncated,
-        entries,
+        truncated: false,
+        ignored_digest: Some(format!("{:x}", hasher.finalize())),
+        ignored_truncated: false,
+        entries: Vec::new(),
     })
 }
 
-fn walk_files(
-    root: &Path,
-    dir: &Path,
-    records: &mut Vec<String>,
-    truncated: &mut bool,
-) -> std::io::Result<()> {
-    if *truncated {
-        return Ok(());
-    }
+fn walk_files(root: &Path, dir: &Path, records: &mut Vec<Vec<u8>>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(_) => continue,
-        };
+        let path = entry?.path();
+        let meta = std::fs::symlink_metadata(&path)?;
         if meta.file_type().is_symlink() {
             continue;
         }
         if meta.is_dir() {
-            walk_files(root, &path, records, truncated)?;
+            walk_files(root, &path, records)?;
             continue;
         }
-        if records.len() >= 2_000 {
-            *truncated = true;
-            return Ok(());
-        }
         let relative = path.strip_prefix(root).unwrap_or(&path);
-        let modified = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|time| time.as_nanos()).unwrap_or(0);
-        records.push(format!("{}\0{}\0{modified}", relative.display(), meta.len()));
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_nanos())
+            .unwrap_or(0);
+        let mut record = path_bytes(relative);
+        record.push(0);
+        record.extend_from_slice(meta.len().to_string().as_bytes());
+        record.push(0);
+        record.extend_from_slice(modified.to_string().as_bytes());
+        records.push(record);
     }
     Ok(())
+}
+
+fn bytes_path(bytes: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(bytes).as_ref())
+    }
+}
+
+fn path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return path.as_os_str().as_bytes().to_vec();
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
 }
 
 fn ignored_digest(workspace: &Path) -> IgnoredDigest {
@@ -422,7 +420,13 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
         .output()
         .ok()
         .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .map(|output| {
+            let mut bytes = output.stdout;
+            while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+                bytes.pop();
+            }
+            bytes
+        })
         .unwrap_or_default();
     let output = match std::process::Command::new("git")
         .arg("-C")
@@ -435,7 +439,7 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
     };
     let bytes = output.stdout;
     // -z records are NUL-separated "XY <path>"; ignored records are "!! ".
-    let mut triples: Vec<String> = Vec::new();
+    let mut triples: Vec<Vec<u8>> = Vec::new();
     let mut count = 0usize;
     let mut start = 0usize;
     for (index, byte) in bytes.iter().enumerate() {
@@ -457,12 +461,12 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
         } else {
             path
         };
-        let path = String::from_utf8_lossy(path);
-        let Some(path) = path.strip_prefix(&prefix).or(if prefix.is_empty() { Some(path.as_ref()) } else { None }) else {
+        let Some(path) = path.strip_prefix(prefix.as_slice()) else {
             continue;
         };
-        let full = workspace.join(path);
-        // stat-only fingerprint: (path, size, mtime_nanos).
+        let full = workspace.join(bytes_path(path));
+        // stat-only fingerprint: raw path bytes, size, mtime_nanos.
+        let mut triple = path.to_vec();
         if let Ok(metadata) = std::fs::metadata(&full) {
             let mtime_ns = metadata
                 .modified()
@@ -470,20 +474,19 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0);
-            triples.push(format!(
-                "{}|{}|{}",
-                path,
-                metadata.len(),
-                mtime_ns
-            ));
+            triple.push(b'|');
+            triple.extend_from_slice(metadata.len().to_string().as_bytes());
+            triple.push(b'|');
+            triple.extend_from_slice(mtime_ns.to_string().as_bytes());
         } else {
-            triples.push(format!("{path}|absent"));
+            triple.extend_from_slice(b"|absent");
         }
+        triples.push(triple);
     }
     triples.sort();
     let mut hasher = Sha256::new();
     for triple in &triples {
-        hasher.update(triple.as_bytes());
+        hasher.update(triple);
         hasher.update(b"\n");
     }
     IgnoredDigest::Digest(format!("{:x}", hasher.finalize()))
@@ -728,6 +731,20 @@ mod tests {
     }
 
     #[test]
+    fn a_large_non_git_folder_is_not_permanently_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..2_001 {
+            std::fs::write(dir.path().join(format!("f{index}.txt")), "x").unwrap();
+        }
+        let sample = sample_workspace(dir.path()).expect("large folder");
+        assert!(!sample.truncated, "file count must not freeze the hold");
+        assert!(!sample.ignored_truncated);
+        std::fs::write(dir.path().join("f0.txt"), "changed").unwrap();
+        let changed = sample_workspace(dir.path()).expect("changed folder");
+        assert_ne!(sample.ignored_digest, changed.ignored_digest);
+    }
+
+    #[test]
     fn an_unreadable_workspace_does_not_release() {
         let decision = decide_quiet(None, &[], None, 5_000);
         assert!(matches!(decision, QuietDecision::Hold { residual: "unknown", .. }));
@@ -799,6 +816,20 @@ mod ignored_digest_tests {
             matches!(decision, QuietDecision::Hold { .. }),
             "changed ignored content must hold: {decision:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_ignored_path_is_still_fingerprinted() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = repo_with_ignore("keep");
+        std::fs::write(dir.path().join(".gitignore"), "*\n").unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"ignored-\xff.txt");
+        std::fs::write(dir.path().join(name), "one\n").unwrap();
+        let first = sample_workspace(dir.path()).unwrap();
+        std::fs::write(dir.path().join(name), "two\n").unwrap();
+        let second = sample_workspace(dir.path()).unwrap();
+        assert_ne!(first.ignored_digest, second.ignored_digest);
     }
 
     #[test]
