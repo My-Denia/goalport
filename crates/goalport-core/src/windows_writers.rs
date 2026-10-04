@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 
+use winapi::um::fileapi::GetLongPathNameW;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::memoryapi::ReadProcessMemory;
 use winapi::um::processthreadsapi::OpenProcess;
@@ -82,8 +83,26 @@ unsafe fn read_usize(process: HANDLE, address: usize) -> Option<usize> {
     }
 }
 
-/// The process's current working directory, read from its PEB, normalized by
-/// the shared stop-closure helper (strips `\??\` / `\\?\`).
+/// Expand 8.3 short-name path components against the live filesystem. A
+/// process spawned from a short-form path (CI runners hand out
+/// `C:\Users\RUNNER~1\...`) reports that short form in its PEB, while the
+/// canonicalized workspace holds the long form; literal component compares
+/// would then fail on an alias that names the same directory. Best effort:
+/// on failure the original text is kept.
+unsafe fn expand_long_path(dos: &str) -> String {
+    let wide: Vec<u16> = dos.encode_utf16().chain(std::iter::once(0)).collect();
+    let capacity = wide.len().max(260) + 260;
+    let mut buffer = vec![0u16; capacity];
+    let len = GetLongPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), capacity as u32);
+    if len == 0 || len as usize >= buffer.len() {
+        return dos.to_owned();
+    }
+    String::from_utf16_lossy(&buffer[..len as usize])
+}
+
+/// The process's current working directory, read from its PEB, expanded to
+/// long-path form and normalized by the shared stop-closure helper (strips
+/// `\??\` / `\\?\`).
 unsafe fn process_cwd(process: HANDLE) -> Option<PathBuf> {
     let mut info = ProcessBasicInformation::default();
     let status = NtQueryInformationProcess(
@@ -120,7 +139,8 @@ unsafe fn process_cwd(process: HANDLE) -> Option<PathBuf> {
         .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
         .collect();
     let text = String::from_utf16_lossy(&units);
-    Some(crate::stop_closure::normalize_observed_path(&text))
+    let expanded = expand_long_path(&text);
+    Some(crate::stop_closure::normalize_observed_path(&expanded))
 }
 
 /// Every other live process's current working directory, as (pid, cwd).
