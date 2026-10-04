@@ -13,12 +13,15 @@
 
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::path::Path;
 use std::process::ExitStatus;
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DomainOccupy {
@@ -37,10 +40,12 @@ pub(crate) struct ContainedChild {
     reaped: bool,
     #[cfg(target_os = "linux")]
     ns_inode: u64,
+    // usize, not HANDLE: a raw pointer is not Send, and this child moves
+    // across the Runtime thread.
     #[cfg(windows)]
-    process: winapi::um::winnt::HANDLE,
+    process: usize,
     #[cfg(windows)]
-    job: winapi::um::winnt::HANDLE,
+    job: usize,
 }
 
 pub(crate) struct ContainedSpawn {
@@ -79,7 +84,9 @@ impl ContainedChild {
         #[cfg(windows)]
         {
             let mut code = 0u32;
-            let ok = unsafe { winapi::um::processthreadsapi::GetExitCodeProcess(self.process, &mut code) };
+            let ok = unsafe {
+                winapi::um::processthreadsapi::GetExitCodeProcess(self.process as _, &mut code)
+            };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -127,7 +134,7 @@ impl ContainedChild {
         }
         #[cfg(windows)]
         {
-            let ok = unsafe { terminate_job(self.job) };
+            let ok = unsafe { terminate_job(self.job as _) };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -144,7 +151,7 @@ impl ContainedChild {
         }
         #[cfg(windows)]
         {
-            return windows_job_has_other(self.job, self.pid);
+            return windows_job_has_other(self.job as _, self.pid);
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         {
@@ -162,8 +169,8 @@ impl Drop for ContainedChild {
         }
         #[cfg(windows)]
         unsafe {
-            winapi::um::handleapi::CloseHandle(self.process);
-            winapi::um::handleapi::CloseHandle(self.job);
+            winapi::um::handleapi::CloseHandle(self.process as _);
+            winapi::um::handleapi::CloseHandle(self.job as _);
         }
     }
 }
@@ -559,8 +566,8 @@ fn windows_spawn_in_job(
             child: ContainedChild {
                 pid: process_info.dwProcessId,
                 reaped: false,
-                process: process_info.hProcess,
-                job,
+                process: process_info.hProcess as usize,
+                job: job as usize,
             },
             stdin: File::from_raw_handle(in_write as std::os::windows::io::RawHandle),
             stdout: File::from_raw_handle(out_read as std::os::windows::io::RawHandle),
