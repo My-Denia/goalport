@@ -1,11 +1,13 @@
 //! Linux evidence that a cancelled Claude turn is no longer writing its workspace.
 //!
-//! Provider turn cancellation is not enough. A hold is released only when two
-//! quiet observations, at least a second apart, both see no other process with
-//! that workspace as its cwd and the same complete workspace fingerprint.
+//! Provider turn cancellation is not enough. A hold is released only when the
+//! recorded descendants and spawn-time domain are clear, and two quiet
+//! observations at least a second apart have the same workspace fingerprint.
+//! An unrelated process that only shares the workspace directory is not a hold.
 
 use crate::turn_results::{
-    WorkspaceDelta, WorkspaceSample, compare_workspace_samples, sample_workspace_entries,
+    WorkspaceDelta, WorkspaceEntry, WorkspaceSample, compare_workspace_samples,
+    sample_workspace_entries,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -280,6 +282,9 @@ pub(crate) fn now_ms() -> u128 {
 }
 
 pub(crate) fn sample_workspace(workspace: &Path) -> Option<WorkspaceSample> {
+    if git_membership(workspace) == GitMembership::NotARepository {
+        return filesystem_sample(workspace);
+    }
     let mut sample = sample_workspace_entries(workspace)?;
     // Merge-review P1: the quiet proof must cover git-ignored content too
     // (a residual process can write target/ or dist/ by absolute path from
@@ -301,6 +306,112 @@ enum IgnoredDigest {
     Digest(String),
     Truncated,
     Unavailable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitMembership {
+    Worktree,
+    NotARepository,
+    Unreadable,
+}
+
+fn git_membership(workspace: &Path) -> GitMembership {
+    if !workspace.is_dir() {
+        return GitMembership::Unreadable;
+    }
+    let output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return GitMembership::Unreadable,
+    };
+    if output.status.success()
+        && std::str::from_utf8(&output.stdout).map(|text| text.trim() == "true").unwrap_or(false)
+    {
+        return GitMembership::Worktree;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("not a git repository") {
+        GitMembership::NotARepository
+    } else {
+        GitMembership::Unreadable
+    }
+}
+
+fn filesystem_sample(workspace: &Path) -> Option<WorkspaceSample> {
+    let mut records = Vec::new();
+    let mut truncated = false;
+    if walk_files(workspace, workspace, &mut records, &mut truncated).is_err() {
+        return None;
+    }
+    records.sort();
+    let digest = {
+        let mut hasher = Sha256::new();
+        for record in &records {
+            hasher.update(record.as_bytes());
+            hasher.update(b"\n");
+        }
+        format!("{:x}", hasher.finalize())
+    };
+    let entries = records
+        .into_iter()
+        .take(80)
+        .map(|record| {
+            let mut parts = record.split('\0');
+            let path = parts.next().unwrap_or("").to_owned();
+            let rest = parts.collect::<Vec<_>>().join(":");
+            WorkspaceEntry {
+                path,
+                area: "filesystem".into(),
+                status: "  ".into(),
+                content_hash: Some(rest),
+                content_inspection: "stat".into(),
+            }
+        })
+        .collect();
+    Some(WorkspaceSample {
+        truncated,
+        ignored_digest: Some(digest),
+        ignored_truncated: truncated,
+        entries,
+    })
+}
+
+fn walk_files(
+    root: &Path,
+    dir: &Path,
+    records: &mut Vec<String>,
+    truncated: &mut bool,
+) -> std::io::Result<()> {
+    if *truncated {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            walk_files(root, &path, records, truncated)?;
+            continue;
+        }
+        if records.len() >= 2_000 {
+            *truncated = true;
+            return Ok(());
+        }
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let modified = meta.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|time| time.as_nanos()).unwrap_or(0);
+        records.push(format!("{}\0{}\0{modified}", relative.display(), meta.len()));
+    }
+    Ok(())
 }
 
 fn ignored_digest(workspace: &Path) -> IgnoredDigest {
@@ -580,6 +691,27 @@ mod tests {
         let detail = json!({ "workspaceQuiet": quiet });
         let second = decide_quiet(Some(&detail), &[], Some(&sample("tick.txt", "bbb")), 8_000);
         assert!(matches!(second, QuietDecision::Hold { .. }));
+    }
+
+    #[test]
+    fn a_non_git_folder_can_go_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
+        let first = sample_workspace(dir.path()).expect("non-git sample");
+        assert!(first.ignored_digest.is_some());
+        assert!(!first.truncated);
+        let held = decide_quiet(None, &[], Some(&first), 1_000);
+        assert!(matches!(held, QuietDecision::Hold { .. }));
+        let detail = json!({
+            "workspaceQuiet": {
+                "observedAtMs": 1_000,
+                "writers": [],
+                "fingerprint": fingerprint_json(&first)
+            }
+        });
+        let second = sample_workspace(dir.path()).expect("second sample");
+        let released = decide_quiet(Some(&detail), &[], Some(&second), 3_000);
+        assert!(matches!(released, QuietDecision::Release { .. }), "{released:?}");
     }
 
     #[test]
