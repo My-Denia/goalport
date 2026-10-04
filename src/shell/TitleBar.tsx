@@ -99,21 +99,28 @@ export function TitleBar({
                 </button>
               )}
             >
+              {/* Menu items render as <button> (Base UI's default is a
+                  div[role=menuitem]): the app's menus have always been
+                  buttons, and the packaged smoke drives
+                  div[role='menu'] button[aria-label='Close window']. */}
               <Menu.CheckboxItem
-                className="app-menu-item"
+                render={<button type="button" className="app-menu-item" />}
                 checked={detailsOpen}
                 onCheckedChange={() => { onToggleDetails(); }}
                 closeOnClick
               >
                 {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
               </Menu.CheckboxItem>
-              <Menu.Item className="app-menu-item" onClick={() => { onOpenDiagnostics(); }}>
+              <Menu.Item render={<button type="button" className="app-menu-item" />} onClick={() => { onOpenDiagnostics(); }}>
                 Developer diagnostics
               </Menu.Item>
-              <Menu.Item className="app-menu-item" onClick={() => { onOpenAbout(); }}>
+              <Menu.Item render={<button type="button" className="app-menu-item" />} onClick={() => { onOpenAbout(); }}>
                 About GoalPort
               </Menu.Item>
-              <Menu.Item className="app-menu-item" aria-label="Close window" onClick={() => { onCloseWindow(); }}>
+              <Menu.Item
+                render={<button type="button" className="app-menu-item" aria-label="Close window" />}
+                onClick={() => { onCloseWindow(); }}
+              >
                 Close window
               </Menu.Item>
             </GoalLayer>

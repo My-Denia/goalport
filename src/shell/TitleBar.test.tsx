@@ -91,4 +91,21 @@ describe("TitleBar application menu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Close window" }));
     expect(spies.onCloseWindow).toHaveBeenCalledTimes(1);
   });
+
+  it("renders every menu item as a button (packaged smoke contract)", () => {
+    mountTitleBar();
+    fireEvent.click(screen.getByRole("button", { name: "Application menu" }));
+    const menu = document.querySelector("div[role='menu']");
+    expect(menu).not.toBeNull();
+    const close = menu!.querySelector("button[aria-label='Close window']");
+    expect(close).not.toBeNull();
+    for (const item of menu!.querySelectorAll(".app-menu-item")) {
+      expect(item.tagName.toLowerCase()).toBe("button");
+    }
+  });
 });
+
+// Windows-packaged smoke regression (CI at f47ed95): menu items must remain
+// <button> elements — the app's menus were always buttons and the packaged
+// smoke drives div[role='menu'] button[aria-label='Close window']; Base UI's
+// default menuitem div broke that contract silently on every query.
