@@ -56,10 +56,15 @@ unsafe extern "system" {
 }
 
 // x64 PEB / RTL_USER_PROCESS_PARAMETERS offsets. The packaged target is
-// x64-only; these offsets are wrong for 32-bit and intentionally unused there.
+// x64-only; these offsets are wrong for 32-bit and intentionally unused
+// there. CURDIR is `{ UNICODE_STRING DosPath; HANDLE Handle; }` (winternl
+// order), so the DosPath starts at params+0x38 and its Handle sits at
+// params+0x48 — Windows CI empirically confirmed the layout after an
+// earlier reference claimed the reverse order (its "+0x40 length" read was
+// the Handle: a handle-shaped 0x7900).
 const PEB_PROCESS_PARAMETERS: usize = 0x20;
-const PARAMS_CURDIR_HANDLE: usize = 0x38;
-const PARAMS_CURDIR_DOSPATH: usize = 0x40;
+const PARAMS_CURDIR_DOSPATH: usize = 0x38;
+const PARAMS_CURDIR_HANDLE: usize = 0x48;
 
 /// Read `size` bytes at `address` in the target process into `out`.
 /// Returns false on any read failure (guard page, exited race, unreadable).
@@ -117,9 +122,8 @@ unsafe fn process_cwd(process: HANDLE) -> Option<PathBuf> {
         return None;
     }
     let parameters = read_usize(process, info.peb_base_address + PEB_PROCESS_PARAMETERS)?;
-    // CURDIR at params+0x38 is { HANDLE Handle; UNICODE_STRING DosPath; }:
-    // the handle is NOT the path; the DosPath begins at +0x40.
-    let _handle = read_usize(process, parameters + PARAMS_CURDIR_HANDLE);
+    // CURDIR at params+0x38 is { UNICODE_STRING DosPath; HANDLE Handle; }:
+    // the DosPath comes first; the handle (at params+0x48) is not the path.
     let mut dos_path = UnicodeString::default();
     let dos_path_bytes = std::slice::from_raw_parts_mut(
         &mut dos_path as *mut UnicodeString as *mut u8,
@@ -128,6 +132,7 @@ unsafe fn process_cwd(process: HANDLE) -> Option<PathBuf> {
     if !read_memory(process, parameters + PARAMS_CURDIR_DOSPATH, dos_path_bytes) {
         return None;
     }
+    let _handle = read_usize(process, parameters + PARAMS_CURDIR_HANDLE);
     if dos_path.length == 0 || dos_path.length % 2 != 0 || dos_path.buffer == 0 {
         return None;
     }
