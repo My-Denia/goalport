@@ -2143,7 +2143,11 @@ impl UiController {
                 crate::stop_closure::ReleaseWriterGate::Hold => continue,
                 crate::stop_closure::ReleaseWriterGate::Filtered(writers) => writers,
             };
-            let sample = crate::stop_closure::sample_workspace(&workspace);
+            let sample = match crate::stop_closure::take_release_sample(&workspace) {
+                crate::stop_closure::ReleaseSample::Pending => continue,
+                crate::stop_closure::ReleaseSample::Unreadable => None,
+                crate::stop_closure::ReleaseSample::Ready(sample) => Some(sample),
+            };
             let decision = crate::stop_closure::decide_quiet(
                 row.detail.as_ref(),
                 &writers,
