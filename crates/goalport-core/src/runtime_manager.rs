@@ -4904,6 +4904,8 @@ struct ClaudeStreamProcess {
     /// was alive after the failed first send, before any signal.
     resume_proof_is_post_send: bool,
     resume_root_wait_succeeded: bool,
+    /// try_wait already reaped this handle. close()/Drop must not kill it.
+    root_handle_reaped: bool,
     resume_failure_is_verification: bool,
     resume_verification_outcome: Option<ResumeContainment>,
 }
@@ -4976,6 +4978,7 @@ impl ClaudeStreamProcess {
             resume_proof_authorizes: false,
             resume_proof_is_post_send: false,
             resume_root_wait_succeeded: false,
+            root_handle_reaped: false,
             resume_failure_is_verification: false,
             resume_verification_outcome: None,
         }
@@ -5506,7 +5509,13 @@ impl ClaudeStreamProcess {
             return false;
         };
         let pid = child.id();
-        let alive = matches!(child.try_wait(), Ok(None));
+        let waited = child.try_wait();
+        if matches!(waited, Ok(Some(_))) {
+            // The handle is already reaped. A later close()/Drop must not
+            // kill this pid; it may have been reused.
+            self.root_handle_reaped = true;
+        }
+        let alive = matches!(waited, Ok(None));
         if !alive {
             // Already dead or unobservable. Do not snapshot after death and
             // do not kill. A pre-send snapshot is discarded.
@@ -7389,7 +7398,10 @@ impl ClaudeStreamProcess {
             self.stdout = None;
             return Ok(());
         }
-        if let Some(child) = self.child.as_mut() {
+        if self.root_handle_reaped || self.resume_root_wait_succeeded {
+            // The original handle was already waited. Drop it without kill.
+            self.child = None;
+        } else if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }

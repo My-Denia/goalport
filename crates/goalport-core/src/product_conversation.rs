@@ -564,7 +564,25 @@ fn describe_turn(
                 runtime_manager.confirm_process_identity(&context.attempt.id),
                 Some(crate::runtime_manager::ProcessConfirmation::Exited { .. })
             );
-        let action = if session.state == "unavailable"
+        let unproven_successor = matches!(context.attempt.state, AttemptState::Queued)
+            && context.attempt.provider.eq_ignore_ascii_case("claude")
+            && context.attempt.provider_session.is_none()
+            && matches!(
+                store.closed_claude_successor_source(&context.attempt.id),
+                Ok(Some(_))
+            )
+            && !matches!(
+                store.resume_retry_generation_dead(&context.attempt.id),
+                Ok(true)
+            );
+        let action = if unproven_successor {
+            turn.reason_code = Some("resume-containment-unproven".into());
+            turn.reason = Some(
+                "This resume is not proven contained. It cannot be closed, retried, or replaced until containment is proven."
+                    .into(),
+            );
+            "diagnose"
+        } else if session.state == "unavailable"
             && exited
             && settled
             && no_unsettled_effect

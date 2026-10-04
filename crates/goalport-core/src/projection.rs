@@ -3644,6 +3644,12 @@ impl UiController {
                     .selected_provider(&attempt_id)
                     .is_some()
             };
+            if self.successor_send_must_not_spawn(&attempt)? {
+                return Err(
+                    "This resume cannot start another process from send. Resume only after containment is proven; no process was spawned."
+                        .into(),
+                );
+            }
             if !runtime_live {
                 self.runtime_manager
                     .select_runtime(
@@ -5667,7 +5673,7 @@ impl UiController {
                 crate::runtime_manager::ResumeContainment::Proven
                     | crate::runtime_manager::ResumeContainment::Vacuous
             ) {
-                let _ = self.persist_event(
+                self.persist_event(
                     successor_id,
                     "runtime.resume.spawn.failed",
                     json!({
@@ -5676,7 +5682,7 @@ impl UiController {
                         "error": error
                     }),
                     None,
-                );
+                )?;
                 self.runtime_manager.disarm_detach_claude(successor_id);
             }
         }
@@ -5705,6 +5711,50 @@ impl UiController {
             None,
         );
         Err(format!("Native session resume failed: {reason}"))
+    }
+
+    /// A closed-Claude successor must not gain a fresh process from send.
+    /// The resume command is the only spawn path, and only after a proven
+    /// marker with no registration left. A held or marker-absent successor
+    /// refuses here even after the in-memory registration is gone.
+    fn successor_send_must_not_spawn(&self, attempt: &Attempt) -> Result<bool, String> {
+        if !self.closed_claude_resume_successor(attempt)? {
+            return Ok(false);
+        }
+        if self.runtime_manager.claude_resume_hold(&attempt.id) {
+            return Ok(true);
+        }
+        if self
+            .runtime_manager
+            .registered_binding(&attempt.id)
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Close must not drop an unproven successor registration. A proven
+    /// marker is the only reason a later close may retire it.
+    fn successor_close_must_not_drop(&self, attempt: &Attempt) -> Result<bool, String> {
+        if !self.closed_claude_resume_successor(attempt)? {
+            return Ok(false);
+        }
+        Ok(!self
+            .store
+            .resume_retry_generation_dead(&attempt.id)
+            .map_err(store_message)?)
+    }
+
+    fn closed_claude_resume_successor(&self, attempt: &Attempt) -> Result<bool, String> {
+        Ok(attempt.provider.eq_ignore_ascii_case("claude")
+            && matches!(attempt.state, AttemptState::Queued)
+            && attempt.provider_session.is_none()
+            && self
+                .store
+                .closed_claude_successor_source(&attempt.id)
+                .map_err(store_message)?
+                .is_some())
     }
 
     fn finish_held_resume_without_spawn(&mut self, attempt_id: &str) -> Result<(), String> {
@@ -6024,6 +6074,12 @@ impl UiController {
             self.selected_attempt_id.as_deref().unwrap_or_default(),
         );
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
+        if self.successor_close_must_not_drop(&attempt)? {
+            return Err(
+                "This resume is not proven contained. Close will not drop it or start another process."
+                    .into(),
+            );
+        }
         if self
             .store
             .latest_event_kind_in(&attempt_id, &["runtime.session.closed"])
