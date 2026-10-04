@@ -73,3 +73,9 @@ describe("draft composer lifecycle across snapshot polls", () => {
     expect(await screen.findByRole("heading", { name: /build a durable preview/i })).toBeTruthy();
   });
 });
+
+// Windows-packaged smoke regression (caught by CI at 1913187): the empty-
+// profile latch must key on the AUTHORITATIVE active id, not the campaigns
+// list lookup — the list transiently lacks the just-created campaign while
+// the id is already set, and latching on that flash re-mounted the draft
+// composer over the fresh conversation for a frame.

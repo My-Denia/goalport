@@ -198,9 +198,14 @@ function App() {
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
     // never the pre-connect placeholder, never a capacity acknowledgement.
+    // Emptiness is the AUTHORITATIVE active id being empty, not the campaigns
+    // list lookup: right after a draft's first send the active id is already
+    // set while the list may not contain the new campaign yet, and latching
+    // on that transient would re-mount the draft composer over the fresh
+    // conversation for a frame (caught by the packaged Windows smoke).
     if (!booted || projectionUnavailable) return;
-    setConfirmedEmptyProfile(!hasGoal);
-  }, [booted, projectionUnavailable, hasGoal]);
+    setConfirmedEmptyProfile(snapshot.activeCampaignId.trim() === "");
+  }, [booted, projectionUnavailable, snapshot.activeCampaignId]);
   const draftActive = draftGoal !== null
     || (confirmedEmptyProfile && !hasGoal && !draftDismissed);
   const activeSendIntent = sendIntents[draftCampaignId];
