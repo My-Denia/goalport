@@ -550,12 +550,19 @@ fn windows_spawn_in_job(
         }
         let mut limits = std::mem::zeroed::<ExtendedLimit>();
         limits.basic.limit_flags = 0x0000_2000;
-        let _ = SetInformationJobObject(
+        if SetInformationJobObject(
             job,
             9,
             &mut limits as *mut _ as *mut _,
             std::mem::size_of::<ExtendedLimit>() as u32,
-        );
+        ) == 0
+        {
+            CloseHandle(job);
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "SetInformationJobObject failed; Claude was not started without kill-on-close",
+            ));
+        }
         let mut sa = std::mem::zeroed::<SECURITY_ATTRIBUTES>();
         sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
         sa.bInheritHandle = 1;
@@ -563,11 +570,16 @@ fn windows_spawn_in_job(
         let mut in_write: HANDLE = std::ptr::null_mut();
         let mut out_read: HANDLE = std::ptr::null_mut();
         let mut out_write: HANDLE = std::ptr::null_mut();
-        if CreatePipe(&mut in_read, &mut in_write, &mut sa, 0) == 0
-            || CreatePipe(&mut out_read, &mut out_write, &mut sa, 0) == 0
-        {
+        if CreatePipe(&mut in_read, &mut in_write, &mut sa, 0) == 0 {
             CloseHandle(job);
             return Err(io::Error::last_os_error());
+        }
+        if CreatePipe(&mut out_read, &mut out_write, &mut sa, 0) == 0 {
+            let error = io::Error::last_os_error();
+            CloseHandle(in_read);
+            CloseHandle(in_write);
+            CloseHandle(job);
+            return Err(error);
         }
         SetHandleInformation(in_write, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(out_read, HANDLE_FLAG_INHERIT, 0);

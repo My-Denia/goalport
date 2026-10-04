@@ -90,7 +90,7 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC**: a release candidate, not Stable V
 - The desktop package targets Windows x64 and is built from source, unsigned. Linux Core has a Unix socket development entry.
 - Current source can reopen compatible profiles and offers supported imports with backups. The previously built RC package retains its original behavior; see [profile continuity](docs/profile-continuity.md).
 - Admission differs per Runtime (Codex partial, Claude Code partially admitted, Grok admitted), recorded for specific builds, not re-checked for builds from current source.
-- After a Claude Code Stop, residual execution is unproven, and held workspaces cannot be released yet.
+- After a Claude Code Stop, a hold stays until the recorded process tree and spawn-time domain are gone and the workspace fingerprint is quiet. Missing evidence does not release it. An unrelated process that only shares the workspace directory does not keep the hold.
 
 Full list: [limitations](docs/limitations.md).
 
