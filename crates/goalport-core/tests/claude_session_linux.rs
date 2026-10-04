@@ -1568,6 +1568,20 @@ fn a_live_resume_descendant_blocks_the_marker_and_a_second_spawn() {
         ))
         .unwrap();
     assert_eq!(send["ok"], false, "{send}");
+    let close = server
+        .handle_json(&serde_json::to_vec(&serde_json::json!({
+            "protocolVersion": CONNECTED_UI_PROTOCOL_VERSION,
+            "requestId": "live-child-close",
+            "entityVersion": 0,
+            "messageType": "close_session",
+            "payload": { "attemptId": successor.id }
+        })).unwrap())
+        .unwrap();
+    assert_eq!(close["ok"], false, "close must not drop an unproven resume: {close}");
+    assert!(
+        close["error"].as_str().unwrap_or_default().contains("not proven contained"),
+        "{close}"
+    );
     let descendant_pid = fs::read_to_string(root.join(".fake-claude-descendant.pid"))
         .unwrap()
         .trim()
@@ -1720,5 +1734,22 @@ fn core_restart_before_a_marker_does_not_offer_retry_or_spawn() {
         .unwrap();
     assert_eq!(retry["ok"], false, "{retry}");
     assert_eq!(argv_pid(&root), first_pid, "restart before a marker must not spawn");
+    let bypass = restarted
+        .handle_json(&server_send(
+            "restart-before",
+            "campaign-restart-before",
+            &successor.id,
+            "send must not spawn while containment is unproven",
+        ))
+        .unwrap();
+    assert_eq!(bypass["ok"], false, "send must not spawn: {bypass}");
+    assert!(
+        bypass["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cannot start another process"),
+        "{bypass}"
+    );
+    assert_eq!(argv_pid(&root), first_pid, "send after restart must not spawn");
     drop(server);
 }
