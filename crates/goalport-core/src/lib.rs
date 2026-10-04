@@ -22,6 +22,10 @@ pub mod runtime_manager;
 pub mod stop_closure;
 #[cfg(windows)]
 mod windows_writers;
+pub mod descendants;
+pub mod provider_failure;
+#[cfg(windows)]
+mod windows_descendants;
 pub mod store;
 pub mod turn_results;
 

@@ -24,6 +24,8 @@ use goalport_core::{
     store::Store,
 };
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use libc;
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -630,4 +632,78 @@ fn git_repo(dir: &Path) {
     run(&["add", "README.md", ".gitignore"]);
     run(&["commit", "-m", "base"]);
     fs::write(dir.join("NOTES"), "pre-existing dirty\n").unwrap();
+}
+
+// --- merge-review P1: stop-time descendant snapshot release leg -----------
+
+#[test]
+fn a_surviving_descendant_blocks_release_and_death_releases() {
+    let _fixture_guard = begin();
+    let root = workspace_dir("descendant", "stop_descendant");
+    let store = Store::memory().unwrap();
+    let core = boot(&store, None);
+    let conversation = admit_claude(&core, &root, "descendant");
+
+    send(&core, &conversation, "descendant", "work until stopped");
+    wait_for(&core, &store, &conversation.attempt_id, "activity", |records| {
+        records.iter().any(|record| record.event.kind == "runtime.tool.activity")
+    });
+    // Wait until the fixture's non-dumpable child is alive (its pid file).
+    let mut descendant_pid = None;
+    for _ in 0..50 {
+        if let Ok(text) = fs::read_to_string(root.join(".fake-claude-descendant.pid")) {
+            descendant_pid = text.trim().parse::<u32>().ok();
+            if descendant_pid.is_some() {
+                break;
+            }
+        }
+        let _ = snapshot(&core);
+        thread::sleep(Duration::from_millis(100));
+    }
+    let descendant_pid = descendant_pid.expect("fixture descendant pid file");
+
+    let stop_receipt = stop(&core, &conversation, "descendant");
+    assert_eq!(stop_receipt["ok"], true, "{stop_receipt}");
+    wait_for(&core, &store, &conversation.attempt_id, "confirmed stop", |records| {
+        records.iter().any(|record| record.event.kind == "runtime.turn.cancelled")
+    });
+
+    // The snapshot must have recorded the descendant in the stop trace.
+    let held = store.stop_responsibilities().unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    let detail = held[0].detail.as_ref().unwrap();
+    let descendants = detail
+        .pointer("/payload/stop_attempt/descendants")
+        .and_then(|value| goalport_core::descendants::descendants_from_json(value))
+        .expect("snapshot present in the durable trace");
+    assert!(
+        descendants.iter().any(|record| record.pid == descendant_pid),
+        "the non-dumpable child is snapshotted: {descendants:?}"
+    );
+
+    // While the descendant lives, the hold must NOT release even though the
+    // workspace is quiet and the CLI ended the turn.
+    let released_early = poll_until(&core, &store, "descendant-alive", Duration::from_secs(4), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(
+        !released_early,
+        "a surviving stop-time descendant must block release"
+    );
+
+    // Kill the descendant; the identity-checked leg now sees it dead and the
+    // interrupted rule releases on quiet evidence.
+    kill_descendant(descendant_pid);
+    let released = poll_until(&core, &store, "descendant-dead", Duration::from_secs(10), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(released, "release completes once the descendant is dead");
+    let releases = release_events(&store, &conversation.attempt_id);
+    assert_eq!(releases.len(), 1, "{releases:?}");
+}
+
+#[cfg(target_os = "linux")]
+fn kill_descendant(pid: u32) {
+    let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    assert_eq!(result, 0, "kill descendant {pid}");
 }

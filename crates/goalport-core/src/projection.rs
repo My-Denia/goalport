@@ -2065,6 +2065,31 @@ impl UiController {
                     .pointer("/payload/stop_attempt/admission/executionEverAdmitted")
                     .cloned()
             }) == Some(json!(false));
+            // Merge-review P1 (descendant leg, both rules): every descendant
+            // snapshotted at Stop time — while the CLI was alive — must be
+            // identity-confirmed dead. A trace WITHOUT the snapshot field is
+            // missing evidence and keeps the hold (re-check discipline: "we
+            // never recorded" != "recorded and gone"); a survivor or an
+            // unreadable classification also keeps it.
+            let descendant_snapshot = row.detail.as_ref().and_then(|detail| {
+                detail
+                    .pointer("/payload/stop_attempt/descendants")
+                    .and_then(|value| {
+                        crate::descendants::descendants_from_json(value)
+                    })
+            });
+            let Some(descendants) = descendant_snapshot else {
+                continue;
+            };
+            if descendants.iter().any(|record| {
+                !matches!(
+                    crate::descendants::classify_descendant(record),
+                    crate::descendants::DescendantState::Dead
+                        | crate::descendants::DescendantState::Reused
+                )
+            }) {
+                continue;
+            }
             match row.native_turn_state {
                 crate::store::StopNativeTurnState::Interrupted => {
                     if claude_pid == 0 {
@@ -5509,10 +5534,7 @@ impl UiController {
                     && dormant.provider_session.is_none()
                     && self
                         .store
-                        .attempt_has_event_kind(
-                            &successor_id,
-                            "runtime.resume.verification.failed",
-                        )
+                        .resume_retry_generation_dead(&successor_id)
                         .map_err(store_message)?
                     && self
                         .runtime_manager
@@ -5526,6 +5548,13 @@ impl UiController {
             }
             Err(error) => return Err(store_message(error)),
         }
+        // Selection moves to the successor row the moment it exists: both a
+        // successful spawn and a spawn/verification failure leave the user on
+        // the successor view, where the deterministic retry is offered (the
+        // closed source is no longer the task's latest attempt).
+        self.selected_attempt_id = Some(successor_id.clone());
+        let task_for_selection = task.clone();
+        self.selected_campaign_id = Some(task_for_selection.campaign_id);
         self.spawn_closed_claude_successor(request, source, &successor_id, session_id)
     }
 
@@ -5553,7 +5582,7 @@ impl UiController {
         let executable = payload_text(&request.payload, "executable")
             .ok()
             .map(PathBuf::from);
-        if self
+        let select = if self
             .runtime_manager
             .registered_binding(successor_id)
             .is_none()
@@ -5566,8 +5595,11 @@ impl UiController {
                     runtime_version(&source.provider),
                     &workspace,
                 )
-                .map_err(|error| error.to_string())?;
-        }
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
         let context = SessionRequest {
             campaign_id: Some(task.campaign_id.clone()),
             task_id: task.id.clone(),
@@ -5575,47 +5607,76 @@ impl UiController {
             workspace_root: workspace,
             resume_session: Some(session_id.to_owned()),
         };
-        match self
-            .runtime_manager
-            .resume_session_with_context(successor_id, &context)
-        {
-            Ok(_session) => {
-                // Spawn-only resume: the CLI now runs with `--resume <stored
-                // id>`. The id itself is verified on the successor's first
-                // send — the real CLI reports the session only after the
-                // first user message — and until then the successor stays
-                // Queued with no provider session. Selection moves here so
-                // the pending-resume successor is the rendered attempt whose
-                // composer offers that first send.
+        let task = self.store.get_task(&task.id).map_err(store_message)?;
+        let spawn = match select {
+            Err(error) => Err(AdapterError::Connection(error)),
+            Ok(()) => self
+                .runtime_manager
+                .resume_session_with_context(successor_id, &context),
+        };
+        // Merge-review P1: ANY failure after a successful spawn — including a
+        // persist failure below — retires the registration FIRST (kill+wait;
+        // the marker must mean proven-dead), then journals the spawn-failed
+        // marker so the deterministic retry covers spawn-time failures too.
+        let mut established = false;
+        let mut spawn_error: Option<String> = None;
+        match spawn {
+            Ok(_) => {
                 let identity = self
                     .runtime_manager
                     .registration_identity(successor_id)
                     .unwrap_or_default();
-                self.persist_registration_established(
+                if let Err(error) = self.persist_registration_established(
                     successor_id,
                     &identity,
                     "resume_native_session",
                     &source.provider,
-                )?;
-                self.selected_attempt_id = Some(successor_id.to_owned());
-                self.selected_campaign_id = Some(task.campaign_id);
-                Ok(())
+                ) {
+                    spawn_error = Some(error);
+                } else {
+                    established = true;
+                }
             }
-            Err(error) => {
-                self.persist_event(
-                    successor_id,
-                    "runtime.session.resumed",
-                    json!({
-                        "resumed": false,
-                        "unsupported": true,
-                        "reason": error.to_string(),
-                        "promptReplay": false
-                    }),
-                    None,
-                )?;
-                Err(format!("Native session resume failed: {error}"))
-            }
+            Err(error) => spawn_error = Some(error.to_string()),
         }
+        if let Some(error) = spawn_error.as_ref() {
+            let _ = self.runtime_manager.close_attempt(successor_id);
+            let _ = self.persist_event(
+                successor_id,
+                "runtime.resume.spawn.failed",
+                json!({
+                    "reasonCode": "resume-spawn-failed",
+                    "reason": "the stored session's resume process could not start or could not be recorded; the process was closed and this resume can be retried",
+                    "error": error
+                }),
+                None,
+            );
+        }
+        if established {
+            // Spawn-only resume: the CLI now runs with `--resume <stored
+            // id>`. The id itself is verified on the successor's first
+            // send — the real CLI reports the session only after the
+            // first user message — and until then the successor stays
+            // Queued with no provider session. Selection moves here so
+            // the pending-resume successor is the rendered attempt whose
+            // composer offers that first send.
+            self.selected_attempt_id = Some(successor_id.to_owned());
+            self.selected_campaign_id = Some(task.campaign_id);
+            return Ok(());
+        }
+        let reason = spawn_error.unwrap_or_default();
+        let _ = self.persist_event(
+            successor_id,
+            "runtime.session.resumed",
+            json!({
+                "resumed": false,
+                "unsupported": true,
+                "reason": reason,
+                "promptReplay": false
+            }),
+            None,
+        );
+        Err(format!("Native session resume failed: {reason}"))
     }
 
     fn resume_native_session(&mut self, request: &UiCommandRequest) -> Result<(), String> {
@@ -5652,7 +5713,7 @@ impl UiController {
                 .is_none()
             && self
                 .store
-                .attempt_has_event_kind(&attempt_id, "runtime.resume.verification.failed")
+                .resume_retry_generation_dead(&attempt_id)
                 .map_err(store_message)?
             && let Some(source_id) = self
                 .store
@@ -6361,8 +6422,15 @@ impl UiController {
         let state = match event.event_type {
             AgentEventType::TurnFailed
                 if matches!(
-                    event.payload.get("reasonCode").and_then(Value::as_str),
-                    Some("provider-quota" | "provider-overloaded")
+                    event
+                        .payload
+                        .get("reasonCode")
+                        .and_then(Value::as_str)
+                        .map(crate::provider_failure::ProviderFailure::parse),
+                    Some(
+                        crate::provider_failure::ProviderFailure::Quota
+                            | crate::provider_failure::ProviderFailure::Overloaded
+                    )
                 ) => None,
             AgentEventType::TurnFailed => Some(AttemptState::Failed),
             AgentEventType::Cancelled => Some(AttemptState::Cancelled),

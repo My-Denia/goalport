@@ -8,6 +8,7 @@ use crate::turn_results::{
     WorkspaceDelta, WorkspaceSample, compare_workspace_samples, sample_workspace_entries,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::Path,
@@ -99,11 +100,15 @@ struct ObservedCwd {
 fn platform_enumerate_cwds(claude_pid: u32) -> Result<Vec<ObservedCwd>, String> {
     let mut observed = Vec::new();
     let entries = fs::read_dir("/proc").map_err(|error| error.to_string())?;
+    let core_pid = std::process::id();
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        if pid == claude_pid || pid == 0 {
+        // The excluded CLI pid AND Core's own pid: running Core from inside
+        // the managed workspace must not permanently block release
+        // (merge-review P2).
+        if pid == claude_pid || pid == core_pid || pid == 0 {
             continue;
         }
         let cwd_link = entry.path().join("cwd");
@@ -208,12 +213,26 @@ fn fingerprints_equal(previous: &Value, current: &Value) -> bool {
     let Some(later) = sample_from_json(current) else {
         return false;
     };
-    compare_workspace_samples(&earlier, &later) == WorkspaceDelta::Equal
+    if compare_workspace_samples(&earlier, &later) != WorkspaceDelta::Equal {
+        return false;
+    }
+    // The ignored-content leg (merge-review P1): quiet requires both samples
+    // to carry an untruncated ignored digest and for the digests to be
+    // equal. Absent-vs-present is a change (pre-digest samples never compare
+    // equal to digested ones); truncated never compares equal.
+    match (&earlier.ignored_digest, &later.ignored_digest) {
+        (Some(before), Some(after)) => {
+            !earlier.ignored_truncated && !later.ignored_truncated && before == after
+        }
+        _ => false,
+    }
 }
 
 fn fingerprint_json(sample: &WorkspaceSample) -> Value {
     json!({
         "truncated": sample.truncated,
+        "ignoredDigest": sample.ignored_digest,
+        "ignoredTruncated": sample.ignored_truncated,
         "entries": sample.entries.iter().map(|entry| json!({
             "path": entry.path,
             "area": entry.area,
@@ -241,6 +260,14 @@ fn sample_from_json(value: &Value) -> Option<WorkspaceSample> {
     }
     Some(WorkspaceSample {
         truncated: value.get("truncated").and_then(Value::as_bool).unwrap_or(true),
+        ignored_digest: value
+            .get("ignoredDigest")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        ignored_truncated: value
+            .get("ignoredTruncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         entries: parsed,
     })
 }
@@ -253,7 +280,89 @@ pub(crate) fn now_ms() -> u128 {
 }
 
 pub(crate) fn sample_workspace(workspace: &Path) -> Option<WorkspaceSample> {
-    sample_workspace_entries(workspace)
+    let mut sample = sample_workspace_entries(workspace)?;
+    // Merge-review P1: the quiet proof must cover git-ignored content too
+    // (a residual process can write target/ or dist/ by absolute path from
+    // outside the workspace). Aggregate digest over (path, size, mtime_ns)
+    // triples — stat only, no content reads — and only on THIS path: the
+    // shared hot helper stays untouched. Over-cap enumerations mark the
+    // sample honestly unknown instead of guessing quiet.
+    match ignored_digest(workspace) {
+        IgnoredDigest::Digest(digest) => sample.ignored_digest = Some(digest),
+        IgnoredDigest::Truncated => sample.ignored_truncated = true,
+        IgnoredDigest::Unavailable => {}
+    }
+    Some(sample)
+}
+
+const MAX_IGNORED_RECORDS: usize = 50_000;
+
+enum IgnoredDigest {
+    Digest(String),
+    Truncated,
+    Unavailable,
+}
+
+fn ignored_digest(workspace: &Path) -> IgnoredDigest {
+    let output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["status", "--porcelain=v1", "-z", "-uall", "--ignored"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return IgnoredDigest::Unavailable,
+    };
+    let bytes = output.stdout;
+    // -z records are NUL-separated "XY <path>"; ignored records are "!! ".
+    let mut triples: Vec<String> = Vec::new();
+    let mut count = 0usize;
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != 0 {
+            continue;
+        }
+        let record = &bytes[start..index];
+        start = index + 1;
+        if record.len() < 3 || &record[..2] != b"!!" {
+            continue;
+        }
+        count += 1;
+        if count > MAX_IGNORED_RECORDS {
+            return IgnoredDigest::Truncated;
+        }
+        let path = &record[3..];
+        let path = if let Some(pos) = path.iter().position(|&b| b == b'\0') {
+            &path[..pos]
+        } else {
+            path
+        };
+        let full = workspace.join(String::from_utf8_lossy(path).as_ref());
+        // stat-only fingerprint: (path, size, mtime_nanos).
+        if let Ok(metadata) = std::fs::metadata(&full) {
+            let mtime_ns = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            triples.push(format!(
+                "{}|{}|{}",
+                String::from_utf8_lossy(path),
+                metadata.len(),
+                mtime_ns
+            ));
+        } else {
+            triples.push(format!("{}|absent", String::from_utf8_lossy(path)));
+        }
+    }
+    triples.sort();
+    let mut hasher = Sha256::new();
+    for triple in &triples {
+        hasher.update(triple.as_bytes());
+        hasher.update(b"\n");
+    }
+    IgnoredDigest::Digest(format!("{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -264,6 +373,8 @@ mod tests {
     fn sample(path: &str, hash: &str) -> WorkspaceSample {
         WorkspaceSample {
             truncated: false,
+            ignored_digest: Some("ignored-digest".into()),
+            ignored_truncated: false,
             entries: vec![WorkspaceEntry {
                 path: path.into(),
                 area: "unstaged".into(),
@@ -350,5 +461,97 @@ mod tests {
     fn an_unreadable_workspace_does_not_release() {
         let decision = decide_quiet(None, &[], None, 5_000);
         assert!(matches!(decision, QuietDecision::Hold { residual: "unknown", .. }));
+    }
+}
+
+#[cfg(test)]
+mod ignored_digest_tests {
+    use super::*;
+
+    fn repo_with_ignore(name: &str) -> tempfile::TempDir {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(outer.path()).unwrap();
+        std::mem::forget(outer);
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@e.c"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join(".gitignore"), format!("{name}\n")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "base\n").unwrap();
+        run(&["add", ".gitignore", "README.md"]);
+        run(&["commit", "-qm", "base"]);
+        dir
+    }
+
+    #[test]
+    fn an_ignored_write_changes_the_digest_and_quiet_requires_equality() {
+        let dir = repo_with_ignore("target-out");
+        std::fs::write(dir.path().join("target-out"), "one\n").unwrap();
+        let first = sample_workspace(dir.path()).unwrap();
+        assert!(first.ignored_digest.is_some(), "{first:?}");
+        // Identical consecutive reads compare equal.
+        let second = sample_workspace(dir.path()).unwrap();
+        let detail = json!({ "workspaceQuiet": {
+            "fingerprint": fingerprint_json(&first),
+        }});
+        let decision = decide_quiet(
+            Some(&detail),
+            &[],
+            Some(&second),
+            crate::stop_closure::now_ms() + 2_000,
+        );
+        assert!(
+            matches!(decision, QuietDecision::Release { .. }),
+            "unchanged ignored content stays quiet: {decision:?}"
+        );
+        // A new write into the ignored path changes the digest: hold.
+        std::fs::write(dir.path().join("target-out"), "two\n").unwrap();
+        let third = sample_workspace(dir.path()).unwrap();
+        assert_ne!(first.ignored_digest, third.ignored_digest);
+        let detail = json!({ "workspaceQuiet": {
+            "fingerprint": fingerprint_json(&first),
+        }});
+        let decision = decide_quiet(
+            Some(&detail),
+            &[],
+            Some(&third),
+            crate::stop_closure::now_ms() + 2_000,
+        );
+        assert!(
+            matches!(decision, QuietDecision::Hold { .. }),
+            "changed ignored content must hold: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn a_digest_absent_from_either_sample_never_compares_equal() {
+        // Pre-digest samples (hot-path samples carry no digest) never satisfy
+        // the quiet comparator against a digested one.
+        let dir = repo_with_ignore("target-out");
+        std::fs::write(dir.path().join("target-out"), "one\n").unwrap();
+        let digested = sample_workspace(dir.path()).unwrap();
+        let mut undigested = digested.clone();
+        undigested.ignored_digest = None;
+        let detail = json!({ "workspaceQuiet": {
+            "fingerprint": fingerprint_json(&undigested),
+        }});
+        let decision = decide_quiet(
+            Some(&detail),
+            &[],
+            Some(&digested),
+            crate::stop_closure::now_ms() + 2_000,
+        );
+        assert!(
+            matches!(decision, QuietDecision::Hold { .. }),
+            "absent-vs-present digest is a change: {decision:?}"
+        );
     }
 }
