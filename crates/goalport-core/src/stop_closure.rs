@@ -27,9 +27,77 @@ pub(crate) fn hosted_workspace(key: &str) -> Option<std::path::PathBuf> {
     fs::canonicalize(unix).ok()
 }
 
+/// Normalize a path an OS observation handed us as text: strip the verbatim
+/// (`\\?\`) prefix `canonicalize` produces on Windows and the object-manager
+/// (`\??\`) prefix the PEB reports, so both forms compare equal to the
+/// canonicalized workspace. A behavioral no-op on Linux.
+pub(crate) fn normalize_observed_path(text: &str) -> std::path::PathBuf {
+    let stripped = text
+        .strip_prefix(r"\\?\")
+        .or_else(|| text.strip_prefix(r"\??\"))
+        .unwrap_or(text);
+    std::path::PathBuf::from(stripped)
+}
+
+/// Component-aware containment: the observed directory IS the workspace or a
+/// descendant of it. A path that merely shares a string prefix
+/// (`workspace-src`) is not within. On Windows the comparison additionally
+/// ASCII-case-folds (DOS paths are case-insensitive) while staying
+/// component-aware, so a case-variant spelling of the workspace itself
+/// (equal length) also matches.
+pub(crate) fn path_is_within(workspace: &Path, dir: &Path) -> bool {
+    if dir == workspace {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let fold = |path: &Path| {
+            path.components()
+                .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        };
+        let dir_parts = fold(dir);
+        let workspace_parts = fold(workspace);
+        return dir_parts.len() >= workspace_parts.len()
+            && dir_parts[..workspace_parts.len()] == workspace_parts[..];
+    }
+    #[cfg(not(windows))]
+    {
+        dir.starts_with(workspace)
+    }
+}
+
 pub(crate) fn workspace_writers(workspace: &Path, claude_pid: u32) -> Result<Vec<u32>, String> {
     let workspace = fs::canonicalize(workspace).map_err(|error| error.to_string())?;
+    // canonicalize resolves symlinks and `..`, but on Windows it also yields
+    // a verbatim `\\?\` path while OS observations arrive in DOS form.
+    // Normalize both sides through the same helper so containment compares
+    // like with like (a no-op on Linux).
+    let workspace = normalize_observed_path(&workspace.to_string_lossy());
     let mut writers = Vec::new();
+    for pid in platform_enumerate_cwds(claude_pid)? {
+        if path_is_within(&workspace, &pid.cwd) {
+            writers.push(pid.pid);
+        }
+    }
+    writers.sort_unstable();
+    Ok(writers)
+}
+
+struct ObservedCwd {
+    pid: u32,
+    cwd: std::path::PathBuf,
+}
+
+/// Enumerate every other live process's current working directory.
+///
+/// Per-process observation failures (permissions, a process that exited
+/// mid-scan, an unreadable PEB) skip that process -- the same observational
+/// limitation on both platforms. Only a systemic failure returns Err, so the
+/// release loop's fail-closed posture is unchanged.
+#[cfg(target_os = "linux")]
+fn platform_enumerate_cwds(claude_pid: u32) -> Result<Vec<ObservedCwd>, String> {
+    let mut observed = Vec::new();
     let entries = fs::read_dir("/proc").map_err(|error| error.to_string())?;
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -45,12 +113,17 @@ pub(crate) fn workspace_writers(workspace: &Path, claude_pid: u32) -> Result<Vec
         let Ok(cwd) = fs::canonicalize(&cwd) else {
             continue;
         };
-        if cwd == workspace {
-            writers.push(pid);
-        }
+        observed.push(ObservedCwd { pid, cwd });
     }
-    writers.sort_unstable();
-    Ok(writers)
+    Ok(observed)
+}
+
+#[cfg(windows)]
+fn platform_enumerate_cwds(claude_pid: u32) -> Result<Vec<ObservedCwd>, String> {
+    Ok(super::windows_writers::enumerate_cwds(claude_pid)?
+        .into_iter()
+        .map(|(pid, cwd)| ObservedCwd { pid, cwd })
+        .collect())
 }
 
 pub(crate) fn decide_quiet(

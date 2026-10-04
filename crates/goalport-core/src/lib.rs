@@ -20,6 +20,8 @@ pub mod projection;
 pub mod response_bounds;
 pub mod runtime_manager;
 pub mod stop_closure;
+#[cfg(windows)]
+mod windows_writers;
 pub mod store;
 pub mod turn_results;
 

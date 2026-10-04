@@ -240,7 +240,9 @@ function handlePermissionResponse(obj) {
     return;
   }
   if (scenario === "native_stop_pending_permission"
-    || scenario === "native_stop_denial_no_id") {
+    || scenario === "native_stop_denial_no_id"
+    || scenario === "native_stop_denial_subset"
+    || scenario === "native_stop_denial_silent") {
     // The Stop's deny lands while the decision is pending; the denied tool
     // never runs. Real Claude still answers the rejection with a tool_result
     // for the rejected tool before the interrupt result ends the turn.
@@ -279,6 +281,8 @@ function beginTurn() {
   if (scenario.startsWith("native_stop_")
     && scenario !== "native_stop_pending_permission"
     && scenario !== "native_stop_denial_no_id"
+    && scenario !== "native_stop_denial_subset"
+    && scenario !== "native_stop_denial_silent"
     && scenario !== "native_stop_after_allow") {
     emitToolUse("Read", "toolu_native_stop_read", {file_path: "README.md"});
     emitToolResult("toolu_native_stop_read", "before Stop");
@@ -428,6 +432,33 @@ function beginTurn() {
     // stays in flight until a Stop arrives, which the fixture answers with
     // the confirmed native_stop shape and NO denials (the allowed tool is
     // not a denial). Models: Allow, then active-tool Stop.
+    // Merge-review P1 (denial-set equality): a Stop that denies TWO pending
+    // permissions while the result reports only one (subset), or denies one
+    // while the result reports none (silent), must NOT confirm.
+    case "native_stop_denial_subset":
+      emitToolUse("Write", toolUseId, {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      emitCanUseTool("Write", {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      emitToolUse("Bash", `${toolUseId}_bash`, { command: "echo probe" });
+      emitCanUseTool("Bash", { command: "echo probe" });
+      waitingInterrupt = true;
+      return;
+    case "native_stop_denial_silent":
+      emitToolUse("Write", toolUseId, {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      emitCanUseTool("Write", {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      waitingInterrupt = true;
+      return;
     case "native_stop_after_allow":
       if (userCount === 1) {
         emitText("ASKING_FOR_BASH");
@@ -623,6 +654,8 @@ rl.on("line", (line) => {
       if (scenario === "native_stop_missing") delete result.user_message_uuid;
       if (scenario === "native_stop_denial") result.permission_denials=[{tool_use_id:"other-denied-tool"}];
       if (scenario === "native_stop_pending_permission") result.permission_denials=[{tool_name:"Bash", tool_use_id:toolUseId, tool_input:{command:"tick"}}];
+      if (scenario === "native_stop_denial_subset") result.permission_denials=[{tool_name:"Write", tool_use_id:toolUseId, tool_input:{}}];
+      if (scenario === "native_stop_denial_silent") result.permission_denials=[];
       if (scenario === "native_stop_denial_no_id") result.permission_denials=[{tool_name:"Bash", tool_input:{command:"tick"}}];
       if (scenario === "native_stop_error") {result.terminal_reason="api_error";result.subtype="success";result.api_error_status=404;}
       if (scenario === "native_stop_normal") {result.terminal_reason="completed";result.subtype="success";result.is_error=false;}

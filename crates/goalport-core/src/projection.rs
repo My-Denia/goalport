@@ -3708,8 +3708,9 @@ impl UiController {
                         // itself, so residual execution is provably none and
                         // no Stop responsibility is begun. The crossed
                         // message is still recorded as an UNKNOWN delivery.
-                        let resume_verification_failed =
-                            first.contains("Claude resume verification failed");
+                        let resume_verification_failed = self
+                            .runtime_manager
+                            .claude_resume_verification_failed(&attempt_id);
                         let _ = self.persist_event(
                             &attempt_id,
                             "runtime.send.failed",
@@ -3728,6 +3729,26 @@ impl UiController {
                             None,
                         );
                         if resume_verification_failed {
+                            // Merge-review P1: fully retire the failed resume.
+                            // The adapter already killed and reaped the child;
+                            // detach the dead registration so the successor is
+                            // not stuck as a zombie latest attempt, then
+                            // journal the failure. State stays QUEUED (the
+                            // machine has no Queued->Failed edge and the row
+                            // truthfully never activated); the journal event
+                            // AFTER the reap is the signal that makes the
+                            // deterministic retry eligible.
+                            let _ = self.runtime_manager.close_attempt(&attempt_id);
+                            self.persist_event(
+                                &attempt_id,
+                                "runtime.resume.verification.failed",
+                                json!({
+                                    "error": first,
+                                    "reasonCode": "resume-verification-failed",
+                                    "reason": "the stored session id was not verified; this resume can be retried and earlier messages will not be sent again"
+                                }),
+                                None,
+                            )?;
                             return Err(first);
                         }
                         let binding = self
@@ -5464,23 +5485,82 @@ impl UiController {
             format!("{}-cap-v1", source.provider),
         );
         let successor_id = successor_attempt.id.clone();
-        self.store
-            .insert_closed_claude_successor(&ClosedClaudeSuccessor {
-                source_attempt_id: source.id.clone(),
-                successor_attempt,
-            })
+        match self.store.insert_closed_claude_successor(&ClosedClaudeSuccessor {
+            source_attempt_id: source.id.clone(),
+            successor_attempt,
+        }) {
+            Ok(()) => {}
+            Err(StoreError::IdempotencyConflict(_)) => {
+                // Merge-review P1 (plan rev 4 piece b): a re-press on the
+                // source id lands here with the deterministic successor
+                // already present. Tolerate it ONLY when the row is the same
+                // dormant successor: still QUEUED with no provider session,
+                // journaled as runtime.resume.verification.failed (written
+                // only after its process was killed and reaped), belonging
+                // to this task, and with nothing registered for it now.
+                // Check and spawn share this one ui-mutex command execution.
+                // Any other shape keeps today's conflict.
+                let dormant = self
+                    .store
+                    .get_attempt(&successor_id)
+                    .map_err(store_message)?;
+                let tolerated = dormant.task_id == task.id
+                    && dormant.state == AttemptState::Queued
+                    && dormant.provider_session.is_none()
+                    && self
+                        .store
+                        .attempt_has_event_kind(
+                            &successor_id,
+                            "runtime.resume.verification.failed",
+                        )
+                        .map_err(store_message)?
+                    && self
+                        .runtime_manager
+                        .registered_binding(&successor_id)
+                        .is_none();
+                if !tolerated {
+                    return Err(store_message(StoreError::IdempotencyConflict(
+                        successor_id.clone(),
+                    )));
+                }
+            }
+            Err(error) => return Err(store_message(error)),
+        }
+        self.spawn_closed_claude_successor(request, source, &successor_id, session_id)
+    }
+
+    /// Spawn a `--resume <stored id>` process for an existing closed-claude
+    /// successor row and move selection to it. Used by the first resume, by
+    /// the deterministic retry of a successor whose first-send verification
+    /// failed (routed or tolerated insert), and by nothing else
+    /// (merge-review P1).
+    fn spawn_closed_claude_successor(
+        &mut self,
+        request: &UiCommandRequest,
+        source: &Attempt,
+        successor_id: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let task = self
+            .store
+            .get_task(&source.task_id)
             .map_err(store_message)?;
+        let workspace = PathBuf::from(self.workspace_for_campaign(&task.campaign_id)?);
+        self.ensure_workspace_ingress_allowed(
+            workspace.to_string_lossy().as_ref(),
+            "native session resume",
+        )?;
         let executable = payload_text(&request.payload, "executable")
             .ok()
             .map(PathBuf::from);
         if self
             .runtime_manager
-            .registered_binding(&successor_id)
+            .registered_binding(successor_id)
             .is_none()
         {
             self.runtime_manager
                 .select_runtime(
-                    &successor_id,
+                    successor_id,
                     &source.provider,
                     executable,
                     runtime_version(&source.provider),
@@ -5491,13 +5571,13 @@ impl UiController {
         let context = SessionRequest {
             campaign_id: Some(task.campaign_id.clone()),
             task_id: task.id.clone(),
-            attempt_id: successor_id.clone(),
+            attempt_id: successor_id.to_owned(),
             workspace_root: workspace,
             resume_session: Some(session_id.to_owned()),
         };
         match self
             .runtime_manager
-            .resume_session_with_context(&successor_id, &context)
+            .resume_session_with_context(successor_id, &context)
         {
             Ok(_session) => {
                 // Spawn-only resume: the CLI now runs with `--resume <stored
@@ -5509,21 +5589,21 @@ impl UiController {
                 // composer offers that first send.
                 let identity = self
                     .runtime_manager
-                    .registration_identity(&successor_id)
+                    .registration_identity(successor_id)
                     .unwrap_or_default();
                 self.persist_registration_established(
-                    &successor_id,
+                    successor_id,
                     &identity,
                     "resume_native_session",
                     &source.provider,
                 )?;
-                self.selected_attempt_id = Some(successor_id);
+                self.selected_attempt_id = Some(successor_id.to_owned());
                 self.selected_campaign_id = Some(task.campaign_id);
                 Ok(())
             }
             Err(error) => {
                 self.persist_event(
-                    &successor_id,
+                    successor_id,
                     "runtime.session.resumed",
                     json!({
                         "resumed": false,
@@ -5553,6 +5633,52 @@ impl UiController {
             return Err(format!(
                 "Attempt {attempt_id} is closed or terminal; start a new Attempt instead of resuming its session"
             ));
+        }
+        // Merge-review P1 (delta-audit routing): the UI sends the RENDERED
+        // attempt's id, so the deterministic retry arrives here carrying the
+        // QUEUED successor's id. Route it into the closed-session resume when
+        // the journal proves its previous process died after a failed
+        // verification (event written only after kill+reap), nothing is
+        // registered for it now, and its rolledFrom source is still CLOSED
+        // with the stored session. A bare successor whose registration was
+        // lost to a crash carries no such journal event and keeps today's
+        // refusal -- its orphaned process may still be alive, unobserved.
+        if attempt.provider_session.is_none()
+            && attempt.provider.eq_ignore_ascii_case("claude")
+            && matches!(attempt.state, AttemptState::Queued)
+            && self
+                .runtime_manager
+                .registered_binding(&attempt_id)
+                .is_none()
+            && self
+                .store
+                .attempt_has_event_kind(&attempt_id, "runtime.resume.verification.failed")
+                .map_err(store_message)?
+            && let Some(source_id) = self
+                .store
+                .closed_claude_successor_source(&attempt_id)
+                .map_err(store_message)?
+            && {
+                let source = self.store.get_attempt(&source_id).map_err(store_message)?;
+                source.state == AttemptState::Closed
+                    && source
+                        .provider_session
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())
+            }
+        {
+            let source = self.store.get_attempt(&source_id).map_err(store_message)?;
+            // Every tolerance leg is already validated above; the insert's
+            // latest-attempt guard runs before its duplicate-id guard, so the
+            // retry spawns directly on the existing row instead of re-entering
+            // the insert path.
+            let session = source
+                .provider_session
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            return self.spawn_closed_claude_successor(request, &source, &attempt_id, &session);
         }
         let Some(session_id) = attempt.provider_session.clone() else {
             self.persist_recovery(&attempt_id, Some("UNSUPPORTED"))?;

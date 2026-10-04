@@ -598,6 +598,48 @@ fn describe_turn(
             turn.reason_code = Some("session-detached".into());
             turn.reason = Some("Resume this session to continue. Earlier messages will not be sent again.".into());
             "resume-session"
+        } else if matches!(context.attempt.state, AttemptState::Queued)
+            && context.attempt.provider.eq_ignore_ascii_case("claude")
+            && context.attempt.provider_session.is_none()
+            && runtime_manager
+                .registered_binding(&context.attempt.id)
+                .is_none()
+            && matches!(
+                store.attempt_has_event_kind(
+                    &context.attempt.id,
+                    "runtime.resume.verification.failed"
+                ),
+                Ok(true)
+            )
+            && {
+                // Merge-review P1: a successor whose first-send resume
+                // verification failed offers the deterministic retry instead
+                // of a dead composer with no way out. Precedes the plain
+                // Queued arm (which would offer a FRESH session) and carries
+                // no settled/no_unsettled_effect gate: the crossed send's
+                // outbox item is UNKNOWN, not Succeeded.
+                match store.closed_claude_successor_source(&context.attempt.id) {
+                    Ok(Some(source_id)) => store
+                        .get_attempt(&source_id)
+                        .map(|source| {
+                            source.state == AttemptState::Closed
+                                && source
+                                    .provider_session
+                                    .as_deref()
+                                    .is_some_and(|id| !id.trim().is_empty())
+                        })
+                        .unwrap_or(false),
+                    Ok(None) => false,
+                    Err(_) => false,
+                }
+            }
+        {
+            turn.reason_code = Some("resume-verification-failed".into());
+            turn.reason = Some(
+                "The last resume did not verify the stored session id. Resume to try again; earlier messages will not be sent again."
+                    .into(),
+            );
+            "resume-session"
         } else if !retained
             && matches!(context.attempt.state, AttemptState::Queued)
             && no_unsettled_effect

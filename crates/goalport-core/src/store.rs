@@ -1467,9 +1467,52 @@ impl Store {
         Ok(())
     }
 
-    /// Same-task, same-provider successor of an explicitly closed Claude session.
-    /// The source row is not rewritten. A FAILED or CANCELLED source is refused.
-    /// No conversation request and no prompt are inserted.
+    /// Whether the attempt's journal already contains an event of this kind.
+    pub fn attempt_has_event_kind(
+        &self,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM events WHERE attempt_id=?1 AND kind=?2 LIMIT 1",
+                params![attempt_id, kind],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// The source attempt id recorded in a closed-claude successor's
+    /// `attempt.created` lineage (`rolledFrom`), if this attempt is one.
+    pub fn closed_claude_successor_source(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT payload_json FROM events WHERE attempt_id=?1 AND kind='attempt.created' LIMIT 1",
+                params![attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|payload| {
+            serde_json::from_str::<Value>(&payload)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("rolledFrom")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+        }))
+    }
+    /// Create the single closed-claude successor row for a source (validates
+    /// the source is CLOSED with a stored session, latest of its task, with
+    /// no pending decision, hold or unsettled action), journaling its
+    /// `attempt.created` lineage (`rolledFrom`).
     pub fn insert_closed_claude_successor(
         &self,
         successor: &ClosedClaudeSuccessor,
