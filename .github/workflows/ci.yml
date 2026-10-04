@@ -98,6 +98,8 @@ jobs:
         run: cargo test --locked -p goalport-core --test linux_socket -- --nocapture
       - name: Linux native protocol and responsiveness tests
         run: cargo test --locked -p goalport-core --test linux_provider_errors --test linux_responsiveness --test async_title
+      - name: Linux Claude stop and resume regressions
+        run: cargo test --locked -p goalport-core --test claude_session_linux --test claude_stop_hold_release
       - name: Linux launcher tests
         run: cargo test --locked -p goalport-core-launcher
       - name: Unix operator client and native verifier tests
