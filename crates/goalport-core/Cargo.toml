@@ -28,4 +28,4 @@ tempfile = "3"
 libc = "0.2.189"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "handleapi", "namedpipeapi", "winbase", "winnt", "errhandlingapi", "winerror", "accctrl", "aclapi", "minwinbase", "processthreadsapi", "sddl", "securitybaseapi", "psapi", "memoryapi", "tlhelp32", "winbase"] }
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "namedpipeapi", "winbase", "winnt", "errhandlingapi", "winerror", "accctrl", "aclapi", "minwinbase", "processthreadsapi", "sddl", "securitybaseapi", "psapi", "memoryapi", "tlhelp32", "jobapi2", "winbase"] }

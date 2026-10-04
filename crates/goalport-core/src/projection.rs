@@ -2114,6 +2114,17 @@ impl UiController {
                 }
                 crate::store::StopNativeTurnState::Pending => continue,
             }
+            // A child forked after the stop snapshot is still in the
+            // spawn-time domain. Parent-link reparenting cannot hide it.
+            // Unreadable domain evidence holds; a missing registration is not
+            // this check.
+            if self
+                .runtime_manager
+                .claude_domain_has_extra(&row.attempt_id)
+                == Some(true)
+            {
+                continue;
+            }
             let Ok(writers) = crate::stop_closure::workspace_writers(&workspace, claude_pid)
             else {
                 continue;
