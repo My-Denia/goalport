@@ -110,6 +110,10 @@ fn drain(
     events
 }
 
+fn events_with(events: &[AgentEventEnvelope], kind: AgentEventType) -> usize {
+    events.iter().filter(|event| event.event_type == kind).count()
+}
+
 fn has(events: &[AgentEventEnvelope], kind: AgentEventType) -> bool {
     events.iter().any(|event| event.event_type == kind)
 }
@@ -1194,4 +1198,181 @@ fn a_pending_permission_denial_without_tool_use_id_does_not_confirm() {
     assert_eq!(terminal.payload["native_turn_state"], "unconfirmed");
     assert_eq!(terminal.payload["write_responsibility"], "held");
     manager.close_attempt(attempt).ok();
+}
+
+// --- merge-review P1: denial-set exact multiset equality ---------------------
+
+#[test]
+fn a_subset_denial_report_does_not_confirm_a_two_permission_stop() {
+    let (_lock, _env) = begin();
+    let root = workspace("denial-subset", "native_stop_denial_subset");
+    let attempt = "attempt-denial-subset";
+    let mut manager = attach(attempt, &root);
+    send(&mut manager, attempt, "ask for a Write and a Bash and wait");
+    let events = drain(&mut manager, attempt, |seen| {
+        events_with(seen, AgentEventType::PermissionRequest) >= 2
+    });
+    assert!(
+        events.iter().filter(|event| event.event_type == AgentEventType::PermissionRequest).count() >= 2,
+        "{events:#?}"
+    );
+    manager.interrupt_with_operation(attempt, "gui-denial-subset").unwrap();
+    let mut events = Vec::new();
+    for _ in 0..240 {
+        events.extend(manager.poll_events(attempt).expect("poll"));
+        if has(&events, AgentEventType::TurnFailed) || has(&events, AgentEventType::Cancelled) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let terminal = events
+        .iter()
+        .find(|event| matches!(event.event_type, AgentEventType::Cancelled | AgentEventType::TurnFailed))
+        .expect("terminal stop event");
+    assert_eq!(
+        terminal.event_type,
+        AgentEventType::TurnFailed,
+        "a result reporting ONE of the TWO stop-denied tools is incomplete evidence: {terminal:#?}"
+    );
+    assert_eq!(terminal.payload["native_turn_cancel"], false);
+    assert_eq!(terminal.payload["native_turn_state"], "unconfirmed");
+    let denied: Vec<&str> = terminal.payload["stop_attempt"]["stop_denied_tool_use_ids"]
+        .as_array()
+        .expect("denied set recorded")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(denied.len(), 2, "both pending permissions were denied by the Stop: {terminal:#?}");
+    manager.close_attempt(attempt).ok();
+}
+
+#[test]
+fn an_empty_denial_report_does_not_confirm_a_one_permission_stop() {
+    let (_lock, _env) = begin();
+    let root = workspace("denial-silent", "native_stop_denial_silent");
+    let attempt = "attempt-denial-silent";
+    let mut manager = attach(attempt, &root);
+    send(&mut manager, attempt, "ask for a Write and wait");
+    let events = drain(&mut manager, attempt, |seen| {
+        has(seen, AgentEventType::PermissionRequest)
+    });
+    assert!(has(&events, AgentEventType::PermissionRequest), "{events:#?}");
+    manager.interrupt_with_operation(attempt, "gui-denial-silent").unwrap();
+    let mut events = Vec::new();
+    for _ in 0..240 {
+        events.extend(manager.poll_events(attempt).expect("poll"));
+        if has(&events, AgentEventType::TurnFailed) || has(&events, AgentEventType::Cancelled) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let terminal = events
+        .iter()
+        .find(|event| matches!(event.event_type, AgentEventType::Cancelled | AgentEventType::TurnFailed))
+        .expect("terminal stop event");
+    assert_eq!(
+        terminal.event_type,
+        AgentEventType::TurnFailed,
+        "a silent permission_denials report against a Stop that denied one tool is incomplete evidence: {terminal:#?}"
+    );
+    assert_eq!(terminal.payload["native_turn_cancel"], false);
+    manager.close_attempt(attempt).ok();
+}
+
+// --- merge-review P1: failed resume teardown + deterministic retry ----------
+
+#[test]
+fn a_failed_resume_successor_detaches_and_can_be_retried() {
+    let (_lock, _env) = begin();
+    let (store, server, attempt_id, root) = closed_claude("retry", "resume_mismatch");
+
+    // First resume: spawn-only successor.
+    let response = server.handle_json(&resume_message("retry", &attempt_id)).unwrap();
+    assert_eq!(response["ok"], true, "{response}");
+    let task_id = store.get_attempt(&attempt_id).unwrap().task_id;
+    let successor = store.attempts_for_task(&task_id).unwrap().pop().unwrap();
+
+    // The first send fails verification: the successor must be DETACHED, stay
+    // QUEUED (it never activated; the machine has no Queued->Failed edge),
+    // journal the failure, and still offer the deterministic retry.
+    let send = server
+        .handle_json(&server_send("retry", "campaign-retry", &successor.id, "first message on a mismatched resume"))
+        .unwrap();
+    assert_eq!(send["ok"], false, "{send}");
+    let row = store.get_attempt(&successor.id).unwrap();
+    assert_eq!(row.state, AttemptState::Queued, "journal-only marking");
+    assert!(row.provider_session.is_none());
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert!(
+        records.iter().any(|record| record.event.kind == "runtime.resume.verification.failed"),
+        "{records:#?}"
+    );
+    // Capture the first process's stdin before any retry overwrites the
+    // fixture's per-process log: it crossed exactly the first message.
+    let stdin_first = fs::read_to_string(root.join(".fake-claude-stdin.jsonl")).unwrap_or_default();
+    assert_eq!(stdin_first.matches("first message on a mismatched resume").count(), 1, "{stdin_first}");
+
+    // The dead view offers the retry (through the successor id -- the same
+    // command path the UI uses), cannot send, and does NOT offer a fresh
+    // session.
+    let snapshot = server.handle_json(&snapshot_message("retry")).unwrap();
+    let view = &snapshot["payload"]["snapshot"];
+    assert_eq!(view["attempt"]["id"], successor.id, "{snapshot}");
+    let turn = &view["productConversation"]["turn"];
+    assert_eq!(turn["canSend"], false, "{turn}");
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action == "resume-session"),
+        "the dead resume view must offer the deterministic retry: {turn}"
+    );
+    assert!(
+        !actions.iter().any(|action| action == "select-runtime"),
+        "a verification-failed successor must not be offered a fresh session: {turn}"
+    );
+    assert_eq!(turn["reasonCode"], "resume-verification-failed", "{turn}");
+
+    // The retry, driven with the SUCCESSOR id (the UI's command path): the
+    // fresh process on the same row.
+    let retry = server
+        .handle_json(&resume_message("retry", &successor.id))
+        .unwrap();
+    assert_eq!(retry["ok"], true, "the retry must respawn a fresh process: {retry}");
+    let row = store.get_attempt(&successor.id).unwrap();
+    assert_eq!(row.state, AttemptState::Queued);
+    assert!(row.provider_session.is_none());
+
+    // A double-resume while the fresh process is spawned and registered keeps
+    // today's refusal.
+    let double = server
+        .handle_json(&resume_message("retry", &successor.id))
+        .unwrap();
+    assert_eq!(double["ok"], false, "{double}");
+    assert!(
+        double["error"].as_str().unwrap_or_default().contains("no persisted native session"),
+        "a registered bare-Queued successor keeps the plain refusal: {double}"
+    );
+
+    // The retried spawn crosses exactly one NEW message when the user sends
+    // again (no replay of the first crossed message) and fails verification
+    // again on this fixture by design.
+    let second_send = server
+        .handle_json(&server_send("retry", "campaign-retry", &successor.id, "second message on the retried resume"))
+        .unwrap();
+    assert_eq!(second_send["ok"], false, "{second_send}");
+    // The fixture rewrites its stdin log per process, so the retried spawn's
+    // log holding ONLY the second message is itself the no-replay proof.
+    let stdin = fs::read_to_string(root.join(".fake-claude-stdin.jsonl")).unwrap_or_default();
+    assert_eq!(stdin.matches("second message on the retried resume").count(), 1, "{stdin}");
+    assert_eq!(stdin.matches("first message on a mismatched resume").count(), 0, "{stdin}");
+    let records = store.list_event_records(&successor.id, 0).unwrap();
+    assert_eq!(
+        records.iter().filter(|record| record.event.kind == "runtime.resume.verification.failed").count(),
+        2,
+        "the retry failure is journaled again and the row is retryable once more: {records:#?}"
+    );
+
+    // The closed source is untouched and no hold was ever created.
+    let source = store.get_attempt(&attempt_id).unwrap();
+    assert_eq!(source.state, AttemptState::Closed);
+    assert!(store.stop_responsibilities().unwrap().is_empty());
 }

@@ -1377,6 +1377,15 @@ impl RuntimeManager {
         self.resume_session(attempt_id, &session_id)
     }
 
+    /// True when the attempt's Claude process was killed by a failed
+    /// first-send resume verification (and has not since been respawned).
+    pub fn claude_resume_verification_failed(&self, attempt_id: &str) -> bool {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Claude(process)) => process.resume_abandoned,
+            _ => false,
+        }
+    }
+
     pub fn close_attempt(&mut self, attempt_id: &str) -> Result<(), AdapterError> {
         let Some(mut runtime) = self.attempts.remove(attempt_id) else {
             return Ok(());
@@ -4641,6 +4650,11 @@ struct ClaudeStreamProcess {
     /// Whether a `resume_requested` target has been verified against the
     /// provider's own init frame on a first send. Spawn alone never sets it.
     resume_verified: bool,
+    /// Latched by `abandon_unverified_resume`: this process was killed by a
+    /// failed first-send resume verification. Lets the projection tell that
+    /// failure apart from any other send error and fully retire the attempt.
+    /// Cleared by a fresh spawn.
+    resume_abandoned: bool,
     /// Set when a resume failed verification and the process was killed.
     /// Frames an unverified session already queued are never this attempt's
     /// content and are discarded by the poll path.
@@ -4717,6 +4731,7 @@ impl ClaudeStreamProcess {
             session_id: None,
             resume_requested: None,
             resume_verified: false,
+            resume_abandoned: false,
             discard_native_output: false,
             session_hash: None,
             session_created_emitted: false,
@@ -4838,6 +4853,7 @@ impl ClaudeStreamProcess {
                 let pid = broker.claude_pid;
                 self.broker = Some(broker);
                 self.spawned = true;
+                self.resume_abandoned = false;
                 (pid, Box::new(stdin), Box::new(stdout))
             } else {
                 let mut command = Command::new(&program);
@@ -4855,6 +4871,7 @@ impl ClaudeStreamProcess {
                     .spawn()
                     .map_err(|error| native_spawn_error("claude stream-json", error))?;
                 self.spawned = true;
+                self.resume_abandoned = false;
                 let stdin = child.stdin.take().ok_or_else(|| {
                     AdapterError::Connection("Claude stream-json stdin unavailable".into())
                 })?;
@@ -5198,6 +5215,19 @@ impl ClaudeStreamProcess {
         self.pending_out.clear();
         self.assistant_text.clear();
         self.last_emitted_assistant.clear();
+        // Merge-review P1: the abandoned process must not keep sticky spawn
+        // identity behind. Retire the binding and turn state so the dead
+        // registration is observationally retired, and latch the reason so
+        // the projection can detach and mark the attempt terminally failed.
+        self.process_binding = None;
+        self.spawned = false;
+        self.turn_in_flight = false;
+        self.pending_permissions.clear();
+        self.mutating_tools.clear();
+        self.unrequested_bash.clear();
+        self.resume_requested = None;
+        self.resume_verified = false;
+        self.resume_abandoned = true;
         // Best-effort drain; the discard flag is the guarantee for anything
         // the reader still pushes before it observes the killed pipes.
         if let Some(receiver) = self.event_rx.as_mut() {
@@ -7153,24 +7183,35 @@ fn claude_result_confirms_interrupt(value: &Value, stop_denied_tool_use_ids: &[S
     if !shape {
         return false;
     }
-    // The reported permission denials must be exactly the boundary this Stop
-    // itself created. Real Claude reports the very permissions GoalPort
+    // The reported permission denials must EXACTLY equal the boundary this
+    // Stop itself created, as multisets: same ids, same cardinality,
+    // duplicates counted. Real Claude reports the very permissions GoalPort
     // answered `deny` when the interrupt landed on a pending decision
     // (live-fix-9: aborted_tools + permission_denials=[the stopped tool]).
-    // A denial naming anything else -- a tool the host refused earlier, a
-    // foreign id, an entry without a tool_use_id -- is not this Stop's
-    // boundary and fails closed.
-    match value.get("permission_denials") {
-        None => false,
-        Some(denials) => denials.as_array().is_some_and(|list| {
-            list.iter().all(|entry| {
-                entry
-                    .get("tool_use_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| stop_denied_tool_use_ids.iter().any(|denied| denied == id))
-            })
-        }),
-    }
+    // Anything else fails closed: a missing entry, a duplicate, a tool the
+    // host refused earlier, a foreign id, an entry without a tool_use_id, an
+    // empty report against a denied set -- or the field absent entirely, for
+    // any denied set including none (merge-review P1: one-way containment
+    // let incomplete evidence confirm).
+    let Some(denials) = value.get("permission_denials") else {
+        return false;
+    };
+    let Some(list) = denials.as_array() else {
+        return false;
+    };
+    let Some(mut reported) = list
+        .iter()
+        .map(|entry| entry.get("tool_use_id").and_then(Value::as_str))
+        .collect::<Option<Vec<&str>>>()
+    else {
+        // At least one entry carries no tool_use_id: unidentified, and the
+        // set cannot be proven equal.
+        return false;
+    };
+    let mut denied: Vec<&str> = stop_denied_tool_use_ids.iter().map(String::as_str).collect();
+    reported.sort_unstable();
+    denied.sort_unstable();
+    reported == denied
 }
 
 trait BoundedReadLine {
@@ -9256,5 +9297,85 @@ mod codex_turn_fact_tests {
         assert_eq!(process.native_turn_id, None);
         assert!(!process.delivery_unknown);
         assert!(!process.turn_in_flight());
+    }
+}
+
+#[cfg(test)]
+mod pr24_p1_confirm_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn shape_result(denials: serde_json::Value) -> Value {
+        json!({
+            "terminal_reason": "aborted_tools",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "permission_denials": denials,
+        })
+    }
+
+    fn denied(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn exact_multiset_confirms() {
+        assert!(claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "a" }])),
+            &denied(&["a"]),
+        ));
+        assert!(claude_result_confirms_interrupt(
+            &shape_result(json!([])),
+            &denied(&[]),
+        ));
+        assert!(claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "b" }, { "tool_use_id": "a" }])),
+            &denied(&["a", "b"]),
+        ));
+    }
+
+    #[test]
+    fn subset_or_superset_or_empty_report_does_not_confirm() {
+        // merge-review P1: one-way containment let these confirm.
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "a" }])),
+            &denied(&["a", "b"]),
+        ));
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([])),
+            &denied(&["a"]),
+        ));
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "a" }])),
+            &denied(&[]),
+        ));
+    }
+
+    #[test]
+    fn duplicates_count_and_are_not_set_equality() {
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "a" }, { "tool_use_id": "a" }])),
+            &denied(&["a"]),
+        ));
+    }
+
+    #[test]
+    fn absent_field_or_unidentified_entries_never_confirm() {
+        let mut value = shape_result(json!([]));
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("permission_denials");
+        // Absent is fail-closed for ANY denied set, including empty.
+        assert!(!claude_result_confirms_interrupt(&value, &denied(&[])));
+        assert!(!claude_result_confirms_interrupt(&value, &denied(&["a"])));
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_name": "Bash" }])),
+            &denied(&["a"]),
+        ));
+        assert!(!claude_result_confirms_interrupt(
+            &shape_result(json!([{ "tool_use_id": "other" }])),
+            &denied(&["a"]),
+        ));
     }
 }

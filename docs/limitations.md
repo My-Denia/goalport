@@ -19,7 +19,7 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 ## Runtimes
 
 - **Admission status differs per Runtime.** Runtime support is shown as Available or Limited, according to the current capability projection. Codex is partial, Claude Code is partially admitted and Grok is admitted. Each ruling applies to a specific recorded build; a package built from current source has not been re-admitted ([runtime integration](runtimes.md#support-status)).
-- **Claude session resume and explicit session close are currently unsupported.** Core refuses those operations. The window can still close while work continues; Stop retains unresolved responsibility where required.
+- **Claude session resume and explicit close work for the recorded Claude build.** Resume is spawn-only: the stored session id is verified on the first send and nothing is replayed. A resume whose verification fails retires its process and leaves a dormant successor that offers a deterministic retry ([safety](safety.md#stop-and-held-responsibility)). The window can still close while work continues; Stop retains unresolved responsibility where required.
 - **CLI version changes are not detected.** Newer Runtime CLI versions may behave differently from the recorded ones.
 - **The Scenario Runtime is synthetic.** Its checks never count as native Runtime evidence.
 
