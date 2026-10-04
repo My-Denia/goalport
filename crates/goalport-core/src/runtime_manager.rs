@@ -18,6 +18,9 @@ use crate::{
     commands::sha256_hex,
     domain::{AgentEventEnvelope, AgentEventType},
     process_identity::{self, ProcessObservation},
+    turn_results::{
+        WorkspaceDelta, WorkspaceSample, compare_workspace_samples, sample_workspace_entries,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -29,7 +32,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -725,6 +728,30 @@ impl RuntimeManager {
         Ok(())
     }
 
+    /// A connection worker may CREATE registrations for attempts outside its
+    /// lend plan — the closed-session resume successor is the known case.
+    /// Dropping the worker would kill those live child processes with no
+    /// event and no record, so a merge moves every non-lent registration
+    /// into the shared controller instead. Lent ids (still busy on `target`)
+    /// are left for `return_attempts`.
+    pub fn transfer_created_attempts(&mut self, target: &mut Self) {
+        let attempt_ids: Vec<String> = self.attempts.keys().cloned().collect();
+        for attempt_id in attempt_ids {
+            if target.busy_attempts.contains_key(&attempt_id) {
+                continue;
+            }
+            if let Some(runtime) = self.attempts.remove(&attempt_id) {
+                target.attempts.insert(attempt_id.clone(), runtime);
+            }
+            if let Some(registration) = self.registrations.remove(&attempt_id) {
+                target.registrations.insert(attempt_id.clone(), registration);
+            }
+            if let Some(provider) = self.selected_provider.remove(&attempt_id) {
+                target.selected_provider.insert(attempt_id, provider);
+            }
+        }
+    }
+
     /// Whether the registered Runtime has spawned a process, or may have. The sticky
     /// `spawned` flag (set the moment a spawn succeeds, never cleared) counts, and so does
     /// any `Child`, any broker session or any spawn-time process binding — so a process Core
@@ -1334,10 +1361,18 @@ impl RuntimeManager {
                 AdapterError::InvalidRequest("resume requires a persisted session id".into())
             })?
             .to_owned();
-        if let Some(ManagedRuntime::Codex(process)) = self.attempts.get_mut(attempt_id) {
-            process.attempt_id = Some(request.attempt_id.clone());
-            process.campaign_id = request.campaign_id.clone();
-            process.task_id = Some(request.task_id.clone());
+        match self.attempts.get_mut(attempt_id) {
+            Some(ManagedRuntime::Codex(process)) => {
+                process.attempt_id = Some(request.attempt_id.clone());
+                process.campaign_id = request.campaign_id.clone();
+                process.task_id = Some(request.task_id.clone());
+            }
+            Some(ManagedRuntime::Claude(process)) => {
+                process.attempt_id = Some(request.attempt_id.clone());
+                process.campaign_id = request.campaign_id.clone();
+                process.task_id = Some(request.task_id.clone());
+            }
+            _ => {}
         }
         self.resume_session(attempt_id, &session_id)
     }
@@ -1368,11 +1403,7 @@ impl RuntimeManager {
             ManagedRuntime::Codex(process) => process.close()?,
             ManagedRuntime::CodexExec(process) => process.close()?,
             ManagedRuntime::Grok(process) => process.close()?,
-            ManagedRuntime::Claude(_) => {
-                return Err(AdapterError::Unsupported(
-                    "Claude session close is not verified; close the window or stop the active turn explicitly".into(),
-                ));
-            }
+            ManagedRuntime::Claude(process) => process.close_confirmed()?,
         }
         self.attempts.remove(attempt_id);
         self.registrations.remove(attempt_id);
@@ -4473,6 +4504,7 @@ impl CodexExecProcess {
 
 struct ClaudePendingPermission {
     native_request_id: String,
+    #[allow(dead_code)]
     tool_name: String,
     input: Value,
     tool_use_id: Option<String>,
@@ -4497,6 +4529,16 @@ struct PathSnapshot {
 struct MutatingToolRecord {
     decision: MutatingToolDecision,
     snapshot: Option<PathSnapshot>,
+    /// Git fingerprint taken when this invocation was first seen. `None` means
+    /// the workspace was not a readable git work tree at that moment.
+    fingerprint: Option<WorkspaceSample>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ToolObservation {
+    command: Option<String>,
+    cwd: Option<String>,
+    path: Option<String>,
 }
 
 /// The single terminal disposition an unresolved Claude Stop may reach.
@@ -4556,6 +4598,12 @@ struct ClaudeStopRequest {
     result_subtype: Option<String>,
     reason: Option<String>,
     terminal_emitted: bool,
+    /// Native `tool_use_id`s of the permissions this Stop itself answered
+    /// `deny` while they were pending. A terminal result may report those
+    /// denials back in `permission_denials`; they are the turn ending at the
+    /// Stop's own boundary, not a foreign refusal, and the confirmation
+    /// predicate accepts exactly this set and nothing wider.
+    denied_pending_tool_use_ids: Vec<String>,
 }
 
 impl ClaudeStopRequest {
@@ -4588,12 +4636,22 @@ struct ClaudeStreamProcess {
     pending_frames: Vec<Value>,
     next_control: u64,
     session_id: Option<String>,
+    /// Set only for an explicit `--resume` of a stored provider session id.
+    resume_requested: Option<String>,
+    /// Whether a `resume_requested` target has been verified against the
+    /// provider's own init frame on a first send. Spawn alone never sets it.
+    resume_verified: bool,
+    /// Set when a resume failed verification and the process was killed.
+    /// Frames an unverified session already queued are never this attempt's
+    /// content and are discarded by the poll path.
+    discard_native_output: bool,
     session_hash: Option<String>,
     session_created_emitted: bool,
     initialized: bool,
     turn_in_flight: bool,
     fail_open: bool,
     fail_open_without_host_decision: bool,
+    fail_open_text: Option<String>,
     unknown_effect: bool,
     used_sigint: bool,
     interrupt_requested: bool,
@@ -4613,6 +4671,10 @@ struct ClaudeStreamProcess {
     pending_permissions: HashMap<String, ClaudePendingPermission>,
     answered_permissions: HashSet<String>,
     mutating_tools: HashMap<String, MutatingToolRecord>,
+    /// Bash invocations that have not received `can_use_tool`. The value is the
+    /// fingerprint at `tool_use`, or `None` when git status could not be read.
+    unrequested_bash: HashMap<String, Option<WorkspaceSample>>,
+    tool_observations: HashMap<String, ToolObservation>,
     assistant_text: String,
     last_emitted_assistant: String,
     pending_out: Vec<AgentEventEnvelope>,
@@ -4626,6 +4688,13 @@ struct ClaudeStreamProcess {
     /// Set the moment a spawn succeeds and never cleared: a process existed at some point,
     /// whatever happened to it afterwards (see `RuntimeManager::process_started`).
     spawned: bool,
+    /// Sticky per-process admission latch: was ANY descendant/tool execution
+    /// ever admitted or observed through a path GoalPort gates? Set the first
+    /// time a mutating tool is host-allowed, an unrequested Bash appears, or a
+    /// fail-open/unknown-effect is latched. Never cleared -- not by turn reset
+    /// -- because a later Stop must still answer for execution admitted by an
+    /// earlier turn of the same process.
+    execution_ever_admitted: bool,
     startup_control: Option<Arc<StartupControl>>,
 }
 
@@ -4646,12 +4715,16 @@ impl ClaudeStreamProcess {
             pending_frames: Vec::new(),
             next_control: 1,
             session_id: None,
+            resume_requested: None,
+            resume_verified: false,
+            discard_native_output: false,
             session_hash: None,
             session_created_emitted: false,
             initialized: false,
             turn_in_flight: false,
             fail_open: false,
             fail_open_without_host_decision: false,
+            fail_open_text: None,
             unknown_effect: false,
             used_sigint: false,
             interrupt_requested: false,
@@ -4669,6 +4742,8 @@ impl ClaudeStreamProcess {
             pending_permissions: HashMap::new(),
             answered_permissions: HashSet::new(),
             mutating_tools: HashMap::new(),
+            unrequested_bash: HashMap::new(),
+            tool_observations: HashMap::new(),
             assistant_text: String::new(),
             last_emitted_assistant: String::new(),
             pending_out: Vec::new(),
@@ -4680,6 +4755,7 @@ impl ClaudeStreamProcess {
             task_id: None,
             process_binding: None,
             spawned: false,
+            execution_ever_admitted: false,
             startup_control: None,
         }
     }
@@ -4694,7 +4770,7 @@ impl ClaudeStreamProcess {
         }
     }
 
-    fn ensure_started(&mut self) -> Result<(), AdapterError> {
+    fn ensure_started(&mut self, resume_session: Option<&str>) -> Result<(), AdapterError> {
         if self.child.is_some() {
             return Ok(());
         }
@@ -4704,7 +4780,11 @@ impl ClaudeStreamProcess {
                     .into(),
             ));
         }
-        let argv = ClaudeCliAdapter::spawn_argv(&self.executable, &self.workspace_root, None);
+        let argv = ClaudeCliAdapter::spawn_argv(
+            &self.executable,
+            &self.workspace_root,
+            resume_session,
+        );
         // The native flags are never rewritten. Under the fixture indirection
         // the interpreter becomes the program and the fixture script is simply
         // the first argument ahead of those unchanged flags.
@@ -4848,17 +4928,15 @@ impl ClaudeStreamProcess {
         self.attempt_id = Some(request.attempt_id.clone());
         self.campaign_id = request.campaign_id.clone();
         self.task_id = Some(request.task_id.clone());
-        if request
+        if let Some(session_id) = request
             .resume_session
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         {
-            return Err(AdapterError::Unsupported(
-                "Claude native --resume is not verified on this adapter path; start a new Attempt or Handoff"
-                    .into(),
-            ));
+            return self.resume_session(session_id);
         }
-        self.ensure_started()?;
+        self.ensure_started(None)?;
         Ok(RuntimeSessionResult {
             handle: SessionHandle {
                 session_id: String::new(),
@@ -4869,15 +4947,56 @@ impl ClaudeStreamProcess {
     }
 
     fn resume_session(&mut self, session_id: &str) -> Result<RuntimeSessionResult, AdapterError> {
-        if session_id.trim().is_empty() || session_id.starts_with("claude-session-") {
+        let session_id = session_id.trim();
+        if session_id.is_empty() || session_id.starts_with("claude-session-") {
             return Err(AdapterError::InvalidRequest(
                 "Claude resume refused: session id is empty or manufactured".into(),
             ));
         }
-        Err(AdapterError::Unsupported(
-            "Claude native --resume is not verified on this adapter path; start a new Attempt or Handoff"
-                .into(),
-        ))
+        if session_id.starts_with('-') || session_id.chars().any(char::is_whitespace) {
+            return Err(AdapterError::InvalidRequest(
+                "Claude resume refused: session id is not a single stored token".into(),
+            ));
+        }
+        if self.session_id.as_deref() == Some(session_id) && (self.child.is_some() || self.initialized)
+        {
+            return Ok(RuntimeSessionResult {
+                handle: SessionHandle {
+                    session_id: session_id.to_owned(),
+                    resumed: true,
+                },
+                events: Vec::new(),
+            });
+        }
+        if self.child.is_some() || self.initialized {
+            return Err(AdapterError::InvalidRequest(
+                "Claude resume refused: this attempt already has a different live session".into(),
+            ));
+        }
+        // Spawn-only resume. The real CLI reports its session id in a
+        // system/init frame only AFTER the first user message (probes A/C),
+        // so the id is verified on the first send, never here. Nothing is
+        // marked verified by this call; the stored id is only the requested
+        // target.
+        self.resume_requested = Some(session_id.to_owned());
+        self.ensure_started(Some(session_id))?;
+        Ok(RuntimeSessionResult {
+            handle: SessionHandle {
+                session_id: session_id.to_owned(),
+                resumed: true,
+            },
+            events: Vec::new(),
+        })
+    }
+
+    fn accept_resumed_session(&mut self, expected: &str, found: &str) -> Result<(), AdapterError> {
+        if found != expected {
+            return Err(AdapterError::Protocol(format!(
+                "Claude resume verification failed: provider reported a different session id"
+            )));
+        }
+        self.bind_session(found);
+        Ok(())
     }
 
     fn send_prompt(&mut self, request: &PromptRequest) -> Result<RuntimeSendResult, AdapterError> {
@@ -4913,11 +5032,14 @@ impl ClaudeStreamProcess {
                 "a Claude turn is already in flight; wait for it to finish or use Safe stop".into(),
             ));
         }
-        if self.pending_stop.is_some() {
+        if self.pending_stop.as_ref().is_some_and(|stop| !stop.terminal_emitted || stop.disposition != ClaudeStopDisposition::NativeTurnCancel) {
             return Err(AdapterError::InvalidRequest(
                 "Claude residual execution is unconfirmed; write responsibility remains held"
                     .into(),
             ));
+        }
+        if self.pending_stop.is_some() {
+            self.pending_stop = None;
         }
         // A newer turn is newer ownership: an unresolved Stop from the previous
         // turn can no longer be signalled or confirmed, so it fails closed here
@@ -4968,6 +5090,7 @@ impl ClaudeStreamProcess {
         self.stop_operation_id = None;
         self.fail_open = false;
         self.fail_open_without_host_decision = false;
+        self.fail_open_text = None;
         self.unknown_effect = false;
         self.used_sigint = false;
         self.interrupt_requested = false;
@@ -4976,6 +5099,8 @@ impl ClaudeStreamProcess {
         self.interrupt_receipt_matched = false;
         self.interrupt_still_queued = None;
         self.mutating_tools.clear();
+        self.unrequested_bash.clear();
+        self.tool_observations.clear();
         self.assistant_text.clear();
         self.last_emitted_assistant.clear();
         self.send_json(&json!({
@@ -5012,8 +5137,43 @@ impl ClaudeStreamProcess {
             })?;
         let mut events = superseded;
         events.push(started);
+        // A pending resume is verified here: the first user message has been
+        // written above, and the real CLI answers it with the session's
+        // system/init frame (probes A/B/C). Until the provider echoes the
+        // stored id, nothing treats this process as this attempt's session.
+        let pending_resume_target = self
+            .resume_requested
+            .clone()
+            .filter(|_| !self.resume_verified);
         if self.session_id.is_none() {
-            events.extend(self.drain_until_session(&attempt_id)?);
+            let drain_timeout_ms = if pending_resume_target.is_some() {
+                CLAUDE_INIT_TIMEOUT_MS
+            } else {
+                CLAUDE_SESSION_BIND_TIMEOUT_MS
+            };
+            events.extend(self.drain_until_session_within(
+                &attempt_id,
+                Duration::from_millis(drain_timeout_ms),
+            )?);
+        }
+        if let Some(expected) = pending_resume_target {
+            let found_session = self.session_id.clone();
+            match found_session.as_deref() {
+                Some(found) => {
+                    if let Err(error) = self.accept_resumed_session(expected.as_str(), found) {
+                        self.abandon_unverified_resume();
+                        return Err(error);
+                    }
+                    self.resume_verified = true;
+                }
+                None => {
+                    self.abandon_unverified_resume();
+                    return Err(AdapterError::Connection(
+                        "Claude resume verification failed: no session id was reported after the first message"
+                            .into(),
+                    ));
+                }
+            }
         }
         Ok(RuntimeSendResult {
             accepted: true,
@@ -5023,11 +5183,49 @@ impl ClaudeStreamProcess {
         })
     }
 
+    /// A resume that failed first-send verification must never receive a
+    /// second message: the process is not a verified session of this attempt.
+    /// Kill and reap it, latch the stream closed so every later guard
+    /// refuses, and discard any frames that unverified stream already
+    /// queued — they are not this attempt's content.
+    fn abandon_unverified_resume(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.stream_closed = true;
+        self.discard_native_output = true;
+        self.pending_out.clear();
+        self.assistant_text.clear();
+        self.last_emitted_assistant.clear();
+        // Best-effort drain; the discard flag is the guarantee for anything
+        // the reader still pushes before it observes the killed pipes.
+        if let Some(receiver) = self.event_rx.as_mut() {
+            loop {
+                match receiver.try_recv() {
+                    Ok(_) => continue,
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+    }
+
     fn drain_until_session(
         &mut self,
         attempt_id: &str,
     ) -> Result<Vec<AgentEventEnvelope>, AdapterError> {
-        let deadline = Instant::now() + Duration::from_millis(CLAUDE_SESSION_BIND_TIMEOUT_MS);
+        self.drain_until_session_within(
+            attempt_id,
+            Duration::from_millis(CLAUDE_SESSION_BIND_TIMEOUT_MS),
+        )
+    }
+
+    fn drain_until_session_within(
+        &mut self,
+        attempt_id: &str,
+        timeout: Duration,
+    ) -> Result<Vec<AgentEventEnvelope>, AdapterError> {
+        let deadline = Instant::now() + timeout;
         let mut events = Vec::new();
         while self.session_id.is_none() {
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -5122,6 +5320,19 @@ impl ClaudeStreamProcess {
         {
             self.child_ended.store(true, Ordering::SeqCst);
         }
+        // An abandoned unverified resume is not this attempt's session:
+        // everything its stream queued is discarded, never journaled.
+        if self.discard_native_output {
+            self.pending_frames.clear();
+            if let Some(receiver) = self.event_rx.as_mut() {
+                loop {
+                    match receiver.try_recv() {
+                        Ok(_) => continue,
+                        Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+            }
+        }
         let mut frames = std::mem::take(&mut self.pending_frames);
         let mut closed = self.child_ended.load(Ordering::SeqCst);
         if let Some(receiver) = self.event_rx.as_ref() {
@@ -5174,8 +5385,33 @@ impl ClaudeStreamProcess {
                     events.push(event);
                 }
             }
+            events.extend(self.cancel_unanswered_permissions(attempt_id));
         }
         Ok(events)
+    }
+
+    fn cancel_unanswered_permissions(&mut self, attempt_id: &str) -> Vec<AgentEventEnvelope> {
+        let pending_ids = self.pending_permissions.keys().cloned().collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for decision_id in pending_ids {
+            self.pending_permissions.remove(&decision_id);
+            self.sequence += 1;
+            if let Some(event) = self.envelope(
+                attempt_id,
+                AgentEventType::PermissionResponse,
+                json!({
+                    "request_id": decision_id,
+                    "kind": "native-permission",
+                    "option_kind": "cancelled",
+                    "allow": false,
+                    "cancelled": true
+                }),
+                Some(format!("claude-ref:{}", sha256_hex(decision_id.as_bytes()))),
+            ) {
+                events.push(event);
+            }
+        }
+        events
     }
 
     fn take_mapped(&mut self, attempt_id: &str, value: &Value) -> Vec<AgentEventEnvelope> {
@@ -5343,7 +5579,7 @@ impl ClaudeStreamProcess {
                     "session_id": "[NATIVE_SESSION]",
                     "provider": "claude",
                     "transport": "stream-json",
-                    "resumed": false,
+                    "resumed": self.resume_requested.as_deref() == Some(session_id),
                     "native_permission_prompts": "host-manual-stdio"
                     ,"runtime_version": value.get("claude_code_version").and_then(Value::as_str)
                 }),
@@ -5369,6 +5605,7 @@ impl ClaudeStreamProcess {
                 .get("tool_use_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            self.note_host_decision_request(tool_use_id.as_deref(), &input);
             let epoch = self
                 .process_binding
                 .as_ref()
@@ -5437,7 +5674,8 @@ impl ClaudeStreamProcess {
                 self.pending_out.push(text);
             }
             self.turn_in_flight = false;
-            self.pending_permissions.clear();
+            let cancelled = self.cancel_unanswered_permissions(attempt_id);
+            self.pending_out.extend(cancelled);
             let is_error = value
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -5457,11 +5695,13 @@ impl ClaudeStreamProcess {
                         "status": "failed",
                         "fail_open": true,
                         "mutating_tool_without_host_decision": without_host,
-                        "text": if without_host {
-                            "mutating Claude tool ran without a host Decision"
-                        } else {
-                            "denied tool still changed the workspace"
-                        }
+                        "text": self.fail_open_text.clone().unwrap_or_else(|| {
+                            if without_host {
+                                "mutating Claude tool ran without a host Decision".into()
+                            } else {
+                                "denied tool still changed the workspace".into()
+                            }
+                        })
                     }),
                     None,
                 );
@@ -5568,24 +5808,32 @@ impl ClaudeStreamProcess {
                     .and_then(Value::as_str)
                     .unwrap_or("native-tool");
                 let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                if !id.is_empty() {
+                    self.tool_observations
+                        .insert(id.to_owned(), observation_from_input(&input));
+                }
                 if claude_mutating_tool(name) && !id.is_empty() {
-                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    let workspace = self.workspace_root.clone();
                     self.mutating_tools.entry(id.to_owned()).or_insert_with(|| {
                         MutatingToolRecord {
                             decision: MutatingToolDecision::Pending,
-                            snapshot: snapshot_tool_path(&self.workspace_root, &input),
+                            snapshot: snapshot_tool_path(&workspace, &input),
+                            fingerprint: sample_workspace_entries(&workspace),
                         }
                     });
+                } else if name == "Bash" && !id.is_empty() && !self.mutating_tools.contains_key(id)
+                {
+                    let workspace = self.workspace_root.clone();
+                    self.unrequested_bash
+                        .entry(id.to_owned())
+                        .or_insert_with(|| sample_workspace_entries(&workspace));
                 }
                 self.sequence += 1;
                 return self.envelope(
                     attempt_id,
                     AgentEventType::ToolActivity,
-                    json!({
-                        "tool": bounded_text(name),
-                        "status": "started",
-                        "kind": bounded_text(name)
-                    }),
+                    self.activity_payload(id, name, "started", None),
                     if id.is_empty() {
                         None
                     } else {
@@ -5615,69 +5863,74 @@ impl ClaudeStreamProcess {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            // A permission this Stop itself denied is not a user refusal: the
+            // Stop machinery owns this turn's terminal outcome (confirmed
+            // cancel or unverified), and the tool was never admitted. Real
+            // Claude 2.1.288 answers the Stop's deny with a tool_result for
+            // the rejected tool; classifying THAT through the denied-effect
+            // lens would fail the turn before the Stop's own resolution and
+            // leave a stopped turn reading as failed. The frames stay
+            // journaled, and any real disobedience is still caught by the
+            // release gates (workspace writers + fingerprint window).
+            let denied_by_current_stop = self
+                .pending_stop
+                .as_ref()
+                .is_some_and(|stop| stop.denied_pending_tool_use_ids.contains(&tool_use_id));
             if let Some(record) = self.mutating_tools.get(&tool_use_id).cloned() {
                 match record.decision {
                     MutatingToolDecision::Pending => {
-                        self.fail_open = true;
-                        self.fail_open_without_host_decision = true;
-                        self.sequence += 1;
-                        return self.envelope(
-                            attempt_id,
-                            AgentEventType::TurnFailed,
-                            json!({
-                                "status": "failed",
-                                "fail_open": true,
-                                "mutating_tool_without_host_decision": true,
-                                "text": "mutating Claude tool ran without a host Decision"
-                            }),
-                            None,
+                        self.note_fail_open(
+                            true,
+                            "mutating Claude tool ran without a host Decision",
                         );
+                        self.sequence += 1;
+                        return self.fail_open_envelope(attempt_id);
                     }
-                    MutatingToolDecision::Denied => match record.snapshot.as_ref() {
-                        None => {
+                    MutatingToolDecision::Denied if denied_by_current_stop => {}
+                    MutatingToolDecision::Denied => match self.denied_effect(&record) {
+                        DeniedEffect::FailOpen => {
+                            self.note_fail_open(false, "denied tool still changed the workspace");
+                            self.sequence += 1;
+                            return self.fail_open_envelope(attempt_id);
+                        }
+                        DeniedEffect::Unknown => {
                             self.unknown_effect = true;
+                            self.execution_ever_admitted = true;
                             self.sequence += 1;
-                            return self.envelope(
-                                attempt_id,
-                                AgentEventType::TurnFailed,
-                                json!({
-                                    "status": "failed",
-                                    "fail_open": false,
-                                    "unknown_effect": true,
-                                    "mutating_tool_without_host_decision": false,
-                                    "text": "mutating Claude tool effect is unknown (no resolvable path)"
-                                }),
-                                None,
-                            );
+                            return self.unknown_effect_envelope(attempt_id);
                         }
-                        Some(snap) if snapshot_delta(snap) => {
-                            self.fail_open = true;
-                            self.sequence += 1;
-                            return self.envelope(
-                                attempt_id,
-                                AgentEventType::TurnFailed,
-                                json!({
-                                    "status": "failed",
-                                    "fail_open": true,
-                                    "mutating_tool_without_host_decision": false,
-                                    "text": "denied tool still changed the workspace"
-                                }),
-                                None,
-                            );
-                        }
-                        Some(_) => {}
+                        DeniedEffect::Clean => {}
                     },
                     MutatingToolDecision::Allowed => {}
+                }
+            } else if let Some(sample) = self.unrequested_bash.get(&tool_use_id).cloned() {
+                // A tool_result for a Bash that never went through a host
+                // decision: execution started ungated, whatever its observed
+                // effect.
+                self.admit_execution();
+                match self.unrequested_bash_effect(sample.as_ref()) {
+                    UnrequestedBashEffect::Complete => {}
+                    UnrequestedBashEffect::FailOpen => {
+                        self.note_fail_open(
+                            true,
+                            "mutating Claude tool ran without a host Decision",
+                        );
+                        self.sequence += 1;
+                        return self.fail_open_envelope(attempt_id);
+                    }
+                    UnrequestedBashEffect::Unknown => {
+                        self.unknown_effect = true;
+                        self.execution_ever_admitted = true;
+                        self.sequence += 1;
+                        return self.unknown_effect_envelope(attempt_id);
+                    }
                 }
             }
             self.sequence += 1;
             return self.envelope(
                 attempt_id,
                 AgentEventType::ToolActivity,
-                json!({
-                    "tool": "tool_result",
-                    "status": "completed"
-                }),
+                self.activity_payload(&tool_use_id, "tool_result", "completed", Some(block)),
                 if tool_use_id.is_empty() {
                     None
                 } else {
@@ -5686,6 +5939,164 @@ impl ClaudeStreamProcess {
             );
         }
         None
+    }
+
+    fn note_host_decision_request(&mut self, tool_use_id: Option<&str>, input: &Value) {
+        let Some(tool_use_id) = tool_use_id.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        let moved = self.unrequested_bash.remove(tool_use_id);
+        let workspace = self.workspace_root.clone();
+        let record = self
+            .mutating_tools
+            .entry(tool_use_id.to_owned())
+            .or_insert_with(|| MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: snapshot_tool_path(&workspace, input),
+                fingerprint: moved
+                    .clone()
+                    .unwrap_or_else(|| sample_workspace_entries(&workspace)),
+            });
+        if record.snapshot.is_none() {
+            record.snapshot = snapshot_tool_path(&workspace, input);
+        }
+        if record.fingerprint.is_none()
+            && let Some(sample) = moved.flatten().or_else(|| sample_workspace_entries(&workspace))
+        {
+            record.fingerprint = Some(sample);
+        }
+    }
+
+    /// Latch the one-way fact that some tool execution was admitted or
+    /// observed through a path this process gates. Never cleared: a later
+    /// Stop must still answer for execution an earlier turn admitted.
+    fn admit_execution(&mut self) {
+        self.execution_ever_admitted = true;
+    }
+
+    fn note_fail_open(&mut self, without_host_decision: bool, text: &str) {
+        self.fail_open = true;
+        self.execution_ever_admitted = true;
+        if self.fail_open_text.is_none() {
+            self.fail_open_without_host_decision = without_host_decision;
+            self.fail_open_text = Some(text.to_owned());
+        }
+    }
+
+    fn fail_open_envelope(&mut self, attempt_id: &str) -> Option<AgentEventEnvelope> {
+        let without_host = self.fail_open_without_host_decision;
+        let text = self.fail_open_text.clone().unwrap_or_else(|| {
+            if without_host {
+                "mutating Claude tool ran without a host Decision".into()
+            } else {
+                "denied tool still changed the workspace".into()
+            }
+        });
+        self.envelope(
+            attempt_id,
+            AgentEventType::TurnFailed,
+            json!({
+                "status": "failed",
+                "fail_open": true,
+                "mutating_tool_without_host_decision": without_host,
+                "text": text
+            }),
+            None,
+        )
+    }
+
+    fn unknown_effect_envelope(&mut self, attempt_id: &str) -> Option<AgentEventEnvelope> {
+        self.envelope(
+            attempt_id,
+            AgentEventType::TurnFailed,
+            json!({
+                "status": "failed",
+                "fail_open": false,
+                "unknown_effect": true,
+                "mutating_tool_without_host_decision": false,
+                "text": "mutating Claude tool effect is unknown (no resolvable path)"
+            }),
+            None,
+        )
+    }
+
+    fn fingerprint_view(&self, baseline: Option<&WorkspaceSample>) -> FingerprintView {
+        let Some(before) = baseline else {
+            return FingerprintView::Unavailable;
+        };
+        let Some(after) = sample_workspace_entries(&self.workspace_root) else {
+            return FingerprintView::Unknown;
+        };
+        match compare_workspace_samples(before, &after) {
+            WorkspaceDelta::Equal => FingerprintView::Equal,
+            WorkspaceDelta::Changed => FingerprintView::Changed,
+            WorkspaceDelta::Unknown => FingerprintView::Unknown,
+        }
+    }
+
+    fn denied_effect(&self, record: &MutatingToolRecord) -> DeniedEffect {
+        let path_delta = record.snapshot.as_ref().is_some_and(snapshot_delta);
+        let finger = self.fingerprint_view(record.fingerprint.as_ref());
+        if record.snapshot.is_none() {
+            return if matches!(finger, FingerprintView::Changed) {
+                DeniedEffect::FailOpen
+            } else {
+                DeniedEffect::Unknown
+            };
+        }
+        if path_delta || matches!(finger, FingerprintView::Changed) {
+            return DeniedEffect::FailOpen;
+        }
+        if matches!(finger, FingerprintView::Unknown) {
+            return DeniedEffect::Unknown;
+        }
+        DeniedEffect::Clean
+    }
+
+    fn unrequested_bash_effect(&self, sample: Option<&WorkspaceSample>) -> UnrequestedBashEffect {
+        match self.fingerprint_view(sample) {
+            FingerprintView::Equal => UnrequestedBashEffect::Complete,
+            FingerprintView::Changed => UnrequestedBashEffect::FailOpen,
+            FingerprintView::Unknown | FingerprintView::Unavailable => {
+                UnrequestedBashEffect::Unknown
+            }
+        }
+    }
+
+    fn activity_payload(
+        &self,
+        tool_use_id: &str,
+        name: &str,
+        status: &str,
+        result_block: Option<&Value>,
+    ) -> Value {
+        let mut payload = json!({
+            "tool": bounded_text(name),
+            "status": status,
+            "kind": bounded_text(name)
+        });
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(observed) = self.tool_observations.get(tool_use_id) {
+                if let Some(command) = &observed.command {
+                    object.insert("command".into(), json!(command));
+                }
+                if let Some(cwd) = &observed.cwd {
+                    object.insert("cwd".into(), json!(cwd));
+                }
+                if let Some(path) = &observed.path {
+                    object.insert("path".into(), json!(path));
+                }
+            }
+            if let Some(block) = result_block {
+                if let Some(output) = explicit_tool_output(block) {
+                    object.insert("output".into(), json!(bounded_text(&output)));
+                }
+                if let Some(code) = explicit_exit_code(block) {
+                    object.insert("exitCode".into(), json!(code));
+                }
+            }
+        }
+        payload
     }
 
     fn bind_session(&mut self, session_id: &str) {
@@ -5710,25 +6121,36 @@ impl ClaudeStreamProcess {
                 "stale or mismatched permission response is rejected".into(),
             )
         })?;
-        if let Some(tool_use_id) = pending.tool_use_id.as_deref()
-            && claude_mutating_tool(&pending.tool_name)
-        {
+        if let Some(tool_use_id) = pending.tool_use_id.as_deref() {
             let snapshot = snapshot_tool_path(&self.workspace_root, &pending.input);
-            let record = self
-                .mutating_tools
-                .entry(tool_use_id.to_owned())
-                .or_insert_with(|| MutatingToolRecord {
-                    decision: MutatingToolDecision::Pending,
-                    snapshot: snapshot.clone(),
-                });
-            if record.snapshot.is_none() {
-                record.snapshot = snapshot;
-            }
-            record.decision = if response.allow {
-                MutatingToolDecision::Allowed
-            } else {
-                MutatingToolDecision::Denied
+            let workspace = self.workspace_root.clone();
+            let premature = {
+                let record = self
+                    .mutating_tools
+                    .entry(tool_use_id.to_owned())
+                    .or_insert_with(|| MutatingToolRecord {
+                        decision: MutatingToolDecision::Pending,
+                        snapshot: snapshot.clone(),
+                        fingerprint: sample_workspace_entries(&workspace),
+                    });
+                if record.snapshot.is_none() {
+                    record.snapshot = snapshot;
+                }
+                let premature =
+                    response.allow && record.snapshot.as_ref().is_some_and(snapshot_delta);
+                record.decision = if response.allow {
+                    MutatingToolDecision::Allowed
+                } else {
+                    MutatingToolDecision::Denied
+                };
+                if response.allow {
+                    self.admit_execution();
+                }
+                premature
             };
+            if premature {
+                self.note_fail_open(true, "the file changed before the host allowed it");
+            }
         }
         let native_response = if response.allow {
             json!({
@@ -5741,14 +6163,18 @@ impl ClaudeStreamProcess {
                 "message": "GoalPort host denied this tool"
             })
         };
-        self.send_json(&json!({
+        if let Err(error) = self.send_json(&json!({
             "type": "control_response",
             "response": {
                 "subtype": "success",
                 "request_id": pending.native_request_id,
                 "response": native_response
             }
-        }))?;
+        })) {
+            self.pending_permissions
+                .insert(request_id.to_owned(), pending);
+            return Err(error);
+        }
         self.pending_frames.push(json!({
             "type": CLAUDE_PERMISSION_RESPONSE_TYPE,
             "request_id": request_id,
@@ -5787,8 +6213,12 @@ impl ClaudeStreamProcess {
             }
         }
         let pending_ids = self.pending_permissions.keys().cloned().collect::<Vec<_>>();
+        let mut denied_pending_tool_use_ids = Vec::new();
         for decision_id in pending_ids {
             if let Some(pending) = self.pending_permissions.remove(&decision_id) {
+                if let Some(tool_use_id) = pending.tool_use_id.as_deref() {
+                    denied_pending_tool_use_ids.push(tool_use_id.to_owned());
+                }
                 let _ = self.send_json(&json!({
                     "type": "control_response",
                     "response": {
@@ -5814,7 +6244,10 @@ impl ClaudeStreamProcess {
         self.interrupt_requested_at = Some(Instant::now());
         self.interrupt_receipt_matched = false;
         self.interrupt_still_queued = None;
-        self.pending_stop = Some(self.new_stop_request(&interrupt_id));
+        self.pending_stop = Some(self.new_stop_request(
+            &interrupt_id,
+            denied_pending_tool_use_ids,
+        ));
         let request = json!({ "subtype": "interrupt" });
         match self.send_json(&json!({
             "type": "control_request",
@@ -5855,7 +6288,7 @@ impl ClaudeStreamProcess {
     /// Snapshot the exact managed child the user asked to stop. Everything here
     /// is re-checked at the fallback deadline; a Stop with no observable binding
     /// starts already failed closed instead of guessing a target later.
-    fn new_stop_request(&self, request_id: &str) -> ClaudeStopRequest {
+    fn new_stop_request(&self, request_id: &str, denied_pending_tool_use_ids: Vec<String>) -> ClaudeStopRequest {
         let mut stop = ClaudeStopRequest {
             request_id: request_id.to_owned(),
             operation_id: self
@@ -5887,6 +6320,7 @@ impl ClaudeStreamProcess {
             result_subtype: None,
             reason: None,
             terminal_emitted: false,
+            denied_pending_tool_use_ids,
         };
         let live_pid = self.managed_pid();
         match (self.process_binding.as_ref(), live_pid) {
@@ -5967,6 +6401,33 @@ impl ClaudeStreamProcess {
             "confirmation_deadline_ms": CLAUDE_SIGINT_FALLBACK_MS,
             "process_fallback_enabled": false,
             "reason": stop.reason,
+            "stop_denied_tool_use_ids": stop.denied_pending_tool_use_ids,
+            "admission": {
+                "mutatingToolsAllowed": self
+                    .mutating_tools
+                    .values()
+                    .filter(|record| record.decision == MutatingToolDecision::Allowed)
+                    .count(),
+                "mutatingToolsDenied": self
+                    .mutating_tools
+                    .values()
+                    .filter(|record| record.decision == MutatingToolDecision::Denied)
+                    .count(),
+                "mutatingToolsPending": self
+                    .mutating_tools
+                    .values()
+                    .filter(|record| record.decision == MutatingToolDecision::Pending)
+                    .count(),
+                "unrequestedBash": self.unrequested_bash.len(),
+                "failOpen": self.fail_open,
+                "unknownEffect": self.unknown_effect,
+                // Sticky across turns: the durable answer to "was ANY tool
+                // execution ever admitted or observed during this process
+                // binding", not just this turn. A later release rule reads
+                // exactly this field; absence (pre-fix holds) reads as
+                // "not proven" and keeps the hold.
+                "executionEverAdmitted": self.execution_ever_admitted,
+            },
             "broker": self.broker_trace()
         })
     }
@@ -5997,6 +6458,11 @@ impl ClaudeStreamProcess {
         disposition: ClaudeStopDisposition,
         reason: Option<String>,
     ) -> Vec<AgentEventEnvelope> {
+        if !self.unrequested_bash.is_empty() {
+            // A Bash frame that never received its host decision is still
+            // unresolved at Stop time; whether it ran is unknown.
+            self.admit_execution();
+        }
         {
             let Some(stop) = self.pending_stop.as_mut() else {
                 return Vec::new();
@@ -6178,7 +6644,7 @@ impl ClaudeStreamProcess {
         let result = stop.raw_result.as_ref()?;
         let receipt = stop.raw_receipt.as_ref()?;
         if !self.result_matches_input(result)
-            || !claude_result_confirms_interrupt(result, "")
+            || !claude_result_confirms_interrupt(result, &stop.denied_pending_tool_use_ids)
             || result
                 .get("_goalport_received_ns")
                 .and_then(Value::as_u64)?
@@ -6281,6 +6747,74 @@ impl ClaudeStreamProcess {
         self.stdout.take();
         self.event_rx.take();
         Ok(())
+    }
+
+    /// Explicit session close. `Ok` means this child was reaped and the pid is
+    /// not still alive. A failed wait, or a pid that is still alive, is an
+    /// error and leaves the registration in place.
+    fn close_confirmed(&mut self) -> Result<(), AdapterError> {
+        if self.turn_in_flight || self.pending_stop.as_ref().is_some_and(ClaudeStopRequest::unresolved)
+        {
+            return Err(AdapterError::InvalidRequest(
+                "Claude session close refused: a turn or Stop is still unresolved".into(),
+            ));
+        }
+        if self.broker.is_some() {
+            return Err(AdapterError::Unsupported(
+                "Claude session close is not confirmed for the brokered launch".into(),
+            ));
+        }
+        let Some(mut child) = self.child.take() else {
+            if self.spawned {
+                return Err(AdapterError::Connection(
+                    "Claude session close could not confirm process exit: the child handle is gone"
+                        .into(),
+                ));
+            }
+            return Ok(());
+        };
+        let pid = child.id();
+        match child.try_wait() {
+            Ok(Some(_)) => self.finish_confirmed_exit(pid),
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    self.child = Some(child);
+                    return Err(AdapterError::Connection(format!(
+                        "Claude session close could not signal the process: {error}"
+                    )));
+                }
+                match child.wait() {
+                    Ok(_) => self.finish_confirmed_exit(pid),
+                    Err(error) => Err(AdapterError::Connection(format!(
+                        "Claude session close could not confirm process exit: {error}"
+                    ))),
+                }
+            }
+            Err(error) => {
+                self.child = Some(child);
+                Err(AdapterError::Connection(format!(
+                    "Claude session close could not observe the process: {error}"
+                )))
+            }
+        }
+    }
+
+    fn finish_confirmed_exit(&mut self, pid: u32) -> Result<(), AdapterError> {
+        match process_identity::observe_process(pid) {
+            ProcessObservation::NotRunning => {
+                self.drop_stdio()?;
+                self.initialized = false;
+                self.stdin = None;
+                self.stdout = None;
+                Ok(())
+            }
+            ProcessObservation::Live(_) => Err(AdapterError::Connection(
+                "Claude session close waited, but the process id is still alive".into(),
+            )),
+            ProcessObservation::Unknown(reason) => Err(AdapterError::Connection(format!(
+                "Claude session close could not confirm process exit: {reason}"
+            ))),
+        }
     }
 
     fn close(&mut self) -> Result<(), AdapterError> {
@@ -6452,8 +6986,92 @@ impl Drop for ClaudeStreamProcess {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FingerprintView {
+    Equal,
+    Changed,
+    Unknown,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeniedEffect {
+    FailOpen,
+    Unknown,
+    Clean,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnrequestedBashEffect {
+    Complete,
+    FailOpen,
+    Unknown,
+}
+
+fn observation_from_input(input: &Value) -> ToolObservation {
+    ToolObservation {
+        command: command_line(input.get("command")).map(|value| bounded_text(&value)),
+        cwd: input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(bounded_text),
+        path: input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .or_else(|| input.get("notebook_path"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(bounded_text),
+    }
+}
+
+fn explicit_tool_output(block: &Value) -> Option<String> {
+    if let Some(text) = block.get("content").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_owned());
+    }
+    if let Some(parts) = block.get("content").and_then(Value::as_array) {
+        let text = parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    let stdout = block
+        .get("aggregatedOutput")
+        .or_else(|| block.get("stdout"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stderr = block.get("stderr").and_then(Value::as_str).unwrap_or("");
+    let mut output = String::new();
+    if !stdout.is_empty() {
+        output.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(stderr);
+    }
+    (!output.is_empty()).then_some(output)
+}
+
+fn explicit_exit_code(block: &Value) -> Option<i64> {
+    block
+        .get("exitCode")
+        .or_else(|| block.get("exit_code"))
+        .and_then(Value::as_i64)
+}
+
 fn claude_mutating_tool(name: &str) -> bool {
-    matches!(name, "Edit" | "Write" | "Bash" | "NotebookEdit")
+    matches!(name, "Edit" | "Write" | "NotebookEdit")
 }
 
 fn claude_tool_path(workspace: &Path, input: &Value) -> Option<PathBuf> {
@@ -6524,15 +7142,35 @@ fn claude_control_response_id(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn claude_result_confirms_interrupt(value: &Value, _stop_reason: &str) -> bool {
+fn claude_result_confirms_interrupt(value: &Value, stop_denied_tool_use_ids: &[String]) -> bool {
     // This is only the terminal shape predicate, NOT cancellation proof.
-    matches!(
+    let shape = matches!(
         value.get("terminal_reason").and_then(Value::as_str),
         Some("aborted_tools" | "aborted_streaming")
     ) && value.get("subtype").and_then(Value::as_str) == Some("error_during_execution")
         && value.get("is_error").and_then(Value::as_bool) == Some(true)
-        && value.get("permission_denials") == Some(&json!([]))
-        && value.get("api_error_status").is_none_or(Value::is_null)
+        && value.get("api_error_status").is_none_or(Value::is_null);
+    if !shape {
+        return false;
+    }
+    // The reported permission denials must be exactly the boundary this Stop
+    // itself created. Real Claude reports the very permissions GoalPort
+    // answered `deny` when the interrupt landed on a pending decision
+    // (live-fix-9: aborted_tools + permission_denials=[the stopped tool]).
+    // A denial naming anything else -- a tool the host refused earlier, a
+    // foreign id, an entry without a tool_use_id -- is not this Stop's
+    // boundary and fails closed.
+    match value.get("permission_denials") {
+        None => false,
+        Some(denials) => denials.as_array().is_some_and(|list| {
+            list.iter().all(|entry| {
+                entry
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| stop_denied_tool_use_ids.iter().any(|denied| denied == id))
+            })
+        }),
+    }
 }
 
 trait BoundedReadLine {
@@ -8054,6 +8692,7 @@ time.sleep(30)
             result_subtype: Some("error_during_execution".into()),
             reason: None,
             terminal_emitted: false,
+            denied_pending_tool_use_ids: Vec::new(),
         });
         process
     }

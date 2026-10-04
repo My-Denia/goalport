@@ -1498,3 +1498,160 @@ fn the_refusal_message_is_readable_by_a_person() {
         "a refusal should say what to do instead: {message:?}"
     );
 }
+
+// --- never-admitted release rule, storage-layer gating ------------------------
+//
+// `release_unadmitted_claude_stop` is the second Claude release rule (the
+// first, `release_quiet_claude_stop`, covers a confirmed-cancelled turn). It
+// releases an UNCONFIRMED hold only against four evidence legs; the store
+// repeats the gate so a future caller cannot skip the proof.
+
+#[test]
+fn never_admitted_release_refuses_each_missing_evidence_leg() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Store::memory().unwrap();
+    seed_held(&store, &workspace.to_string_lossy(), "attempt-never");
+    // Drive the row to unconfirmed the way the projection does: an update
+    // carrying the native outcome payload with the admission ledger.
+    store
+        .update_stop_responsibility(&goalport_core::store::StopResponsibilityUpdate {
+            attempt_id: "attempt-never".into(),
+            operation_id: "operation-recheck-1".into(),
+            binding: binding(),
+            native_turn_state: goalport_core::store::StopNativeTurnState::Unconfirmed,
+            residual_execution_state: "unknown".into(),
+            detail: Some(json!({
+                "source": "Claude native outcome",
+                "payload": { "stop_attempt": { "admission": {
+                    "executionEverAdmitted": false
+                } } }
+            })),
+        })
+        .unwrap();
+
+    let full = json!({
+        "boundRuntimeAbsent": true,
+        "executionNeverAdmitted": true,
+        "fingerprintEqual": true,
+        "writers": [],
+    });
+    for (name, evidence) in [
+        ("no absent-runtime leg", json!({
+            "executionNeverAdmitted": true, "fingerprintEqual": true, "writers": []
+        })),
+        ("no never-admitted leg", json!({
+            "boundRuntimeAbsent": true, "fingerprintEqual": true, "writers": []
+        })),
+        ("no equal fingerprint", json!({
+            "boundRuntimeAbsent": true, "executionNeverAdmitted": true, "writers": []
+        })),
+        ("a live writer", json!({
+            "boundRuntimeAbsent": true, "executionNeverAdmitted": true,
+            "fingerprintEqual": true, "writers": [42]
+        })),
+        ("absent runtime contradicted", json!({
+            "boundRuntimeAbsent": false, "executionNeverAdmitted": true,
+            "fingerprintEqual": true, "writers": []
+        })),
+    ] {
+        let refused = store
+            .release_unadmitted_claude_stop("attempt-never", "operation-recheck-1", &evidence)
+            .expect_err(&format!("{name} must be refused"));
+        assert!(
+            matches!(refused, goalport_core::store::StoreError::InvalidState(_)),
+            "{name}: {refused:?}"
+        );
+        assert!(
+            !store.stop_responsibilities().unwrap().is_empty(),
+            "{name}: the hold must survive"
+        );
+    }
+
+    // The quiet release stays bound to interrupted rows: the same evidence
+    // cannot release an unconfirmed hold through the OTHER rule.
+    let quiet_refused = store
+        .release_quiet_claude_stop("attempt-never", "operation-recheck-1", &json!({
+            "nativeTurnCancelled": true, "fingerprintEqual": true, "writers": []
+        }))
+        .expect_err("the quiet rule must refuse an unconfirmed row");
+    assert!(matches!(
+        quiet_refused,
+        goalport_core::store::StoreError::InvalidState(_)
+    ));
+
+    // The complete evidence releases exactly once, tags the rule, and leaves
+    // a durable release event.
+    let released = store
+        .release_unadmitted_claude_stop("attempt-never", "operation-recheck-1", &full)
+        .unwrap();
+    assert!(released, "complete evidence must release");
+    assert!(store.stop_responsibilities().unwrap().is_empty());
+    let events = store
+        .list_event_records("attempt-never", 0)
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.event.kind == "runtime.stop.responsibility.released")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "{events:?}");
+    let payload = events[0].payload.as_ref().unwrap();
+    assert_eq!(payload["rule"], json!("never-admitted"));
+    assert_eq!(payload["evidence"]["executionNeverAdmitted"], json!(true));
+    // The store rule itself makes no cancelled-turn claim; the projection
+    // composes `nativeTurnCancelled: false` into the evidence it passes (see
+    // claude_stop_hold_release).
+
+    // Single-use: a second release attempt finds no row and changes nothing.
+    let again = store
+        .release_unadmitted_claude_stop("attempt-never", "operation-recheck-1", &full)
+        .unwrap();
+    assert!(!again, "an already-released hold cannot release twice");
+}
+
+#[test]
+fn never_admitted_release_refuses_an_interrupted_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let store = Store::memory().unwrap();
+    seed_held(&store, &workspace.to_string_lossy(), "attempt-interrupted-row");
+    let interrupted_binding = json!({
+        "input_uuid": "input-recheck-1",
+        "session_id": "session-recheck",
+        "turn_epoch": 1,
+        "process_epoch": "process-recheck"
+    });
+    store
+        .update_stop_responsibility(&goalport_core::store::StopResponsibilityUpdate {
+            attempt_id: "attempt-interrupted-row".into(),
+            operation_id: "operation-recheck-1".into(),
+            binding: interrupted_binding,
+            native_turn_state: goalport_core::store::StopNativeTurnState::Interrupted,
+            residual_execution_state: "unknown".into(),
+            detail: Some(json!({
+                "source": "Claude native outcome",
+                "payload": { "stop_attempt": { "admission": {
+                    "executionEverAdmitted": false
+                } } }
+            })),
+        })
+        .unwrap();
+    let refused = store
+        .release_unadmitted_claude_stop(
+            "attempt-interrupted-row",
+            "operation-recheck-1",
+            &json!({
+                "boundRuntimeAbsent": true,
+                "executionNeverAdmitted": true,
+                "fingerprintEqual": true,
+                "writers": []
+            }),
+        )
+        .expect_err("an interrupted row must go through the quiet rule");
+    assert!(matches!(
+        refused,
+        goalport_core::store::StoreError::InvalidState(_)
+    ));
+    assert!(!store.stop_responsibilities().unwrap().is_empty());
+}

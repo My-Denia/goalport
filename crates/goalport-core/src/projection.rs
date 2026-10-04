@@ -28,7 +28,8 @@ use crate::{
         RegistrationWithdrawal, RuntimeManager, StartupControl, TransportClosure, TransportState,
     },
     store::{
-        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ConfirmedStopSuccessor,
+        self, AppendEventOutcome, AttemptRecovery, CampaignAuthorization, ClosedClaudeSuccessor,
+        ConfirmedStopSuccessor,
         ConversationPrepareOutcome, ConversationRequestPhase, ConversationRequestRow,
         ConversationStart, EventRecord, NewRecheckObservation, RecheckVerdict, RuntimeEpochBinding,
         RuntimeObservation, StopNativeTurnState, StopResponsibility, StopResponsibilityUpdate,
@@ -941,8 +942,15 @@ impl UiController {
         {
             self.native_persistence_error = None;
         }
+        // The worker may have created registrations for attempts outside its
+        // lend plan (the closed-session resume successor); those live
+        // processes belong to the shared controller, not to the worker.
+        // Extras move first; the planned ids are still busy and follow
+        // through `return_attempts`.
+        let mut returning = std::mem::take(&mut worker.runtime_manager);
+        returning.transfer_created_attempts(&mut self.runtime_manager);
         self.runtime_manager
-            .return_attempts(&plan.attempt_ids, std::mem::take(&mut worker.runtime_manager))
+            .return_attempts(&plan.attempt_ids, returning)
             .map_err(|error| error.to_string())?;
         self.pending_titles.append(&mut worker.pending_titles);
         if self.selection_revision == baseline {
@@ -1194,6 +1202,7 @@ impl UiController {
             self.selected_attempt_id = None;
         }
         if flush_runtime { let _ = self.flush_runtime_events(); }
+        self.try_release_quiet_claude_stops();
         let selected_project = projects
             .iter()
             .find(|project| project.id == self.selected_project_id)
@@ -2024,6 +2033,126 @@ impl UiController {
     /// So row 1 short-circuits BEFORE `observe_process` is called: with nothing
     /// recorded there is nothing to observe. `not-running` is reachable only from
     /// a real `NotRunning` on a real recorded identity.
+    /// Release a Claude Stop hold only when the workspace has been quiet.
+    /// A cancelled attempt is not enough: a live writer, an unreadable
+    /// fingerprint, or a single sample keeps the hold.
+    ///
+    /// Two rules share the quiet gate:
+    /// - `interrupted`: the native turn was confirmed cancelled; quiet evidence
+    ///   completes the release.
+    /// - `unconfirmed` + never-admitted: the Stop could not be confirmed, so
+    ///   releasing additionally requires the exact bound runtime to be observed
+    ///   gone AND the durable admission ledger to prove no tool execution was
+    ///   ever admitted during the process binding. Any missing leg keeps the
+    ///   hold; "no child visible" alone proves nothing.
+    fn try_release_quiet_claude_stops(&mut self) {
+        let Ok(rows) = self.store.stop_responsibilities() else {
+            return;
+        };
+        for row in rows {
+            if !row.provider.eq_ignore_ascii_case("claude") {
+                continue;
+            }
+            let Some(workspace) = crate::stop_closure::hosted_workspace(&row.workspace_key) else {
+                continue;
+            };
+            let bound = self
+                .bound_runtime_identity(&row.attempt_id, &row.operation_id)
+                .unwrap_or(Value::Null);
+            let claude_pid = bound.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let never_admitted = row.detail.as_ref().and_then(|detail| {
+                detail
+                    .pointer("/payload/stop_attempt/admission/executionEverAdmitted")
+                    .cloned()
+            }) == Some(json!(false));
+            match row.native_turn_state {
+                crate::store::StopNativeTurnState::Interrupted => {
+                    if claude_pid == 0 {
+                        continue;
+                    }
+                }
+                crate::store::StopNativeTurnState::Unconfirmed => {
+                    // Rule legs 1 and 2: a fully recorded identity observed not
+                    // running, and the durable never-admitted proof. A pre-fix
+                    // hold with no admission ledger reads as not proven and
+                    // stays held.
+                    if !never_admitted || claude_pid == 0 {
+                        continue;
+                    }
+                    let (observation, verdict, _) = classify_recheck(&bound);
+                    if observation != crate::store::RuntimeObservation::NotRunning
+                        || verdict
+                            != crate::store::RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown
+                    {
+                        continue;
+                    }
+                }
+                crate::store::StopNativeTurnState::Pending => continue,
+            }
+            let Ok(writers) = crate::stop_closure::workspace_writers(&workspace, claude_pid)
+            else {
+                continue;
+            };
+            let sample = crate::stop_closure::sample_workspace(&workspace);
+            let decision = crate::stop_closure::decide_quiet(
+                row.detail.as_ref(),
+                &writers,
+                sample.as_ref(),
+                crate::stop_closure::now_ms(),
+            );
+            match decision {
+                crate::stop_closure::QuietDecision::Release { evidence } => {
+                    let mut evidence = evidence;
+                    if let Some(object) = evidence.as_object_mut() {
+                        match row.native_turn_state {
+                            crate::store::StopNativeTurnState::Interrupted => {
+                                // What the confirmed cancellation proves.
+                                object.insert("nativeTurnCancelled".into(), json!(true));
+                            }
+                            crate::store::StopNativeTurnState::Unconfirmed => {
+                                // What this rule proves, and only this: the
+                                // turn was never confirmed cancelled; the
+                                // release rests on the absent runtime, the
+                                // never-admitted ledger and the quiet window.
+                                object.insert("nativeTurnCancelled".into(), json!(false));
+                                object.insert("rule".into(), json!("never-admitted"));
+                                object.insert("boundRuntimeAbsent".into(), json!(true));
+                                object.insert("executionNeverAdmitted".into(), json!(true));
+                            }
+                            crate::store::StopNativeTurnState::Pending => {}
+                        }
+                    }
+                    let _ = match row.native_turn_state {
+                        crate::store::StopNativeTurnState::Unconfirmed => self
+                            .store
+                            .release_unadmitted_claude_stop(
+                                &row.attempt_id,
+                                &row.operation_id,
+                                &evidence,
+                            ),
+                        _ => self.store.release_quiet_claude_stop(
+                            &row.attempt_id,
+                            &row.operation_id,
+                            &evidence,
+                        ),
+                    };
+                }
+                crate::stop_closure::QuietDecision::Hold { residual, quiet } => {
+                    let mut detail = row.detail.clone().unwrap_or_else(|| json!({}));
+                    if let Some(object) = detail.as_object_mut() {
+                        object.insert("workspaceQuiet".into(), quiet);
+                    }
+                    let _ = self.store.record_stop_quiet_sample(
+                        &row.attempt_id,
+                        &row.operation_id,
+                        residual,
+                        &detail,
+                    );
+                }
+            }
+        }
+    }
+
     fn recheck_stop_responsibility(&mut self, request: &UiCommandRequest) -> Result<Value, String> {
         let attempt_id = payload_text_default(
             &request.payload,
@@ -2095,6 +2224,51 @@ impl UiController {
             .store
             .stop_responsibility_for_attempt(&attempt_id)
             .map_err(store_message)?;
+        // Honest reporting of which legs of the never-admitted release rule
+        // currently hold. The re-check itself never releases; the poll loop
+        // applies the rule once every leg -- including the quiet window --
+        // is satisfied.
+        let release_eligibility = after.as_ref().map(|row| {
+            if !row.provider.eq_ignore_ascii_case("claude")
+                || row.native_turn_state != crate::store::StopNativeTurnState::Unconfirmed
+            {
+                return json!({
+                    "rule": "never-admitted",
+                    "applies": false,
+                    "reason": "this release rule covers only an unconfirmed Claude Stop",
+                });
+            }
+            let bound = self
+                .bound_runtime_identity(&row.attempt_id, &row.operation_id)
+                .unwrap_or(Value::Null);
+            let (_, verdict, _) = classify_recheck(&bound);
+            let never_admitted = row.detail.as_ref().and_then(|detail| {
+                detail
+                    .pointer("/payload/stop_attempt/admission/executionEverAdmitted")
+                    .cloned()
+            }) == Some(json!(false));
+            let runtime_absent =
+                verdict == crate::store::RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown;
+            let blockers: Vec<&str> = [
+                (!runtime_absent).then(|| {
+                    "the bound runtime was not observed absent with its recorded identity"
+                }),
+                (!never_admitted).then(|| {
+                    "the durable admission ledger does not prove that no execution was ever admitted"
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            json!({
+                "rule": "never-admitted",
+                "applies": true,
+                "boundRuntimeAbsent": runtime_absent,
+                "executionNeverAdmitted": never_admitted,
+                "blockers": blockers,
+                "note": "the quiet window is evaluated by the poll loop; a live writer or a single fingerprint sample keeps the hold",
+            })
+        });
         Ok(json!({
             "observation": recorded,
             "responsibilityUnchanged": after.map(|row| json!({
@@ -2102,6 +2276,7 @@ impl UiController {
                 "residualExecutionState": row.residual_execution_state,
                 "writeResponsibility": row.write_responsibility,
             })),
+            "releaseEligibility": release_eligibility,
         }))
     }
 
@@ -3528,6 +3703,13 @@ impl UiController {
                     }
                     if provider.eq_ignore_ascii_case("claude") {
                         delivery = "UNKNOWN";
+                        // A failed resume verification is special: the
+                        // adapter killed and reaped the unverified process
+                        // itself, so residual execution is provably none and
+                        // no Stop responsibility is begun. The crossed
+                        // message is still recorded as an UNKNOWN delivery.
+                        let resume_verification_failed =
+                            first.contains("Claude resume verification failed");
                         let _ = self.persist_event(
                             &attempt_id,
                             "runtime.send.failed",
@@ -3536,10 +3718,18 @@ impl UiController {
                                 "reasonCode": "delivery-unknown",
                                 "retry": false,
                                 "deliveryState": "UNKNOWN",
-                                "reason": "Claude native send may have partially crossed the transport boundary"
+                                "reason": if resume_verification_failed {
+                                    "Claude native resume did not verify the stored session id; the unverified process was closed"
+                                } else {
+                                    "Claude native send may have partially crossed the transport boundary"
+                                },
+                                "unverifiedResumeClosed": resume_verification_failed
                             }),
                             None,
                         );
+                        if resume_verification_failed {
+                            return Err(first);
+                        }
                         let binding = self
                             .runtime_manager
                             .claude_turn_binding(&attempt_id)
@@ -5238,6 +5428,116 @@ impl UiController {
         Ok(())
     }
 
+    /// Explicitly closed Claude sessions continue on a new Attempt. The closed
+    /// row stays CLOSED. This does not resume a FAILED attempt and does not
+    /// send the old prompt.
+    fn resume_closed_claude_session(
+        &mut self,
+        request: &UiCommandRequest,
+        source: &Attempt,
+    ) -> Result<(), String> {
+        let Some(session_id) = source.provider_session.as_deref() else {
+            return Err("no persisted native session to resume".into());
+        };
+        let session_id = session_id.trim();
+        if session_id.is_empty()
+            || session_id.starts_with("claude-session-")
+            || session_id.starts_with('-')
+            || session_id.chars().any(char::is_whitespace)
+        {
+            return Err("Claude resume refused: session id is empty or manufactured".into());
+        }
+        let workspace = PathBuf::from(self.workspace_for_attempt(&source.id)?);
+        self.ensure_workspace_ingress_allowed(
+            workspace.to_string_lossy().as_ref(),
+            "native session resume",
+        )?;
+        let task = self
+            .store
+            .get_task(&source.task_id)
+            .map_err(store_message)?;
+        let successor_hash = sha256_hex(format!("{}:closed-claude-successor", source.id).as_bytes());
+        let successor_attempt = Attempt::new(
+            format!("attempt-{successor_hash}"),
+            &task.id,
+            &source.provider,
+            format!("{}-cap-v1", source.provider),
+        );
+        let successor_id = successor_attempt.id.clone();
+        self.store
+            .insert_closed_claude_successor(&ClosedClaudeSuccessor {
+                source_attempt_id: source.id.clone(),
+                successor_attempt,
+            })
+            .map_err(store_message)?;
+        let executable = payload_text(&request.payload, "executable")
+            .ok()
+            .map(PathBuf::from);
+        if self
+            .runtime_manager
+            .registered_binding(&successor_id)
+            .is_none()
+        {
+            self.runtime_manager
+                .select_runtime(
+                    &successor_id,
+                    &source.provider,
+                    executable,
+                    runtime_version(&source.provider),
+                    &workspace,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let context = SessionRequest {
+            campaign_id: Some(task.campaign_id.clone()),
+            task_id: task.id.clone(),
+            attempt_id: successor_id.clone(),
+            workspace_root: workspace,
+            resume_session: Some(session_id.to_owned()),
+        };
+        match self
+            .runtime_manager
+            .resume_session_with_context(&successor_id, &context)
+        {
+            Ok(_session) => {
+                // Spawn-only resume: the CLI now runs with `--resume <stored
+                // id>`. The id itself is verified on the successor's first
+                // send — the real CLI reports the session only after the
+                // first user message — and until then the successor stays
+                // Queued with no provider session. Selection moves here so
+                // the pending-resume successor is the rendered attempt whose
+                // composer offers that first send.
+                let identity = self
+                    .runtime_manager
+                    .registration_identity(&successor_id)
+                    .unwrap_or_default();
+                self.persist_registration_established(
+                    &successor_id,
+                    &identity,
+                    "resume_native_session",
+                    &source.provider,
+                )?;
+                self.selected_attempt_id = Some(successor_id);
+                self.selected_campaign_id = Some(task.campaign_id);
+                Ok(())
+            }
+            Err(error) => {
+                self.persist_event(
+                    &successor_id,
+                    "runtime.session.resumed",
+                    json!({
+                        "resumed": false,
+                        "unsupported": true,
+                        "reason": error.to_string(),
+                        "promptReplay": false
+                    }),
+                    None,
+                )?;
+                Err(format!("Native session resume failed: {error}"))
+            }
+        }
+    }
+
     fn resume_native_session(&mut self, request: &UiCommandRequest) -> Result<(), String> {
         let attempt_id = payload_text_default(
             &request.payload,
@@ -5245,6 +5545,10 @@ impl UiController {
             self.selected_attempt_id.as_deref().unwrap_or_default(),
         );
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
+        if attempt.state == AttemptState::Closed && attempt.provider.eq_ignore_ascii_case("claude")
+        {
+            return self.resume_closed_claude_session(request, &attempt);
+        }
         if attempt.state.is_terminal() {
             return Err(format!(
                 "Attempt {attempt_id} is closed or terminal; start a new Attempt instead of resuming its session"
@@ -5254,9 +5558,6 @@ impl UiController {
             self.persist_recovery(&attempt_id, Some("UNSUPPORTED"))?;
             return Err("no persisted native session to resume".into());
         };
-        if attempt.provider.eq_ignore_ascii_case("claude") {
-            return Err("Claude Code session resume is not supported by GoalPort yet".into());
-        }
         let workspace = PathBuf::from(self.workspace_for_attempt(&attempt_id)?);
         self.ensure_workspace_ingress_allowed(
             workspace.to_string_lossy().as_ref(),
@@ -5908,6 +6209,11 @@ impl UiController {
 
     fn persist_agent_event_with_settlement(&self, event: &AgentEventEnvelope, frozen: &mut Option<FrozenTurnSettlement>) -> Result<(), String> {
         let kind = match event.event_type {
+            AgentEventType::SessionCreated
+                if event.payload.get("resumed").and_then(Value::as_bool) == Some(true) =>
+            {
+                "runtime.session.resumed"
+            }
             AgentEventType::SessionCreated => "runtime.session.created",
             AgentEventType::TurnStarted => "runtime.turn.started",
             AgentEventType::MessageDelta => "runtime.reply.delta",
@@ -5965,7 +6271,40 @@ impl UiController {
             .store
             .get_attempt(&event.attempt_id)
             .map_err(store_message)?;
+        // The provider's own init echo is the only point a pending
+        // closed-session resume successor becomes Active: spawn alone never
+        // activates it. rolledFrom comes from the successor's lineage event.
+        if kind == "runtime.session.resumed" && attempt.state == AttemptState::Queued {
+            let rolled_from = self
+                .store
+                .list_event_records(&event.attempt_id, 0)
+                .map_err(store_message)?
+                .iter()
+                .find(|record| record.event.kind == "attempt.created")
+                .and_then(|record| record.payload.as_ref())
+                .and_then(|payload| payload.get("rolledFrom"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let mut active_payload = json!({ "resumed": true, "promptReplay": false });
+            if let Some(source) = rolled_from {
+                active_payload["rolledFrom"] = json!(source);
+            }
+            self.persist_event(
+                &event.attempt_id,
+                "attempt.active",
+                active_payload,
+                Some(AttemptState::Active),
+            )?;
+        }
         let mut payload = event.payload.clone();
+        // The journal event for a verified resume states the replay fact the
+        // envelope itself does not carry.
+        if kind == "runtime.session.resumed"
+            && !payload.get("promptReplay").is_some()
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert("promptReplay".into(), serde_json::json!(false));
+        }
         let mut claude_exact_interrupted = false;
         if attempt.provider.eq_ignore_ascii_case("claude") {
             let reported_native_state = event
@@ -6051,7 +6390,14 @@ impl UiController {
                     }
                 }
             }
-            if state == Some(AttemptState::Cancelled) && !claude_exact_interrupted {
+            // The turn is cancelled either way. A confirmed Claude interrupt keeps
+            // the Attempt open so a quiet workspace can send on the same session
+            // and an explicit close can record CLOSED. The hold, not CANCELLED,
+            // is what blocks that until the workspace is quiet.
+            if state == Some(AttemptState::Cancelled)
+                && (!claude_exact_interrupted
+                    || attempt.provider.eq_ignore_ascii_case("claude"))
+            {
                 if let Some(current) = self
                     .store
                     .stop_responsibility_for_attempt(&event.attempt_id)
@@ -6699,12 +7045,11 @@ fn runtime_profiles() -> Vec<UiRuntime> {
             subtitle: "Native stream-json · subscription path".into(),
             reasons: vec![
                 "Uses the unmodified native CLI over persistent stream-json".into(),
-                "Host permission prompts are fail-closed; resume stays unsupported until proven"
-                    .into(),
+                "Host permission prompts stay on; resume uses the stored session id".into(),
             ],
             capabilities: UiRuntimeCapabilities {
                 events: "needs-review".into(),
-                resume: "unsupported".into(),
+                resume: "needs-review".into(),
                 permissions: "needs-review".into(),
                 cancel: "needs-review".into(),
             },

@@ -745,7 +745,7 @@ fn reserved_queued_attempt_is_idle_with_reason() {
 }
 
 #[test]
-fn unsupported_claude_resume_is_not_advertised_or_registered() {
+fn claude_resume_is_offered_and_this_test_does_not_launch_a_runtime() {
     let workspace = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(workspace.path())
         .unwrap()
@@ -812,26 +812,15 @@ fn unsupported_claude_resume_is_not_advertised_or_registered() {
     let before = view(result(&server, "claude-resume-before", "snapshot", json!({})));
     assert_eq!(before["productConversation"]["session"]["state"], "detached");
     assert!(
-        !before["productConversation"]["turn"]["actions"]
+        before["productConversation"]["turn"]["actions"]
             .as_array()
             .unwrap()
             .iter()
             .any(|action| action == "resume-session"),
-        "unsupported action must not be offered: {before}"
+        "a detached Claude session with a stored id offers resume: {before}"
     );
-    let refusal = result(
-        &server,
-        "claude-resume-refused",
-        "resume_native_session",
-        json!({"attemptId": attempt_id}),
-    );
-    assert_eq!(refusal["ok"], false, "{refusal}");
-    assert!(
-        refusal["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("not supported by GoalPort yet")
-    );
+    // Do not call resume_native_session here. That selects the real Claude CLI.
+    // The fixture peer covers the spawn, and this test only checks the offer.
     let after = view(result(&server, "claude-resume-after", "snapshot", json!({})));
     assert_eq!(after["productConversation"]["session"]["state"], "detached");
     assert_eq!(event_kinds(&store, attempt_id), vec!["attempt.active", "attempt.awaiting_review"]);

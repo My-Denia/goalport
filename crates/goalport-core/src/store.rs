@@ -1467,6 +1467,182 @@ impl Store {
         Ok(())
     }
 
+    /// Same-task, same-provider successor of an explicitly closed Claude session.
+    /// The source row is not rewritten. A FAILED or CANCELLED source is refused.
+    /// No conversation request and no prompt are inserted.
+    pub fn insert_closed_claude_successor(
+        &self,
+        successor: &ClosedClaudeSuccessor,
+    ) -> Result<(), StoreError> {
+        successor.successor_attempt.validate()?;
+        if successor.successor_attempt.state != AttemptState::Queued
+            || successor.successor_attempt.last_event_seq != 0
+            || successor.successor_attempt.provider_session.is_some()
+        {
+            return Err(StoreError::InvalidState(
+                "a closed-session successor must be a new queued row with no events or provider session"
+                    .into(),
+            ));
+        }
+        let source_attempt_id = successor.source_attempt_id.trim();
+        if source_attempt_id.is_empty() || source_attempt_id == successor.successor_attempt.id {
+            return Err(StoreError::InvalidState(
+                "closed-session successor must name a distinct source Attempt".into(),
+            ));
+        }
+        if !successor
+            .successor_attempt
+            .provider
+            .eq_ignore_ascii_case("claude")
+        {
+            return Err(StoreError::InvalidState(
+                "closed-session successor is only defined for Claude".into(),
+            ));
+        }
+        let payload_json = serde_json::to_string(&serde_json::json!({
+            "provider": successor.successor_attempt.provider,
+            "rolledFrom": source_attempt_id,
+        }))?;
+        let event_id = format!("core-event-{}-1", successor.successor_attempt.id);
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source: (String, String, String, Option<String>) = tx
+            .query_row(
+                "SELECT task_id, provider, state, provider_session FROM attempts WHERE id=?1",
+                params![source_attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(format!("attempt {source_attempt_id}")))?;
+        let (source_task_id, source_provider, source_state, source_session) = source;
+        if source_task_id != successor.successor_attempt.task_id {
+            return Err(StoreError::InvalidState(
+                "the closed-session successor must belong to the source task".into(),
+            ));
+        }
+        if !source_provider.eq_ignore_ascii_case("claude")
+            || !successor
+                .successor_attempt
+                .provider
+                .eq_ignore_ascii_case(&source_provider)
+        {
+            return Err(StoreError::InvalidState(
+                "the closed-session successor provider must equal the Claude source".into(),
+            ));
+        }
+        if source_state != attempt_state_string(AttemptState::Closed) {
+            return Err(StoreError::InvalidState(format!(
+                "closed-session successor requires source attempt {source_attempt_id} to be CLOSED, not {source_state}"
+            )));
+        }
+        let session = source_session.unwrap_or_default();
+        let session = session.trim();
+        if session.is_empty()
+            || session.starts_with("claude-session-")
+            || session.starts_with('-')
+            || session.chars().any(char::is_whitespace)
+        {
+            return Err(StoreError::InvalidState(
+                "closed-session successor requires the source's exact stored session id".into(),
+            ));
+        }
+        let closed: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM events WHERE attempt_id=?1 AND kind='runtime.session.closed' LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if closed.is_none() {
+            return Err(StoreError::InvalidState(
+                "closed-session successor requires a durable runtime.session.closed event".into(),
+            ));
+        }
+        let pending: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM decisions WHERE attempt_id=?1 AND state='PENDING' LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if pending.is_some() {
+            return Err(StoreError::InvalidState(
+                "closed-session successor refused: a Decision is still pending".into(),
+            ));
+        }
+        let held: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM stop_responsibilities WHERE attempt_id=?1 LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if held.is_some() {
+            return Err(StoreError::InvalidState(
+                "closed-session successor refused: a Stop is still held".into(),
+            ));
+        }
+        let unsettled: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM outbox o INNER JOIN commands c ON c.id=o.command_id
+                 WHERE c.attempt_id=?1 AND o.state != 'SUCCEEDED' LIMIT 1",
+                params![source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if unsettled.is_some() {
+            return Err(StoreError::InvalidState(
+                "closed-session successor refused: an action is still unsettled".into(),
+            ));
+        }
+        let later: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts WHERE task_id=?1 AND rowid > (SELECT rowid FROM attempts WHERE id=?2) LIMIT 1",
+                params![source_task_id, source_attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if later.is_some() {
+            return Err(StoreError::InvalidState(
+                "closed-session successor is created only from the latest Attempt of its task".into(),
+            ));
+        }
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM attempts WHERE id=?1",
+                params![successor.successor_attempt.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(StoreError::IdempotencyConflict(
+                successor.successor_attempt.id.clone(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO attempts(id, task_id, provider, provider_session, state, last_event_seq, capability_version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                successor.successor_attempt.id,
+                successor.successor_attempt.task_id,
+                successor.successor_attempt.provider,
+                successor.successor_attempt.provider_session,
+                attempt_state_string(successor.successor_attempt.state),
+                successor.successor_attempt.last_event_seq,
+                successor.successor_attempt.capability_version
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at) VALUES (?1, ?2, 1, 'attempt.created', NULL, NULL, ?3, ?4)",
+            params![event_id, successor.successor_attempt.id, payload_json, now()],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET last_event_seq=1, version=version+1 WHERE id=?1",
+            params![successor.successor_attempt.id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_attempt(&self, id: &str) -> Result<Attempt, StoreError> {
         let connection = self.inner.lock().expect("store mutex poisoned");
         connection
@@ -3947,6 +4123,169 @@ impl Store {
         Ok(updated)
     }
 
+    /// Record one quiet-window sample without releasing the hold. Sample
+    /// collection serves both release rules: the interrupted quiet release and
+    /// the never-admitted release of an unconfirmed hold.
+    pub fn record_stop_quiet_sample(
+        &self,
+        attempt_id: &str,
+        operation_id: &str,
+        residual_execution_state: &str,
+        detail: &Value,
+    ) -> Result<(), StoreError> {
+        if !matches!(residual_execution_state, "unknown" | "active") {
+            return Err(StoreError::InvalidState(
+                "Stop residual execution state must be unknown or active".into(),
+            ));
+        }
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        connection.execute(
+            "UPDATE stop_responsibilities
+             SET residual_execution_state=?1, detail_json=?2, updated_at=?3
+             WHERE attempt_id=?4 AND operation_id=?5
+               AND native_turn_state IN ('interrupted','unconfirmed')",
+            params![
+                residual_execution_state,
+                serde_json::to_string(detail)?,
+                now(),
+                attempt_id,
+                operation_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a Claude Stop hold only after the caller proved the workspace is quiet.
+    /// Attempt state is not changed. A cancelled attempt with no quiet evidence
+    /// is refused.
+    pub fn release_quiet_claude_stop(
+        &self,
+        attempt_id: &str,
+        operation_id: &str,
+        evidence: &Value,
+    ) -> Result<bool, StoreError> {
+        if evidence.get("nativeTurnCancelled").and_then(Value::as_bool) != Some(true)
+            || evidence.get("fingerprintEqual").and_then(Value::as_bool) != Some(true)
+            || evidence.get("writers").and_then(Value::as_array).is_none_or(|rows| !rows.is_empty())
+        {
+            return Err(StoreError::InvalidState(
+                "quiet Stop release requires a cancelled turn, an equal fingerprint, and no workspace writer".into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = tx
+            .query_row(
+                "SELECT s.provider, s.native_turn_state, a.last_event_seq FROM stop_responsibilities s
+                 JOIN attempts a ON a.id=s.attempt_id
+                 WHERE s.attempt_id=?1 AND s.operation_id=?2",
+                params![attempt_id, operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()?;
+        let Some((provider, native_turn_state, last_seq)) = row else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if !provider.eq_ignore_ascii_case("claude") || native_turn_state != "interrupted" {
+            return Err(StoreError::InvalidState(
+                "quiet Stop release is only for an interrupted Claude turn".into(),
+            ));
+        }
+        let next_seq = last_seq + 1;
+        let event_id = format!("core-event-{attempt_id}-{next_seq}");
+        let payload = serde_json::to_string(&serde_json::json!({
+            "operationId": operation_id,
+            "evidence": evidence,
+        }))?;
+        tx.execute(
+            "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at)
+             VALUES (?1, ?2, ?3, 'runtime.stop.responsibility.released', NULL, NULL, ?4, ?5)",
+            params![event_id, attempt_id, next_seq, payload, now()],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET last_event_seq=?1, version=version+1 WHERE id=?2",
+            params![next_seq, attempt_id],
+        )?;
+        let deleted = tx.execute(
+            "DELETE FROM stop_responsibilities
+             WHERE attempt_id=?1 AND operation_id=?2 AND native_turn_state='interrupted'",
+            params![attempt_id, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(deleted == 1)
+    }
+
+    /// Drop an unconfirmed Claude Stop hold only after the caller proved ALL
+    /// three legs of the never-admitted rule: the exact bound runtime was
+    /// observed not running, no tool execution was EVER admitted during the
+    /// process binding (durable admission ledger), and the workspace is quiet
+    /// now. Attempt state is not changed. This is the release path for a Stop
+    /// whose interruption could not be confirmed; it never claims the native
+    /// turn was cancelled.
+    pub fn release_unadmitted_claude_stop(
+        &self,
+        attempt_id: &str,
+        operation_id: &str,
+        evidence: &Value,
+    ) -> Result<bool, StoreError> {
+        if evidence.get("boundRuntimeAbsent").and_then(Value::as_bool) != Some(true)
+            || evidence.get("executionNeverAdmitted").and_then(Value::as_bool) != Some(true)
+            || evidence.get("fingerprintEqual").and_then(Value::as_bool) != Some(true)
+            || evidence
+                .get("writers")
+                .and_then(Value::as_array)
+                .is_none_or(|rows| !rows.is_empty())
+        {
+            return Err(StoreError::InvalidState(
+                "never-admitted Stop release requires an absent bound runtime, no admitted execution, an equal fingerprint, and no workspace writer".into(),
+            ));
+        }
+        let mut connection = self.inner.lock().expect("store mutex poisoned");
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = tx
+            .query_row(
+                "SELECT s.provider, s.native_turn_state, a.last_event_seq FROM stop_responsibilities s
+                 JOIN attempts a ON a.id=s.attempt_id
+                 WHERE s.attempt_id=?1 AND s.operation_id=?2",
+                params![attempt_id, operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()?;
+        let Some((provider, native_turn_state, last_seq)) = row else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if !provider.eq_ignore_ascii_case("claude") || native_turn_state != "unconfirmed" {
+            return Err(StoreError::InvalidState(
+                "never-admitted Stop release is only for an unconfirmed Claude turn".into(),
+            ));
+        }
+        let next_seq = last_seq + 1;
+        let event_id = format!("core-event-{attempt_id}-{next_seq}");
+        let payload = serde_json::to_string(&serde_json::json!({
+            "operationId": operation_id,
+            "rule": "never-admitted",
+            "evidence": evidence,
+        }))?;
+        tx.execute(
+            "INSERT INTO events(id, attempt_id, seq, kind, payload_ref, state_after, payload_json, created_at)
+             VALUES (?1, ?2, ?3, 'runtime.stop.responsibility.released', NULL, NULL, ?4, ?5)",
+            params![event_id, attempt_id, next_seq, payload, now()],
+        )?;
+        tx.execute(
+            "UPDATE attempts SET last_event_seq=?1, version=version+1 WHERE id=?2",
+            params![next_seq, attempt_id],
+        )?;
+        let deleted = tx.execute(
+            "DELETE FROM stop_responsibilities
+             WHERE attempt_id=?1 AND operation_id=?2 AND native_turn_state='unconfirmed'",
+            params![attempt_id, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(deleted == 1)
+    }
+
     pub fn mark_dispatching_outbox_unknown(&self) -> Result<usize, StoreError> {
         let connection = self.inner.lock().expect("store mutex poisoned");
         Ok(connection.execute(
@@ -4916,6 +5255,13 @@ pub struct ConfirmedStopSuccessor {
     pub payload_hash: String,
     pub claim_token: String,
     pub native_command_id: String,
+    pub successor_attempt: Attempt,
+}
+
+/// Successor of an explicitly closed, settled Claude session. The source stays CLOSED.
+#[derive(Debug, Clone)]
+pub struct ClosedClaudeSuccessor {
+    pub source_attempt_id: String,
     pub successor_attempt: Attempt,
 }
 

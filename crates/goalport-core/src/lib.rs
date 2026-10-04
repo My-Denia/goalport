@@ -19,6 +19,7 @@ pub mod profile_ops;
 pub mod projection;
 pub mod response_bounds;
 pub mod runtime_manager;
+pub mod stop_closure;
 pub mod store;
 pub mod turn_results;
 
