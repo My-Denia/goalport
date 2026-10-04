@@ -234,15 +234,9 @@ fn linux_spawn(
     let mut env_owned = inherited_env(env_remove)?;
     let mut env_ptrs: Vec<*const libc::c_char> = env_owned.iter().map(|s| s.as_ptr()).collect();
     env_ptrs.push(std::ptr::null());
-    // The child reads these pointers after clone copies the address space.
-    // They must stay alive until exec. Leak is one spawn's argv, freed with
-    // the process. The sync pipe is the barrier before exec.
-    let argv_ptrs = Box::leak(argv_ptrs.into_boxed_slice());
-    let env_ptrs = Box::leak(env_ptrs.into_boxed_slice());
+    // clone without CLONE_VM copies this address space. The parent may
+    // drop these buffers after clone returns; the child already has its copy.
     let program_ptr = argv_owned[0].as_ptr();
-    let argv_owned = Box::leak(argv_owned.into_boxed_slice());
-    let _env_owned = Box::leak(env_owned.into_boxed_slice());
-    let cwd_c = Box::leak(Box::new(cwd_c));
     let mut arg = LinuxSpawnArg {
         program: program_ptr,
         argv: argv_ptrs.as_ptr(),
@@ -277,18 +271,25 @@ fn linux_spawn(
     }
     let pid = pid as u32;
     if let Err(error) = write_id_maps(pid) {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        kill_and_reap(pid);
         return Err(error);
     }
     let mut go = [1u8];
     let wrote = unsafe { libc::write(sync_write.fd(), go.as_mut_ptr().cast(), 1) };
     unsafe { libc::close(sync_write.take()) };
     if wrote != 1 {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        kill_and_reap(pid);
         return Err(io::Error::last_os_error());
     }
-    let ns_inode = namespace_inode(pid)?;
-    let _ = argv_owned;
+    let ns_inode = match namespace_inode(pid) {
+        Ok(inode) => inode,
+        Err(error) => {
+            // The sync byte already let the child proceed toward exec.
+            // A failed namespace capture must not leave that process untracked.
+            kill_and_reap(pid);
+            return Err(error);
+        }
+    };
     Ok(ContainedSpawn {
         child: ContainedChild {
             pid,
@@ -350,6 +351,19 @@ fn linux_child(arg: &LinuxSpawnArg) -> ! {
         libc::dup2(arg.stdout_fd, 1);
         libc::execve(arg.program, arg.argv, arg.envp);
         libc::_exit(127);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn kill_and_reap(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+        let mut status = 0;
+        while libc::waitpid(pid as i32, &mut status, 0) < 0 {
+            if *libc::__errno_location() != libc::EINTR {
+                break;
+            }
+        }
     }
 }
 
