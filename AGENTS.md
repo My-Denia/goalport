@@ -53,6 +53,7 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
   3. 独立的会话标题生成（不污染主对话，额度不足时用本地标题，不阻塞正文）
   4. 类型化的 provider 错误映射（如额度错误的结构化处理，而非猜字符串）
   5. Agent 可观察的调试接口（preview_snapshot / click / evaluate 一级工具）
+- 前置完成状态（2026-10-04 记录，PR #24 修复轮交付）：#1 共享浮层 primitive（`src/ui/GoalLayer.tsx`，Base UI 封装；composer 输入规则合一 `useComposerInput`）；#2 焦点/草稿/轮询生命周期分离（`useConversationDrafts` + 轮询 epoch 守卫 + draft composer 稳定挂载）；#3 独立会话标题生成（`crates/goalport-core/src/async_title.rs`，脱线程、限额回退本地标题）；#4 类型化 provider 错误映射（`crates/goalport-core/src/provider_failure.rs` 闭集 + 前端 union + 锁测试）；#5 Agent 可观察调试接口（`scripts/connected/ui-debug.mjs`，preview_snapshot/click/evaluate，localhost-only，不进生产路径）。此后本条禁令恢复完全效力：再加安全/收据/epoch/审计/加固基础设施前，先回到本清单核对。
 - 当你发现自己又在写"可证明正确"的东西、而过去两小时没人看过一眼界面时，**停下来，这就是那个病**。
 
 ## 4. UI 的正确姿势：抄，别发明
@@ -81,7 +82,7 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
 
 - **前端基线转向 t3code**：认真评估以 pingdotgg/t3code 为 fork 基线，而不是继续在现有前端上增量修补。
 - 现有 Core 仅在以下差异化确实是要卖的产品价值时才保留：跨 Runtime handoff、held responsibility、后台续跑。否则它们是负担不是资产。
-- 注意：t3code 的 same-thread 逻辑拒绝跨 driver 切换，handoff 在上游不存在，不能照抄。抄的是 primitive、输入规则、错误映射、测试，不是业务语义。
+- 更新（2026-10-04，事实已按上游源码核实）：t3code 的 orchestration-v2 现在**有** first-class provider switching（同一条 app thread 可包含多个 provider 的 run，各保留原生会话句柄）、`ProviderThread` 与 `ContextHandoff` 概念（上游 `docs/orchestration-v2/provider-switching-and-context.md`、`apps/server/src/orchestration-v2/ContextHandoffService.ts`）。旧说法"same-thread 拒绝跨 driver、handoff 不存在"已过时。仍然只抄 primitive、输入规则、错误映射、测试；provider 切换/handoff 的业务语义与 GoalPort 的 durable hold 语义不同，评估 fork 基线时逐项对照，不整体照搬。
 - t3code 的 MIT 许可证允许复制修改，但必须保留其版权与许可声明；其组件依赖的其他库需分别核查。
 
 ## 7. 与我的沟通规则

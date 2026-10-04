@@ -1460,3 +1460,39 @@ function normalizeEvidenceState(value: unknown): EvidenceState | undefined {
 function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
+
+// The closed provider-failure reason-code set. Lock test
+// (src/providerFailureLock.test.ts) fails when this drifts from the Rust
+// enum in crates/goalport-core/src/provider_failure.rs.
+export type ProviderFailureCode =
+  | "provider-quota"
+  | "provider-overloaded"
+  | "provider-auth-required"
+  | "provider-version"
+  | "provider-transport"
+  | "provider-permission"
+  | "provider-request-invalid"
+  | "provider-startup"
+  | "provider-not-installed"
+  | "provider-context-full"
+  | "delivery-unknown"
+  | "resume-spawn-failed"
+  | "resume-verification-failed"
+  | "provider-failed";
+
+export const PROVIDER_FAILURE_CODES: readonly ProviderFailureCode[] = [
+  "provider-quota",
+  "provider-overloaded",
+  "provider-auth-required",
+  "provider-version",
+  "provider-transport",
+  "provider-permission",
+  "provider-request-invalid",
+  "provider-startup",
+  "provider-not-installed",
+  "provider-context-full",
+  "delivery-unknown",
+  "resume-spawn-failed",
+  "resume-verification-failed",
+  "provider-failed",
+] as const;

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { AppInfo } from "../ipc";
 import type { CoreCommandOutcome, CoreSnapshot, EvidenceSummary, TimelineItem } from "../types";
 import { EVIDENCE_LABEL, formatTimestamp } from "../lib/display";
+import { GoalLayer } from "../ui/GoalLayer";
 
 interface DiagnosticsDrawerProps {
   open: boolean;
@@ -149,16 +150,6 @@ function EvidenceRow({ evidence }: { evidence: EvidenceSummary }) {
  * because a snapshot says "preview".
  */
 export function DiagnosticsDrawer({ open, onClose, snapshot, appInfo, onRevoke, onOwnerAction, onOffline }: DiagnosticsDrawerProps) {
-  useEffect(() => {
-    if (!open) return undefined;
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
   const canInjectFaults = appInfo?.testMode === true || appInfo?.distribution === "dev";
   const holdsJson = JSON.stringify(
     { stopResponsibility: snapshot.stopResponsibility, relatedHolds: snapshot.relatedHolds },
@@ -168,7 +159,13 @@ export function DiagnosticsDrawer({ open, onClose, snapshot, appInfo, onRevoke, 
   const timelineJson = JSON.stringify(snapshot.timeline, null, 2);
 
   return (
-    <aside className={`diagnostics-drawer diagnostics-open`} aria-label="Developer diagnostics" role="region">
+    <GoalLayer
+      variant="drawer"
+      open={open}
+      onOpenChange={(next) => { if (!next) onClose(); }}
+      label="Developer diagnostics"
+      surface={<aside className="diagnostics-drawer diagnostics-open" role="region" />}
+    >
       <div className="inspector-scroll">
         <div className="inspector-head">
           <h2>Developer diagnostics</h2>
@@ -311,6 +308,6 @@ export function DiagnosticsDrawer({ open, onClose, snapshot, appInfo, onRevoke, 
           </section>
         ) : null}
       </div>
-    </aside>
+    </GoalLayer>
   );
 }
