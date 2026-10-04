@@ -830,16 +830,26 @@ fn read_fingerprints(workspace: &Path) -> Option<StatusRead> {
     {
         return None;
     }
+    let prefix = git_status_prefix(workspace);
     let status = Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .args(["status", "--porcelain=v1", "-z", "-uall"])
+        .args(["status", "--porcelain=v1", "-z", "-uall", "--", "."])
         .output()
         .ok()?;
     if !status.status.success() {
         return None;
     }
-    let records = parse_porcelain_records(&status.stdout);
+    let records = parse_porcelain_records(&status.stdout)
+        .into_iter()
+        .filter_map(|mut record| {
+            record.path = strip_git_prefix(&record.path, &prefix)?;
+            if let Some(from) = record.from_path.as_mut() {
+                *from = strip_git_prefix(from, &prefix)?;
+            }
+            Some(record)
+        })
+        .collect::<Vec<_>>();
     let truncated = records.len() > MAX_FILES;
     Some(StatusRead {
         entries: records.into_iter().take(MAX_FILES).map(|record| fingerprint(workspace, record)).collect(),
@@ -881,6 +891,26 @@ fn parse_porcelain_records(bytes: &[u8]) -> Vec<PorcelainRecord> {
         records.push(PorcelainRecord { x, y, path, from_path });
     }
     records
+}
+
+fn git_status_prefix(workspace: &Path) -> String {
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--show-prefix"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn strip_git_prefix(path: &str, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return Some(path.to_owned());
+    }
+    path.strip_prefix(prefix).map(|stripped| stripped.to_owned())
 }
 
 fn fingerprint(workspace: &Path, record: PorcelainRecord) -> Fingerprint {

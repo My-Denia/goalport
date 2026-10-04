@@ -216,6 +216,9 @@ fn linux_spawn(
     let (sync_r, sync_w) = pipe()?;
     let mut sync_read = FdGuard::new(sync_r);
     let mut sync_write = FdGuard::new(sync_w);
+    let (ack_r, ack_w) = pipe()?;
+    let mut ack_read = FdGuard::new(ack_r);
+    let mut ack_write = FdGuard::new(ack_w);
     let program = resolve_program(program)?;
     let program_c = std::ffi::CString::new(program.as_os_str().as_encoded_bytes())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -245,6 +248,7 @@ fn linux_spawn(
         stdin_fd: stdin_read.fd(),
         stdout_fd: stdout_write.fd(),
         sync_fd: sync_read.fd(),
+        ack_fd: ack_write.fd(),
     };
     let flags = libc::CLONE_NEWUSER | libc::CLONE_NEWPID | libc::SIGCHLD;
     let pid = unsafe {
@@ -268,11 +272,25 @@ fn linux_spawn(
         libc::close(stdin_read.take());
         libc::close(stdout_write.take());
         libc::close(sync_read.take());
+        libc::close(ack_write.take());
     }
     let pid = pid as u32;
     if let Err(error) = write_id_maps(pid) {
         kill_and_reap(pid);
         return Err(error);
+    }
+    // Do not send go until the child has armed PR_SET_PDEATHSIG. Inside a
+    // pid namespace the outside parent is reported as pid 0, so getppid()
+    // cannot tell a live Core from a dead one.
+    let mut ack = [0u8; 1];
+    let acked = unsafe { libc::read(ack_read.fd(), ack.as_mut_ptr().cast(), 1) };
+    unsafe { libc::close(ack_read.take()) };
+    if acked != 1 {
+        kill_and_reap(pid);
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "contained child exited before arming parent-death",
+        ));
     }
     let mut go = [1u8];
     let wrote = unsafe { libc::write(sync_write.fd(), go.as_mut_ptr().cast(), 1) };
@@ -310,6 +328,7 @@ struct LinuxSpawnArg {
     stdin_fd: RawFd,
     stdout_fd: RawFd,
     sync_fd: RawFd,
+    ack_fd: RawFd,
 }
 
 #[cfg(target_os = "linux")]
@@ -320,9 +339,11 @@ fn linux_child(arg: &LinuxSpawnArg) -> ! {
         // waits, the kernel delivers SIGKILL. A zero read is EOF: the parent
         // closed the pipe, so exec would run with nobody holding the domain.
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-        if libc::getppid() == 1 {
+        let ack = [1u8; 1];
+        if libc::write(arg.ack_fd, ack.as_ptr().cast(), 1) != 1 {
             libc::_exit(127);
         }
+        libc::close(arg.ack_fd);
         loop {
             let n = libc::read(arg.sync_fd, buf.as_mut_ptr().cast(), 1);
             if n < 0 {
@@ -335,9 +356,6 @@ fn linux_child(arg: &LinuxSpawnArg) -> ! {
                 libc::_exit(127);
             }
             break;
-        }
-        if libc::getppid() == 1 {
-            libc::_exit(127);
         }
         if libc::chdir(arg.cwd) != 0 {
             libc::_exit(127);

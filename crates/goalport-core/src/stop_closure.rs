@@ -415,10 +415,19 @@ fn walk_files(
 }
 
 fn ignored_digest(workspace: &Path) -> IgnoredDigest {
+    let prefix = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--show-prefix"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default();
     let output = match std::process::Command::new("git")
         .arg("-C")
         .arg(workspace)
-        .args(["status", "--porcelain=v1", "-z", "-uall", "--ignored"])
+        .args(["status", "--porcelain=v1", "-z", "-uall", "--ignored", "--", "."])
         .output()
     {
         Ok(output) if output.status.success() => output,
@@ -448,7 +457,11 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
         } else {
             path
         };
-        let full = workspace.join(String::from_utf8_lossy(path).as_ref());
+        let path = String::from_utf8_lossy(path);
+        let Some(path) = path.strip_prefix(&prefix).or(if prefix.is_empty() { Some(path.as_ref()) } else { None }) else {
+            continue;
+        };
+        let full = workspace.join(path);
         // stat-only fingerprint: (path, size, mtime_nanos).
         if let Ok(metadata) = std::fs::metadata(&full) {
             let mtime_ns = metadata
@@ -459,12 +472,12 @@ fn ignored_digest(workspace: &Path) -> IgnoredDigest {
                 .unwrap_or(0);
             triples.push(format!(
                 "{}|{}|{}",
-                String::from_utf8_lossy(path),
+                path,
                 metadata.len(),
                 mtime_ns
             ));
         } else {
-            triples.push(format!("{}|absent", String::from_utf8_lossy(path)));
+            triples.push(format!("{path}|absent"));
         }
     }
     triples.sort();
