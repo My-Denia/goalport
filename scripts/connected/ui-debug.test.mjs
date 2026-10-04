@@ -102,7 +102,7 @@ test("the loopback URL boundary accepts only 127.0.0.1 and localhost http(s)", (
   assert.equal(parseLocalUrl("http://127.0.0.1:4186/").hostname, "127.0.0.1");
   assert.equal(parseLocalUrl("http://localhost:4173/goals/campaign-7").hostname, "localhost");
   assert.equal(parseLocalUrl("https://127.0.0.1:9443/").protocol, "https:");
-  for (const refused of ["http://example.com/", "http://0.0.0.0:4186/", "file:///home/peter/dist/index.html", "http://[::1]:4186/", "goalport", "", undefined, null]) {
+  for (const refused of ["http://example.com/", "http://0.0.0.0:4186/", "file:///some-user/dist/index.html", "http://[::1]:4186/", "goalport", "", undefined, null]) {
     assert.throws(() => parseLocalUrl(refused), /ui-debug only drives|--url/, String(refused));
   }
 });
