@@ -316,6 +316,17 @@ describe("GoalPort preview", () => {
     expect(confirmCloseChoice).toHaveBeenCalledOnce();
   });
 
+  it("keeps the conversation visible when the active id arrives before the campaign row", async () => {
+    mountElectron({
+      ...DEMO_SNAPSHOT,
+      campaigns: [],
+      activeCampaignId: "campaign-just-sent",
+      bounds: { truncated: false, projectionUnavailable: false, omittedCounts: {} }
+    });
+    expect(await screen.findByText("Summarize the workspace and list the open risks.")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: /project folder/i })).toBeNull();
+  });
+
   it("starts a goal from a local draft with one first send (no dialog)", async () => {
     render(<App />);
 

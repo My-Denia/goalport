@@ -130,6 +130,21 @@ describe("GoalLayer drawer variant", () => {
 });
 
 describe("GoalLayer dialog variant", () => {
+  it("renders the shared modal card without a second dialog root", async () => {
+    const { GoalDialog } = await import("./GoalDialog");
+    const onDismiss = vi.fn();
+    render(
+      <GoalDialog label="About GoalPort" className="about-dialog" onDismiss={onDismiss}>
+        <button type="button">Close</button>
+      </GoalDialog>
+    );
+    const dialog = await screen.findByRole("dialog", { name: "About GoalPort" });
+    expect(dialog.className).toContain("about-dialog");
+    expect(document.querySelectorAll("[role='dialog']")).toHaveLength(1);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onDismiss).toHaveBeenCalled();
+  });
+
   it("is a modal dialog that traps Tab and reports Escape as a close request", async () => {
     const onOpen = vi.fn();
     render(
