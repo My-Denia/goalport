@@ -2079,6 +2079,7 @@ impl UiController {
                     })
             });
             let Some(descendants) = descendant_snapshot else {
+                eprintln!("quiet-block missing-descendants");
                 crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             };
@@ -2089,12 +2090,14 @@ impl UiController {
                         | crate::descendants::DescendantState::Reused
                 )
             }) {
+                eprintln!("quiet-block descendant");
                 crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             }
             match row.native_turn_state {
                 crate::store::StopNativeTurnState::Interrupted => {
                     if claude_pid == 0 {
+                        eprintln!("quiet-block interrupted-no-pid");
                         crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
@@ -2105,6 +2108,7 @@ impl UiController {
                     // hold with no admission ledger reads as not proven and
                     // stays held.
                     if !never_admitted || claude_pid == 0 {
+                        eprintln!("quiet-block unconfirmed-unproven");
                         crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
@@ -2113,11 +2117,13 @@ impl UiController {
                         || verdict
                             != crate::store::RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown
                     {
+                        eprintln!("quiet-block unconfirmed-still-running");
                         crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
                 }
                 crate::store::StopNativeTurnState::Pending => {
+                    eprintln!("quiet-block pending-turn");
                     crate::stop_closure::invalidate_release_scan(&workspace);
                     continue;
                 }
@@ -2131,11 +2137,13 @@ impl UiController {
                 .claude_domain_has_extra(&row.attempt_id)
                 == Some(true)
             {
+                eprintln!("quiet-block domain-extra");
                 crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             }
             let Ok(writers) = crate::stop_closure::workspace_writers(&workspace, claude_pid)
             else {
+                eprintln!("quiet-block writers-unreadable");
                 crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             };
@@ -2151,13 +2159,17 @@ impl UiController {
                 &writers,
             ) {
                 crate::stop_closure::ReleaseWriterGate::Hold => {
+                    eprintln!("quiet-block writer-gate");
                     crate::stop_closure::invalidate_release_scan(&workspace);
                     continue;
                 }
                 crate::stop_closure::ReleaseWriterGate::Filtered(writers) => writers,
             };
             let sample = match crate::stop_closure::take_release_sample(&workspace) {
-                crate::stop_closure::ReleaseSample::Pending => continue,
+                crate::stop_closure::ReleaseSample::Pending => {
+                    eprintln!("quiet-block sample-pending");
+                    continue;
+                }
                 crate::stop_closure::ReleaseSample::Unreadable => None,
                 crate::stop_closure::ReleaseSample::Ready(sample) => Some(sample),
             };
