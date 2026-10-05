@@ -852,3 +852,133 @@ mod tests {
         let _ = std::fs::remove_file(marker);
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_job_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn pid_still_running(pid: u32) -> bool {
+        unsafe {
+            let handle = winapi::um::processthreadsapi::OpenProcess(0x1000, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = winapi::um::processthreadsapi::GetExitCodeProcess(handle, &mut code);
+            winapi::um::handleapi::CloseHandle(handle);
+            ok != 0 && code == 259
+        }
+    }
+
+    #[test]
+    fn a_breakaway_attempt_child_dies_with_the_job() {
+        let dir = std::env::temp_dir().join(format!("goalport-job-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("breakaway.ps1");
+        std::fs::write(
+            &script,
+            r#"Set-Content -LiteralPath 'started.txt' -Value 'started'
+$ErrorActionPreference = 'Stop'
+trap { Set-Content -LiteralPath 'error.txt' -Value $_.Exception.Message; exit 1 }
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class GoalPortBreakaway {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct STARTUPINFO {
+    public int cb; public IntPtr lpReserved; public IntPtr lpDesktop; public IntPtr lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+    public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags;
+    public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+    public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct PROCESS_INFORMATION {
+    public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId;
+  }
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool CreateProcess(IntPtr app, System.Text.StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, IntPtr dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+}
+'@
+$si = New-Object GoalPortBreakaway+STARTUPINFO
+$si.cb = [Runtime.InteropServices.Marshal]::SizeOf($si)
+$pi = New-Object GoalPortBreakaway+PROCESS_INFORMATION
+$cmd = New-Object System.Text.StringBuilder 'C:\Windows\System32\ping.exe -n 40 127.0.0.1'
+$ok = [GoalPortBreakaway]::CreateProcess([IntPtr]::Zero, $cmd, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0x01000000, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$si, [ref]$pi)
+$err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+if (-not $ok) {
+  $cmd = New-Object System.Text.StringBuilder 'C:\Windows\System32\ping.exe -n 40 127.0.0.1'
+  $ok2 = [GoalPortBreakaway]::CreateProcess([IntPtr]::Zero, $cmd, [IntPtr]::Zero, [IntPtr]::Zero, $false, 0, [IntPtr]::Zero, [IntPtr]::Zero, [ref]$si, [ref]$pi)
+  if (-not $ok2) { throw "child spawn failed $err" }
+  Set-Content -LiteralPath 'breakaway.txt' -Value "denied $err pid $($pi.dwProcessId)"
+} else {
+  Set-Content -LiteralPath 'breakaway.txt' -Value "allowed pid $($pi.dwProcessId)"
+}
+Start-Sleep -Seconds 45
+"#,
+        )
+        .unwrap();
+        let powershell = Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        let spawned = spawn_contained(
+            powershell,
+            &[
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script.display().to_string(),
+            ],
+            &dir,
+            &[],
+        )
+        .expect("contained powershell");
+        let marker = dir.join("breakaway.txt");
+        let mut text = String::new();
+        for _ in 0..250 {
+            if let Ok(read) = std::fs::read_to_string(&marker) {
+                if read.contains("pid ") {
+                    text = read;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let started = dir.join("started.txt");
+        let error_file = dir.join("error.txt");
+        let error_text = std::fs::read_to_string(&error_file).unwrap_or_default();
+        eprintln!("breakaway-result {text}");
+        assert!(
+            !text.is_empty(),
+            "breakaway attempt did not record a child; started={} root={} error={}",
+            started.is_file(),
+            pid_still_running(spawned.child.id()),
+            error_text
+        );
+        let pid: u32 = text
+            .split("pid ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("child pid");
+        assert!(pid_still_running(pid), "child {pid} was not alive: {text}");
+        assert!(
+            spawned.child.extras_alive().expect("domain scan"),
+            "the child must be inside the job before it is ended: {text}"
+        );
+        let mut child = spawned.child;
+        child.end_domain().expect("end job");
+        let mut dead = false;
+        for _ in 0..50 {
+            if !pid_still_running(pid) && child.extras_alive().ok() == Some(false) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert!(dead, "breakaway-attempt child {pid} survived the job: {text}");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
