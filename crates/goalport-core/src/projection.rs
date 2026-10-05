@@ -6802,15 +6802,14 @@ impl UiController {
             // The turn is cancelled either way. A confirmed Claude interrupt keeps
             // the Attempt open so a quiet workspace can send on the same session
             // and an explicit close can record CLOSED. The hold, not CANCELLED,
-            // is what blocks that until the workspace is quiet.
-            if state == Some(AttemptState::Cancelled)
-                && (!claude_exact_interrupted
-                    || attempt.provider.eq_ignore_ascii_case("claude"))
-            {
-                if let Some(current) = self
-                    .store
-                    .stop_responsibility_for_attempt(&event.attempt_id)
-                    .map_err(store_message)?
+            // is what blocks that until the workspace is quiet. This branch is
+            // already Claude-only, so a provider check cannot decide the mismatch.
+            if state == Some(AttemptState::Cancelled) {
+                if !claude_exact_interrupted
+                    && let Some(current) = self
+                        .store
+                        .stop_responsibility_for_attempt(&event.attempt_id)
+                        .map_err(store_message)?
                 {
                     let _ = self
                         .store
@@ -8548,6 +8547,99 @@ mod coalesce_tests {
                     .and_then(|payload| payload.get("session_id"))
                     == Some(&json!("session-foreign"))
         }));
+    }
+
+    #[test]
+    fn confirmed_claude_interrupt_keeps_the_native_outcome() {
+        let store = Store::memory().unwrap();
+        let mut controller =
+            UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture")
+                .unwrap();
+        let snapshot = controller.snapshot(None).unwrap();
+        let attempt_id = "attempt-claude-confirmed";
+        store
+            .insert_attempt(&Attempt::new(
+                attempt_id,
+                &snapshot.active_task.id,
+                "claude",
+                "claude-cap-v1",
+            ))
+            .unwrap();
+        store
+            .append_event_with_state(
+                &Event {
+                    id: "activate-claude-confirmed".into(),
+                    attempt_id: attempt_id.into(),
+                    seq: 1,
+                    kind: "attempt.active".into(),
+                    payload_ref: None,
+                },
+                Some(AttemptState::Active),
+                None,
+            )
+            .unwrap();
+        let binding = json!({
+            "input_uuid": "input-expected",
+            "session_id": "session-expected",
+            "turn_epoch": 1,
+            "process_epoch": "process-expected"
+        });
+        store
+            .begin_stop_responsibility(
+                attempt_id,
+                "operation-expected",
+                &snapshot.project.workspace_root,
+                "claude",
+                &binding,
+                None,
+            )
+            .unwrap();
+        controller
+            .persist_agent_event(&AgentEventEnvelope {
+                event_id: "native-confirmed".into(),
+                campaign_id: Some(snapshot.active_campaign_id),
+                task_id: snapshot.active_task.id,
+                attempt_id: attempt_id.into(),
+                process_epoch_id: "process-expected".into(),
+                sequence: 2,
+                occurred_at: "2026-09-05T00:00:00Z".into(),
+                received_at: "2026-09-05T00:00:01Z".into(),
+                provider_event_reference: Some("confirmed-result".into()),
+                event_type: AgentEventType::Cancelled,
+                payload: json!({
+                    "stop_operation_id": "operation-expected",
+                    "input_uuid": "input-expected",
+                    "session_id": "session-expected",
+                    "turn_epoch": 1,
+                    "process_epoch": "process-expected",
+                    "native_turn_state": "interrupted",
+                    "residual_execution_state": "unknown",
+                    "write_responsibility": "held",
+                    "native_turn_cancel": true,
+                    "safe_process_stop": false
+                }),
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_attempt(attempt_id).unwrap().state,
+            AttemptState::Active
+        );
+        let responsibility = store
+            .stop_responsibility_for_attempt(attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            responsibility.native_turn_state,
+            StopNativeTurnState::Interrupted
+        );
+        assert_eq!(
+            responsibility
+                .detail
+                .as_ref()
+                .and_then(|detail| detail.get("source"))
+                .and_then(Value::as_str),
+            Some("Claude native outcome")
+        );
     }
 
     #[test]
