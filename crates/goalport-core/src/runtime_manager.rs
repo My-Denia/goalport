@@ -6138,6 +6138,30 @@ impl ClaudeStreamProcess {
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             self.note_host_decision_request(tool_use_id.as_deref(), &input);
+            // A Stop already owns this turn. A can_use_tool that arrives after
+            // the interrupt snapshot must not become a host card: answering it
+            // later is stale once the Stop resolves, and allowing it would run
+            // a tool during the Stop.
+            if self.pending_stop.is_some() {
+                if let Some(tool_use_id) = tool_use_id.as_deref()
+                    && let Some(record) = self.mutating_tools.get_mut(tool_use_id)
+                    && record.decision == MutatingToolDecision::Pending
+                {
+                    record.decision = MutatingToolDecision::Denied;
+                }
+                let _ = self.send_json(&json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": native_id,
+                        "response": {
+                            "behavior": "deny",
+                            "message": "GoalPort host interrupted this turn"
+                        }
+                    }
+                }));
+                return None;
+            }
             let epoch = self
                 .process_binding
                 .as_ref()
@@ -7160,9 +7184,11 @@ impl ClaudeStreamProcess {
         if let Some(text) = self.flush_assistant_text(attempt_id) {
             events.push(text);
         }
-        // The stopped turn is over under every disposition.
+        // The stopped turn is over under every disposition. Cancel any
+        // permission that landed after the interrupt snapshot so its Decision
+        // does not stay pending with no answer path.
         self.turn_in_flight = false;
-        self.pending_permissions.clear();
+        events.extend(self.cancel_unanswered_permissions(attempt_id));
         let trace = self.stop_trace();
         let Some(stop) = self.pending_stop.as_ref() else {
             return events;
@@ -9562,6 +9588,81 @@ time.sleep(30)
     fn assert_not_a_and_not_b(payload: &Value) {
         assert_eq!(payload["native_turn_cancel"], json!(false), "{payload}");
         assert_eq!(payload["safe_process_stop"], json!(false), "{payload}");
+    }
+
+    struct LatePermissionSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LatePermissionSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_permission_arriving_after_stop_is_denied_and_not_projected() {
+        let mut process = claude_with_bound_stop();
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink = written.clone();
+        process.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+            LatePermissionSink(sink),
+        ))));
+        let frame = json!({
+            "type": "control_request",
+            "request_id": "req-late",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "tool_use_id": "tool-late",
+                "input": { "command": "echo hi" }
+            }
+        });
+        let mapped = process.map_frame("attempt-stop", &frame);
+        assert!(mapped.is_none(), "a late permission must not become a card: {mapped:?}");
+        assert!(
+            process.pending_permissions.is_empty(),
+            "a late permission must not wait for a host answer"
+        );
+        assert_eq!(
+            process.mutating_tools["tool-late"].decision,
+            MutatingToolDecision::Denied
+        );
+        let bytes = written.lock().expect("sink");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("req-late"), "{text}");
+        assert!(text.contains("\"behavior\":\"deny\""), "{text}");
+    }
+
+    #[test]
+    fn resolving_a_stop_cancels_a_permission_that_is_still_pending() {
+        let mut process = claude_with_bound_stop();
+        process.pending_permissions.insert(
+            "decision-late".into(),
+            ClaudePendingPermission {
+                native_request_id: "req-late".into(),
+                tool_name: "Bash".into(),
+                input: json!({}),
+                tool_use_id: None,
+            },
+        );
+        let events = process.resolve_stop(
+            "attempt-stop",
+            ClaudeStopDisposition::Unknown,
+            Some("test".into()),
+        );
+        assert!(process.pending_permissions.is_empty());
+        assert!(
+            events.iter().any(|event| {
+                event.event_type == AgentEventType::PermissionResponse
+                    && event.payload["request_id"] == json!("decision-late")
+                    && event.payload["cancelled"] == json!(true)
+            }),
+            "resolving the Stop must cancel the pending decision: {events:?}"
+        );
     }
 
     #[test]
