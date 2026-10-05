@@ -656,3 +656,55 @@ fn revocation_fans_out_distinct_stop_operations_and_retains_parent_operation() {
     }
 }
 
+#[test]
+fn a_release_gate_hold_discards_the_durable_quiet_sample() {
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_text = workspace.to_string_lossy().to_string();
+    let store = Store::memory().unwrap();
+    seed_attempt(&store, &workspace_text, "attempt-quiet", "claude");
+    store
+        .begin_stop_responsibility(
+            "attempt-quiet",
+            "operation-quiet",
+            &workspace_text,
+            "claude",
+            &binding(),
+            None,
+        )
+        .unwrap();
+    store
+        .update_stop_responsibility(&StopResponsibilityUpdate {
+            attempt_id: "attempt-quiet".into(),
+            operation_id: "operation-quiet".into(),
+            binding: binding(),
+            native_turn_state: StopNativeTurnState::Interrupted,
+            residual_execution_state: "unknown".into(),
+            detail: Some(json!({
+                "payload": { "stop_attempt": { "descendants": [] } },
+                "workspaceQuiet": {
+                    "observedAtMs": 1,
+                    "writers": [],
+                    "fingerprint": { "truncated": false, "entries": [] }
+                }
+            })),
+        })
+        .unwrap();
+    let mut ui = UiController::new(store.clone()).unwrap();
+    let _ = ui.snapshot(None);
+    let row = store
+        .stop_responsibility_for_attempt("attempt-quiet")
+        .unwrap()
+        .expect("the missing pid still holds");
+    assert_eq!(row.write_responsibility, "held");
+    assert!(
+        row.detail
+            .as_ref()
+            .and_then(|detail| detail.pointer("/workspaceQuiet/fingerprint"))
+            .is_some_and(serde_json::Value::is_null),
+        "a gate hold drops the stale quiet fingerprint: {:?}",
+        row.detail
+    );
+}
+

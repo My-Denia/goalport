@@ -24,6 +24,7 @@ use crate::{
         ProductTurn,
         product_conversation,
     },
+    provider_failure::ProviderFailure,
     runtime_manager::{
         RegistrationWithdrawal, RuntimeManager, StartupControl, TransportClosure, TransportState,
     },
@@ -1063,7 +1064,7 @@ impl UiController {
                 json!({
                     "provider": "codex",
                     "reason": closure.reason,
-                    "reasonCode": "provider-transport",
+                    "reasonCode": ProviderFailure::Transport.as_str(),
                     "pid": closure.pid,
                     "registration_identity": identity,
                     "turnFailed": closure.turn_failed,
@@ -2079,23 +2080,49 @@ impl UiController {
                     })
             });
             let Some(descendants) = descendant_snapshot else {
-                crate::stop_closure::invalidate_release_scan(&workspace);
+                self.hold_stop_release(&row, &workspace);
                 continue;
             };
+            // Session infrastructure sealed before this turn may remain. The
+            // exemption applies only to a confirmed Stop whose baseline still
+            // names the live registration. Unknown on any other record holds.
+            let session_baseline = if matches!(
+                row.native_turn_state,
+                crate::store::StopNativeTurnState::Interrupted
+            ) {
+                crate::descendants::session_baseline_from_trace(row.detail.as_ref()).filter(
+                    |baseline| {
+                        self.runtime_manager
+                            .claude_session_baseline_live(&row.attempt_id, baseline)
+                    },
+                )
+            } else {
+                None
+            };
+            let exempt = session_baseline
+                .as_ref()
+                .map(|baseline| baseline.members.as_slice())
+                .unwrap_or(&[]);
             if descendants.iter().any(|record| {
+                let exempted = exempt.iter().any(|known| {
+                    known.pid == record.pid && known.start_tick == record.start_tick
+                });
+                if exempted {
+                    return false;
+                }
                 !matches!(
                     crate::descendants::classify_descendant(record),
                     crate::descendants::DescendantState::Dead
                         | crate::descendants::DescendantState::Reused
                 )
             }) {
-                crate::stop_closure::invalidate_release_scan(&workspace);
+                self.hold_stop_release(&row, &workspace);
                 continue;
             }
             match row.native_turn_state {
                 crate::store::StopNativeTurnState::Interrupted => {
                     if claude_pid == 0 {
-                        crate::stop_closure::invalidate_release_scan(&workspace);
+                        self.hold_stop_release(&row, &workspace);
                         continue;
                     }
                 }
@@ -2105,7 +2132,7 @@ impl UiController {
                     // hold with no admission ledger reads as not proven and
                     // stays held.
                     if !never_admitted || claude_pid == 0 {
-                        crate::stop_closure::invalidate_release_scan(&workspace);
+                        self.hold_stop_release(&row, &workspace);
                         continue;
                     }
                     let (observation, verdict, _) = classify_recheck(&bound);
@@ -2113,12 +2140,12 @@ impl UiController {
                         || verdict
                             != crate::store::RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown
                     {
-                        crate::stop_closure::invalidate_release_scan(&workspace);
+                        self.hold_stop_release(&row, &workspace);
                         continue;
                     }
                 }
                 crate::store::StopNativeTurnState::Pending => {
-                    crate::stop_closure::invalidate_release_scan(&workspace);
+                    self.hold_stop_release(&row, &workspace);
                     continue;
                 }
             }
@@ -2128,15 +2155,15 @@ impl UiController {
             // this check.
             if self
                 .runtime_manager
-                .claude_domain_has_extra(&row.attempt_id)
+                .claude_domain_has_extra(&row.attempt_id, session_baseline.as_ref())
                 == Some(true)
             {
-                crate::stop_closure::invalidate_release_scan(&workspace);
+                self.hold_stop_release(&row, &workspace);
                 continue;
             }
             let Ok(writers) = crate::stop_closure::workspace_writers(&workspace, claude_pid)
             else {
-                crate::stop_closure::invalidate_release_scan(&workspace);
+                self.hold_stop_release(&row, &workspace);
                 continue;
             };
             // After the descendant gate: unknown, missing, or mismatched
@@ -2149,9 +2176,10 @@ impl UiController {
                 &bound,
                 &descendants,
                 &writers,
+                exempt,
             ) {
                 crate::stop_closure::ReleaseWriterGate::Hold => {
-                    crate::stop_closure::invalidate_release_scan(&workspace);
+                    self.hold_stop_release(&row, &workspace);
                     continue;
                 }
                 crate::stop_closure::ReleaseWriterGate::Filtered(writers) => writers,
@@ -2188,6 +2216,12 @@ impl UiController {
                             }
                             crate::store::StopNativeTurnState::Pending => {}
                         }
+                        if let Some(baseline) = session_baseline.as_ref() {
+                            object.insert(
+                                "sessionBaseline".into(),
+                                crate::descendants::session_baseline_json(baseline),
+                            );
+                        }
                     }
                     let _ = match row.native_turn_state {
                         crate::store::StopNativeTurnState::Unconfirmed => self
@@ -2217,6 +2251,32 @@ impl UiController {
                     );
                 }
             }
+        }
+    }
+
+    fn hold_stop_release(
+        &mut self,
+        row: &crate::store::StopResponsibility,
+        workspace: &std::path::Path,
+    ) {
+        crate::stop_closure::invalidate_release_scan(workspace);
+        let Some(detail) = row.detail.as_ref() else {
+            return;
+        };
+        let Some(restarted) =
+            crate::stop_closure::restart_quiet_window(detail, crate::stop_closure::now_ms())
+        else {
+            return;
+        };
+        if let Err(error) = self.store.record_stop_quiet_sample(
+            &row.attempt_id,
+            &row.operation_id,
+            &row.residual_execution_state,
+            &restarted,
+        ) {
+            eprintln!(
+                "goalport-core: stop quiet-window restart was not recorded: {error}"
+            );
         }
     }
 
@@ -3188,7 +3248,7 @@ impl UiController {
         task_id: &str,
         workspace: PathBuf,
         provider_label: &str,
-    ) -> Result<(), (&'static str, String, &'static str)> {
+    ) -> Result<(), (&'static str, String, ProviderFailure)> {
         let session = self
             .runtime_manager
             .create_session(
@@ -3207,12 +3267,12 @@ impl UiController {
         {
             self.store
                 .set_attempt_provider_session(attempt_id, &session.handle.session_id)
-                .map_err(|error| ("provider_session", store_message(error), "provider-startup"))?;
+                .map_err(|error| ("provider_session", store_message(error), ProviderFailure::Startup))?;
         }
         if self
             .store
             .get_attempt(attempt_id)
-            .map_err(|error| ("attempt_active", store_message(error), "provider-startup"))?
+            .map_err(|error| ("attempt_active", store_message(error), ProviderFailure::Startup))?
             .state
             == AttemptState::Queued
         {
@@ -3222,11 +3282,11 @@ impl UiController {
                 json!({ "provider": provider_label, "session": "[RUNTIME_SESSION]" }),
                 Some(AttemptState::Active),
             )
-            .map_err(|error| ("attempt_active", error, "provider-startup"))?;
+            .map_err(|error| ("attempt_active", error, ProviderFailure::Startup))?;
         }
         for event in session.events {
             self.persist_agent_event(&event)
-                .map_err(|error| ("session_events", error, "provider-startup"))?;
+                .map_err(|error| ("session_events", error, ProviderFailure::Startup))?;
         }
         Ok(())
     }
@@ -3250,7 +3310,7 @@ impl UiController {
         registration_identity: &str,
         stage: &'static str,
         error: String,
-        reason_code: &'static str,
+        reason_code: ProviderFailure,
     ) -> String {
         // Increment 6: if the failure was an observed Codex transport closure, name it in the
         // record (before the withdrawal, while the registration is certainly present). This is the
@@ -3294,7 +3354,7 @@ impl UiController {
             json!({
                 "stage": stage,
                 "error": error,
-                "reasonCode": reason_code,
+                "reasonCode": reason_code.as_str(),
                 "provider": provider,
                 "registration": registration,
                 "process": process,
@@ -3764,7 +3824,7 @@ impl UiController {
                                 "runtime.send.failed",
                                 json!({
                                     "error": first,
-                                    "reasonCode": if write_unknown { "delivery-unknown" } else { "provider-transport" },
+                                    "reasonCode": if write_unknown { ProviderFailure::DeliveryUnknown.as_str() } else { ProviderFailure::Transport.as_str() },
                                     "retry": false,
                                     "deliveryState": if write_unknown { "UNKNOWN" } else { "FAILED" },
                                     "transport": closed_reason.unwrap_or("write-error")
@@ -3796,7 +3856,7 @@ impl UiController {
                             "runtime.send.failed",
                             json!({
                                 "error": first,
-                                "reasonCode": "delivery-unknown",
+                                "reasonCode": ProviderFailure::DeliveryUnknown.as_str(),
                                 "retry": false,
                                 "deliveryState": "UNKNOWN",
                                 "reason": if proven {
@@ -3819,7 +3879,7 @@ impl UiController {
                                     "runtime.resume.verification.failed",
                                     json!({
                                         "error": first,
-                                        "reasonCode": "resume-verification-failed",
+                                        "reasonCode": ProviderFailure::ResumeVerificationFailed.as_str(),
                                         "reason": "proven cleanup: the resume process and its captured descendants were contained; this resume can be retried and earlier messages will not be sent again"
                                     }),
                                     None,
@@ -3893,7 +3953,7 @@ impl UiController {
                         "runtime.send.failed",
                         json!({
                             "error": first,
-                            "reasonCode": "delivery-unknown",
+                            "reasonCode": ProviderFailure::DeliveryUnknown.as_str(),
                             "retry": false,
                             "deliveryState": "UNKNOWN"
                         }),
@@ -5705,7 +5765,7 @@ impl UiController {
                     successor_id,
                     "runtime.resume.spawn.failed",
                     json!({
-                        "reasonCode": "resume-spawn-failed",
+                        "reasonCode": ProviderFailure::ResumeSpawnFailed.as_str(),
                         "reason": "proven cleanup: the resume process was contained or never spawned; this resume can be retried and earlier messages will not be sent again",
                         "error": error
                     }),
@@ -5805,9 +5865,9 @@ impl UiController {
                     kind,
                     json!({
                         "reasonCode": if verification {
-                            "resume-verification-failed"
+                            ProviderFailure::ResumeVerificationFailed.as_str()
                         } else {
-                            "resume-spawn-failed"
+                            ProviderFailure::ResumeSpawnFailed.as_str()
                         },
                         "reason": "proven cleanup: the resume process and its captured descendants were contained; this resume can be retried and earlier messages will not be sent again"
                     }),
@@ -7439,17 +7499,17 @@ fn runtime_profiles() -> Vec<UiRuntime> {
     ]
 }
 
-fn admission_reason_code(error: &AdapterError) -> &'static str {
+fn admission_reason_code(error: &AdapterError) -> ProviderFailure {
     match error {
-        AdapterError::ExecutableMissing(_) => "provider-not-installed",
-        AdapterError::AuthenticationRequired(_) => "provider-auth-required",
-        AdapterError::Unsupported(_) | AdapterError::Protocol(_) => "provider-version",
-        AdapterError::InvalidRequest(_) => "provider-request-invalid",
+        AdapterError::ExecutableMissing(_) => ProviderFailure::NotInstalled,
+        AdapterError::AuthenticationRequired(_) => ProviderFailure::AuthRequired,
+        AdapterError::Unsupported(_) | AdapterError::Protocol(_) => ProviderFailure::Version,
+        AdapterError::InvalidRequest(_) => ProviderFailure::RequestInvalid,
         AdapterError::Connection(_)
         | AdapterError::RegistrationOccupied(_)
         | AdapterError::Preflight(_)
         | AdapterError::Io(_)
-        | AdapterError::Json(_) => "provider-startup",
+        | AdapterError::Json(_) => ProviderFailure::Startup,
     }
 }
 
@@ -7961,7 +8021,7 @@ fn rejection_code(
     native_dispatch_state: &str,
 ) -> &'static str {
     if delivery_state == "UNKNOWN" || native_dispatch_state == "UNKNOWN" {
-        "delivery-unknown"
+        ProviderFailure::DeliveryUnknown.as_str()
     } else if native_dispatch_state == "NOT_STARTED" {
         if request.message_type == "start_conversation" {
             "first-send-admission-failed"
@@ -8086,6 +8146,28 @@ fn delivery_after_answer(before: &'static str, accepted: bool) -> &'static str {
 #[cfg(test)]
 mod title_integration_tests {
     use super::*;
+
+    #[test]
+    fn admission_reason_code_maps_adapter_errors_to_provider_failure() {
+        let json_error = serde_json::from_str::<Value>("{").unwrap_err();
+        let cases = [
+            (AdapterError::ExecutableMissing("missing".into()), ProviderFailure::NotInstalled),
+            (AdapterError::AuthenticationRequired("sign-in".into()), ProviderFailure::AuthRequired),
+            (AdapterError::Unsupported("unsupported".into()), ProviderFailure::Version),
+            (AdapterError::Protocol("protocol".into()), ProviderFailure::Version),
+            (AdapterError::InvalidRequest("invalid".into()), ProviderFailure::RequestInvalid),
+            (AdapterError::Connection("connection".into()), ProviderFailure::Startup),
+            (AdapterError::RegistrationOccupied("occupied".into()), ProviderFailure::Startup),
+            (AdapterError::Preflight("preflight".into()), ProviderFailure::Startup),
+            (AdapterError::Io(std::io::Error::other("io")), ProviderFailure::Startup),
+            (AdapterError::Json(json_error), ProviderFailure::Startup),
+        ];
+        for (error, variant) in cases {
+            let mapped = admission_reason_code(&error);
+            assert_eq!(mapped, variant);
+            assert_eq!(mapped.as_str(), variant.as_str());
+        }
+    }
 
     #[test]
     fn delayed_native_title_cannot_replace_manual_rename() {

@@ -170,6 +170,64 @@ pub fn descendants_json(records: &[DescendantRecord]) -> Value {
 /// Parse a snapshot from a durable stop trace. `None` when the payload carries
 /// no snapshot field at all (pre-upgrade or crash-window holds) — the caller
 /// must treat that as missing evidence, never as an empty set.
+/// Identity-bound session infrastructure sealed before turn-specific work.
+/// The root process is never a member. `process_epoch` is the root binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBaseline {
+    pub process_epoch: String,
+    pub sealed_at: String,
+    pub members: Vec<DescendantRecord>,
+}
+
+pub(crate) fn session_baseline_json(baseline: &SessionBaseline) -> Value {
+    json!({
+        "process_epoch": baseline.process_epoch,
+        "sealed_at": baseline.sealed_at,
+        "members": descendants_json(&baseline.members),
+    })
+}
+
+/// `Some` only when the trace baseline epoch equals a non-empty
+/// `bound_process_epoch` and every member parses. Anything else is missing.
+pub(crate) fn session_baseline_from_trace(detail: Option<&Value>) -> Option<SessionBaseline> {
+    let trace = detail?.pointer("/payload/stop_attempt")?;
+    let bound_epoch = trace.get("bound_process_epoch").and_then(Value::as_str)?;
+    if bound_epoch.is_empty() {
+        return None;
+    }
+    let baseline = trace.get("session_baseline")?;
+    if baseline.is_null() {
+        return None;
+    }
+    let epoch = baseline.get("process_epoch").and_then(Value::as_str)?;
+    if epoch != bound_epoch {
+        return None;
+    }
+    let members = descendants_from_json(baseline.get("members")?)?;
+    let sealed_at = baseline.get("sealed_at").and_then(Value::as_str)?.to_owned();
+    Some(SessionBaseline {
+        process_epoch: epoch.to_owned(),
+        sealed_at,
+        members,
+    })
+}
+
+pub(crate) fn start_tick(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_stat_fields(pid).map(|(_, tick)| tick)
+    }
+    #[cfg(windows)]
+    {
+        crate::windows_descendants::creation_tick(pid)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub fn descendants_from_json(value: &Value) -> Option<Vec<DescendantRecord>> {
     let list = value.as_array()?;
     let mut records = Vec::with_capacity(list.len());
@@ -501,5 +559,44 @@ mod assembler_and_signal_tests {
         );
         assert_eq!(signalled.len(), 2, "Alive is signalled on both passes: {signalled:?}");
         assert_eq!(remaining, 2, "Alive and Unknown still count; Dead and Reused do not");
+    }
+
+    #[test]
+    fn session_baseline_binds_to_the_stop_epoch() {
+        let member = json!({ "pid": 7, "startTick": "tick-7" });
+        let detail = json!({
+            "payload": {
+                "stop_attempt": {
+                    "bound_process_epoch": "runtime-epoch:same",
+                    "session_baseline": {
+                        "process_epoch": "runtime-epoch:same",
+                        "sealed_at": "permission-request",
+                        "members": [member]
+                    }
+                }
+            }
+        });
+        let parsed = session_baseline_from_trace(Some(&detail)).expect("matching epoch");
+        assert_eq!(parsed.sealed_at, "permission-request");
+        assert_eq!(parsed.members.len(), 1);
+        assert_eq!(session_baseline_json(&parsed)["members"][0]["pid"], 7);
+
+        let mut mismatch = detail.clone();
+        mismatch["payload"]["stop_attempt"]["session_baseline"]["process_epoch"] =
+            json!("runtime-epoch:other");
+        assert!(session_baseline_from_trace(Some(&mismatch)).is_none());
+
+        let mut empty = detail.clone();
+        empty["payload"]["stop_attempt"]["bound_process_epoch"] = json!("");
+        assert!(session_baseline_from_trace(Some(&empty)).is_none());
+
+        let mut broken = detail.clone();
+        broken["payload"]["stop_attempt"]["session_baseline"]["members"] =
+            json!([{ "pid": 7 }]);
+        assert!(session_baseline_from_trace(Some(&broken)).is_none());
+
+        let mut absent = detail.clone();
+        absent["payload"]["stop_attempt"]["session_baseline"] = Value::Null;
+        assert!(session_baseline_from_trace(Some(&absent)).is_none());
     }
 }

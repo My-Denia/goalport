@@ -26,6 +26,9 @@ pub enum ProviderFailure {
     /// the frontend lock covers them (merge-review round).
     ResumeSpawnFailed,
     ResumeVerificationFailed,
+    /// The Runtime process is gone. The wire string stays `provider-exited`
+    /// so the enum owns every `provider-*` code.
+    Exited,
     Failed,
 }
 
@@ -43,6 +46,7 @@ pub const ALL_PROVIDER_FAILURE_CODES: &[(&str, ProviderFailure)] = &[
     ("delivery-unknown", ProviderFailure::DeliveryUnknown),
     ("resume-spawn-failed", ProviderFailure::ResumeSpawnFailed),
     ("resume-verification-failed", ProviderFailure::ResumeVerificationFailed),
+    ("provider-exited", ProviderFailure::Exited),
     ("provider-failed", ProviderFailure::Failed),
 ];
 
@@ -81,6 +85,7 @@ impl ProviderFailure {
             Self::Permission => "The Runtime denied this request. Check Technical details before continuing.",
             Self::DeliveryUnknown => "Message delivery is uncertain. Check the session before sending again.",
             Self::ResumeSpawnFailed | Self::ResumeVerificationFailed => "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again.",
+            Self::Exited => "The Runtime process ended. Close this session before starting new work; its history remains here.",
             Self::ContextFull | Self::Failed => "The Runtime could not finish this response. Check Technical details before continuing.",
         }
     }

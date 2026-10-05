@@ -3,6 +3,7 @@
 //! Provider turn cancellation is not enough. A hold is released only when the
 //! recorded descendants and spawn-time domain are clear, and two quiet
 //! observations at least a second apart have the same workspace fingerprint.
+//! Identity-matched session infrastructure sealed before the turn may remain.
 //! An unrelated process that only shares the workspace directory is not a hold.
 
 use crate::turn_results::{WorkspaceDelta, WorkspaceSample, compare_workspace_samples};
@@ -557,15 +558,20 @@ pub(crate) fn gate_stop_release_writers(
     bound: &Value,
     stop_time: &[crate::descendants::DescendantRecord],
     writers: &[u32],
+    exempt: &[crate::descendants::DescendantRecord],
 ) -> ReleaseWriterGate {
     let view = bound_runtime_view(bound);
     if let BoundRuntimeView::LiveMatch { pid } = view {
         let fresh = crate::descendants::snapshot_descendants(pid);
+        let fresh_filtered = fresh
+            .as_ref()
+            .map(|records| without_baseline(records, exempt));
+        let stop_filtered = without_baseline(stop_time, exempt);
         return gate_release_writers(
             BoundRuntimeView::LiveMatch { pid },
-            stop_time,
+            &stop_filtered,
             writers,
-            fresh.as_deref(),
+            fresh_filtered.as_deref(),
             crate::descendants::classify_descendant,
         );
     }
@@ -576,6 +582,41 @@ pub(crate) fn gate_stop_release_writers(
         None,
         crate::descendants::classify_descendant,
     )
+}
+
+fn without_baseline(
+    records: &[crate::descendants::DescendantRecord],
+    exempt: &[crate::descendants::DescendantRecord],
+) -> Vec<crate::descendants::DescendantRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            !exempt.iter().any(|known| {
+                known.pid == record.pid && known.start_tick == record.start_tick
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Drop a stored quiet fingerprint when a release gate holds, so a sample
+/// taken before the hold cannot later authorize release.
+pub(crate) fn restart_quiet_window(detail: &Value, now_ms: u128) -> Option<Value> {
+    let fingerprint = detail.pointer("/workspaceQuiet/fingerprint")?;
+    if fingerprint.is_null() {
+        return None;
+    }
+    let mut next = detail.clone();
+    next.as_object_mut()?.insert(
+        "workspaceQuiet".into(),
+        json!({
+            "observedAtMs": now_ms,
+            "writers": [],
+            "fingerprint": Value::Null,
+            "reason": "a release gate held; the quiet window restarts",
+        }),
+    );
+    Some(next)
 }
 
 fn bound_runtime_view(bound: &Value) -> BoundRuntimeView {
@@ -817,6 +858,47 @@ mod tests {
         let decision = decide_quiet(None, &[], None, 5_000);
         assert!(matches!(decision, QuietDecision::Hold { residual: "unknown", .. }));
     }
+
+    #[test]
+    fn a_gate_hold_restarts_the_durable_quiet_window() {
+        let first = decide_quiet(None, &[], Some(&sample("tick.txt", "aaa")), 5_000);
+        let QuietDecision::Hold { quiet, .. } = first else {
+            panic!("first sample holds");
+        };
+        let stored = json!({ "workspaceQuiet": quiet });
+        let reset = restart_quiet_window(&stored, 5_400).expect("a stored fingerprint restarts");
+        assert!(reset["workspaceQuiet"]["fingerprint"].is_null());
+        assert!(restart_quiet_window(&reset, 5_500).is_none());
+
+        let after_reset = decide_quiet(Some(&reset), &[], Some(&sample("tick.txt", "aaa")), 6_200);
+        let QuietDecision::Hold { quiet, .. } = &after_reset else {
+            panic!("a restarted window must not release on the next sample: {after_reset:?}");
+        };
+        assert_eq!(quiet["observedAtMs"], json!(6_200));
+        assert!(quiet["fingerprint"].as_object().is_some());
+        let restarted = json!({ "workspaceQuiet": quiet });
+        let released = decide_quiet(
+            Some(&restarted),
+            &[],
+            Some(&sample("tick.txt", "aaa")),
+            7_300,
+        );
+        assert!(
+            matches!(released, QuietDecision::Release { .. }),
+            "a fresh window releases only after QUIET_MS: {released:?}"
+        );
+
+        let without_reset = decide_quiet(
+            Some(&stored),
+            &[],
+            Some(&sample("tick.txt", "aaa")),
+            6_200,
+        );
+        assert!(
+            matches!(without_reset, QuietDecision::Release { .. }),
+            "without the restart the old fingerprint still releases: {without_reset:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1041,5 +1123,95 @@ mod ignored_digest_tests {
             ReleaseWriterGate::Filtered(vec![]),
             "an empty filtered list is not a Hold/release short-circuit"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_match_exempts_only_baseline_identities() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-exempt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = "import os,time\nchild=os.fork()\nif child==0:\n status=open('/proc/self/status').read()\n host=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0]\n open('helper.pid','w').write(host)\n time.sleep(30)\nelse:\n time.sleep(30)\n";
+        let spawned = crate::runtime_containment::spawn_contained(
+            std::path::Path::new("python3"),
+            &[String::from("-c"), script.to_owned()],
+            &dir,
+            &[],
+        )
+        .expect("contained helper");
+        let marker = dir.join("helper.pid");
+        let mut helper_pid = None;
+        for _ in 0..250 {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                helper_pid = text.trim().parse::<u32>().ok();
+                if helper_pid.is_some() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let helper_pid = helper_pid.expect("helper pid");
+        let root = spawned.child.id();
+        let identity = match crate::process_identity::observe_process(root) {
+            crate::process_identity::ProcessObservation::Live(identity) => identity,
+            other => panic!("root must be live: {other:?}"),
+        };
+        let bound = json!({
+            "pid": root,
+            "creationDate": identity.creation_date(),
+            "executableSha256": identity.executable_sha256,
+        });
+        let fresh = crate::descendants::snapshot_descendants(root).expect("fresh snapshot");
+        let helper = fresh
+            .iter()
+            .find(|record| record.pid == helper_pid)
+            .cloned()
+            .expect("helper is a descendant");
+        assert_eq!(
+            gate_stop_release_writers(&bound, &[helper.clone()], &[], &[helper.clone()]),
+            ReleaseWriterGate::Filtered(vec![])
+        );
+        let mut reused = helper.clone();
+        reused.start_tick = "not-this-process".into();
+        assert_eq!(
+            gate_stop_release_writers(&bound, &[reused.clone()], &[], &[reused]),
+            ReleaseWriterGate::Hold
+        );
+
+        let sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
+        let finished = std::process::Command::new("true").spawn().expect("true");
+        let dead_pid = finished.id();
+        let _ = finished.wait_with_output();
+        let tick = crate::descendants::start_tick(sleeper.id()).expect("sleeper tick");
+        let alive = crate::descendants::DescendantRecord {
+            pid: sleeper.id(),
+            start_tick: tick,
+        };
+        let absent = json!({
+            "pid": dead_pid,
+            "creationDate": "gone",
+            "executableSha256": "abc",
+        });
+        assert_eq!(
+            gate_stop_release_writers(&absent, &[alive.clone()], &[sleeper.id()], &[alive]),
+            ReleaseWriterGate::Filtered(vec![sleeper.id()]),
+            "NotRunning ignores the baseline exemption"
+        );
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &sleeper.id().to_string()])
+            .status();
+        let mut child = spawned.child;
+        child.kill().expect("kill root");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

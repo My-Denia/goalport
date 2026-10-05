@@ -25,7 +25,8 @@ use std::os::windows::process::ExitStatusExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DomainOccupy {
-    /// No process remains in the domain except, when asked, the recorded root.
+    /// Every non-root member is identity-matched to the session baseline.
+    /// The recorded root may remain and is not required to be in the baseline.
     Empty,
     /// At least one other process is still in the domain.
     Occupied,
@@ -170,6 +171,24 @@ impl ContainedChild {
         }
         #[cfg(not(any(target_os = "linux", windows)))]
         Err(io::Error::new(io::ErrorKind::Unsupported, "no containment domain"))
+    }
+
+    /// Every process in the ownership domain, including the root.
+    /// An unreadable identity is `Err`, not a partial list.
+    pub(crate) fn members(&self) -> io::Result<Vec<crate::descendants::DescendantRecord>> {
+        #[cfg(target_os = "linux")]
+        {
+            return linux_namespace_members(self.ns_inode, self.pid);
+        }
+        #[cfg(windows)]
+        {
+            return windows_job_members(self.job as _, self.pid);
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            let _ = self;
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no containment domain"))
+        }
     }
 
     pub(crate) fn extras_alive(&self) -> io::Result<bool> {
@@ -457,6 +476,68 @@ fn linux_namespace_has_other(inode: u64, root: u32) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_namespace_members(
+    inode: u64,
+    root: u32,
+) -> io::Result<Vec<crate::descendants::DescendantRecord>> {
+    let entries = std::fs::read_dir("/proc")?;
+    let mut records = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 {
+            continue;
+        }
+        let Ok(found) = namespace_inode(pid) else {
+            continue;
+        };
+        if found != inode {
+            continue;
+        }
+        if process_state(pid) == Some('Z') {
+            continue;
+        }
+        let Some(start_tick) = crate::descendants::start_tick(pid) else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "a domain member identity could not be read",
+            ));
+        };
+        records.push(crate::descendants::DescendantRecord { pid, start_tick });
+    }
+    if !records.iter().any(|record| record.pid == root) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "the domain root was not in the namespace listing",
+        ));
+    }
+    records.sort_by_key(|record| record.pid);
+    Ok(records)
+}
+
+/// The recorded root may remain and is not part of the baseline.
+/// Any other member must match `(pid, startTick)`. A reused pid is occupied.
+pub(crate) fn classify_domain(
+    members: &[crate::descendants::DescendantRecord],
+    root: u32,
+    baseline: &[crate::descendants::DescendantRecord],
+) -> DomainOccupy {
+    for member in members {
+        if member.pid == root || member.pid == 0 {
+            continue;
+        }
+        let matched = baseline.iter().any(|known| {
+            known.pid == member.pid && known.start_tick == member.start_tick
+        });
+        if !matched {
+            return DomainOccupy::Occupied;
+        }
+    }
+    DomainOccupy::Empty
 }
 
 #[cfg(target_os = "linux")]
@@ -773,10 +854,75 @@ fn windows_job_has_other(job: winapi::um::winnt::HANDLE, root: u32) -> io::Resul
     Ok(ids.iter().any(|id| *id as u32 != root && *id != 0))
 }
 
+#[cfg(windows)]
+fn windows_job_members(
+    job: winapi::um::winnt::HANDLE,
+    root: u32,
+) -> io::Result<Vec<crate::descendants::DescendantRecord>> {
+    #[repr(C)]
+    struct List {
+        assigned: u32,
+        listed: u32,
+        ids: [usize; 1],
+    }
+    let mut buffer = vec![0u8; std::mem::size_of::<List>() + 4096];
+    let mut returned = 0u32;
+    let ok = unsafe {
+        winapi::um::jobapi2::QueryInformationJobObject(
+            job,
+            3,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let list = unsafe { &*buffer.as_ptr().cast::<List>() };
+    if list.listed != list.assigned {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "job membership listing is incomplete",
+        ));
+    }
+    let count = list.listed as usize;
+    let ids = unsafe { std::slice::from_raw_parts(list.ids.as_ptr(), count) };
+    let mut records = Vec::new();
+    for id in ids {
+        let pid = *id as u32;
+        if pid == 0 {
+            continue;
+        }
+        let Some(start_tick) = crate::descendants::start_tick(pid) else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "a job member identity could not be read",
+            ));
+        };
+        records.push(crate::descendants::DescendantRecord { pid, start_tick });
+    }
+    if !records.iter().any(|record| record.pid == root) {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "the job root was not in the membership listing",
+        ));
+    }
+    records.sort_by_key(|record| record.pid);
+    Ok(records)
+}
+
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 mod tests {
     use super::*;
+
+    fn record(pid: u32, tick: &str) -> crate::descendants::DescendantRecord {
+        crate::descendants::DescendantRecord {
+            pid,
+            start_tick: tick.to_owned(),
+        }
+    }
 
     #[test]
     fn inherited_env_drops_provider_keys_without_utf8_panic() {
@@ -864,6 +1010,96 @@ mod tests {
         child.kill().expect("kill namespace init");
         let _ = child.wait();
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn domain_classification_allows_only_identity_matched_baseline() {
+        let root = record(1, "root-tick");
+        let helper = record(2, "helper-tick");
+        let baseline = [helper.clone()];
+        assert_eq!(
+            classify_domain(&[root.clone(), helper.clone()], root.pid, &baseline),
+            DomainOccupy::Empty
+        );
+        assert_eq!(
+            classify_domain(&[root.clone()], root.pid, &[]),
+            DomainOccupy::Empty,
+            "the root may remain and is not a baseline member"
+        );
+        assert_eq!(
+            classify_domain(
+                &[root.clone(), helper.clone(), record(3, "turn-tick")],
+                root.pid,
+                &baseline
+            ),
+            DomainOccupy::Occupied
+        );
+        assert_eq!(
+            classify_domain(&[root.clone(), record(2, "other-tick")], root.pid, &baseline),
+            DomainOccupy::Occupied
+        );
+        assert_eq!(
+            classify_domain(&[root.clone(), helper], root.pid, &[]),
+            DomainOccupy::Occupied
+        );
+    }
+
+    #[test]
+    fn domain_members_carry_the_snapshot_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-members-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = "import os,time\nchild=os.fork()\nif child==0:\n status=open('/proc/self/status').read()\n host=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0]\n open('sleeper.pid','w').write(host)\n time.sleep(30)\nelse:\n time.sleep(30)\n";
+        let spawned = spawn_contained(
+            Path::new("python3"),
+            &[String::from("-c"), script.to_owned()],
+            &dir,
+            &[],
+        )
+        .expect("pid namespace spawn");
+        let marker = dir.join("sleeper.pid");
+        let mut sleeper = None;
+        for _ in 0..250 {
+            if let Ok(text) = std::fs::read_to_string(&marker) {
+                sleeper = text.trim().parse::<u32>().ok();
+                if sleeper.is_some() {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let sleeper = sleeper.expect("sleeper host pid");
+        let members = spawned.child.members().expect("members");
+        let root = spawned.child.id();
+        let sleeper_record = members
+            .iter()
+            .find(|member| member.pid == sleeper)
+            .cloned()
+            .expect("sleeper is a domain member");
+        let tick = crate::descendants::start_tick(sleeper).expect("sleeper tick");
+        assert_eq!(sleeper_record.start_tick, tick);
+        let snapshot = crate::descendants::snapshot_descendants(root).expect("snapshot");
+        assert!(
+            snapshot.iter().any(|member| {
+                member.pid == sleeper && member.start_tick == sleeper_record.start_tick
+            }),
+            "members and the descendant snapshot share one identity: {snapshot:?} {members:?}"
+        );
+        assert_eq!(
+            classify_domain(&members, root, &members),
+            DomainOccupy::Empty,
+            "a domain classified against itself is empty once the root is exempt"
+        );
+        let mut child = spawned.child;
+        child.kill().expect("kill");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -991,6 +1227,36 @@ Start-Sleep -Seconds 45
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
         assert!(dead, "breakaway-attempt child {pid} survived the job: {text}");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn job_members_carry_the_snapshot_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-job-members-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spawned = spawn_contained(
+            Path::new("cmd"),
+            &[
+                String::from("/c"),
+                String::from("ping 127.0.0.1 -n 6 > nul"),
+            ],
+            &dir,
+            &[],
+        )
+        .expect("job spawn");
+        let members = spawned.child.members().expect("job members");
+        let root = spawned.child.id();
+        assert!(
+            members.iter().any(|member| member.pid == root),
+            "the job root is listed: {members:?}"
+        );
+        assert_eq!(classify_domain(&members, root, &members), DomainOccupy::Empty);
+        let mut child = spawned.child;
+        child.kill().expect("kill job");
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
