@@ -276,13 +276,38 @@ fn linux_stat_fields(pid: u32) -> Option<(u32, String)> {
     Some((ppid, start_tick))
 }
 
+enum ProcDirEntry {
+    NotPid,
+    Pid(u32),
+    Unreadable,
+}
+
+/// A directory-iterator error is an incomplete `/proc` scan. A name that is
+/// not a pid is skipped. Callers that build a Stop snapshot must treat
+/// `Unreadable` as a failed enumeration, not as "this pid was absent".
+fn proc_dir_entry(entry: std::io::Result<impl AsRef<std::ffi::OsStr>>) -> ProcDirEntry {
+    let Ok(name) = entry else {
+        return ProcDirEntry::Unreadable;
+    };
+    match name.as_ref().to_string_lossy().parse::<u32>() {
+        Ok(pid) => ProcDirEntry::Pid(pid),
+        Err(_) => ProcDirEntry::NotPid,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_snapshot(root_pid: u32) -> Option<Vec<DescendantRecord>> {
     let mut parents: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut ticks: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    for entry in std::fs::read_dir("/proc").ok()?.into_iter().flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
+    // A mid-scan /proc error is missing evidence. Dropping it and returning
+    // the pids already seen would journal a partial snapshot as complete, and
+    // a restart can then release while an omitted descendant is still live.
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries {
+        let pid = match proc_dir_entry(entry.map(|item| item.file_name())) {
+            ProcDirEntry::Unreadable => return None,
+            ProcDirEntry::NotPid => continue,
+            ProcDirEntry::Pid(pid) => pid,
         };
         if let Some((ppid, tick)) = linux_stat_fields(pid) {
             parents.insert(pid, ppid);
@@ -352,6 +377,24 @@ fn windows_classify(record: &DescendantRecord) -> DescendantState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proc_directory_error_is_an_incomplete_snapshot_entry() {
+        let unreadable: std::io::Result<&std::ffi::OsStr> =
+            Err(std::io::Error::other("unreadable proc entry"));
+        assert!(matches!(
+            super::proc_dir_entry(unreadable),
+            super::ProcDirEntry::Unreadable
+        ));
+        assert!(matches!(
+            super::proc_dir_entry(Ok(std::ffi::OsStr::new("self"))),
+            super::ProcDirEntry::NotPid
+        ));
+        assert!(matches!(
+            super::proc_dir_entry(Ok(std::ffi::OsStr::new("42"))),
+            super::ProcDirEntry::Pid(42)
+        ));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
