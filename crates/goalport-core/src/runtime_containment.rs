@@ -480,11 +480,21 @@ impl NamespaceDomain {
         let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if raw < 0 {
             let error = io::Error::last_os_error();
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ENOENT | libc::EACCES | libc::ESRCH)
-            ) {
+            // Gone processes are outside. EACCES is not gone: a same-user
+            // descendant can hide this link with PR_SET_DUMPABLE, 0 while
+            // /proc/<pid>/stat stays readable.
+            if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) {
                 return Ok(false);
+            }
+            if error.raw_os_error() == Some(libc::EACCES) {
+                return if hidden_pid_namespace_may_occupy(pid)? {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "a same-user pid namespace link is unreadable",
+                    ))
+                } else {
+                    Ok(false)
+                };
             }
             return Err(error);
         }
@@ -528,6 +538,53 @@ impl NamespaceDomain {
         self.cache.insert(innermost, contained);
         Ok(contained)
     }
+}
+
+/// `PR_SET_DUMPABLE, 0` makes `/proc/<pid>/ns/pid` unreadable to its owner
+/// while `/proc/<pid>/status` still shows that owner and a nested `NSpid`.
+/// That process may be inside the Runtime domain. Another user's process, or
+/// one still in the observer namespace, is not.
+#[cfg(target_os = "linux")]
+pub(crate) fn hidden_pid_namespace_may_occupy(pid: u32) -> io::Result<bool> {
+    let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(text) => text,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::ESRCH | libc::EACCES)
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut uid: Option<u32> = None;
+    let mut nspid_len = None;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            uid = rest.split_whitespace().next().and_then(|value| value.parse().ok());
+        } else if let Some(rest) = line.strip_prefix("NSpid:") {
+            nspid_len = Some(rest.split_whitespace().count());
+        }
+    }
+    let (Some(uid), Some(nspid_len)) = (uid, nspid_len) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "process status has no uid or NSpid",
+        ));
+    };
+    if uid != unsafe { libc::geteuid() } {
+        return Ok(false);
+    }
+    let observer = std::fs::read_to_string(format!("/proc/{}/status", std::process::id()))?;
+    let observer_len = observer
+        .lines()
+        .find_map(|line| line.strip_prefix("NSpid:"))
+        .map(|rest| rest.split_whitespace().count())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "observer status has no NSpid")
+        })?;
+    Ok(nspid_len > observer_len)
 }
 
 #[cfg(target_os = "linux")]
@@ -1193,6 +1250,48 @@ mod tests {
             "a nested pid namespace must die with the Runtime namespace"
         );
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn a_dumpable_descendant_does_not_look_absent() {
+        let dir = std::env::temp_dir().join(format!("goalport-dumpable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // PR_SET_DUMPABLE, 0. The child stays in the Runtime pid namespace, but
+        // its namespace link becomes EACCES.
+        let script = "import ctypes,os,time\nlibc=ctypes.CDLL(None)\nif os.fork()==0:\n libc.prctl(4, 0)\n open('dumpable.ready','w').write('1')\n time.sleep(60)\nelse:\n time.sleep(60)\n";
+        let spawned = spawn_contained(
+            Path::new("python3"),
+            &[String::from("-c"), script.to_owned()],
+            &dir,
+            &[],
+        )
+        .expect("pid namespace spawn");
+        let marker = dir.join("dumpable.ready");
+        for _ in 0..250 {
+            if marker.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(marker.is_file(), "dumpable child did not start");
+        let root = spawned.child.id();
+        let scan = spawned.child.extras_alive();
+        let members = spawned.child.members();
+        let mut child = spawned.child;
+        child.kill().ok();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(marker);
+        // Some kernels still let the namespace owner read the link, so the
+        // child is visibly inside the domain. A kernel that returns EACCES
+        // must surface that as unreadable, never as an empty domain.
+        assert!(
+            matches!(scan, Err(_) | Ok(true)),
+            "a dumpable descendant must not look absent: {scan:?}"
+        );
+        assert!(
+            members.as_ref().map(|rows| rows.iter().any(|row| row.pid != root)).unwrap_or(true),
+            "membership must not omit a dumpable descendant: {members:?}"
+        );
     }
 
     #[test]
