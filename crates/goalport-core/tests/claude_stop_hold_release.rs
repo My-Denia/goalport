@@ -697,7 +697,10 @@ fn a_surviving_descendant_blocks_release_and_death_releases() {
     let released = poll_until(&core, &store, "descendant-dead", Duration::from_secs(10), || {
         store.stop_responsibilities().unwrap().is_empty()
     });
-    assert!(released, "release completes once the descendant is dead");
+    if !released {
+        let held = store.stop_responsibilities().unwrap();
+        panic!("release completes once the descendant is dead: {held:?}");
+    }
     let releases = release_events(&store, &conversation.attempt_id);
     assert_eq!(releases.len(), 1, "{releases:?}");
 }
