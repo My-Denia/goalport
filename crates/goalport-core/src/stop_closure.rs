@@ -984,10 +984,25 @@ mod ignored_digest_tests {
     fn an_ignored_write_changes_the_digest_and_quiet_requires_equality() {
         let dir = repo_with_ignore("target-out");
         std::fs::write(dir.path().join("target-out"), "one\n").unwrap();
-        let first = sample_workspace(dir.path()).unwrap();
+        // The digest includes file mtimes. A busy runner can still be
+        // finishing the git metadata write, so two immediate reads of an
+        // unchanged tree are not always equal. Wait until two consecutive
+        // reads match; that settled pair is the quiet sample.
+        let mut first = sample_workspace(dir.path()).unwrap();
         assert!(first.ignored_digest.is_some(), "{first:?}");
-        // Identical consecutive reads compare equal.
-        let second = sample_workspace(dir.path()).unwrap();
+        let mut second = sample_workspace(dir.path()).unwrap();
+        for _ in 0..20 {
+            if first.ignored_digest == second.ignored_digest {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            first = second;
+            second = sample_workspace(dir.path()).unwrap();
+        }
+        assert_eq!(
+            first.ignored_digest, second.ignored_digest,
+            "an unchanged tree did not settle"
+        );
         let detail = json!({ "workspaceQuiet": {
             "fingerprint": fingerprint_json(&first),
         }});
