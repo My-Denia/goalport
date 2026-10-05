@@ -308,8 +308,11 @@ struct ScanSlot {
     /// current only if its scan started at this generation.
     generation: u64,
     running_generation: Option<u64>,
+    running_since: Option<std::time::Instant>,
     ready: Option<(u64, Result<WorkspaceSample, ()>)>,
 }
+
+const SCAN_FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
 
 static RELEASE_SCANS: LazyLock<Mutex<HashMap<PathBuf, ScanSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -332,6 +335,7 @@ pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
     let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
         generation: 0,
         running_generation: None,
+        running_since: None,
         ready: None,
     });
     if let Some((generation, result)) = slot.ready.take() {
@@ -343,16 +347,49 @@ pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
             };
         }
     }
-    if slot.running_generation != Some(slot.generation) {
-        spawn_release_scan(workspace, slot);
+    let current = slot.running_generation == Some(slot.generation);
+    let overdue = current && slot.running_since.is_some_and(|started| started.elapsed() >= SCAN_FALLBACK);
+    if current && !overdue {
+        return ReleaseSample::Pending;
     }
-    ReleaseSample::Pending
+    if !current {
+        spawn_release_scan(workspace, slot);
+        return ReleaseSample::Pending;
+    }
+    // The background walk did not publish. Finish this observation here so a
+    // starved scanner cannot hold a dead tree for the whole quiet window.
+    // Bump generation first; the late background result must not replace it.
+    slot.generation = slot.generation.wrapping_add(1);
+    let generation = slot.generation;
+    slot.running_generation = None;
+    slot.running_since = None;
+    drop(slots);
+    let result = sample_workspace(workspace).ok_or(());
+    let Ok(mut slots) = RELEASE_SCANS.lock() else {
+        return ReleaseSample::Unreadable;
+    };
+    let Some(slot) = slots.get_mut(workspace) else {
+        return ReleaseSample::Unreadable;
+    };
+    if slot.generation != generation {
+        return ReleaseSample::Pending;
+    }
+    slot.ready = Some((generation, result));
+    let Some((_, stored)) = slot.ready.take() else {
+        return ReleaseSample::Unreadable;
+    };
+    spawn_release_scan(workspace, slot);
+    return match stored {
+        Ok(sample) => ReleaseSample::Ready(sample),
+        Err(()) => ReleaseSample::Unreadable,
+    };
 }
 
 fn spawn_release_scan(workspace: &Path, slot: &mut ScanSlot) {
     let path = workspace.to_path_buf();
     let generation = slot.generation;
     slot.running_generation = Some(generation);
+    slot.running_since = Some(std::time::Instant::now());
     let spawned = thread::Builder::new()
         .name("goalport-quiet-scan".into())
         .spawn(move || {
