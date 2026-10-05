@@ -609,7 +609,10 @@ fn parent_pid_namespace(fd: RawFd) -> io::Result<OwnedFd> {
 fn linux_namespace_has_other(inode: u64, root: u32) -> io::Result<bool> {
     let mut domain = NamespaceDomain::new(inode)?;
     let entries = std::fs::read_dir("/proc")?;
-    for entry in entries.flatten() {
+    // A mid-scan read error is missing evidence. Dropping it and returning
+    // Ok(false) would release a hold after seeing only part of /proc.
+    for entry in entries {
+        let entry = entry?;
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
@@ -637,7 +640,9 @@ fn linux_namespace_members(
     let mut domain = NamespaceDomain::new(inode)?;
     let entries = std::fs::read_dir("/proc")?;
     let mut records = Vec::new();
-    for entry in entries.flatten() {
+    // Same rule as the occupancy scan: a partial directory is not a member list.
+    for entry in entries {
+        let entry = entry?;
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
