@@ -115,8 +115,24 @@ fn platform_enumerate_cwds(claude_pid: u32) -> Result<Vec<ObservedCwd>, String> 
             continue;
         }
         let cwd_link = entry.path().join("cwd");
-        let Ok(cwd) = fs::read_link(&cwd_link) else {
-            continue;
+        let cwd = match fs::read_link(&cwd_link) {
+            Ok(cwd) => cwd,
+            // Same case as the ownership domain: dumpable=0 hides cwd too.
+            // Skipping it would let a quiet fingerprint release while that
+            // process can still write by absolute path.
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                match crate::runtime_containment::hidden_pid_namespace_may_occupy(pid) {
+                    Ok(true) => {
+                        return Err(
+                            "a same-user process hid its working directory; workspace writers are unknown"
+                                .into(),
+                        );
+                    }
+                    Ok(false) => continue,
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Err(_) => continue,
         };
         let Ok(cwd) = fs::canonicalize(&cwd) else {
             continue;
