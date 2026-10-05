@@ -326,8 +326,25 @@ pub(crate) fn invalidate_release_scan(workspace: &Path) {
 }
 
 pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
+    if let Some(sample) = take_ready_sample(workspace) {
+        return sample;
+    }
+    // Do not walk here. A short wait lets the scanner thread publish; the
+    // snapshot thread must not traverse the tree.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    while std::time::Instant::now() < deadline {
+        thread::yield_now();
+        if let Some(sample) = take_ready_sample(workspace) {
+            return sample;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    ReleaseSample::Pending
+}
+
+fn take_ready_sample(workspace: &Path) -> Option<ReleaseSample> {
     let Ok(mut slots) = RELEASE_SCANS.lock() else {
-        return ReleaseSample::Unreadable;
+        return Some(ReleaseSample::Unreadable);
     };
     let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
         generation: 0,
@@ -337,16 +354,16 @@ pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
     if let Some((generation, result)) = slot.ready.take() {
         if generation == slot.generation {
             spawn_release_scan(workspace, slot);
-            return match result {
+            return Some(match result {
                 Ok(sample) => ReleaseSample::Ready(sample),
                 Err(()) => ReleaseSample::Unreadable,
-            };
+            });
         }
     }
     if slot.running_generation != Some(slot.generation) {
         spawn_release_scan(workspace, slot);
     }
-    ReleaseSample::Pending
+    None
 }
 
 fn spawn_release_scan(workspace: &Path, slot: &mut ScanSlot) {
@@ -719,11 +736,8 @@ mod tests {
     fn a_release_sample_does_not_walk_on_the_caller() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
-        assert!(matches!(
-            take_release_sample(dir.path()),
-            ReleaseSample::Pending
-        ));
         let started = std::time::Instant::now();
+        let _ = take_release_sample(dir.path());
         loop {
             match take_release_sample(dir.path()) {
                 ReleaseSample::Ready(sample) => {
@@ -744,7 +758,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
         let before = sample_workspace(dir.path()).unwrap();
-        assert!(matches!(take_release_sample(dir.path()), ReleaseSample::Pending));
+        let _ = take_release_sample(dir.path());
         invalidate_release_scan(dir.path());
         std::fs::write(dir.path().join("notes.txt"), "two\n").unwrap();
         let started = std::time::Instant::now();
