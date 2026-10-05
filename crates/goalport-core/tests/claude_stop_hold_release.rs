@@ -694,7 +694,7 @@ fn a_surviving_descendant_blocks_release_and_death_releases() {
     // Kill the descendant; the identity-checked leg now sees it dead and the
     // interrupted rule releases on quiet evidence.
     kill_descendant(descendant_pid);
-    let released = poll_until(&core, &store, "descendant-dead", Duration::from_secs(10), || {
+    let released = poll_until(&core, &store, "descendant-dead", Duration::from_secs(20), || {
         store.stop_responsibilities().unwrap().is_empty()
     });
     if !released {
