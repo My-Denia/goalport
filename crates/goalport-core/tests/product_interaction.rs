@@ -826,6 +826,114 @@ fn claude_resume_is_offered_and_this_test_does_not_launch_a_runtime() {
     assert_eq!(event_kinds(&store, attempt_id), vec!["attempt.active", "attempt.awaiting_review"]);
 }
 
+/// A confirmed Stop whose hold has already been released, seen after the
+/// in-memory registration is gone. The Attempt stays Active. Resume is the
+/// way back; a cancelled turn with no release event stays uncertain.
+fn detached_cancelled_claude(label: &str, released: bool) -> Value {
+    let workspace = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(workspace.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let store = Store::memory().unwrap();
+    let project = Project {
+        id: format!("project-{label}"),
+        workspace_root: root,
+    };
+    let campaign = Campaign {
+        id: format!("campaign-{label}"),
+        goal: label.into(),
+        root_task_id: format!("task-{label}"),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    let task = Task {
+        id: campaign.root_task_id.clone(),
+        campaign_id: campaign.id.clone(),
+        title: label.into(),
+        acceptance: "Result is visible".into(),
+        state: goalport_core::WorkStatus::InProgress,
+    };
+    store
+        .create_workspace_campaign(
+            &project,
+            &campaign,
+            &task,
+            &format!("policy-{label}"),
+            "{}",
+            &CampaignAuthorization::granted(),
+        )
+        .unwrap();
+    let attempt_id = format!("attempt-{label}");
+    store
+        .insert_attempt(&Attempt::new(&attempt_id, &task.id, "claude", "claude-cap-v1"))
+        .unwrap();
+    store
+        .set_attempt_provider_session(&attempt_id, "native-claude-session")
+        .unwrap();
+    let mut events = vec![
+        (1, "attempt.active", AttemptState::Active),
+        (2, "runtime.turn.cancelled", AttemptState::Active),
+    ];
+    if released {
+        events.push((3, "runtime.stop.responsibility.released", AttemptState::Active));
+    }
+    for (seq, kind, state) in events {
+        store
+            .append_event_with_state(
+                &goalport_core::Event {
+                    id: format!("{label}-{seq}"),
+                    attempt_id: attempt_id.clone(),
+                    seq,
+                    kind: kind.into(),
+                    payload_ref: None,
+                },
+                Some(state),
+                None,
+            )
+            .unwrap();
+    }
+    store
+        .set_conversation_provider(&campaign.id, "claude")
+        .unwrap();
+    let server = CoreServer::new(store);
+    view(result(&server, &format!("{label}-snapshot"), "snapshot", json!({})))
+}
+
+#[test]
+fn a_released_stop_offers_resume_after_the_registration_is_gone() {
+    let snapshot = detached_cancelled_claude("released-stop", true);
+    let turn = &snapshot["productConversation"]["turn"];
+    assert_eq!(snapshot["productConversation"]["session"]["state"], "detached");
+    assert_eq!(turn["state"], "stopped");
+    assert_eq!(turn["canSend"], false);
+    assert_eq!(turn["reasonCode"], "session-detached");
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action == "resume-session"),
+        "a released Stop with a stored session offers resume after restart: {turn}"
+    );
+    assert!(
+        !actions.iter().any(|action| action == "diagnose"),
+        "a released Stop is not an uncertain recovery: {turn}"
+    );
+}
+
+#[test]
+fn a_cancelled_turn_without_a_release_stays_uncertain() {
+    let snapshot = detached_cancelled_claude("unreleased-stop", false);
+    let turn = &snapshot["productConversation"]["turn"];
+    assert_eq!(turn["state"], "uncertain");
+    let actions = turn["actions"].as_array().unwrap();
+    assert!(
+        actions.iter().any(|action| action == "diagnose"),
+        "a cancelled turn with the hold still unexplained stays uncertain: {turn}"
+    );
+    assert!(
+        !actions.iter().any(|action| action == "resume-session"),
+        "resume requires the quiet release: {turn}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Confirmed-stop successor lineage (R2/R3)
 // ---------------------------------------------------------------------------
