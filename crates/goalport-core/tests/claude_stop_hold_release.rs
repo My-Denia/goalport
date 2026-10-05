@@ -754,7 +754,7 @@ fn baseline_members(detail: &Value) -> Vec<Value> {
 }
 
 #[test]
-fn a_session_helper_does_not_hold_a_confirmed_pending_permission_stop() {
+fn a_post_message_helper_holds_a_confirmed_pending_permission_stop() {
     let _fixture_guard = begin();
     let root = workspace_with_helper(
         "baseline-pending",
@@ -796,16 +796,13 @@ fn a_session_helper_does_not_hold_a_confirmed_pending_permission_stop() {
     let detail = cancelled.payload.clone().unwrap();
     assert_eq!(
         detail.pointer("/stop_attempt/session_baseline/sealed_at"),
-        Some(&json!("permission-request"))
+        Some(&json!("before-first-message"))
     );
     let helper = read_pid_file(&outside_pid(&root, "session-helper"));
-    let helper_tick = proc_tick(helper).expect("helper tick");
     let members = baseline_members(&detail);
     assert!(
-        members.iter().any(|member| {
-            member["pid"] == json!(helper) && member["startTick"] == json!(helper_tick)
-        }),
-        "baseline must name the helper: {members:?}"
+        members.iter().all(|member| member["pid"] != json!(helper)),
+        "a helper started after the user message is not session infrastructure: {members:?}"
     );
     let cli = read_json_pid(&root);
     let cli_tick = proc_tick(cli).expect("root tick");
@@ -813,19 +810,26 @@ fn a_session_helper_does_not_hold_a_confirmed_pending_permission_stop() {
         members.iter().all(|member| member["pid"] != json!(cli)),
         "the root is not session infrastructure: {members:?}"
     );
-    let released = poll_until(&core, &store, "baseline-pending", Duration::from_secs(10), || {
+    let released_early = poll_until(&core, &store, "baseline-pending-held", Duration::from_secs(4), || {
         store.stop_responsibilities().unwrap().is_empty()
     });
-    assert!(released, "a sealed helper must not keep the Stop held");
+    assert!(
+        !released_early,
+        "a post-message helper must keep the Stop held"
+    );
+    kill_descendant(helper);
+    let released = poll_until(&core, &store, "baseline-pending", Duration::from_secs(20), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(released, "release follows once the post-message helper is gone");
     let releases = release_events(&store, &conversation.attempt_id);
     assert_eq!(releases.len(), 1, "{releases:?}");
     assert_eq!(
         releases[0]["evidence"]["sessionBaseline"]["sealedAt"].as_str()
             .or_else(|| releases[0]["evidence"]["sessionBaseline"]["sealed_at"].as_str()),
-        Some("permission-request")
+        Some("before-first-message")
     );
     assert_eq!(proc_tick(cli).as_deref(), Some(cli_tick.as_str()));
-    assert_eq!(proc_tick(helper).as_deref(), Some(helper_tick.as_str()));
     let restart = core
         .server
         .handle_json(&wire(
