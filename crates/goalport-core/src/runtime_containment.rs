@@ -83,15 +83,21 @@ impl ContainedChild {
         }
         #[cfg(windows)]
         {
+            // 259 is both STILL_ACTIVE and a legal exit code. The handle is
+            // the liveness check; the code is only read after it is signaled.
+            let waited = unsafe { wait_for_single_object(self.process as _, 0) };
+            if waited == 0x0000_0102 {
+                return Ok(None);
+            }
+            if waited != 0 {
+                return Err(io::Error::last_os_error());
+            }
             let mut code = 0u32;
             let ok = unsafe {
                 winapi::um::processthreadsapi::GetExitCodeProcess(self.process as _, &mut code)
             };
             if ok == 0 {
                 return Err(io::Error::last_os_error());
-            }
-            if code == 259 {
-                return Ok(None);
             }
             self.reaped = true;
             return Ok(Some(ExitStatus::from_raw(code)));
@@ -727,6 +733,14 @@ fn windows_env_block(remove: &[&str]) -> Vec<u16> {
 }
 
 #[cfg(windows)]
+fn wait_for_single_object(handle: winapi::um::winnt::HANDLE, milliseconds: u32) -> u32 {
+    unsafe extern "system" {
+        fn WaitForSingleObject(handle: winapi::um::winnt::HANDLE, milliseconds: u32) -> u32;
+    }
+    unsafe { WaitForSingleObject(handle, milliseconds) }
+}
+
+#[cfg(windows)]
 fn terminate_job(job: winapi::um::winnt::HANDLE) -> i32 {
     unsafe { winapi::um::jobapi2::TerminateJobObject(job, 1) }
 }
@@ -860,14 +874,13 @@ mod windows_job_tests {
 
     fn pid_still_running(pid: u32) -> bool {
         unsafe {
-            let handle = winapi::um::processthreadsapi::OpenProcess(0x1000, 0, pid);
+            let handle = winapi::um::processthreadsapi::OpenProcess(0x0010_1000, 0, pid);
             if handle.is_null() {
                 return false;
             }
-            let mut code = 0u32;
-            let ok = winapi::um::processthreadsapi::GetExitCodeProcess(handle, &mut code);
+            let waited = super::wait_for_single_object(handle, 0);
             winapi::um::handleapi::CloseHandle(handle);
-            ok != 0 && code == 259
+            waited == 0x0000_0102
         }
     }
 
