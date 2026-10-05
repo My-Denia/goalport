@@ -974,12 +974,15 @@ fn project_turn(
             })
     {
         return Ok(ProductTurn {
-            reason_code: None,
+            reason_code: Some("resume-pending-verification".into()),
             actions: Vec::new(),
             state: "idle".into(),
             can_stop: false,
             can_send: true,
-            reason: None,
+            reason: Some(
+                "Session is starting again. Send a message to continue. Earlier messages will not be sent again."
+                    .into(),
+            ),
         });
     }
     let terminal = match attempt.state {

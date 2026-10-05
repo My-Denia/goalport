@@ -49,12 +49,16 @@ Held responsibility is released only by evidence, never by elapsed time or by
 the Runtime process disappearing from view:
 
 - **Confirmed cancel + quiet workspace.** When the native turn confirmed the
-  interrupt, Core releases once the stopped Runtime's recorded descendants are
-  dead or reused, its spawn-time ownership domain has no other live process,
-  and two workspace fingerprints taken at least a second apart are equal.
-  An unrelated terminal, editor, or dev server that merely shares the
-  workspace directory does not keep the hold. A missing descendant snapshot
-  or an unreadable domain does.
+  interrupt, Core releases once three observations agree. Recorded descendants
+  from this Stop are dead or reused, except identity-matched session helpers
+  sealed before the turn (same process id and start tick) while that baseline
+  still names the live Runtime. The Runtime root may remain. Any other live
+  process in its ownership domain blocks release, and a survivor from an
+  earlier turn is never added to that baseline. Two workspace fingerprints
+  taken at least a second apart are equal; a blocked release throws away a
+  stale quiet reading and waits for a fresh one. An unrelated terminal,
+  editor, or dev server outside that domain does not keep the hold. A missing
+  descendant snapshot or an unreadable domain does.
 - **Unconfirmed Stop, nothing ever admitted.** A Stop whose interruption was
   never confirmed releases only when all three legs hold together: the exact
   bound Runtime identity recorded at Stop time is observed not running; the
