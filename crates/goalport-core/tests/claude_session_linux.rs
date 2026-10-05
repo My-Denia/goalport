@@ -926,6 +926,14 @@ fn closed_claude_resume_creates_a_successor_and_does_not_replay() {
         "{}",
         snapshot["payload"]["snapshot"]["productConversation"]["turn"]
     );
+    assert_eq!(
+        snapshot["payload"]["snapshot"]["productConversation"]["turn"]["reasonCode"],
+        "resume-pending-verification"
+    );
+    assert_eq!(
+        snapshot["payload"]["snapshot"]["productConversation"]["turn"]["reason"],
+        "Session is starting again. Send a message to continue. Earlier messages will not be sent again."
+    );
     // The first send verifies the stored id and only then activates.
     let send = server
         .handle_json(&server_send(
@@ -955,6 +963,13 @@ fn closed_claude_resume_creates_a_successor_and_does_not_replay() {
     assert_eq!(
         row.provider_session.as_deref(),
         Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    );
+    let verified = server.handle_json(&snapshot_message("closed-resume-verified")).unwrap();
+    assert_ne!(
+        verified["payload"]["snapshot"]["productConversation"]["turn"]["reasonCode"],
+        "resume-pending-verification",
+        "{}",
+        verified["payload"]["snapshot"]["productConversation"]["turn"]
     );
     let records = store.list_event_records(&successor.id, 0).unwrap();
     let user_messages: Vec<_> = records

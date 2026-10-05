@@ -1512,7 +1512,8 @@ export type TurnStateReasonCode =
   | "recovery-required"
   | "turn-starting"
   | "stop-pending"
-  | "start-cancelling";
+  | "start-cancelling"
+  | "resume-pending-verification";
 
 export const TURN_STATE_REASON_CODES: readonly TurnStateReasonCode[] = [
   "authorization-revoked",
@@ -1525,6 +1526,7 @@ export const TURN_STATE_REASON_CODES: readonly TurnStateReasonCode[] = [
   "turn-starting",
   "stop-pending",
   "start-cancelling",
+  "resume-pending-verification",
 ] as const;
 
 export type TurnReasonCode = ProviderFailureCode | TurnStateReasonCode;

@@ -174,6 +174,43 @@ describe('conversation-first product boundary', () => {
     expect(command.mock.calls[0][0].messageType).toBe('close_session');
   });
 
+  it('shows a pending resume until the stored session is verified, then retires that notice', async () => {
+    const closed = base();
+    closed.attempt = { ...closed.attempt, id: 'attempt-closed', state: 'completed' };
+    closed.productConversation!.runtime = { state: 'unavailable', provider: 'claude', name: 'Claude Code' };
+    closed.productConversation!.session = { state: 'closed', nativeIdKnown: true };
+    closed.productConversation!.turn = { state: 'completed', canSend: false, canStop: false, actions: ['resume-session'], reasonCode: 'session-closed' };
+    const pending = structuredClone(closed);
+    pending.attempt = { ...pending.attempt, id: 'attempt-successor', state: 'waiting' };
+    pending.productConversation!.runtime = { state: 'selected', provider: 'claude', name: 'Claude Code' };
+    pending.productConversation!.session = { state: 'attached', nativeIdKnown: false };
+    pending.productConversation!.turn = {
+      state: 'idle',
+      canSend: true,
+      canStop: false,
+      reasonCode: 'resume-pending-verification',
+      reason: 'Session is starting again. Send a message to continue. Earlier messages will not be sent again.',
+      actions: ['send']
+    };
+    const verified = structuredClone(pending);
+    verified.productConversation!.session = { state: 'attached', nativeIdKnown: true };
+    verified.productConversation!.turn = { state: 'completed', canSend: true, canStop: false, actions: ['send', 'close-session'] };
+    verified.productConversation!.items = [{ id: 'reply-1', kind: 'assistant-message', body: 'after-resume' }];
+    const command = mount(closed, async () => pending);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Resume session' }));
+    expect(await screen.findByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeTruthy();
+    expect(screen.queryByText('Session resume was not confirmed. Check its status in details.')).toBeNull();
+    expect(screen.getAllByText('Ready').length).toBeGreaterThan(0);
+    expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'resume_native_session', payload: { attemptId: 'attempt-closed' } }));
+    window.goalportCore!.snapshot = async () => verified;
+    await waitFor(() => {
+      expect(screen.queryByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeNull();
+    }, { timeout: 2500 });
+    expect(screen.getByText('after-resume')).toBeTruthy();
+    expect(screen.queryByText('Session resume was not confirmed. Check its status in details.')).toBeNull();
+  });
+
   it('resumes only through the explicit Core action and confirms attached state', async () => {
     const detached = base();
     detached.productConversation!.runtime.state = 'unavailable';

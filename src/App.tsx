@@ -143,6 +143,29 @@ function App() {
   // tauri, older preload/test mounts) have no profile bootstrap and are ready
   // immediately.
   const selectionIntent = useRef(0);
+  const resumeWatch = useRef<{ attemptId: string; sentence: string } | null>(null);
+  useEffect(() => {
+    const watch = resumeWatch.current;
+    if (!watch || snapshot.attempt.id !== watch.attemptId) return;
+    const turn = snapshot.productConversation?.turn;
+    const session = snapshot.productConversation?.session;
+    if (turn?.reasonCode === "resume-pending-verification") return;
+    if (turn?.reasonCode === "resume-verification-failed" || turn?.reasonCode === "resume-spawn-failed") {
+      resumeWatch.current = null;
+      setActiveNotice({
+        sentence: turn.reason || "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again."
+      });
+      return;
+    }
+    const verified = session?.nativeIdKnown === true
+      || turn?.state === "running"
+      || turn?.state === "completed"
+      || turn?.state === "waiting-permission"
+      || turn?.state === "stopped";
+    if (!verified) return;
+    resumeWatch.current = null;
+    setActiveNotice((current) => current?.sentence === watch.sentence ? null : current);
+  }, [snapshot]);
   useLayoutEffect(() => {
     const routedGoal = campaignIdFromLocation();
     if (routedGoal) client.pinView?.(routedGoal);
@@ -762,11 +785,22 @@ function App() {
     if (viewIntent !== selectionIntent.current) return;
     setSnapshot(next);
     const failure = commandFailure(next, "resume_native_session");
-    if (failure) setActiveNotice(failure);
-    else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
+    const turn = next.productConversation?.turn;
+    const pendingVerification = next.attempt.id !== attemptId
+      && turn?.reasonCode === "resume-pending-verification";
+    if (failure) {
+      resumeWatch.current = null;
+      setActiveNotice(failure);
+    } else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
+      resumeWatch.current = null;
       setActiveNotice({ sentence: "Runtime session resumed. You can continue this goal." });
+    } else if (pendingVerification) {
+      const sentence = turn?.reason || "Session is starting again. Send a message to continue. Earlier messages will not be sent again.";
+      resumeWatch.current = { attemptId: next.attempt.id, sentence };
+      setActiveNotice({ sentence });
     } else {
-      setActiveNotice({ sentence: next.productConversation?.turn.reason || "Session resume was not confirmed. Check its status in details." });
+      resumeWatch.current = null;
+      setActiveNotice({ sentence: turn?.reason || "Session resume was not confirmed. Check its status in details." });
     }
   }
 
