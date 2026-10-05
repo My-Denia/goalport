@@ -441,16 +441,13 @@ fn walk_files(root: &Path, dir: &Path, records: &mut Vec<Vec<u8>>) -> std::io::R
             continue;
         }
         if meta.is_dir() {
+            // Path only. Directory mtime changes when the directory is read
+            // on some filesystems, so two quiet samples of an unchanged tree
+            // would never compare equal. Create, remove, and rename still
+            // change the path set.
             let relative = path.strip_prefix(root).unwrap_or(&path);
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|time| time.as_nanos())
-                .unwrap_or(0);
             let mut record = path_bytes(relative);
-            record.extend_from_slice(b"\0dir\0");
-            record.extend_from_slice(modified.to_string().as_bytes());
+            record.extend_from_slice(b"\0dir");
             records.push(record);
             walk_files(root, &path, records)?;
             continue;
