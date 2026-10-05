@@ -1060,11 +1060,24 @@ mod tests {
         let mut child = spawned.child;
         child.kill().expect("kill namespace init");
         let _ = child.wait();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The kernel kills the setsid grandchild when pid 1 exits, but that
+        // is not finished at wait(). A reused root pid must not look like the
+        // namespace is still alive.
+        let mut gone = false;
+        let mut last = String::new();
+        for _ in 0..100 {
+            let other = linux_namespace_has_other(inode, root).expect("post-kill scan");
+            let root_ns = namespace_inode(root).ok();
+            if !other && root_ns != Some(inode) {
+                gone = true;
+                break;
+            }
+            last = format!("other={other} root_ns={root_ns:?} domain={inode}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(
-            !linux_namespace_has_other(inode, root).expect("post-kill scan")
-                && namespace_inode(root).is_err(),
-            "a setsid grandchild must die with the pid namespace"
+            gone,
+            "a setsid grandchild must die with the pid namespace: {last}"
         );
         let _ = std::fs::remove_file(marker);
     }
