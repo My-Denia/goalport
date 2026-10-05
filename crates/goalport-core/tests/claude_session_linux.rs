@@ -392,6 +392,49 @@ fn stop_then_resume_does_not_replay_the_old_task() {
     let _ = drain(&mut resumed, attempt, |seen| has(seen, AgentEventType::Cancelled));
 }
 
+#[test]
+fn the_same_root_takes_the_next_turn_after_a_pending_permission_stop() {
+    let (_lock, _env) = begin();
+    let root = workspace("same-root", "baseline_pending_permission");
+    fs::write(root.join(".fake-claude-session-helper"), "first-message").unwrap();
+    let attempt = "attempt-same-root";
+    let mut manager = attach(attempt, &root);
+    send(&mut manager, attempt, "pending permission on the first turn");
+    let events = drain(&mut manager, attempt, |seen| {
+        has(seen, AgentEventType::PermissionRequest)
+    });
+    assert!(has(&events, AgentEventType::PermissionRequest), "{events:#?}");
+    let root_pid = read_json(&root, ".fake-claude-argv.json")["pid"].as_u64().unwrap();
+    manager.interrupt(attempt).expect("stop");
+    let stopped = drain(&mut manager, attempt, |seen| has(seen, AgentEventType::Cancelled));
+    assert!(has(&stopped, AgentEventType::Cancelled), "{stopped:#?}");
+    manager
+        .send_prompt(
+            attempt,
+            &PromptRequest {
+                attempt_id: attempt.into(),
+                text: "follow up on the same Claude process".into(),
+                idempotency_key: format!("{attempt}-follow-up"),
+            },
+        )
+        .expect("second prompt");
+    let followed = drain(&mut manager, attempt, |seen| {
+        has(seen, AgentEventType::TurnCompleted)
+    });
+    assert!(has(&followed, AgentEventType::TurnCompleted), "{followed:#?}");
+    let still = read_json(&root, ".fake-claude-argv.json")["pid"].as_u64().unwrap();
+    assert_eq!(still, root_pid, "the same Claude root took the next turn");
+    let helper_path = root.parent().unwrap().join(format!(
+        "{}.session-helper.pid",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let helper: u32 = fs::read_to_string(helper_path).unwrap().trim().parse().unwrap();
+    assert!(
+        Path::new(&format!("/proc/{helper}")).exists(),
+        "session helper stays alive"
+    );
+}
+
 fn git_repo(dir: &Path) {
     let run = |args: &[&str]| {
         let status = Command::new("git")

@@ -18,6 +18,7 @@ use crate::{
     commands::sha256_hex,
     domain::{AgentEventEnvelope, AgentEventType},
     process_identity::{self, ProcessObservation},
+    provider_failure::ProviderFailure,
     turn_results::{
         WorkspaceDelta, WorkspaceSample, compare_workspace_samples, sample_workspace_entries,
     },
@@ -1400,11 +1401,14 @@ impl RuntimeManager {
         }
     }
 
-    /// True when a process other than the recorded root is still inside the
-    /// spawn-time ownership domain. `None` means this attempt has no live
-    /// contained child to ask. An observation error is occupied: missing
-    /// evidence is not an empty domain.
-    pub fn claude_domain_has_extra(&mut self, attempt_id: &str) -> Option<bool> {
+    /// `None` means this attempt has no live contained child. An observation
+    /// error is occupied. A baseline applies only when the live binding matches
+    /// it; the root may remain, and only non-root members must match.
+    pub fn claude_domain_has_extra(
+        &mut self,
+        attempt_id: &str,
+        baseline: Option<&crate::descendants::SessionBaseline>,
+    ) -> Option<bool> {
         let process = match self.attempts.get_mut(attempt_id) {
             Some(ManagedRuntime::Claude(process)) => process,
             _ => return None,
@@ -1412,10 +1416,40 @@ impl RuntimeManager {
         let Some(child) = process.child.as_ref() else {
             return None;
         };
-        match child.extras_alive() {
-            Ok(alive) => Some(alive),
+        let Some(baseline) = baseline else {
+            return match child.extras_alive() {
+                Ok(alive) => Some(alive),
+                Err(_) => Some(true),
+            };
+        };
+        let Some(binding) = process.process_binding.as_ref() else {
+            return Some(true);
+        };
+        if binding.process_epoch != baseline.process_epoch || child.id() != binding.pid {
+            return Some(true);
+        }
+        let root = binding.pid;
+        match child.members() {
+            Ok(members) => Some(
+                crate::runtime_containment::classify_domain(&members, root, &baseline.members)
+                    != crate::runtime_containment::DomainOccupy::Empty,
+            ),
             Err(_) => Some(true),
         }
+    }
+
+    pub fn claude_session_baseline_live(
+        &self,
+        attempt_id: &str,
+        baseline: &crate::descendants::SessionBaseline,
+    ) -> bool {
+        let Some(ManagedRuntime::Claude(process)) = self.attempts.get(attempt_id) else {
+            return false;
+        };
+        let Some(binding) = process.process_binding.as_ref() else {
+            return false;
+        };
+        process.live_pid() == Some(binding.pid) && binding.process_epoch == baseline.process_epoch
     }
 
     pub fn claude_resume_hold(&self, attempt_id: &str) -> bool {
@@ -1949,7 +1983,7 @@ fn end_codex_reader(
 struct CodexStartFailure {
     request_id: u64,
     detail: String,
-    reason_code: &'static str,
+    reason_code: ProviderFailure,
 }
 
 impl CodexProcess {
@@ -2207,7 +2241,7 @@ impl CodexProcess {
             let detail = bounded_codex_error(error);
             return Err(if codex_reason_code(
                 error.get("data").and_then(|data| data.get("codexErrorInfo")),
-            ) == "provider-auth-required" {
+            ) == ProviderFailure::AuthRequired {
                 AdapterError::AuthenticationRequired(format!("Codex sign-in is required: {detail}"))
             } else {
                 AdapterError::Protocol(format!("Codex thread/start was rejected: {detail}"))
@@ -2666,7 +2700,7 @@ impl CodexProcess {
                         "text": "Codex rejected the turn start request",
                         "turnStartRequestId": failure.request_id,
                         "error": failure.detail,
-                        "reasonCode": failure.reason_code,
+                        "reasonCode": failure.reason_code.as_str(),
                         "nativeTurnId": Value::Null
                     }),
                 });
@@ -2758,7 +2792,7 @@ impl CodexProcess {
                     request_id: pending,
                     detail: bounded_codex_error(error),
                     reason_code: if error.get("code").and_then(Value::as_i64) == Some(-32601) {
-                        "provider-version"
+                        ProviderFailure::Version
                     } else {
                         codex_reason_code(error.get("data").and_then(|data| data.get("codexErrorInfo")))
                     },
@@ -4829,6 +4863,13 @@ where
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BaselineWindow {
+    BeforeFirstMessage,
+    FirstTurn,
+    Frozen,
+}
+
 struct ClaudeStreamProcess {
     executable: PathBuf,
     version: String,
@@ -4917,6 +4958,11 @@ struct ClaudeStreamProcess {
     /// -- because a later Stop must still answer for execution admitted by an
     /// earlier turn of the same process.
     execution_ever_admitted: bool,
+    /// Session infrastructure sealed before turn-specific work. The root is
+    /// not a member. A frozen window never reopens for this process binding.
+    session_baseline: Option<crate::descendants::SessionBaseline>,
+    baseline_window: BaselineWindow,
+    baseline_refresh_due: bool,
     startup_control: Option<Arc<StartupControl>>,
     /// Checked at the start of ensure_started, before the child.is_some()
     /// success return. Refuses another spawn while set.
@@ -5000,6 +5046,9 @@ impl ClaudeStreamProcess {
             process_binding: None,
             spawned: false,
             execution_ever_admitted: false,
+            session_baseline: None,
+            baseline_window: BaselineWindow::BeforeFirstMessage,
+            baseline_refresh_due: false,
             startup_control: None,
             resume_hold: false,
             close_disarmed: false,
@@ -5168,6 +5217,9 @@ impl ClaudeStreamProcess {
             executable_path: observed.executable_path,
             executable_sha256: observed.executable_sha256,
         });
+        self.session_baseline = None;
+        self.baseline_window = BaselineWindow::BeforeFirstMessage;
+        self.baseline_refresh_due = false;
         if let (Some(control), Some(binding)) =
             (self.startup_control.as_ref(), self.process_binding.as_ref())
         {
@@ -5377,6 +5429,16 @@ impl ClaudeStreamProcess {
         self.tool_observations.clear();
         self.assistant_text.clear();
         self.last_emitted_assistant.clear();
+        match self.baseline_window {
+            BaselineWindow::BeforeFirstMessage => {
+                self.refresh_session_baseline("before-first-message");
+                self.baseline_window = BaselineWindow::FirstTurn;
+            }
+            BaselineWindow::FirstTurn | BaselineWindow::Frozen => {
+                self.baseline_window = BaselineWindow::Frozen;
+                self.baseline_refresh_due = false;
+            }
+        }
         self.send_json(&json!({
             "type": "user",
             "uuid": self.input_uuid,
@@ -5708,6 +5770,7 @@ impl ClaudeStreamProcess {
             match message {
                 Ok(NativeMessage::Json(value)) => {
                     events.extend(self.take_mapped(attempt_id, &value));
+                    self.consume_baseline_refresh();
                 }
                 Ok(NativeMessage::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.stream_closed = true;
@@ -5818,6 +5881,7 @@ impl ClaudeStreamProcess {
         for frame in frames {
             events.extend(self.take_mapped(attempt_id, &frame));
         }
+        self.consume_baseline_refresh();
         if let Some(child) = self.child.as_mut()
             && matches!(child.try_wait(), Ok(Some(_)))
         {
@@ -6105,6 +6169,9 @@ impl ClaudeStreamProcess {
                     tool_use_id,
                 },
             );
+            if self.baseline_window == BaselineWindow::FirstTurn {
+                self.baseline_refresh_due = true;
+            }
             self.sequence += 1;
             return self.envelope(
                 attempt_id,
@@ -6350,6 +6417,8 @@ impl ClaudeStreamProcess {
             if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
             }
+            self.baseline_window = BaselineWindow::Frozen;
+            self.baseline_refresh_due = false;
             let tool_use_id = block
                 .get("tool_use_id")
                 .and_then(Value::as_str)
@@ -6707,6 +6776,77 @@ impl ClaudeStreamProcess {
         Ok(())
     }
 
+    fn no_tool_started(&self) -> bool {
+        if self.execution_ever_admitted || !self.unrequested_bash.is_empty() {
+            return false;
+        }
+        if self
+            .mutating_tools
+            .values()
+            .any(|record| record.decision != MutatingToolDecision::Pending)
+        {
+            return false;
+        }
+        let awaiting = |tool_use_id: &str| {
+            self.pending_permissions
+                .values()
+                .any(|pending| pending.tool_use_id.as_deref() == Some(tool_use_id))
+        };
+        self.tool_observations.keys().all(|id| awaiting(id))
+            && self.mutating_tools.keys().all(|id| awaiting(id))
+    }
+
+    fn consume_baseline_refresh(&mut self) {
+        if !self.baseline_refresh_due {
+            return;
+        }
+        self.baseline_refresh_due = false;
+        if self.baseline_window != BaselineWindow::FirstTurn || !self.no_tool_started() {
+            return;
+        }
+        self.refresh_session_baseline("permission-request");
+    }
+
+    fn refresh_session_baseline(&mut self, sealed_at: &str) {
+        if self.broker.is_some() {
+            return;
+        }
+        if !matches!(
+            self.baseline_window,
+            BaselineWindow::BeforeFirstMessage | BaselineWindow::FirstTurn
+        ) {
+            return;
+        }
+        let Some(binding) = self.process_binding.as_ref() else {
+            return;
+        };
+        let Some(child) = self.child.as_ref() else {
+            return;
+        };
+        if child.id() != binding.pid {
+            return;
+        }
+        let epoch = binding.process_epoch.clone();
+        let root = binding.pid;
+        for _ in 0..3 {
+            match child.members() {
+                Ok(members) => {
+                    let members = members
+                        .into_iter()
+                        .filter(|member| member.pid != root && member.pid != 0)
+                        .collect();
+                    self.session_baseline = Some(crate::descendants::SessionBaseline {
+                        process_epoch: epoch,
+                        sealed_at: sealed_at.to_owned(),
+                        members,
+                    });
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
     fn interrupt(&mut self) -> Result<crate::adapters::CancelResult, AdapterError> {
         // A Stop that is still unresolved owns this turn. A duplicate Safe stop
         // must not open a second Stop, restart the deadline, or add a second
@@ -6728,6 +6868,8 @@ impl ClaudeStreamProcess {
                 reason: Some("no active turn".into()),
             });
         }
+        self.baseline_window = BaselineWindow::Frozen;
+        self.baseline_refresh_due = false;
         self.interrupt_requested = true;
         for record in self.mutating_tools.values_mut() {
             if record.decision == MutatingToolDecision::Pending {
@@ -6937,6 +7079,13 @@ impl ClaudeStreamProcess {
             "descendants": stop.descendants.as_ref().map(
                 |records| crate::descendants::descendants_json(records),
             ),
+            "session_baseline": self.session_baseline.as_ref().and_then(|baseline| {
+                if baseline.process_epoch == stop.process_epoch {
+                    Some(crate::descendants::session_baseline_json(baseline))
+                } else {
+                    None
+                }
+            }),
             "admission": {
                 "mutatingToolsAllowed": self
                     .mutating_tools
@@ -7961,7 +8110,7 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
         let will_retry = params.get("willRetry").and_then(Value::as_bool) == Some(true);
         return Some(json!({
             "status": if will_retry { "retrying" } else { "failed" },
-            "reasonCode": codex_reason_code(error.get("codexErrorInfo")),
+            "reasonCode": codex_reason_code(error.get("codexErrorInfo")).as_str(),
             "text": "Codex reported a turn error",
             "httpStatus": codex_http_status(error.get("codexErrorInfo")),
             "willRetry": will_retry,
@@ -8027,7 +8176,7 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
         let error = turn.get("error").unwrap_or(&Value::Null);
         return Some(json!({
             "status": bounded_text(status),
-            "reasonCode": (status == "failed").then(|| codex_reason_code(error.get("codexErrorInfo"))),
+            "reasonCode": (status == "failed").then(|| codex_reason_code(error.get("codexErrorInfo")).as_str()),
             "text": (status == "failed").then_some("Codex turn failed"),
             "httpStatus": codex_http_status(error.get("codexErrorInfo")),
         }));
@@ -8219,7 +8368,7 @@ fn bounded_codex_error(error: &Value) -> String {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unknown".into());
     let reason = codex_reason_code(error.get("data").and_then(|data| data.get("codexErrorInfo")));
-    format!("code={code}; reason={reason}")
+    format!("code={code}; reason={}", reason.as_str())
 }
 
 fn codex_http_status(info: Option<&Value>) -> Option<u64> {
@@ -8229,19 +8378,19 @@ fn codex_http_status(info: Option<&Value>) -> Option<u64> {
 
 /// Map only native structured fields. Provider prose is diagnostic detail, not
 /// evidence that a send is safe to repeat or that an account is out of quota.
-fn codex_reason_code(info: Option<&Value>) -> &'static str {
+fn codex_reason_code(info: Option<&Value>) -> ProviderFailure {
     let kind = info.and_then(|info| {
         info.as_str().or_else(|| info.as_object()?.keys().next().map(String::as_str))
     });
     match kind {
-        Some("usageLimitExceeded" | "rateLimitExceeded" | "sessionBudgetExceeded") => "provider-quota",
-        Some("unauthorized") => "provider-auth-required",
-        Some("contextWindowExceeded") => "provider-context-full",
-        Some("serverOverloaded" | "flexUnavailable") => "provider-overloaded",
-        Some("httpConnectionFailed" | "responseStreamConnectionFailed" | "responseStreamDisconnected") => "provider-transport",
-        Some("cyberPolicy" | "misalignmentPolicyViolation" | "tooManyDenials") => "provider-permission",
-        Some("badRequest") => "provider-request-invalid",
-        _ => "provider-failed",
+        Some("usageLimitExceeded" | "rateLimitExceeded" | "sessionBudgetExceeded") => ProviderFailure::Quota,
+        Some("unauthorized") => ProviderFailure::AuthRequired,
+        Some("contextWindowExceeded") => ProviderFailure::ContextFull,
+        Some("serverOverloaded" | "flexUnavailable") => ProviderFailure::Overloaded,
+        Some("httpConnectionFailed" | "responseStreamConnectionFailed" | "responseStreamDisconnected") => ProviderFailure::Transport,
+        Some("cyberPolicy" | "misalignmentPolicyViolation" | "tooManyDenials") => ProviderFailure::Permission,
+        Some("badRequest") => ProviderFailure::RequestInvalid,
+        _ => ProviderFailure::Failed,
     }
 }
 
@@ -8594,6 +8743,34 @@ mod tests {
         let after_dispatch = StartupControl::default();
         after_dispatch.mark_dispatching().unwrap();
         assert_eq!(after_dispatch.request_cancel().unwrap(), false);
+    }
+
+    #[test]
+    fn codex_reason_code_maps_structured_fields_to_provider_failure() {
+        let expected = [
+            (None, ProviderFailure::Failed),
+            (Some(json!("usageLimitExceeded")), ProviderFailure::Quota),
+            (Some(json!("rateLimitExceeded")), ProviderFailure::Quota),
+            (Some(json!("sessionBudgetExceeded")), ProviderFailure::Quota),
+            (Some(json!({"usageLimitExceeded": {}})), ProviderFailure::Quota),
+            (Some(json!("unauthorized")), ProviderFailure::AuthRequired),
+            (Some(json!("contextWindowExceeded")), ProviderFailure::ContextFull),
+            (Some(json!("serverOverloaded")), ProviderFailure::Overloaded),
+            (Some(json!("flexUnavailable")), ProviderFailure::Overloaded),
+            (Some(json!("httpConnectionFailed")), ProviderFailure::Transport),
+            (Some(json!("responseStreamConnectionFailed")), ProviderFailure::Transport),
+            (Some(json!("responseStreamDisconnected")), ProviderFailure::Transport),
+            (Some(json!("cyberPolicy")), ProviderFailure::Permission),
+            (Some(json!("misalignmentPolicyViolation")), ProviderFailure::Permission),
+            (Some(json!("tooManyDenials")), ProviderFailure::Permission),
+            (Some(json!("badRequest")), ProviderFailure::RequestInvalid),
+            (Some(json!("not-a-known-kind")), ProviderFailure::Failed),
+        ];
+        for (info, variant) in expected {
+            let mapped = codex_reason_code(info.as_ref());
+            assert_eq!(mapped, variant);
+            assert_eq!(mapped.as_str(), variant.as_str());
+        }
     }
 
     #[test]
@@ -9694,6 +9871,24 @@ time.sleep(30)
             AgentEventType::Cancelled
         );
     }
+
+    #[test]
+    fn stop_trace_carries_the_baseline_only_for_its_binding() {
+        let mut process = claude_with_bound_stop();
+        process.session_baseline = Some(crate::descendants::SessionBaseline {
+            process_epoch: "runtime-epoch:stop".into(),
+            sealed_at: "permission-request".into(),
+            members: vec![crate::descendants::DescendantRecord {
+                pid: 77,
+                start_tick: "tick-77".into(),
+            }],
+        });
+        let matched = process.stop_trace();
+        assert_eq!(matched["session_baseline"]["members"][0]["pid"], json!(77));
+        process.session_baseline.as_mut().unwrap().process_epoch = "runtime-epoch:other".into();
+        let other = process.stop_trace();
+        assert!(other["session_baseline"].is_null());
+    }
 }
 
 /// R3 Codex turn-fact machine tests: pending start request vs acknowledged
@@ -10304,5 +10499,86 @@ mod resume_proof_and_tool_result_tests {
         assert_ne!(process.pending_out[0].event_type, AgentEventType::TurnFailed);
         assert_eq!(last.event_type, AgentEventType::TurnFailed);
         assert_eq!(last.payload["fail_open"], true);
+    }
+
+    #[test]
+    fn the_baseline_window_closes_once_a_tool_may_have_run() {
+        let mut process = ClaudeStreamProcess::new(
+            PathBuf::from("claude"),
+            "2.1.288".into(),
+            PathBuf::from("/tmp/goalport-baseline-window"),
+        );
+        assert!(process.no_tool_started());
+        process.pending_permissions.insert(
+            "claude-decision-1".into(),
+            ClaudePendingPermission {
+                native_request_id: "native-1".into(),
+                tool_name: "Bash".into(),
+                input: json!({ "command": "tick" }),
+                tool_use_id: Some("toolu_1".into()),
+            },
+        );
+        process
+            .tool_observations
+            .insert("toolu_1".into(), ToolObservation::default());
+        process.mutating_tools.insert(
+            "toolu_1".into(),
+            MutatingToolRecord {
+                decision: MutatingToolDecision::Pending,
+                snapshot: None,
+                fingerprint: None,
+            },
+        );
+        assert!(
+            process.no_tool_started(),
+            "a pending permission matches on tool_use_id, not the decision id"
+        );
+        process
+            .tool_observations
+            .insert("toolu_unawaited".into(), ToolObservation::default());
+        assert!(!process.no_tool_started());
+        process.tool_observations.remove("toolu_unawaited");
+        process.execution_ever_admitted = true;
+        assert!(!process.no_tool_started());
+        process.execution_ever_admitted = false;
+        process
+            .mutating_tools
+            .get_mut("toolu_1")
+            .unwrap()
+            .decision = MutatingToolDecision::Denied;
+        assert!(!process.no_tool_started());
+        process
+            .mutating_tools
+            .get_mut("toolu_1")
+            .unwrap()
+            .decision = MutatingToolDecision::Pending;
+        process
+            .unrequested_bash
+            .insert("bash-1".into(), None);
+        assert!(!process.no_tool_started());
+
+        process.unrequested_bash.clear();
+        process.baseline_window = BaselineWindow::FirstTurn;
+        process.baseline_refresh_due = true;
+        let frame = json!({
+            "message": {
+                "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }]
+            }
+        });
+        let _ = process.map_user_tool_result("attempt", &frame);
+        assert_eq!(process.baseline_window, BaselineWindow::Frozen);
+        assert!(!process.baseline_refresh_due);
+
+        let mut stopping = ClaudeStreamProcess::new(
+            PathBuf::from("claude"),
+            "2.1.288".into(),
+            PathBuf::from("/tmp/goalport-baseline-window"),
+        );
+        stopping.turn_in_flight = true;
+        stopping.baseline_window = BaselineWindow::FirstTurn;
+        stopping.baseline_refresh_due = true;
+        let _ = stopping.interrupt();
+        assert_eq!(stopping.baseline_window, BaselineWindow::Frozen);
+        assert!(!stopping.baseline_refresh_due);
     }
 }

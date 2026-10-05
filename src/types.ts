@@ -98,7 +98,7 @@ export interface ProductTurn {
   canSend: boolean;
   reason?: string;
   /** Stable provider/UI failure class supplied by Core; never inferred from text. */
-  reasonCode?: string;
+  reasonCode?: TurnReasonCode;
   /** Available next actions supplied by Core. */
   actions?: string[];
 }
@@ -181,7 +181,7 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
       canStop: turnRaw.canStop === true || turnRaw.can_stop === true,
       canSend: turnRaw.canSend === true || turnRaw.can_send === true,
       reason: optionalText(turnRaw.reason),
-      reasonCode: optionalText(turnRaw.reasonCode ?? turnRaw.reason_code),
+      reasonCode: normalizeTurnReasonCode(turnRaw.reasonCode ?? turnRaw.reason_code),
       actions: Array.isArray(turnRaw.actions) ? turnRaw.actions.map((action) => asText(action, "")).filter(Boolean) : undefined
     },
     session: sessionRaw && ["starting", "attached", "unavailable", "detached", "closed", "none"].includes(String(sessionRaw.state))
@@ -1478,7 +1478,10 @@ export type ProviderFailureCode =
   | "delivery-unknown"
   | "resume-spawn-failed"
   | "resume-verification-failed"
+  | "provider-exited"
   | "provider-failed";
+
+export const PREVIEW_PROVIDER_QUOTA: ProviderFailureCode = "provider-quota";
 
 export const PROVIDER_FAILURE_CODES: readonly ProviderFailureCode[] = [
   "provider-quota",
@@ -1494,5 +1497,41 @@ export const PROVIDER_FAILURE_CODES: readonly ProviderFailureCode[] = [
   "delivery-unknown",
   "resume-spawn-failed",
   "resume-verification-failed",
+  "provider-exited",
   "provider-failed",
 ] as const;
+
+/** Turn-state codes Core emits that are not provider failures. */
+export type TurnStateReasonCode =
+  | "authorization-revoked"
+  | "resume-containment-unproven"
+  | "session-closed"
+  | "session-detached"
+  | "native-persistence"
+  | "permission-pending"
+  | "recovery-required"
+  | "turn-starting"
+  | "stop-pending"
+  | "start-cancelling";
+
+export const TURN_STATE_REASON_CODES: readonly TurnStateReasonCode[] = [
+  "authorization-revoked",
+  "resume-containment-unproven",
+  "session-closed",
+  "session-detached",
+  "native-persistence",
+  "permission-pending",
+  "recovery-required",
+  "turn-starting",
+  "stop-pending",
+  "start-cancelling",
+] as const;
+
+export type TurnReasonCode = ProviderFailureCode | TurnStateReasonCode;
+
+export function normalizeTurnReasonCode(value: unknown): TurnReasonCode | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  if ((PROVIDER_FAILURE_CODES as readonly string[]).includes(value)) return value as ProviderFailureCode;
+  if ((TURN_STATE_REASON_CODES as readonly string[]).includes(value)) return value as TurnStateReasonCode;
+  return "provider-failed";
+}

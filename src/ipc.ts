@@ -23,6 +23,7 @@ import {
   type GoalCard,
   type GoalOverview,
   type HistoryPageInfo,
+  PREVIEW_PROVIDER_QUOTA,
   type ProductConversation,
   type ProductConversationItem,
   type TimelineItem
@@ -66,7 +67,7 @@ export function previewInitialSnapshot(): CoreSnapshot {
         ...DEMO_SNAPSHOT.productConversation!,
         runtime: { state: "selected", provider: "codex", name: "Codex" },
         session: { state: "attached", nativeIdKnown: false },
-        turn: { state: "failed", canSend: true, canStop: false, reasonCode: "provider-quota", actions: ["select-runtime", "send"] },
+        turn: { state: "failed", canSend: true, canStop: false, reasonCode: PREVIEW_PROVIDER_QUOTA, actions: ["select-runtime", "send"] },
         items: [{ id: "preview-quota", kind: "actionable-error", body: "Codex has reached its usage limit. Wait for the limit to reset or choose another Runtime.", technicalDetails: "Synthetic example: usageLimitExceeded", actions: ["select-runtime"] }]
       }
     };

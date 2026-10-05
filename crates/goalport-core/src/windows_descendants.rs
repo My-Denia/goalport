@@ -39,7 +39,7 @@ unsafe extern "system" {
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
-fn creation_tick(pid: u32) -> Option<String> {
+pub(crate) fn creation_tick(pid: u32) -> Option<String> {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {

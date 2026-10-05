@@ -4,7 +4,7 @@
 import { createInterface } from "node:readline";
 import { writeFileSync, readFileSync, mkdirSync, renameSync, closeSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, dirname, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
 function scenarioName() {
@@ -15,7 +15,38 @@ function scenarioName() {
   }
 }
 
+function helperMode() {
+  try {
+    return readFileSync(resolve(process.cwd(), ".fake-claude-session-helper"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function outsidePid(name) {
+  return resolve(dirname(process.cwd()), `${basename(process.cwd())}.${name}.pid`);
+}
+
+function spawnSleeper(pidFile) {
+  const child = spawn("python3", ["-c", "import time\nstatus=open('/proc/self/status').read()\nhost=[line.split()[1] for line in status.splitlines() if line.startswith('NSpid:')][0]\nopen(" + JSON.stringify(pidFile) + ",'w').write(host)\ntime.sleep(300)"], {
+    cwd: process.cwd(),
+    stdio: "ignore"
+  });
+  child.unref();
+  const deadline = Date.now() + 5000;
+  while (!existsSync(pidFile)) {
+    if (Date.now() > deadline) {
+      throw new Error(`session sleeper did not write ${pidFile}`);
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+}
+
 const scenario = scenarioName();
+const sessionHelper = helperMode();
+if (sessionHelper === "startup") {
+  spawnSleeper(outsidePid("session-helper"));
+}
 const argv = process.argv.slice(2);
 function resumeArg() {
   const index = argv.indexOf("--resume");
@@ -254,7 +285,8 @@ function handlePermissionResponse(obj) {
   if (scenario === "native_stop_pending_permission"
     || scenario === "native_stop_denial_no_id"
     || scenario === "native_stop_denial_subset"
-    || scenario === "native_stop_denial_silent") {
+    || scenario === "native_stop_denial_silent"
+    || scenario.startsWith("baseline_")) {
     // The Stop's deny lands while the decision is pending; the denied tool
     // never runs. Real Claude still answers the rejection with a tool_result
     // for the rejected tool before the interrupt result ends the turn.
@@ -287,6 +319,9 @@ function handlePermissionResponse(obj) {
 
 function beginTurn() {
   userCount += 1;
+  if (userCount === 1 && sessionHelper === "first-message") {
+    spawnSleeper(outsidePid("session-helper"));
+  }
   if (userCount === 1 && scenario === "resume_mismatch_with_child") {
     // Spawn before the mismatch init frame so the post-send snapshot, taken
     // while this process is still alive, includes the descendant.
@@ -473,6 +508,47 @@ function beginTurn() {
       waitingInterrupt = true;
       return;
     case "native_stop_denial_silent":
+      emitToolUse("Write", toolUseId, {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      emitCanUseTool("Write", {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      waitingInterrupt = true;
+      return;
+    case "baseline_pending_permission":
+      if (userCount > 1) {
+        emitText("FOLLOW_UP");
+        emitResult("end_turn", { result: "FOLLOW_UP" });
+        return;
+      }
+      emitToolUse("Bash", toolUseId, { command: "tick" });
+      emitCanUseTool("Bash", { command: "tick" });
+      waitingInterrupt = true;
+      return;
+    case "baseline_turn_child":
+      spawnSleeper(outsidePid("turn-child"));
+      emitToolUse("Bash", "toolu_unrequested_bash", { command: "sleep 300" });
+      emitToolUse("Write", toolUseId, {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      emitCanUseTool("Write", {
+        file_path: writeTarget,
+        contents: "PROBE_WRITE_OK\n"
+      });
+      waitingInterrupt = true;
+      return;
+    case "baseline_previous_turn_survivor":
+      if (userCount === 1) {
+        spawnSleeper(outsidePid("survivor"));
+        emitToolUse("Bash", "toolu_unrequested_bash", { command: "sleep 300" });
+        emitToolResult("toolu_unrequested_bash", "still running");
+        emitResult("end_turn", { result: "TURN_ONE" });
+        return;
+      }
       emitToolUse("Write", toolUseId, {
         file_path: writeTarget,
         contents: "PROBE_WRITE_OK\n"
@@ -720,6 +796,14 @@ rl.on("line", (line) => {
           send(result);
         },100);
       }
+      return;
+    }
+    if (scenario.startsWith("baseline_")) {
+      send({type:"control_response", response:{subtype:"success", request_id:obj.request_id, response:{still_queued:[]}}});
+      send({type:"result", uuid:randomUUID(), session_id:sessionId,
+        user_message_uuid:currentInputUuid, user_message_uuids:[currentInputUuid],
+        terminal_reason:"aborted_tools", subtype:"error_during_execution", is_error:true,
+        permission_denials:[{tool_name: scenario === "baseline_pending_permission" ? "Bash" : "Write", tool_use_id:toolUseId, tool_input:{}}]});
       return;
     }
     if (scenario === "two_tool_frame" || scenario === "stop_descendant") {

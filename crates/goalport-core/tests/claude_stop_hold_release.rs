@@ -710,3 +710,259 @@ fn kill_descendant(pid: u32) {
     let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     assert_eq!(result, 0, "kill descendant {pid}");
 }
+
+fn workspace_with_helper(label: &str, scenario: &str, helper: &str) -> PathBuf {
+    let dir = workspace_dir(label, scenario);
+    fs::write(dir.join(".fake-claude-session-helper"), helper).unwrap();
+    dir
+}
+
+fn outside_pid(root: &Path, name: &str) -> PathBuf {
+    let base = root.file_name().unwrap().to_string_lossy();
+    root.parent().unwrap().join(format!("{base}.{name}.pid"))
+}
+
+fn read_pid_file(path: &Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                return pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "missing pid file {}", path.display());
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn proc_tick(pid: u32) -> Option<String> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = text.rsplit(')').next()?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next()?;
+    let _ppid = fields.next()?;
+    fields.nth(17).map(str::to_owned)
+}
+
+fn baseline_members(detail: &Value) -> Vec<Value> {
+    detail
+        .pointer("/stop_attempt/session_baseline/members")
+        .or_else(|| detail.pointer("/payload/stop_attempt/session_baseline/members"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_session_helper_does_not_hold_a_confirmed_pending_permission_stop() {
+    let _fixture_guard = begin();
+    let root = workspace_with_helper(
+        "baseline-pending",
+        "baseline_pending_permission",
+        "first-message",
+    );
+    let store = Store::memory().unwrap();
+    let core = boot(&store, None);
+    let conversation = admit_claude(&core, &root, "baseline-pending");
+    send(
+        &core,
+        &conversation,
+        "baseline-pending",
+        "ask before the helper is part of the turn",
+    );
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "permission card",
+        |records| records.iter().any(|record| record.event.kind == "runtime.permission.request"),
+    );
+    let stop_receipt = stop(&core, &conversation, "baseline-pending");
+    assert_eq!(stop_receipt["ok"], true, "{stop_receipt}");
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "confirmed stop",
+        |records| records.iter().any(|record| record.event.kind == "runtime.turn.cancelled"),
+    );
+    let records = store
+        .list_event_records(&conversation.attempt_id, 0)
+        .unwrap();
+    let cancelled = records
+        .iter()
+        .find(|record| record.event.kind == "runtime.turn.cancelled")
+        .expect("cancelled event");
+    let detail = cancelled.payload.clone().unwrap();
+    assert_eq!(
+        detail.pointer("/stop_attempt/session_baseline/sealed_at"),
+        Some(&json!("permission-request"))
+    );
+    let helper = read_pid_file(&outside_pid(&root, "session-helper"));
+    let helper_tick = proc_tick(helper).expect("helper tick");
+    let members = baseline_members(&detail);
+    assert!(
+        members.iter().any(|member| {
+            member["pid"] == json!(helper) && member["startTick"] == json!(helper_tick)
+        }),
+        "baseline must name the helper: {members:?}"
+    );
+    let cli = read_json_pid(&root);
+    let cli_tick = proc_tick(cli).expect("root tick");
+    assert!(
+        members.iter().all(|member| member["pid"] != json!(cli)),
+        "the root is not session infrastructure: {members:?}"
+    );
+    let released = poll_until(&core, &store, "baseline-pending", Duration::from_secs(10), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(released, "a sealed helper must not keep the Stop held");
+    let releases = release_events(&store, &conversation.attempt_id);
+    assert_eq!(releases.len(), 1, "{releases:?}");
+    assert_eq!(
+        releases[0]["evidence"]["sessionBaseline"]["sealedAt"].as_str()
+            .or_else(|| releases[0]["evidence"]["sessionBaseline"]["sealed_at"].as_str()),
+        Some("permission-request")
+    );
+    assert_eq!(proc_tick(cli).as_deref(), Some(cli_tick.as_str()));
+    assert_eq!(proc_tick(helper).as_deref(), Some(helper_tick.as_str()));
+    let restart = core
+        .server
+        .handle_json(&wire(
+            "baseline-pending-continue",
+            "start_conversation",
+            json!({
+                "workspaceRoot": root.to_string_lossy(),
+                "provider": "scenario",
+                "message": "continue in the same workspace"
+            }),
+        ))
+        .unwrap();
+    assert_eq!(restart["ok"], true, "{restart}");
+}
+
+fn read_json_pid(root: &Path) -> u32 {
+    let value: Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".fake-claude-argv.json")).unwrap(),
+    )
+    .unwrap();
+    value["pid"].as_u64().unwrap() as u32
+}
+
+#[test]
+fn a_turn_child_still_blocks_release_until_it_dies() {
+    let _fixture_guard = begin();
+    let root = workspace_with_helper("baseline-child", "baseline_turn_child", "startup");
+    let store = Store::memory().unwrap();
+    let core = boot(&store, None);
+    let conversation = admit_claude(&core, &root, "baseline-child");
+    send(&core, &conversation, "baseline-child", "spawn a turn child");
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "permission card",
+        |records| records.iter().any(|record| record.event.kind == "runtime.permission.request"),
+    );
+    let stop_receipt = stop(&core, &conversation, "baseline-child");
+    assert_eq!(stop_receipt["ok"], true, "{stop_receipt}");
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "confirmed stop",
+        |records| records.iter().any(|record| record.event.kind == "runtime.turn.cancelled"),
+    );
+    let held = store.stop_responsibilities().unwrap();
+    let detail = held[0].detail.clone().unwrap();
+    assert_eq!(
+        detail.pointer("/payload/stop_attempt/session_baseline/sealed_at"),
+        Some(&json!("before-first-message"))
+    );
+    let helper = read_pid_file(&outside_pid(&root, "session-helper"));
+    let child = read_pid_file(&outside_pid(&root, "turn-child"));
+    let members = baseline_members(&detail);
+    assert!(members.iter().any(|member| member["pid"] == json!(helper)));
+    assert!(members.iter().all(|member| member["pid"] != json!(child)));
+    let released_early = poll_until(&core, &store, "baseline-child-held", Duration::from_secs(4), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(!released_early, "a turn-owned child must keep the hold");
+    kill_descendant(child);
+    let released = poll_until(&core, &store, "baseline-child-dead", Duration::from_secs(20), || {
+        store.stop_responsibilities().unwrap().is_empty()
+    });
+    assert!(released, "release follows once the turn child is gone");
+    assert!(proc_tick(helper).is_some(), "the session helper stays");
+}
+
+#[test]
+fn a_previous_turn_survivor_is_not_learned_as_session_infrastructure() {
+    let _fixture_guard = begin();
+    let root = workspace_with_helper(
+        "baseline-survivor",
+        "baseline_previous_turn_survivor",
+        "startup",
+    );
+    let store = Store::memory().unwrap();
+    let core = boot(&store, None);
+    let conversation = admit_claude(&core, &root, "baseline-survivor");
+    send(&core, &conversation, "baseline-survivor", "leave a survivor behind");
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "first turn ended",
+        |records| {
+            records.iter().any(|record| {
+                record.event.kind == "runtime.turn.completed"
+                    || record.event.kind == "runtime.turn.failed"
+            })
+        },
+    );
+    send(
+        &core,
+        &conversation,
+        "baseline-survivor-2",
+        "ask after the survivor already exists",
+    );
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "second permission",
+        |records| {
+            records
+                .iter()
+                .filter(|record| record.event.kind == "runtime.permission.request")
+                .count()
+                >= 1
+        },
+    );
+    let stop_receipt = stop(&core, &conversation, "baseline-survivor");
+    assert_eq!(stop_receipt["ok"], true, "{stop_receipt}");
+    wait_for(
+        &core,
+        &store,
+        &conversation.attempt_id,
+        "confirmed stop",
+        |records| records.iter().any(|record| record.event.kind == "runtime.turn.cancelled"),
+    );
+    let held = store.stop_responsibilities().unwrap();
+    let detail = held[0].detail.clone().unwrap();
+    let survivor = read_pid_file(&outside_pid(&root, "survivor"));
+    let members = baseline_members(&detail);
+    assert!(
+        members.iter().all(|member| member["pid"] != json!(survivor)),
+        "a previous turn's child is not sealed as infrastructure: {members:?}"
+    );
+    let released_early = poll_until(
+        &core,
+        &store,
+        "baseline-survivor-held",
+        Duration::from_secs(4),
+        || store.stop_responsibilities().unwrap().is_empty(),
+    );
+    assert!(!released_early, "the unsealed survivor must keep the hold");
+    kill_descendant(survivor);
+}

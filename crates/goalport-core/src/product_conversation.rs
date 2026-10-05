@@ -23,6 +23,7 @@
 use crate::{
     domain::{Attempt, AttemptState, DecisionState},
     history::HistoryPageInfo,
+    provider_failure::ProviderFailure,
     runtime_manager::RuntimeManager,
     store::{ConversationPreference, EventRecord, StopResponsibility, Store},
 };
@@ -492,12 +493,14 @@ fn describe_turn(
         && record.event.kind == "runtime.turn.failed"
         && matches!(turn.state.as_str(), "idle" | "failed")
     {
-        let code = record
+        let failure = record
             .payload
             .as_ref()
             .and_then(|payload| payload.get("reasonCode"))
             .and_then(Value::as_str)
-            .unwrap_or("provider-failed");
+            .map(ProviderFailure::parse)
+            .unwrap_or(ProviderFailure::Failed);
+        let code = failure.as_str();
         turn.reason_code = Some(code.into());
         turn.reason = Some(provider_issue_message(code).into());
         if turn.state == "idle" {
@@ -508,7 +511,7 @@ fn describe_turn(
     if turn.reason_code.is_none() {
         turn.reason_code = match turn.state.as_str() {
             "uncertain" => Some(if turn.reason.as_deref().is_some_and(|reason| reason.contains("delivery")) {
-                "delivery-unknown"
+                ProviderFailure::DeliveryUnknown.as_str()
             } else {
                 "recovery-required"
             }),
@@ -587,7 +590,7 @@ fn describe_turn(
             && settled
             && no_unsettled_effect
         {
-            turn.reason_code = Some("provider-exited".into());
+            turn.reason_code = Some(ProviderFailure::Exited.as_str().into());
             turn.reason = Some("The Runtime process ended. Close this session before starting new work; its history remains here.".into());
             "close-session"
         } else if turn.state == "uncertain" {
@@ -652,7 +655,7 @@ fn describe_turn(
                 }
             }
         {
-            turn.reason_code = Some("resume-verification-failed".into());
+            turn.reason_code = Some(ProviderFailure::ResumeVerificationFailed.as_str().into());
             turn.reason = Some(
                 "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again."
                     .into(),
