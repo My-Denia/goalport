@@ -1109,8 +1109,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("goalport-nested-ns-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // CLONE_NEWPID. The child is pid 1 of an inner namespace, so its
-        // innermost inode is not the Runtime inode.
-        let script = "import ctypes,os,time\nlibc=ctypes.CDLL(None)\nif libc.unshare(0x20000000)!=0:\n raise SystemExit(1)\nif os.fork()==0:\n open('nested.ready','w').write('1')\n time.sleep(60)\nelse:\n time.sleep(60)\n";
+        // innermost inode is not the Runtime inode. A refused unshare is the
+        // kernel, not a missed descendant; the membership assertion still runs
+        // whenever the inner namespace actually starts.
+        let script = "import os,time,errno,traceback\ntry:\n os.unshare(os.CLONE_NEWPID)\n child=os.fork()\n if child==0:\n  open('nested.ready','w').write('1')\n  time.sleep(60)\n else:\n  time.sleep(60)\nexcept OSError as err:\n open('nested.error','w').write('errno %s %s' % (err.errno, errno.errorcode.get(err.errno, err.strerror)))\n raise SystemExit(1)\nexcept Exception:\n open('nested.error','w').write(traceback.format_exc())\n raise SystemExit(1)\n";
         let spawned = spawn_contained(
             Path::new("python3"),
             &[String::from("-c"), script.to_owned()],
@@ -1125,7 +1127,21 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(marker.is_file(), "nested pid namespace did not start");
+        if !marker.is_file() {
+            let detail = std::fs::read_to_string(dir.join("nested.error"))
+                .unwrap_or_else(|_| "no diagnostic".to_owned());
+            let mut child = spawned.child;
+            child.kill().ok();
+            let _ = child.wait();
+            let refused = ["errno 1 ", "errno 13 ", "errno 38 ", "errno 95 "]
+                .iter()
+                .any(|code| detail.contains(code));
+            if refused {
+                eprintln!("nested pid namespace fixture unavailable: {detail}");
+                return;
+            }
+            panic!("nested pid namespace did not start: {detail}");
+        }
         let inode = spawned.child.ns_inode;
         let root = spawned.child.id();
         assert!(
