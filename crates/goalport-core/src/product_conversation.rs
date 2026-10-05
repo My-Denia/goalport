@@ -865,13 +865,22 @@ fn project_turn(
             reason: Some("Stop was requested. Waiting for the Runtime to confirm the result; new messages are blocked.".into()),
         });
     }
-    // 3. A completed native turn remains completed across a Core restart. The
+    // 3. A finished native turn remains recoverable across a Core restart. The
     // provider session is detached until the user explicitly resumes it; no
-    // message is resent as part of this projection.
+    // message is resent as part of this projection. A confirmed Stop that has
+    // already released its hold is the same shape: the Attempt stays Active so
+    // a still-attached session can send, and once the registration is gone the
+    // stored session id is resumed instead of looking uncertain.
     if attempt.state == AttemptState::Active
         && runtime_manager.registered_binding(&attempt.id).is_none()
     {
-        if latest_turn_fact.as_deref() == Some("runtime.turn.completed")
+        let quiet_release = latest_turn_fact.as_deref() == Some("runtime.turn.cancelled")
+            && store
+                .latest_event_kind_in(&attempt.id, &["runtime.stop.responsibility.released"])
+                .map_err(|error| error.to_string())?
+                .is_some();
+        let finished = latest_turn_fact.as_deref() == Some("runtime.turn.completed") || quiet_release;
+        if finished
             && attempt.provider_session.is_some()
             && !pending_permission
             && !runtime_manager.operation_busy(&attempt.id)
@@ -884,10 +893,17 @@ fn project_turn(
             return Ok(ProductTurn {
                 reason_code: Some("session-detached".into()),
                 actions: Vec::new(),
-                state: "completed".into(),
+                state: if quiet_release { "stopped" } else { "completed" }.into(),
                 can_stop: false,
                 can_send: false,
-                reason: Some("The previous turn finished. Resume this session to continue.".into()),
+                reason: Some(
+                    if quiet_release {
+                        "The previous turn was stopped. Resume this session to continue."
+                    } else {
+                        "The previous turn finished. Resume this session to continue."
+                    }
+                    .into(),
+                ),
             });
         }
         return Ok(ProductTurn {
