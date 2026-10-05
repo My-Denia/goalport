@@ -276,7 +276,7 @@ fn linux_stat_fields(pid: u32) -> Option<(u32, String)> {
     Some((ppid, start_tick))
 }
 
-enum ProcDirEntry {
+pub(crate) enum ProcDirEntry {
     NotPid,
     Pid(u32),
     Unreadable,
@@ -285,7 +285,7 @@ enum ProcDirEntry {
 /// A directory-iterator error is an incomplete `/proc` scan. A name that is
 /// not a pid is skipped. Callers that build a Stop snapshot must treat
 /// `Unreadable` as a failed enumeration, not as "this pid was absent".
-fn proc_dir_entry(entry: std::io::Result<impl AsRef<std::ffi::OsStr>>) -> ProcDirEntry {
+pub(crate) fn proc_dir_entry(entry: std::io::Result<impl AsRef<std::ffi::OsStr>>) -> ProcDirEntry {
     let Ok(name) = entry else {
         return ProcDirEntry::Unreadable;
     };

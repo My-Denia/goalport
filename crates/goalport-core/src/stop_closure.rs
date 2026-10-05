@@ -97,15 +97,36 @@ struct ObservedCwd {
 ///
 /// Per-process observation failures (permissions, a process that exited
 /// mid-scan, an unreadable PEB) skip that process -- the same observational
-/// limitation on both platforms. Only a systemic failure returns Err, so the
-/// release loop's fail-closed posture is unchanged.
+/// limitation on both platforms. A `/proc` iterator error is not one of
+/// those: the scan is incomplete, and returning the pids already seen would
+/// let a quiet fingerprint release while an omitted process can still write.
+/// That error, like any other systemic failure, returns Err so the release
+/// loop keeps the hold.
+fn writer_scan_pid(entry: std::io::Result<impl AsRef<std::ffi::OsStr>>) -> Result<Option<u32>, String> {
+    match crate::descendants::proc_dir_entry(entry) {
+        crate::descendants::ProcDirEntry::Unreadable => Err(
+            "workspace writer scan stopped on an unreadable /proc entry".into(),
+        ),
+        crate::descendants::ProcDirEntry::NotPid => Ok(None),
+        crate::descendants::ProcDirEntry::Pid(pid) => Ok(Some(pid)),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn platform_enumerate_cwds(claude_pid: u32) -> Result<Vec<ObservedCwd>, String> {
     let mut observed = Vec::new();
     let entries = fs::read_dir("/proc").map_err(|error| error.to_string())?;
     let core_pid = std::process::id();
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                return Err(
+                    "workspace writer scan stopped on an unreadable /proc entry".into(),
+                );
+            }
+        };
+        let Some(pid) = writer_scan_pid(Ok(entry.file_name()))? else {
             continue;
         };
         // The excluded CLI pid AND Core's own pid: running Core from inside
@@ -667,6 +688,21 @@ fn bound_runtime_view(bound: &Value) -> BoundRuntimeView {
 mod tests {
     use super::*;
     use crate::turn_results::WorkspaceEntry;
+
+    #[test]
+    fn an_unreadable_proc_entry_is_not_an_empty_writer_scan() {
+        let unreadable: std::io::Result<&std::ffi::OsStr> =
+            Err(std::io::Error::other("unreadable proc entry"));
+        assert!(writer_scan_pid(unreadable).is_err());
+        assert_eq!(
+            writer_scan_pid(Ok(std::ffi::OsStr::new("self"))).expect("not a pid"),
+            None
+        );
+        assert_eq!(
+            writer_scan_pid(Ok(std::ffi::OsStr::new("42"))).expect("pid"),
+            Some(42)
+        );
+    }
 
     fn sample(path: &str, hash: &str) -> WorkspaceSample {
         WorkspaceSample {
