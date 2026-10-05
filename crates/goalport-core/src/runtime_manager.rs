@@ -6149,7 +6149,7 @@ impl ClaudeStreamProcess {
                 {
                     record.decision = MutatingToolDecision::Denied;
                 }
-                let _ = self.send_json(&json!({
+                let sent = self.send_json(&json!({
                     "type": "control_response",
                     "response": {
                         "subtype": "success",
@@ -6160,6 +6160,16 @@ impl ClaudeStreamProcess {
                         }
                     }
                 }));
+                // Claude echoes this id in the terminal permission_denials.
+                // The Stop confirms only when that list equals this boundary,
+                // so a deny that actually went out has to be part of it.
+                if sent.is_ok()
+                    && let Some(id) = tool_use_id.filter(|id| !id.is_empty())
+                    && let Some(stop) = self.pending_stop.as_mut()
+                    && !stop.denied_pending_tool_use_ids.iter().any(|seen| seen == &id)
+                {
+                    stop.denied_pending_tool_use_ids.push(id);
+                }
                 return None;
             }
             let epoch = self
@@ -9635,6 +9645,54 @@ time.sleep(30)
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("req-late"), "{text}");
         assert!(text.contains("\"behavior\":\"deny\""), "{text}");
+        assert_eq!(
+            process
+                .pending_stop
+                .as_ref()
+                .expect("stop")
+                .denied_pending_tool_use_ids,
+            vec!["tool-late".to_owned()]
+        );
+    }
+
+    struct ClosedPermissionSink;
+
+    impl std::io::Write for ClosedPermissionSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("stdin closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_permission_arriving_after_stop_is_not_recorded_when_the_deny_is_not_sent() {
+        let mut process = claude_with_bound_stop();
+        process.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+            ClosedPermissionSink,
+        ))));
+        let frame = json!({
+            "type": "control_request",
+            "request_id": "req-unsent",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "tool_use_id": "tool-unsent",
+                "input": { "command": "echo hi" }
+            }
+        });
+        assert!(process.map_frame("attempt-stop", &frame).is_none());
+        assert!(
+            process
+                .pending_stop
+                .as_ref()
+                .expect("stop")
+                .denied_pending_tool_use_ids
+                .is_empty(),
+            "a deny Claude never received must stay off the confirmation boundary"
+        );
     }
 
     #[test]
