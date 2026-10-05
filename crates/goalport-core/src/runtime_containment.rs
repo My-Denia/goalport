@@ -112,6 +112,28 @@ impl ContainedChild {
         }
     }
 
+    /// End the ownership domain even if the root handle was already reaped.
+    /// Windows does not kill job members when the root process exits; only
+    /// `TerminateJobObject` does. Linux namespace init death already took the
+    /// tree, so a reaped root is a no-op here and `extras_alive` is the check.
+    pub(crate) fn end_domain(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            let ok = unsafe { terminate_job(self.job as _) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            if self.reaped {
+                return Ok(());
+            }
+            self.kill()
+        }
+    }
+
     /// End the ownership domain. On Linux this is SIGKILL to namespace init,
     /// which the kernel extends to every process in the namespace. On Windows
     /// this is `TerminateJobObject`. A reused pid outside the domain is not a

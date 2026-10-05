@@ -7343,7 +7343,13 @@ impl ClaudeStreamProcess {
             ));
         };
         let exited = match child.try_wait() {
-            Ok(Some(_)) => Ok(()),
+            Ok(Some(_)) => match self.domain_empty_after_root_exit(&mut child) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.child = Some(child);
+                    Err(error)
+                }
+            },
             Ok(None) => match child.kill() {
                 Err(error) => {
                     self.child = Some(child);
@@ -7406,22 +7412,68 @@ impl ClaudeStreamProcess {
         Ok(())
     }
 
+fn waited_pid_was_reused(
+    identity: &process_identity::ProcessIdentity,
+    binding: Option<&RuntimeProcessBinding>,
+) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    identity.creation_date() != binding.creation_date
+        || !identity
+            .executable_sha256
+            .eq_ignore_ascii_case(&binding.executable_sha256)
+}
+
+    fn domain_empty_after_root_exit(
+        &mut self,
+        child: &mut crate::runtime_containment::ContainedChild,
+    ) -> Result<(), AdapterError> {
+        if let Err(error) = child.end_domain() {
+            return Err(AdapterError::Connection(format!(
+                "Claude session close could not end the ownership domain: {error}"
+            )));
+        }
+        for _ in 0..50 {
+            match child.extras_alive() {
+                Ok(false) => return Ok(()),
+                Ok(true) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(error) => {
+                    return Err(AdapterError::Connection(format!(
+                        "Claude session close could not observe the ownership domain: {error}"
+                    )));
+                }
+            }
+        }
+        Err(AdapterError::Connection(
+            "Claude session close ended the ownership domain, but a process is still inside it".into(),
+        ))
+    }
+
     fn finish_confirmed_exit(&mut self, pid: u32) -> Result<(), AdapterError> {
         match process_identity::observe_process(pid) {
-            ProcessObservation::NotRunning => {
-                self.drop_stdio()?;
-                self.initialized = false;
-                self.stdin = None;
-                self.stdout = None;
-                Ok(())
+            ProcessObservation::NotRunning => self.mark_close_reaped(),
+            ProcessObservation::Live(identity) => {
+                if Self::waited_pid_was_reused(&identity, self.process_binding.as_ref()) {
+                    return self.mark_close_reaped();
+                }
+                Err(AdapterError::Connection(
+                    "Claude session close waited, but the process id is still alive".into(),
+                ))
             }
-            ProcessObservation::Live(_) => Err(AdapterError::Connection(
-                "Claude session close waited, but the process id is still alive".into(),
-            )),
             ProcessObservation::Unknown(reason) => Err(AdapterError::Connection(format!(
                 "Claude session close could not confirm process exit: {reason}"
             ))),
         }
+    }
+
+    fn mark_close_reaped(&mut self) -> Result<(), AdapterError> {
+        self.root_handle_reaped = true;
+        self.drop_stdio()?;
+        self.initialized = false;
+        self.stdin = None;
+        self.stdout = None;
+        Ok(())
     }
 
     fn close(&mut self) -> Result<(), AdapterError> {
