@@ -54,7 +54,7 @@ the Runtime process disappearing from view:
   sealed before the first message (same process id and start tick) while that
   baseline still names the live Runtime. A later process snapshot, including
   the first permission request, does not add anyone to that set. The Runtime root may remain. Any other live
-  process in its ownership domain blocks release, and a survivor from an
+  process in its ownership domain blocks release, including one that created a nested PID namespace inside the Runtime. A survivor from an
   earlier turn is never added to that baseline. Two workspace fingerprints
   taken at least a second apart are equal; a blocked release throws away a
   stale quiet reading and waits for a fresh one. An unrelated terminal,

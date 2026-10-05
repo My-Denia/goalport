@@ -6,7 +6,8 @@
 //! Runtime runs, and leaving it is not possible:
 //! - Linux: the Runtime is pid 1 of a new pid namespace. The kernel kills every
 //!   process in that namespace when pid 1 dies, including a child that called
-//!   `setsid`.
+//!   `setsid` and a process that created a nested pid namespace. The domain
+//!   query follows that ancestry. An innermost inode match is not enough.
 //! - Windows: the Runtime is assigned to a job before its primary thread is
 //!   resumed. Breakaway is not enabled, so descendants stay in the job.
 //!   `TerminateJobObject` ends the job, not a stale pid list.
@@ -17,7 +18,7 @@ use std::path::Path;
 use std::process::ExitStatus;
 
 #[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 #[cfg(windows)]
@@ -454,7 +455,102 @@ fn namespace_inode(pid: u32) -> io::Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
+struct NamespaceDomain {
+    ancestor: u64,
+    observer: u64,
+    cache: std::collections::HashMap<u64, bool>,
+}
+
+#[cfg(target_os = "linux")]
+impl NamespaceDomain {
+    fn new(ancestor: u64) -> io::Result<Self> {
+        Ok(Self {
+            ancestor,
+            observer: namespace_inode(std::process::id())?,
+            cache: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Same namespace or a descendant. `unshare --pid` exposes the inner
+    /// inode at `/proc/<pid>/ns/pid`, so equality with the spawn-time inode
+    /// would leave that process outside the domain while it can still write.
+    fn contains(&mut self, pid: u32) -> io::Result<bool> {
+        let path = std::ffi::CString::new(format!("/proc/{pid}/ns/pid"))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if raw < 0 {
+            let error = io::Error::last_os_error();
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT | libc::EACCES | libc::ESRCH)
+            ) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        let mut current = unsafe { OwnedFd::from_raw_fd(raw) };
+        let innermost = fd_inode(current.as_raw_fd())?;
+        if let Some(known) = self.cache.get(&innermost) {
+            return Ok(*known);
+        }
+        let mut inode = innermost;
+        let mut contained = None;
+        for _ in 0..32 {
+            if inode == self.ancestor {
+                contained = Some(true);
+                break;
+            }
+            // The observer namespace is the parent of the Runtime namespace.
+            // A process there, or in a namespace that is not under the
+            // observer, cannot be inside the Runtime domain.
+            if inode == self.observer {
+                contained = Some(false);
+                break;
+            }
+            let parent = match parent_pid_namespace(current.as_raw_fd()) {
+                Ok(parent) => parent,
+                Err(error) if error.raw_os_error() == Some(libc::EPERM) => {
+                    contained = Some(false);
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
+            drop(current);
+            inode = fd_inode(parent.as_raw_fd())?;
+            current = parent;
+        }
+        let Some(contained) = contained else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "pid namespace ancestry exceeded the nesting limit",
+            ));
+        };
+        self.cache.insert(innermost, contained);
+        Ok(contained)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fd_inode(fd: RawFd) -> io::Result<u64> {
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stat.st_ino)
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid_namespace(fd: RawFd) -> io::Result<OwnedFd> {
+    let parent = unsafe { libc::ioctl(fd, libc::NS_GET_PARENT) };
+    if parent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(parent) })
+}
+
+#[cfg(target_os = "linux")]
 fn linux_namespace_has_other(inode: u64, root: u32) -> io::Result<bool> {
+    let mut domain = NamespaceDomain::new(inode)?;
     let entries = std::fs::read_dir("/proc")?;
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
@@ -463,17 +559,15 @@ fn linux_namespace_has_other(inode: u64, root: u32) -> io::Result<bool> {
         if pid == root || pid == 0 {
             continue;
         }
-        let Ok(found) = namespace_inode(pid) else {
+        if !domain.contains(pid)? {
             continue;
-        };
-        if found == inode {
-            // A zombie is not executing and cannot write or fork. Counting it
-            // keeps a killed descendant blocking release until some parent reaps it.
-            if process_state(pid) == Some('Z') {
-                continue;
-            }
-            return Ok(true);
         }
+        // A zombie is not executing and cannot write or fork. Counting it
+        // keeps a killed descendant blocking release until some parent reaps it.
+        if process_state(pid) == Some('Z') {
+            continue;
+        }
+        return Ok(true);
     }
     Ok(false)
 }
@@ -483,6 +577,7 @@ fn linux_namespace_members(
     inode: u64,
     root: u32,
 ) -> io::Result<Vec<crate::descendants::DescendantRecord>> {
+    let mut domain = NamespaceDomain::new(inode)?;
     let entries = std::fs::read_dir("/proc")?;
     let mut records = Vec::new();
     for entry in entries.flatten() {
@@ -492,10 +587,7 @@ fn linux_namespace_members(
         if pid == 0 {
             continue;
         }
-        let Ok(found) = namespace_inode(pid) else {
-            continue;
-        };
-        if found != inode {
+        if !domain.contains(pid)? {
             continue;
         }
         if process_state(pid) == Some('Z') {
@@ -1009,6 +1101,68 @@ mod tests {
         let mut child = spawned.child;
         child.kill().expect("kill namespace init");
         let _ = child.wait();
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn a_nested_pid_namespace_stays_in_the_ownership_domain() {
+        let dir = std::env::temp_dir().join(format!("goalport-nested-ns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // CLONE_NEWPID. The child is pid 1 of an inner namespace, so its
+        // innermost inode is not the Runtime inode.
+        let script = "import ctypes,os,time\nlibc=ctypes.CDLL(None)\nif libc.unshare(0x20000000)!=0:\n raise SystemExit(1)\nif os.fork()==0:\n open('nested.ready','w').write('1')\n time.sleep(60)\nelse:\n time.sleep(60)\n";
+        let spawned = spawn_contained(
+            Path::new("python3"),
+            &[String::from("-c"), script.to_owned()],
+            &dir,
+            &[],
+        )
+        .expect("pid namespace spawn");
+        let marker = dir.join("nested.ready");
+        for _ in 0..250 {
+            if marker.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(marker.is_file(), "nested pid namespace did not start");
+        let inode = spawned.child.ns_inode;
+        let root = spawned.child.id();
+        assert!(
+            spawned.child.extras_alive().expect("domain scan"),
+            "a nested pid namespace must keep the domain occupied"
+        );
+        let members = spawned.child.members().expect("domain members");
+        let nested: Vec<_> = members.iter().filter(|member| member.pid != root).collect();
+        assert!(
+            nested
+                .iter()
+                .any(|member| namespace_inode(member.pid).expect("nested inode") != inode),
+            "membership must include the inner namespace, not only an inode match"
+        );
+        assert!(
+            !members.iter().any(|member| member.pid == std::process::id()),
+            "the observer process is outside the Runtime domain"
+        );
+        let nested_pids: Vec<u32> = nested.iter().map(|member| member.pid).collect();
+        let mut child = spawned.child;
+        child.kill().expect("kill namespace init");
+        let _ = child.wait();
+        let mut gone = false;
+        for _ in 0..50 {
+            let alive = nested_pids.iter().any(|pid| {
+                std::fs::metadata(format!("/proc/{pid}")).is_ok() && process_state(*pid) != Some('Z')
+            });
+            if !alive && child.extras_alive().ok() == Some(false) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            gone,
+            "a nested pid namespace must die with the Runtime namespace"
+        );
         let _ = std::fs::remove_file(marker);
     }
 
