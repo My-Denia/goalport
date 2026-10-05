@@ -410,6 +410,48 @@ pub fn terminate_descendants(records: &[DescendantRecord]) -> usize {
     }
 }
 
+/// Signal the process opened by `pidfd_open`, and only when that pid still has
+/// the recorded start time. A pid reused after classification is a different
+/// process: the recheck refuses it, and `pidfd_send_signal` cannot follow a
+/// later reuse of the number. There is no `kill(pid)` fallback.
+#[cfg(target_os = "linux")]
+fn linux_signal_bound(record: &DescendantRecord, sig: i32) {
+    let opened = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_open,
+            record.pid as libc::c_int,
+            0 as libc::c_uint,
+        )
+    };
+    if opened < 0 {
+        return;
+    }
+    struct CloseFd(libc::c_int);
+    impl Drop for CloseFd {
+        fn drop(&mut self) {
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+    let fd = CloseFd(opened as libc::c_int);
+    let same = linux_stat_fields(record.pid)
+        .is_some_and(|(_, tick)| tick == record.start_tick)
+        && linux_process_state(record.pid).is_some_and(|state| state != 'Z');
+    if !same {
+        return;
+    }
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.0,
+            sig,
+            std::ptr::null_mut::<libc::siginfo_t>(),
+            0 as libc::c_uint,
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_terminate(records: &[DescendantRecord]) -> usize {
     terminate_alive_only(
@@ -420,9 +462,7 @@ fn linux_terminate(records: &[DescendantRecord]) -> usize {
                 TerminatePhase::Term => libc::SIGTERM,
                 TerminatePhase::Kill => libc::SIGKILL,
             };
-            // SAFETY: libc kill with a checked pid; errors (already gone) ignore.
-            // Only invoked for a record that classified Alive immediately before.
-            unsafe { libc::kill(record.pid as i32, sig) };
+            linux_signal_bound(record, sig);
         },
         std::time::Duration::from_millis(2_000),
         std::time::Duration::from_millis(2_000),
@@ -459,6 +499,53 @@ mod terminate_tests {
         let _ = child.wait();
         let remaining = linux_terminate(&[record]);
         assert_eq!(remaining, 0, "a dead descendant reports zero survivors");
+    }
+
+    #[test]
+    fn a_live_descendant_is_terminated_through_its_pidfd() {
+        let mut child = Command::new("sleep").arg("60").spawn().expect("spawn sleep");
+        let records = linux_snapshot(std::process::id()).expect("enumeration works");
+        let record = records
+            .iter()
+            .find(|record| record.pid == child.id())
+            .expect("child snapshotted")
+            .clone();
+        let remaining = linux_terminate(&[record]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let exited = loop {
+            if let Some(status) = child.try_wait().expect("reap") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the matched descendant was not signalled");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(remaining, 0, "the matched descendant must not survive");
+        assert!(
+            exited.code().is_none(),
+            "the descendant must die from the pidfd signal, not a normal exit: {exited:?}"
+        );
+    }
+
+    #[test]
+    fn a_stale_start_tick_is_not_signalled() {
+        let mut child = Command::new("sleep").arg("60").spawn().expect("spawn sleep");
+        let stale = DescendantRecord {
+            pid: child.id(),
+            start_tick: "not-this-process".into(),
+        };
+        linux_signal_bound(&stale, libc::SIGKILL);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        match child.try_wait() {
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            other => panic!("a mismatched identity must not be signalled: {other:?}"),
+        }
     }
 }
 
