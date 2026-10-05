@@ -394,8 +394,22 @@ fn spawn_release_scan(workspace: &Path, slot: &mut ScanSlot) {
 }
 
 fn filesystem_sample(workspace: &Path) -> Option<WorkspaceSample> {
+    // A file can disappear between readdir and stat on a busy machine.
+    // Retry that race. Any other read error stays unreadable.
     let mut records = Vec::new();
-    if walk_files(workspace, workspace, &mut records).is_err() {
+    let mut read = false;
+    for _ in 0..3 {
+        records.clear();
+        match walk_files(workspace, workspace, &mut records) {
+            Ok(()) => {
+                read = true;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    if !read {
         return None;
     }
     records.sort();
