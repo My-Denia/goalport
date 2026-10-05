@@ -92,6 +92,50 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
 - 当我（项目负责人）的指令会明显伤害用户体验时，指出来，并给出更好的做法。这条优先级高于"照做"。
 - 每次交付结尾，用一句话回答："用户为什么会更喜欢用这个？" 答不上来就别说做完了。
 
+## 8. Code Review Rules
+
+GitHub 和本地审阅都先回答两件事，顺序不能反：
+
+1. 这个 finding 在 **current HEAD** 上是否成立？
+2. 即使成立，它是否属于 **这个 PR 当前必须修的 scope**？
+
+严重级别（P1、P2）不决定第二问。先判 scope，再标严重度。
+
+每个 finding 必须同时给出两列：
+
+- 成立性：`valid` / `fixed` / `outdated` / `false positive`
+- 去向：`blocking current PR` / `follow-up`
+
+Reviewer 只分类，不把当前 PR 接过来自己实现。
+
+**当前 PR 的 blocker 只限这四类：**
+
+- 这个 PR 引入的 regression
+- 这个 PR 明确承诺的产品行为没有实现，或被这个 diff 破坏
+- 这个 diff 造成的具体 correctness、security、data-integrity、destructive risk
+- 会让本 PR 已声明的真实产品验收失效
+
+**即使成立，默认 follow-up，不强迫当前 PR 吸收：**
+
+- 改动前就存在的缺陷
+- PR contract 之外的问题
+- 理论 hardening
+- 更深、这个 PR 没有承诺的架构不变量
+- 与本 PR 产品路径无关的 tooling、文案风格、泛化重构
+- 只为了「还可以证明得更严格」而新加的安全或审计机制
+
+**GoalPort 的层不要揉在一起。** UI、Runtime、Core、profile、storage、IPC、safety 是不同边界。产品验收和测试/形式证明是不同证据。session 级 ownership 和 turn 级 responsibility 是不同东西。不许为了补一层表象，把另一层已经成立的 durable/safety 语义推翻；也不许用 safety hardening 把已经定义的产品交付无限压住。这与 §0、§3、§6 一致：用户喜欢使用高于验证仪式；诚实语义保留，但不为它再加一层装甲；Core 只保留真正要卖的差异。
+
+已经被 current HEAD 的代码和真实证据修好的问题，不得因为 review thread 还挂着 unresolved 就继续算 blocker。
+
+连续出现大量同类、彼此相邻、又都落在 scope 内的 finding 时，停止逐条补洞。直接写明实现或原计划可能整体不成立，建议另开一次系统性 audit 或 redesign。不要靠无限追加 finding，把当前 PR 变成没有终点的架构项目。
+
+没有 APPROVE，或 reviewer 还能再提一条建议，本身不是 merge blocker。完成看这个 PR 自己的 contract、对 current HEAD 的独立 audit、CI，以及已经定义的产品验收。
+
+Windows GUI、Electron、Claude native path：真实打包的 EXE、真实的鼠标键盘、真实 Runtime 行为，高于 synthetic 和 unit 测试。不得用更多形式验证替换已经定义的产品验收。
+
+已经授权并创建的 PR，在同一分支上为 **成立且属于当前 scope** 的修复做普通 fast-forward commit 和 push，算这条 PR 生命周期里的持续授权。不要为此再向 owner 要一次「继续」或重新授权 push。force-push、扩大 PR scope、新建 PR、merge、tag、release、deploy、签名、版本变更，以及其他不可逆的外部操作，仍要单独明确授权。
+
 ---
 
 *本文件高于一切局部优化冲动。当它与"再加一层验证"的诱惑冲突时，记住：2026 年，想法廉价、实现已自动化，软件业剩下的唯一稀缺品是"让用户喜欢"的判断力。*
