@@ -797,7 +797,8 @@ fn windows_spawn_in_job(
 ) -> io::Result<ContainedSpawn> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
-    use winapi::um::handleapi::{CloseHandle, SetHandleInformation};
+    use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE, SetHandleInformation};
     use winapi::um::jobapi2::{
         AssignProcessToJobObject, CreateJobObjectW, QueryInformationJobObject, SetInformationJobObject,
         TerminateJobObject,
@@ -809,7 +810,9 @@ fn windows_spawn_in_job(
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, HANDLE_FLAG_INHERIT,
         STARTF_USESTDHANDLES,
     };
-    use winapi::um::winnt::HANDLE;
+    use winapi::um::winnt::{
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GENERIC_WRITE, HANDLE,
+    };
     unsafe {
         let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
         if job.is_null() {
@@ -880,13 +883,36 @@ fn windows_spawn_in_job(
         }
         let mut wide: Vec<u16> = cmdline.encode_wide().chain(std::iter::once(0)).collect();
         let cwd_wide: Vec<u16> = cwd.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let nul_name: Vec<u16> = std::ffi::OsStr::new("NUL")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let err_write = CreateFileW(
+            nul_name.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &mut sa,
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if err_write == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            CloseHandle(in_read);
+            CloseHandle(in_write);
+            CloseHandle(out_read);
+            CloseHandle(out_write);
+            CloseHandle(job);
+            return Err(error);
+        }
         let mut process_info = std::mem::zeroed::<PROCESS_INFORMATION>();
         let mut startup = std::mem::zeroed::<STARTUPINFOW>();
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         startup.dwFlags = STARTF_USESTDHANDLES;
         startup.hStdInput = in_read;
         startup.hStdOutput = out_write;
-        startup.hStdError = out_write;
+        // Diagnostics must not share the stream-json stdout pipe.
+        startup.hStdError = err_write;
         let mut env_block = windows_env_block(env_remove);
         let ok = CreateProcessW(
             std::ptr::null(),
@@ -902,6 +928,7 @@ fn windows_spawn_in_job(
         );
         CloseHandle(in_read);
         CloseHandle(out_write);
+        CloseHandle(err_write);
         if ok == 0 {
             CloseHandle(in_write);
             CloseHandle(out_read);
@@ -1541,5 +1568,54 @@ Start-Sleep -Seconds 45
         child.kill().expect("kill job");
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_stays_off_the_stdout_pipe() {
+        let dir = std::env::temp_dir().join(format!(
+            "goalport-stderr-pipe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut spawned = spawn_contained(
+            Path::new("cmd"),
+            &[
+                String::from("/c"),
+                String::from("echo STDOUT_GOALPORT_PIPE& echo STDERR_GOALPORT_PIPE 1>&2"),
+            ],
+            &dir,
+            &[],
+        )
+        .expect("contained cmd");
+        drop(spawned.stdin);
+        let mut child = spawned.child;
+        let mut exited = false;
+        for _ in 0..100 {
+            if child.try_wait().expect("poll child").is_some() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut output = String::new();
+        let read = if exited {
+            std::io::Read::read_to_string(&mut spawned.stdout, &mut output)
+        } else {
+            Ok(0)
+        };
+        child.kill().ok();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(exited, "cmd did not exit");
+        read.expect("stdout read");
+        assert!(
+            output.contains("STDOUT_GOALPORT_PIPE"),
+            "stdout marker missing: {output:?}"
+        );
+        assert!(
+            !output.contains("STDERR_GOALPORT_PIPE"),
+            "stderr leaked onto the stream pipe: {output:?}"
+        );
     }
 }
