@@ -1499,7 +1499,11 @@ Start-Sleep -Seconds 45
         .expect("contained powershell");
         let marker = dir.join("breakaway.txt");
         let mut text = String::new();
-        for _ in 0..250 {
+        // started.txt is written before Add-Type. A cold csc on the Windows
+        // runner can still be compiling past a 10s poll while the contained
+        // PowerShell is alive and has not failed.
+        let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < marker_deadline {
             if let Ok(read) = std::fs::read_to_string(&marker) {
                 if read.contains("pid ") {
                     text = read;
