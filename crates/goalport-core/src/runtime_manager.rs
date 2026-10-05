@@ -6801,20 +6801,16 @@ impl ClaudeStreamProcess {
             return;
         }
         self.baseline_refresh_due = false;
-        if self.baseline_window != BaselineWindow::FirstTurn || !self.no_tool_started() {
-            return;
+        if self.baseline_window == BaselineWindow::FirstTurn {
+            self.baseline_window = BaselineWindow::Frozen;
         }
-        self.refresh_session_baseline("permission-request");
     }
 
     fn refresh_session_baseline(&mut self, sealed_at: &str) {
         if self.broker.is_some() {
             return;
         }
-        if !matches!(
-            self.baseline_window,
-            BaselineWindow::BeforeFirstMessage | BaselineWindow::FirstTurn
-        ) {
+        if self.baseline_window != BaselineWindow::BeforeFirstMessage {
             return;
         }
         let Some(binding) = self.process_binding.as_ref() else {
@@ -10558,6 +10554,23 @@ mod resume_proof_and_tool_result_tests {
         assert!(!process.no_tool_started());
 
         process.unrequested_bash.clear();
+        process.session_baseline = Some(crate::descendants::SessionBaseline {
+            process_epoch: "epoch-pre-message".into(),
+            sealed_at: "before-first-message".into(),
+            members: vec![crate::descendants::DescendantRecord {
+                pid: 11,
+                start_tick: "tick-11".into(),
+            }],
+        });
+        process.baseline_window = BaselineWindow::FirstTurn;
+        process.baseline_refresh_due = true;
+        process.consume_baseline_refresh();
+        let sealed = process.session_baseline.as_ref().expect("pre-message baseline");
+        assert_eq!(sealed.sealed_at, "before-first-message");
+        assert_eq!(sealed.members.len(), 1);
+        assert_eq!(sealed.members[0].pid, 11);
+        assert_eq!(process.baseline_window, BaselineWindow::Frozen);
+        assert!(!process.baseline_refresh_due);
         process.baseline_window = BaselineWindow::FirstTurn;
         process.baseline_refresh_due = true;
         let frame = json!({

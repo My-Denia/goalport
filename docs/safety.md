@@ -51,8 +51,9 @@ the Runtime process disappearing from view:
 - **Confirmed cancel + quiet workspace.** When the native turn confirmed the
   interrupt, Core releases once three observations agree. Recorded descendants
   from this Stop are dead or reused, except identity-matched session helpers
-  sealed before the turn (same process id and start tick) while that baseline
-  still names the live Runtime. The Runtime root may remain. Any other live
+  sealed before the first message (same process id and start tick) while that
+  baseline still names the live Runtime. A later process snapshot, including
+  the first permission request, does not add anyone to that set. The Runtime root may remain. Any other live
   process in its ownership domain blocks release, and a survivor from an
   earlier turn is never added to that baseline. Two workspace fingerprints
   taken at least a second apart are equal; a blocked release throws away a
