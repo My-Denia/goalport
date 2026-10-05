@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode, type RefObject } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Drawer } from "@base-ui/react/drawer";
 import { Menu } from "@base-ui/react/menu";
@@ -74,6 +74,14 @@ export interface GoalLayerProps {
   surface?: ReactElement;
   /** dialog/drawer: where focus lands on open. `false` never moves focus. */
   initialFocus?: boolean | RefObject<HTMLElement | null>;
+  /**
+   * dialog: the shared modal card (scrim, viewport, dismiss control). This is
+   * the only Dialog.Root. Callers that used to wrap Base UI themselves pass
+   * this instead of owning a second primitive.
+   */
+  modalCard?: boolean;
+  /** dialog modal card: classes on the popup, after the shared shell class. */
+  popupClassName?: string;
   /** Bumped by the app to open the layer and focus its trigger (menu/popover). */
   focusSignal?: number;
   /** menu/popover: class for the positioned box (our CSS convention styles the positioner). */
@@ -83,6 +91,29 @@ export interface GoalLayerProps {
 
 interface BaseUIOpenChangeDetails {
   reason?: string;
+}
+
+function ModalCardPopup({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+  const restoreRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  useLayoutEffect(() => () => {
+    const previous = restoreRef.current;
+    if (previous?.isConnected) queueMicrotask(() => previous.focus());
+  }, []);
+  const focusWhenMounted = (popup: HTMLDivElement | null) => {
+    if (!popup || popup.contains(document.activeElement)) return;
+    (popup.querySelector<HTMLElement>("input:not([disabled]), textarea:not([disabled]), button:not([disabled])") ?? popup).focus();
+  };
+  return (
+    <Dialog.Popup
+      ref={focusWhenMounted}
+      finalFocus={() => restoreRef.current}
+      className={`first-run-dialog ${className ?? ""}`.trim()}
+      aria-label={label}
+    >
+      {children}
+      <Dialog.Close className="dialog-sr-close" aria-label="Dismiss dialog">Dismiss</Dialog.Close>
+    </Dialog.Popup>
+  );
 }
 
 function useResolvedOpen(open: boolean | undefined) {
@@ -102,6 +133,8 @@ export function GoalLayer({
   modal,
   surface,
   initialFocus,
+  modalCard,
+  popupClassName,
   focusSignal,
   positionerClassName,
   children
@@ -158,6 +191,20 @@ export function GoalLayer({
   }
 
   if (variant === "dialog") {
+    if (modalCard) {
+      return (
+        <Dialog.Root {...openChangeProps} modal={modal ?? true}>
+          <Dialog.Portal>
+            <Dialog.Backdrop className="dialog-scrim" />
+            <Dialog.Viewport className="dialog-backdrop">
+              <ModalCardPopup label={label} className={popupClassName}>
+                {children}
+              </ModalCardPopup>
+            </Dialog.Viewport>
+          </Dialog.Portal>
+        </Dialog.Root>
+      );
+    }
     return (
       <Dialog.Root {...openChangeProps} modal={modal ?? true}>
         {/* The portal fills the viewport so full-screen surfaces (the

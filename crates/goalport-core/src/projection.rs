@@ -2079,9 +2079,9 @@ impl UiController {
                     })
             });
             let Some(descendants) = descendant_snapshot else {
+                crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             };
-            crate::stop_closure::ensure_release_scan(&workspace);
             if descendants.iter().any(|record| {
                 !matches!(
                     crate::descendants::classify_descendant(record),
@@ -2089,11 +2089,13 @@ impl UiController {
                         | crate::descendants::DescendantState::Reused
                 )
             }) {
+                crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             }
             match row.native_turn_state {
                 crate::store::StopNativeTurnState::Interrupted => {
                     if claude_pid == 0 {
+                        crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
                 }
@@ -2103,6 +2105,7 @@ impl UiController {
                     // hold with no admission ledger reads as not proven and
                     // stays held.
                     if !never_admitted || claude_pid == 0 {
+                        crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
                     let (observation, verdict, _) = classify_recheck(&bound);
@@ -2110,10 +2113,14 @@ impl UiController {
                         || verdict
                             != crate::store::RecheckVerdict::BoundRuntimeAbsentResidualStillUnknown
                     {
+                        crate::stop_closure::invalidate_release_scan(&workspace);
                         continue;
                     }
                 }
-                crate::store::StopNativeTurnState::Pending => continue,
+                crate::store::StopNativeTurnState::Pending => {
+                    crate::stop_closure::invalidate_release_scan(&workspace);
+                    continue;
+                }
             }
             // A child forked after the stop snapshot is still in the
             // spawn-time domain. Parent-link reparenting cannot hide it.
@@ -2124,10 +2131,12 @@ impl UiController {
                 .claude_domain_has_extra(&row.attempt_id)
                 == Some(true)
             {
+                crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             }
             let Ok(writers) = crate::stop_closure::workspace_writers(&workspace, claude_pid)
             else {
+                crate::stop_closure::invalidate_release_scan(&workspace);
                 continue;
             };
             // After the descendant gate: unknown, missing, or mismatched
@@ -2141,7 +2150,10 @@ impl UiController {
                 &descendants,
                 &writers,
             ) {
-                crate::stop_closure::ReleaseWriterGate::Hold => continue,
+                crate::stop_closure::ReleaseWriterGate::Hold => {
+                    crate::stop_closure::invalidate_release_scan(&workspace);
+                    continue;
+                }
                 crate::stop_closure::ReleaseWriterGate::Filtered(writers) => writers,
             };
             let sample = match crate::stop_closure::take_release_sample(&workspace) {

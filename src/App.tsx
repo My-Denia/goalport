@@ -177,11 +177,12 @@ function App() {
 
   const projectionUnavailable = snapshot.bounds?.projectionUnavailable === true;
   const activeCampaign = snapshot.campaigns.find((campaign) => campaign.id === snapshot.activeCampaignId);
-  // A capacity acknowledgement may omit the navigation row while preserving
-  // the bounded authoritative active id. Keep that id as the pending intent /
-  // history key; an absent id remains unavailable and never means "fresh".
-  const draftCampaignId = activeCampaign?.id
-    ?? (projectionUnavailable ? snapshot.activeCampaignId.trim() : "");
+  // The visible goal follows the authoritative active id, not only a campaign
+  // row. Right after send, and on a capacity acknowledgement, that id is
+  // already set while the row may still be missing. Dropping it blanks the
+  // conversation. An empty id is still a fresh profile, so the draft composer
+  // is not remounted over a goal that Core has already opened.
+  const draftCampaignId = activeCampaign?.id ?? snapshot.activeCampaignId.trim();
   const draft = draftCampaignId ? campaignDrafts[draftCampaignId] ?? "" : "";
   const product = snapshot.productConversation;
   const hasGoal = Boolean(draftCampaignId);

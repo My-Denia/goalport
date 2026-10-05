@@ -304,24 +304,25 @@ pub(crate) enum ReleaseSample {
 }
 
 struct ScanSlot {
-    running: bool,
-    ready: Option<Result<WorkspaceSample, ()>>,
+    /// Bumped when a descendant, domain, or writer gate holds. A sample is
+    /// current only if its scan started at this generation.
+    generation: u64,
+    running_generation: Option<u64>,
+    ready: Option<(u64, Result<WorkspaceSample, ()>)>,
 }
 
 static RELEASE_SCANS: LazyLock<Mutex<HashMap<PathBuf, ScanSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) fn ensure_release_scan(workspace: &Path) {
+pub(crate) fn invalidate_release_scan(workspace: &Path) {
     let Ok(mut slots) = RELEASE_SCANS.lock() else {
         return;
     };
-    let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
-        running: false,
-        ready: None,
-    });
-    if slot.ready.is_none() && !slot.running {
-        spawn_release_scan(workspace, slot);
-    }
+    let Some(slot) = slots.get_mut(workspace) else {
+        return;
+    };
+    slot.generation = slot.generation.wrapping_add(1);
+    slot.ready = None;
 }
 
 pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
@@ -329,17 +330,20 @@ pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
         return ReleaseSample::Unreadable;
     };
     let slot = slots.entry(workspace.to_path_buf()).or_insert(ScanSlot {
-        running: false,
+        generation: 0,
+        running_generation: None,
         ready: None,
     });
-    if let Some(result) = slot.ready.take() {
-        spawn_release_scan(workspace, slot);
-        return match result {
-            Ok(sample) => ReleaseSample::Ready(sample),
-            Err(()) => ReleaseSample::Unreadable,
-        };
+    if let Some((generation, result)) = slot.ready.take() {
+        if generation == slot.generation {
+            spawn_release_scan(workspace, slot);
+            return match result {
+                Ok(sample) => ReleaseSample::Ready(sample),
+                Err(()) => ReleaseSample::Unreadable,
+            };
+        }
     }
-    if !slot.running {
+    if slot.running_generation != Some(slot.generation) {
         spawn_release_scan(workspace, slot);
     }
     ReleaseSample::Pending
@@ -347,21 +351,28 @@ pub(crate) fn take_release_sample(workspace: &Path) -> ReleaseSample {
 
 fn spawn_release_scan(workspace: &Path, slot: &mut ScanSlot) {
     let path = workspace.to_path_buf();
-    slot.running = true;
+    let generation = slot.generation;
+    slot.running_generation = Some(generation);
     let spawned = thread::Builder::new()
         .name("goalport-quiet-scan".into())
         .spawn(move || {
             let result = sample_workspace(&path).ok_or(());
             if let Ok(mut slots) = RELEASE_SCANS.lock() {
                 if let Some(slot) = slots.get_mut(&path) {
-                    slot.running = false;
-                    slot.ready = Some(result);
+                    if slot.running_generation == Some(generation) {
+                        slot.running_generation = None;
+                    }
+                    // A gate hold bumps generation. The walk that started
+                    // before that hold must not become the next observation.
+                    if slot.generation == generation {
+                        slot.ready = Some((generation, result));
+                    }
                 }
             }
         });
     if spawned.is_err() {
-        slot.running = false;
-        slot.ready = Some(Err(()));
+        slot.running_generation = None;
+        slot.ready = Some((generation, Err(())));
     }
 }
 
@@ -717,6 +728,30 @@ mod tests {
             match take_release_sample(dir.path()) {
                 ReleaseSample::Ready(sample) => {
                     assert!(sample.ignored_digest.is_some());
+                    return;
+                }
+                ReleaseSample::Pending => {
+                    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+                    thread::yield_now();
+                }
+                ReleaseSample::Unreadable => panic!("walk failed"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_gate_hold_discards_a_scan_that_started_before_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "one\n").unwrap();
+        let before = sample_workspace(dir.path()).unwrap();
+        assert!(matches!(take_release_sample(dir.path()), ReleaseSample::Pending));
+        invalidate_release_scan(dir.path());
+        std::fs::write(dir.path().join("notes.txt"), "two\n").unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            match take_release_sample(dir.path()) {
+                ReleaseSample::Ready(sample) => {
+                    assert_ne!(sample.ignored_digest, before.ignored_digest);
                     return;
                 }
                 ReleaseSample::Pending => {
