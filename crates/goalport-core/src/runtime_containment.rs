@@ -420,10 +420,22 @@ fn linux_namespace_has_other(inode: u64, root: u32) -> io::Result<bool> {
             continue;
         };
         if found == inode {
+            // A zombie is not executing and cannot write or fork. Counting it
+            // keeps a killed descendant blocking release until some parent reaps it.
+            if process_state(pid) == Some('Z') {
+                continue;
+            }
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn process_state(pid: u32) -> Option<char> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = text.rsplit(')').next()?;
+    after.split_whitespace().next()?.chars().next()
 }
 
 #[cfg(target_os = "linux")]
@@ -780,6 +792,41 @@ mod tests {
                 && namespace_inode(root).is_err(),
             "a setsid grandchild must die with the pid namespace"
         );
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn a_zombie_in_the_namespace_is_not_an_extra() {
+        let dir = std::env::temp_dir().join(format!("goalport-zombie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = "import os,time\nchild=os.fork()\nif child==0:\n os._exit(0)\nopen('zombie.ready','w').write('1')\ntime.sleep(30)\n";
+        let spawned = spawn_contained(
+            Path::new("python3"),
+            &[String::from("-c"), script.to_owned()],
+            &dir,
+            &[],
+        )
+        .expect("pid namespace spawn");
+        let marker = dir.join("zombie.ready");
+        for _ in 0..250 {
+            if marker.is_file() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(marker.is_file(), "zombie parent did not start");
+        let mut quiet = false;
+        for _ in 0..50 {
+            if spawned.child.extras_alive().expect("domain scan") == false {
+                quiet = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(quiet, "a zombie must not keep the domain occupied");
+        let mut child = spawned.child;
+        child.kill().expect("kill namespace init");
+        let _ = child.wait();
         let _ = std::fs::remove_file(marker);
     }
 }
