@@ -5,6 +5,8 @@
 use crate::descendants::{DescendantRecord, DescendantState};
 
 use winapi::ctypes::c_void;
+use winapi::shared::winerror::ERROR_NO_MORE_FILES;
+use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::tlhelp32::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -76,15 +78,21 @@ pub(crate) fn snapshot(root_pid: u32) -> Option<Vec<DescendantRecord>> {
         let mut entries: Vec<(u32, u32)> = Vec::new(); // (pid, ppid)
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-        if Process32FirstW(snap, &mut entry) != 0 {
+        let complete = if Process32FirstW(snap, &mut entry) != 0 {
             loop {
                 entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
                 if Process32NextW(snap, &mut entry) == 0 {
                     break;
                 }
             }
-        }
+            toolhelp_ended()
+        } else {
+            toolhelp_ended()
+        };
         CloseHandle(snap);
+        if !complete {
+            return None;
+        }
         let mut in_tree: std::collections::HashSet<u32> = std::collections::HashSet::new();
         in_tree.insert(root_pid);
         loop {
@@ -118,18 +126,26 @@ pub(crate) fn classify(record: &DescendantRecord) -> DescendantState {
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         let mut present = false;
-        if Process32FirstW(snap, &mut entry) != 0 {
+        let ended = if Process32FirstW(snap, &mut entry) != 0 {
+            let mut ended = false;
             loop {
                 if entry.th32ProcessID == record.pid {
                     present = true;
                     break;
                 }
                 if Process32NextW(snap, &mut entry) == 0 {
+                    ended = toolhelp_ended();
                     break;
                 }
             }
-        }
+            ended
+        } else {
+            toolhelp_ended()
+        };
         CloseHandle(snap);
+        if !present && !ended {
+            return DescendantState::Unknown;
+        }
         if !present {
             return DescendantState::Dead;
         }
@@ -139,6 +155,10 @@ pub(crate) fn classify(record: &DescendantRecord) -> DescendantState {
             Some(_) => DescendantState::Reused,
         }
     }
+}
+
+fn toolhelp_ended() -> bool {
+    unsafe { GetLastError() == ERROR_NO_MORE_FILES }
 }
 
 const PROCESS_TERMINATE: u32 = 0x0001;
