@@ -41,8 +41,10 @@ const ESTABLISHED_KIND: &str = "runtime.registration.established";
 const NOT_COMPLETE: &str = "initialization did not complete";
 const NOT_RECORDED: &str = "initialization or recovery success is not recorded";
 const NOT_RETRIED: &str = "not retried automatically";
-/// Budget of a restart case: fixture 1's unconditional watchdog.
-const WATCHDOG: Duration = Duration::from_secs(45);
+/// Hang bound for a restart case. The node fixture still exits 45s after that
+/// process starts. This clock starts earlier, during case setup, and CI finishes
+/// the real checks at about 48s while that process is still alive.
+const WATCHDOG: Duration = Duration::from_secs(60);
 
 static CODEX_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1178,7 +1180,11 @@ fn g5_restart_then_resume_delivers_events_through_poll_events() {
         r.kept_before,
         "old records are never rewritten"
     );
-    assert!(r.began.elapsed() < WATCHDOG);
+    assert!(
+        r.began.elapsed() < WATCHDOG,
+        "the case must finish inside the restart hang bound: elapsed={:?}, budget={WATCHDOG:?}",
+        r.began.elapsed(),
+    );
 
     stop_fixtures(&case.workspace, &[r.first.pid, second.pid]);
 }
