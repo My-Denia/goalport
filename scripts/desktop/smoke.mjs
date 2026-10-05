@@ -497,7 +497,10 @@ async function smoke() {
   const closeWindow = async () => {
     // The app close entry lives in the title-bar application menu; the native
     // overlay X is the other close path and requestClose shares the controlled flow.
+    // The menu item is portaled after the click. Clicking it in the same turn
+    // races the open and fails the packaged smoke with "control missing".
     await click("button[aria-label='Application menu']");
+    await until("close window menu item", () => read("Boolean(document.querySelector(\"div[role='menu'] button[aria-label='Close window']\"))"));
     await click("div[role='menu'] button[aria-label='Close window']");
     await sleep(150);
     if (child.exitCode === null) {

@@ -786,18 +786,19 @@ function App() {
     setSnapshot(next);
     const failure = commandFailure(next, "resume_native_session");
     const turn = next.productConversation?.turn;
-    const pendingVerification = next.attempt.id !== attemptId
-      && turn?.reasonCode === "resume-pending-verification";
+    // A retry can reuse the same attempt. The pending reason, not a new id,
+    // is what means verification has not finished.
+    const pendingVerification = turn?.reasonCode === "resume-pending-verification";
     if (failure) {
       resumeWatch.current = null;
       setActiveNotice(failure);
-    } else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
-      resumeWatch.current = null;
-      setActiveNotice({ sentence: "Runtime session resumed. You can continue this goal." });
     } else if (pendingVerification) {
       const sentence = turn?.reason || "Session is starting again. Send a message to continue. Earlier messages will not be sent again.";
       resumeWatch.current = { attemptId: next.attempt.id, sentence };
       setActiveNotice({ sentence });
+    } else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
+      resumeWatch.current = null;
+      setActiveNotice({ sentence: "Runtime session resumed. You can continue this goal." });
     } else {
       resumeWatch.current = null;
       setActiveNotice({ sentence: turn?.reason || "Session resume was not confirmed. Check its status in details." });
