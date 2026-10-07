@@ -3,6 +3,7 @@ const { spawn, execFile } = require("node:child_process");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const net = require("node:net");
+const os = require("node:os");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
@@ -11,6 +12,8 @@ const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileSt
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
+const { discoverCoordination, launchOne } = require("./coordinate-service.cjs");
+const { createHarnessRuntime } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 function reportStartupFailure(error) {
@@ -224,6 +227,53 @@ const configuredPipeName = profile?.pipe || (isolatedRequired()
 const PIPE_NAME = configuredPipeName.startsWith("\\\\.\\pipe\\")
   ? configuredPipeName
   : `\\\\.\\pipe\\${configuredPipeName}`;
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+
+function endpointSocketLeafName(endpoint, parentDir) {
+  const hash = createHash("sha256").update(endpoint, "utf8").digest("hex").slice(0, 16);
+  const suffix = `--${hash}.sock`;
+  const maxLeaf = LINUX_UNIX_SOCKET_PATH_MAX_BYTES - (Buffer.byteLength(parentDir) + 1);
+  if (suffix.length > maxLeaf) {
+    throw new Error("Unix socket path would exceed Linux sun_path capacity (107 bytes)");
+  }
+  let prefix = Array.from(endpoint, (character) => (
+    /^[A-Za-z0-9]$/.test(character) || character === "-" || character === "_" || character === "."
+      ? character
+      : "_"
+  )).join("");
+  if (!prefix) prefix = "endpoint";
+  const maxPrefix = maxLeaf - suffix.length;
+  if (prefix.length > maxPrefix) prefix = prefix.slice(0, maxPrefix);
+  return `${prefix}${suffix}`;
+}
+
+function resolveUnixSocket(endpoint) {
+  const name = String(endpoint || "").trim();
+  if (!name) throw new Error("Unix socket endpoint is empty");
+  if (path.isAbsolute(name)) {
+    if (Buffer.byteLength(name) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+      throw new Error(`Unix socket path is ${Buffer.byteLength(name)} bytes; Linux sun_path capacity is 107 bytes`);
+    }
+    return name;
+  }
+  const home = process.env.HOME;
+  if (!home) throw new Error("HOME is required");
+  const directory = path.join(home, ".goalport", "runtime");
+  const resolved = path.join(directory, endpointSocketLeafName(name, directory));
+  if (Buffer.byteLength(resolved) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+    throw new Error(`Unix socket path is ${Buffer.byteLength(resolved)} bytes; Linux sun_path capacity is 107 bytes`);
+  }
+  return resolved;
+}
+
+function coreConnectPath() {
+  return process.platform === "linux" ? resolveUnixSocket(PIPE_NAME) : PIPE_NAME;
+}
+
+function identityProfile() {
+  if (!profile || process.platform !== "linux") return profile;
+  return { ...profile, pipe: coreConnectPath() };
+}
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 let mainWindow;
 const appDocumentUrl = pathToFileURL(path.join(appRoot, "dist", "index.html")).href;
@@ -310,7 +360,9 @@ function resolveCoreBinary() {
   const candidates = [
     path.join(process.resourcesPath, "goalport-core.exe"),
     path.join(appRoot, "target", "release", "goalport-core.exe"),
-    path.join(appRoot, "target", "debug", "goalport-core.exe")
+    path.join(appRoot, "target", "debug", "goalport-core.exe"),
+    path.join(appRoot, "target", "release", "goalport-core"),
+    path.join(appRoot, "target", "debug", "goalport-core")
   ];
   return candidates.find((candidate) => require("node:fs").existsSync(candidate));
 }
@@ -354,7 +406,7 @@ function showToast(title, body) {
 
 function pipeAvailable() {
   return new Promise((resolve) => {
-    const socket = net.createConnection(PIPE_NAME);
+    const socket = net.createConnection(coreConnectPath());
     const finish = (available) => { socket.destroy(); resolve(available); };
     socket.once("connect", () => finish(true));
     socket.once("error", () => finish(false));
@@ -466,7 +518,7 @@ async function verifyCoreConnection() {
     },
     assertPeer: (peerStdout, receipt) => {
       assertPipePeer(peerStdout, receipt);
-      assertCoreIdentity(receipt, profile);
+      assertCoreIdentity(receipt, identityProfile());
     }
   });
 }
@@ -653,8 +705,20 @@ function importFacts(discovery) {
     liveSource: discovery?.inspection?.latestEpoch?.priorCore === "live-exact"
   };
 }
+let harnessRuntime = null;
+function coordinationRuntime() {
+  if (!harnessRuntime) harnessRuntime = createHarnessRuntime();
+  return harnessRuntime;
+}
+function closeHarnessRuntime() {
+  if (!harnessRuntime) return;
+  const runtime = harnessRuntime;
+  harnessRuntime = null;
+  runtime.close();
+}
 function quitFromBootstrap() {
   allowQuitAfterCloseChoice = true;
+  closeHarnessRuntime();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
   app.exit(0);
 }
@@ -884,7 +948,7 @@ function exchangeVerified(request) {
 
 function exchange(request, { timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(PIPE_NAME);
+    const socket = net.createConnection(coreConnectPath());
     const chunks = [];
     let expected = null;
     let settled = false;
@@ -1289,12 +1353,18 @@ app.whenReady().then(() => {
       return { ok: false, requestId, choice: "stop", allowQuitLatch: false, coreAcknowledged: false, error: message };
     }
   });
+  handleTrusted("goalport:coordinate-discover", () => discoverCoordination(process.env, coordinationRuntime()));
+  handleTrusted("goalport:coordinate-launch", (_event, command) => launchOne(process.env, coordinationRuntime(), command));
   handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };
   });
   return createWindow();
 }).catch(reportStartupFailure);
+
+app.on("will-quit", () => {
+  closeHarnessRuntime();
+});
 
 app.on("before-quit", (event) => {
   if (allowQuitAfterCloseChoice) return;

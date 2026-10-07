@@ -26,7 +26,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRu
         selectedId={provider}
         triggerClassName="runtime-picker-button"
         triggerAriaLabel="Select Runtime"
-        triggerTitle="Choose the Runtime for this goal"
+        triggerTitle="Send without picking, or pick the single-harness path."
         emptyText="No Runtime information from Core yet."
         blockedHint={!connected ? "Reconnect Core to select." : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}
@@ -38,7 +38,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRu
             </span>
             <span className="runtime-picker-copy">
               <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
-              <small>{selected ? "will run this goal" : "pick before sending"}</small>
+              <small>Send without picking, or pick the single-harness path.</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
@@ -79,7 +79,6 @@ export function DraftGoalComposer({
     && (!blockedFromSending || Boolean(retryLabel))
     && connected
     && draft.workspace.trim().length > 0
-    && draft.provider.length > 0
     && draft.message.trim().length > 0;
 
   // One input layer, one copy: auto-grow, IME-safe Enter and the draft's

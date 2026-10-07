@@ -1581,7 +1581,7 @@ impl NamedPipeClient {
         Err(IpcError::UnsupportedPlatform)
     }
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn verify_pipe_peer(_name: &str) -> Result<PipePeer, IpcError> {
     Err(IpcError::UnsupportedPlatform)
 }
@@ -2585,10 +2585,9 @@ fn bind_unix_socket(
 }
 
 #[cfg(target_os = "linux")]
-fn unix_peer_uid_matches(
+fn unix_peer_credentials(
     stream: &std::os::unix::net::UnixStream,
-    expected: u32,
-) -> Result<bool, IpcError> {
+) -> Result<libc::ucred, IpcError> {
     use std::os::unix::io::AsRawFd;
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -2606,5 +2605,49 @@ fn unix_peer_uid_matches(
             "SO_PEERCRED unavailable; refusing connection".into(),
         ));
     }
-    Ok(cred.uid == expected)
+    Ok(cred)
+}
+
+#[cfg(target_os = "linux")]
+fn unix_peer_uid_matches(
+    stream: &std::os::unix::net::UnixStream,
+    expected: u32,
+) -> Result<bool, IpcError> {
+    Ok(unix_peer_credentials(stream)?.uid == expected)
+}
+
+/// Linux peer check for the same `pipe-peer` contract Electron already runs.
+/// Connects to the socket `serve` bound for this endpoint and reads
+/// `SO_PEERCRED`. A different uid is refused. No protocol frame is sent.
+#[cfg(target_os = "linux")]
+pub fn verify_pipe_peer(name: &str) -> Result<PipePeer, IpcError> {
+    let resolved = resolve_unix_socket(name).map_err(|_| IpcError::PipeSecurity {
+        stage: "open",
+        code: 22,
+    })?;
+    let stream = std::os::unix::net::UnixStream::connect(&resolved.path).map_err(|error| {
+        IpcError::PipeSecurity {
+            stage: "open",
+            code: error.raw_os_error().unwrap_or(50),
+        }
+    })?;
+    let cred = unix_peer_credentials(&stream).map_err(|_| IpcError::PipeSecurity {
+        stage: "server-pid",
+        code: 50,
+    })?;
+    if cred.uid != current_uid() {
+        return Err(IpcError::PipeSecurity {
+            stage: "server-user",
+            code: 13,
+        });
+    }
+    if cred.pid <= 0 {
+        return Err(IpcError::PipeSecurity {
+            stage: "server-pid",
+            code: 50,
+        });
+    }
+    Ok(PipePeer {
+        server_pid: cred.pid as u32,
+    })
 }

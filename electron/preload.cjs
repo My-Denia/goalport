@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld("goalportCore", {
   requestClose: () => ipcRenderer.invoke("goalport:request-close"),
   confirmCloseChoice: (payload) => ipcRenderer.invoke("goalport:confirm-close-choice", payload),
   dismissCloseChoice: () => ipcRenderer.invoke("goalport:dismiss-close-choice"),
+  coordinateDiscover: () => ipcRenderer.invoke("goalport:coordinate-discover"),
+  coordinateLaunch: (command) => ipcRenderer.invoke("goalport:coordinate-launch", command),
   onClosePrompt: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("goalport:close-prompt", listener);

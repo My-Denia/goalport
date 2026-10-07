@@ -291,6 +291,32 @@ declare global {
       onBootstrapState?: (callback: (state: BootstrapState) => void) => () => void;
       onClosePrompt?: (callback: () => void) => () => void;
       onCloseChoiceFailed?: (callback: (payload?: unknown) => void) => () => void;
+      coordinateDiscover?: () => Promise<{
+        connected: boolean;
+        sendAuthorized: boolean;
+        providers: readonly {
+          instanceId?: string;
+          displayName?: string;
+          driver?: string;
+          enabled?: boolean;
+          installed?: boolean;
+          availability?: string;
+          status?: string;
+          auth?: { status?: string; type?: string; label?: string };
+          models?: readonly { slug?: string; name?: string; isDefault?: boolean; isLegacy?: boolean }[];
+          usageLimits?: { unavailable?: unknown; windows?: readonly { id?: string; usedPercent?: number }[] };
+        }[];
+        stopReason: string | null;
+      }>;
+      coordinateLaunch?: (command: {
+        type: "goalport.coordinateTurn";
+        modelSelection: { instanceId: string; model: string };
+        runtimeMode: "approval-required";
+        approvalPolicy: "never";
+        sandboxPolicy: { type: "readOnly" };
+        workspaceStrategy: { type: "root"; branch?: string } | { type: "existing_worktree"; worktreePath: string; branch?: string };
+        initialMessage: { text: string };
+      }) => Promise<{ text: string; errorText: string; prepared?: boolean }>;
     };
   }
 }
