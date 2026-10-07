@@ -136,6 +136,10 @@ function App() {
   const [sendBusy, setSendBusy] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  // A first send with no Runtime chosen only proceeds when this window can assign a harness.
+  const coordinationAvailable = client.mode === "electron"
+    && appInfo?.coordinationConfigured === true
+    && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 860);
@@ -454,7 +458,7 @@ function App() {
       const bridge = window.goalportCore;
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
-      if (!discover || !launch) {
+      if (!coordinationAvailable || !discover || !launch) {
         setDraftError({ sentence: "Choose a Runtime before sending." });
         return;
       }
@@ -1147,7 +1151,7 @@ function App() {
                 retryLabel={draftRetryLabel}
                 error={draftError}
                 canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
-                coordinationAvailable={client.mode === "electron" && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch)}
+                coordinationAvailable={coordinationAvailable}
                 workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                 onBrowse={() => { void chooseWorkspace(); }}
                 onChange={(value) => {

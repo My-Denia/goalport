@@ -214,6 +214,7 @@ export interface AppInfo {
   distribution?: string;
   testMode: boolean;
   dataPath: string;
+  coordinationConfigured?: boolean;
 }
 
 export interface BootstrapFacts {

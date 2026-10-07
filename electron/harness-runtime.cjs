@@ -17,6 +17,13 @@ function chosenPath(options, key, envName) {
   return configuredPath(process.env[envName]);
 }
 
+function harnessLaunchConfigured(env = process.env) {
+  const checkout = configuredPath(env.GOALPORT_HARNESS_CHECKOUT);
+  const stateDir = configuredPath(env.GOALPORT_HARNESS_STATE_DIR);
+  const serverCwd = configuredPath(env.GOALPORT_HARNESS_SERVER_CWD) || checkout;
+  return Boolean(stateDir && serverCwd);
+}
+
 function defaultChildPath() {
   const alongside = path.join(__dirname, "pinned-harness-child.ts");
   const unpacked = alongside.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
@@ -218,4 +225,4 @@ function createHarnessRuntime(options = {}) {
   };
 }
 
-module.exports = { createHarnessRuntime };
+module.exports = { createHarnessRuntime, harnessLaunchConfigured };
