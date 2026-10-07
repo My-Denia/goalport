@@ -731,6 +731,57 @@ describe("new goal during a selected-runtime send", () => {
     expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("");
     expect(starts).toEqual(["inspect the helper"]);
   });
+
+  it("keeps the replacement draft when the replaced send creates a goal", async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    let published: unknown = EMPTY_PREVIEW_SNAPSHOT;
+    const created = {
+      ...EMPTY_PREVIEW_SNAPSHOT,
+      activeCampaignId: "campaign-created",
+      campaigns: [{
+        ...DEMO_SNAPSHOT.campaigns[0]!,
+        id: "campaign-created",
+        title: "Created during send",
+      }],
+    };
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => published,
+      command: async (request: CoreCommand) => {
+        if (request.messageType !== "start_conversation") {
+          return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: published };
+        }
+        await gate;
+        published = created;
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: created };
+      },
+      startCore: async () => published,
+      openInVsCode: async () => undefined,
+    } as never;
+    render(<App />);
+
+    const message = await screen.findByRole("textbox", { name: "Message composer" });
+    fireEvent.change(message, { target: { value: "inspect the helper" } });
+    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    const claude = await screen.findByRole("option", { name: /Claude Code/ });
+    await waitFor(() => expect(document.activeElement).toBe(claude));
+    fireEvent.keyDown(claude, { key: "ArrowDown" });
+    const codex = screen.getByRole("option", { name: /Codex/ });
+    await waitFor(() => expect(document.activeElement).toBe(codex));
+    fireEvent.keyDown(codex, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).textContent).toContain("Starting…"));
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    release(undefined);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+      expect(screen.getAllByText("Created during send").length).toBeGreaterThan(0);
+    }, { timeout: 2500 });
+    expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("");
+  });
 });
 
 describe("send without a Runtime", () => {

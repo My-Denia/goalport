@@ -109,6 +109,7 @@ export function coordinationGeneration(scope: string, request: number): string {
 interface GoalDraft extends GoalDraftValue {
   requestId: string;
   baselineCampaignId: string;
+  acceptNextCampaign?: boolean;
   intent?: SendIntent;
 }
 
@@ -285,6 +286,14 @@ function App() {
   useEffect(() => {
     if (!draftGoal) return;
     if (!draftGoal.intent && snapshot.activeCampaignId && snapshot.activeCampaignId !== draftGoal.baselineCampaignId) {
+      if (draftGoal.acceptNextCampaign) {
+        setDraftGoal((current) => current ? {
+          ...current,
+          baselineCampaignId: snapshot.activeCampaignId,
+          acceptNextCampaign: false,
+        } : current);
+        return;
+      }
       setDraftGoal(null);
       setDraftError(null);
       setDraftBlocked(false);
@@ -519,10 +528,10 @@ function App() {
     setDraftGoal((current) => current ? { ...current, intent } : current);
     try {
       const next = await client.startConversation(workspace, provider, message, intent.requestId);
-      setSnapshot(next);
-      // New goal, discard, and a draft edit replace this send. Their draft
-      // stays; this result must not wipe it or paste the old error onto it.
+      // New goal replaced this send. Publishing its campaign first would close
+      // the replacement draft and put the user on the goal they just left.
       if (epoch !== draftEpoch.current) return;
+      setSnapshot(next);
       const failure = client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation");
       if (failure) {
         setDraftError(failure);
@@ -568,6 +577,7 @@ function App() {
     setDraftGoal({
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
+      acceptNextCampaign: draftInFlight.current,
       workspace: snapshot.project.workspaceRoot || "",
       provider: "",
       message: ""
