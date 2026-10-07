@@ -21,7 +21,7 @@ test("coordination stays unavailable until a harness checkout can start", () => 
   assert.equal(harnessLaunchConfigured({
     GOALPORT_HARNESS_STATE_DIR: "/state",
     GOALPORT_HARNESS_SERVER_CWD: "/server",
-  }), true);
+  }), false);
 });
 
 const SENTINEL = "goalport-sentinel-do-not-send-9c2e";

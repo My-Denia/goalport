@@ -101,6 +101,10 @@ function freshRequestId(): string {
   return `goalport-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+export function coordinationGeneration(scope: string, request: number): string {
+  return `${scope}-${request}`;
+}
+
 /** A new-goal draft: local only, one stable request id for the first Send. */
 interface GoalDraft extends GoalDraftValue {
   requestId: string;
@@ -188,6 +192,7 @@ function App() {
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
   const draftEpoch = useRef(0);
+  const coordinationScope = useRef(freshRequestId());
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
   draftGoalRef.current = draftGoal;
@@ -464,7 +469,7 @@ function App() {
       }
       setDraftError(null);
       const request = ++coordinationRequest.current;
-      const generation = String(request);
+      const generation = coordinationGeneration(coordinationScope.current, request);
       const stillCurrent = () => coordinationRequest.current === request;
       setDraftBusy(true);
       try {
@@ -544,7 +549,9 @@ function App() {
     draftEpoch.current += 1;
     const previous = coordinationRequest.current;
     coordinationRequest.current += 1;
-    if (previous > 0) void window.goalportCore?.coordinateCancel?.(String(previous));
+    if (previous > 0) {
+      void window.goalportCore?.coordinateCancel?.(coordinationGeneration(coordinationScope.current, previous));
+    }
     setCoordination(null);
     // A selected Runtime send owns the busy flag until it settles. Clearing it
     // here re-enables Send while that send is still in flight, and the click

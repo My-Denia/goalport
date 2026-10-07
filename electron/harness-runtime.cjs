@@ -20,8 +20,7 @@ function chosenPath(options, key, envName) {
 function harnessLaunchConfigured(env = process.env) {
   const checkout = configuredPath(env.GOALPORT_HARNESS_CHECKOUT);
   const stateDir = configuredPath(env.GOALPORT_HARNESS_STATE_DIR);
-  const serverCwd = configuredPath(env.GOALPORT_HARNESS_SERVER_CWD) || checkout;
-  return Boolean(stateDir && serverCwd);
+  return Boolean(checkout && stateDir);
 }
 
 function defaultChildPath() {
