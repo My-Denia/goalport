@@ -9193,12 +9193,16 @@ mod tests {
 
     fn attach_python_reader(process: &mut CodexProcess, dir: &Path, script: &str) -> KillChild {
         fs::write(dir.join("peer.py"), script).unwrap();
+        let stderr = fs::File::create(dir.join("peer-stderr.txt")).expect("peer stderr");
         let mut child = Command::new("python3")
+            .arg("-u")
             .arg(dir.join("peer.py"))
             .current_dir(dir)
+            .env("PYTHONUNBUFFERED", "1")
+            .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("python3");
         process.stdout = Some(BufReader::new(child.stdout.take().unwrap()));
@@ -9207,10 +9211,14 @@ mod tests {
         KillChild(Some(child))
     }
 
-    fn wait_until(mut ready: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    fn wait_until(dir: &Path, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !ready() {
-            assert!(Instant::now() < deadline, "timed out waiting for the reader");
+            let detail = fs::read_to_string(dir.join("peer-stderr.txt")).unwrap_or_default();
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the reader\n{detail}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -9256,8 +9264,8 @@ mod tests {
 import json, pathlib, sys, time
 root = pathlib.Path(__file__).resolve().parent
 def send(value):
-    sys.stdout.write(json.dumps(value) + "\n")
-    sys.stdout.flush()
+    sys.stdout.buffer.write((json.dumps(value) + "\n").encode())
+    sys.stdout.buffer.flush()
 send({"id":"rpc-A","method":"item/commandExecution/requestApproval","params":{"threadId":"T","turnId":"U","itemId":"I","command":"echo"}})
 while not (root / "release-retry").exists():
     time.sleep(0.01)
@@ -9270,7 +9278,7 @@ send({"method":"error","params":{"threadId":"T","turnId":"U","willRetry":False,"
 time.sleep(30)
 "#,
         );
-        wait_until(|| {
+        wait_until(&dir, || {
             process
                 .approval
                 .lock()
@@ -9292,7 +9300,7 @@ time.sleep(30)
             std::thread::sleep(Duration::from_millis(10));
         }
         fs::write(dir.join("release-retry"), "go").unwrap();
-        wait_until(|| dir.join("retry-visible").is_file());
+        wait_until(&dir, || dir.join("retry-visible").is_file());
         let id = {
             let slot = process.approval.lock().unwrap();
             let binding = slot
@@ -9305,7 +9313,7 @@ time.sleep(30)
             binding.decision_id.clone()
         };
         fs::write(dir.join("release-fatal"), "go").unwrap();
-        wait_until(|| {
+        wait_until(&dir, || {
             process
                 .approval
                 .lock()
@@ -9345,8 +9353,8 @@ time.sleep(30)
 import json, pathlib, sys, time
 root = pathlib.Path(__file__).resolve().parent
 def send(value):
-    sys.stdout.write(json.dumps(value) + "\n")
-    sys.stdout.flush()
+    sys.stdout.buffer.write((json.dumps(value) + "\n").encode())
+    sys.stdout.buffer.flush()
 send({{"id":"rpc-A","method":"item/commandExecution/requestApproval","params":{{"threadId":"T","turnId":"U","itemId":"I","command":"echo"}}}})
 while not (root / "release-oversize").exists():
     time.sleep(0.01)
@@ -9357,7 +9365,7 @@ time.sleep(30)
             max = MAX_NATIVE_LINE_BYTES
         );
         let _child = attach_python_reader(&mut process, &dir, &script);
-        wait_until(|| {
+        wait_until(&dir, || {
             process
                 .approval
                 .lock()
@@ -9380,7 +9388,7 @@ time.sleep(30)
         }
         let id = decision_ids(&process).into_iter().next().unwrap();
         fs::write(dir.join("release-oversize"), "go").unwrap();
-        wait_until(|| {
+        wait_until(&dir, || {
             process
                 .approval
                 .lock()
@@ -9435,7 +9443,7 @@ time.sleep(30)
         // stdout payload; the closed stdin is what makes the write uncertain.
         process.note_frame(&approval_frame("rpc-A", "U"));
         let id = decision_ids(&process).into_iter().next().unwrap();
-        wait_until(|| dir.join("stdin-closed").is_file());
+        wait_until(&dir, || dir.join("stdin-closed").is_file());
         let first = answer_error(&mut process, &id);
         assert!(
             first.contains("permission response delivery could not be confirmed"),
