@@ -13,11 +13,12 @@ interface DraftRuntimePickerProps {
   runtimes: RuntimeProfile[];
   provider: string;
   connected: boolean;
+  coordinationAvailable: boolean;
   onSelect: (provider: string) => void;
 }
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
-function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRuntimePickerProps) {
+function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, onSelect }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
   return (
     <div className="runtime-picker draft-runtime-picker">
@@ -37,7 +38,9 @@ function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRu
             </span>
             <span className="runtime-picker-copy">
               <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
-              <small>Send without picking, or pick the single-harness path.</small>
+              <small>{coordinationAvailable
+                ? "Send without picking, or pick the single-harness path."
+                : "Choose a Runtime before sending."}</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
@@ -56,6 +59,7 @@ interface DraftGoalComposerProps {
   retryLabel?: string;
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
+  coordinationAvailable: boolean;
   workspacePlaceholder?: string;
   onBrowse: () => void;
   onChange: (value: GoalDraftValue) => void;
@@ -70,7 +74,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -78,7 +82,8 @@ export function DraftGoalComposer({
     && (!blockedFromSending || Boolean(retryLabel))
     && connected
     && draft.workspace.trim().length > 0
-    && draft.message.trim().length > 0;
+    && draft.message.trim().length > 0
+    && (coordinationAvailable || draft.provider.trim().length > 0);
 
   // One input layer, one copy: auto-grow, IME-safe Enter and the draft's
   // ready-for-typing focus live in useComposerInput, shared with the
@@ -121,6 +126,7 @@ export function DraftGoalComposer({
           runtimes={runtimes}
           provider={draft.provider}
           connected={connected}
+          coordinationAvailable={coordinationAvailable}
           onSelect={(provider) => onChange({ ...draft, provider })}
         />
 

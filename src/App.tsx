@@ -184,6 +184,8 @@ function App() {
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
   const coordinationRequest = useRef(0);
+  const draftGoalRef = useRef(draftGoal);
+  draftGoalRef.current = draftGoal;
   const historyRequest = useRef(0);
 
   useEffect(() => {
@@ -448,14 +450,20 @@ function App() {
       return;
     }
     if (!provider) {
+      const bridge = window.goalportCore;
+      const discover = bridge?.coordinateDiscover;
+      const launch = bridge?.coordinateLaunch;
+      if (!discover || !launch) {
+        setDraftError({ sentence: "Choose a Runtime before sending." });
+        return;
+      }
       setDraftError(null);
       const request = ++coordinationRequest.current;
       const generation = String(request);
       const stillCurrent = () => coordinationRequest.current === request;
       setDraftBusy(true);
       try {
-        const bridge = window.goalportCore;
-        const discovery = bridge?.coordinateDiscover ? await bridge.coordinateDiscover(generation) : null;
+        const discovery = await discover(generation);
         if (!stillCurrent()) return;
         const report = await requestCoordination(
           { workspacePath: workspace, goal: message },
@@ -465,10 +473,7 @@ function App() {
               if (!stillCurrent()) {
                 return { text: "", errorText: "The coordination request was replaced, so nothing was sent." };
               }
-              if (!bridge?.coordinateLaunch) {
-                return { text: "", errorText: "This window has no coordination service." };
-              }
-              return bridge.coordinateLaunch(command, generation);
+              return launch(command, generation);
             },
           },
           stillCurrent,
@@ -990,21 +995,17 @@ function App() {
     try {
       const selected = await client.chooseWorkspace();
       if (selected) {
-        let workspaceChanged = false;
-        setDraftGoal((current) => {
-          if (!current) {
-            workspaceChanged = true;
-            return {
+        const current = draftGoalRef.current;
+        const workspaceChanged = !current || current.workspace !== selected;
+        setDraftGoal((latest) => latest
+          ? { ...latest, workspace: selected, intent: undefined, requestId: latest.intent ? freshRequestId() : latest.requestId }
+          : {
               workspace: selected,
               provider: "",
               message: "",
               requestId: freshRequestId(),
               baselineCampaignId: snapshot.activeCampaignId
-            };
-          }
-          if (current.workspace !== selected) workspaceChanged = true;
-          return { ...current, workspace: selected, intent: undefined, requestId: current.intent ? freshRequestId() : current.requestId };
-        });
+            });
         setDraftError(null);
         if (workspaceChanged) abandonCoordination();
       }
@@ -1137,6 +1138,7 @@ function App() {
                 retryLabel={draftRetryLabel}
                 error={draftError}
                 canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
+                coordinationAvailable={client.mode === "electron" && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch)}
                 workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                 onBrowse={() => { void chooseWorkspace(); }}
                 onChange={(value) => {

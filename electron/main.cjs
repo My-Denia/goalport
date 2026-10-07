@@ -8,7 +8,7 @@ const path = require("node:path");
 const { performance } = require("node:perf_hooks");
 const { pathToFileURL } = require("node:url");
 const { createTrustedIpcHandler, protectRenderer, isAppDocument } = require("./security-policy.cjs");
-const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy } = require("./launch-config.cjs");
+const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy, windowsPipeName, coreServePipe, coreConnectEndpoint } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
@@ -224,50 +224,10 @@ app.setAppUserModelId("GoalPort.Desktop");
 const configuredPipeName = profile?.pipe || (isolatedRequired()
   ? (process.env.GOALPORT_CORE_PIPE || `${RUN_SLUG}-missing-pipe`)
   : (process.env.GOALPORT_CORE_PIPE || "goalport-core-v1"));
-const PIPE_NAME = configuredPipeName.startsWith("\\\\.\\pipe\\")
-  ? configuredPipeName
-  : `\\\\.\\pipe\\${configuredPipeName}`;
-const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
-
-function endpointSocketLeafName(endpoint, parentDir) {
-  const hash = createHash("sha256").update(endpoint, "utf8").digest("hex").slice(0, 16);
-  const suffix = `--${hash}.sock`;
-  const maxLeaf = LINUX_UNIX_SOCKET_PATH_MAX_BYTES - (Buffer.byteLength(parentDir) + 1);
-  if (suffix.length > maxLeaf) {
-    throw new Error("Unix socket path would exceed Linux sun_path capacity (107 bytes)");
-  }
-  let prefix = Array.from(endpoint, (character) => (
-    /^[A-Za-z0-9]$/.test(character) || character === "-" || character === "_" || character === "."
-      ? character
-      : "_"
-  )).join("");
-  if (!prefix) prefix = "endpoint";
-  const maxPrefix = maxLeaf - suffix.length;
-  if (prefix.length > maxPrefix) prefix = prefix.slice(0, maxPrefix);
-  return `${prefix}${suffix}`;
-}
-
-function resolveUnixSocket(endpoint) {
-  const name = String(endpoint || "").trim();
-  if (!name) throw new Error("Unix socket endpoint is empty");
-  if (path.isAbsolute(name)) {
-    if (Buffer.byteLength(name) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
-      throw new Error(`Unix socket path is ${Buffer.byteLength(name)} bytes; Linux sun_path capacity is 107 bytes`);
-    }
-    return name;
-  }
-  const home = process.env.HOME;
-  if (!home) throw new Error("HOME is required");
-  const directory = path.join(home, ".goalport", "runtime");
-  const resolved = path.join(directory, endpointSocketLeafName(name, directory));
-  if (Buffer.byteLength(resolved) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
-    throw new Error(`Unix socket path is ${Buffer.byteLength(resolved)} bytes; Linux sun_path capacity is 107 bytes`);
-  }
-  return resolved;
-}
+const PIPE_NAME = windowsPipeName(configuredPipeName);
 
 function coreConnectPath() {
-  return process.platform === "linux" ? resolveUnixSocket(PIPE_NAME) : PIPE_NAME;
+  return coreConnectEndpoint(process.platform, configuredPipeName);
 }
 
 function identityProfile() {
@@ -443,8 +403,8 @@ async function ensureCore() {
     if (app.isPackaged && !launcher) throw new Error("The packaged Core launcher is missing; verify or rebuild the complete RC package");
     const command = launcher || binary;
     const commandArgs = launcher
-      ? [binary, "serve", "--pipe", PIPE_NAME, "--db", dbPath()]
-      : ["serve", "--pipe", PIPE_NAME, "--db", dbPath()];
+      ? [binary, "serve", "--pipe", coreServePipe(process.platform, configuredPipeName), "--db", dbPath()]
+      : ["serve", "--pipe", coreServePipe(process.platform, configuredPipeName), "--db", dbPath()];
     const launchNonce = randomUUID();
     lastLaunchNonce = launchNonce;
     const identity = electronIdentity();
@@ -493,7 +453,7 @@ function runPipePeer() {
   return new Promise((resolve) => {
     const binary = coreBinary();
     if (!binary) return resolve({ code: null, stdout: "" });
-    execFile(binary, ["pipe-peer", "--pipe", PIPE_NAME], { timeout: 5000, windowsHide: true }, (error, stdout) => {
+    execFile(binary, ["pipe-peer", "--pipe", coreServePipe(process.platform, configuredPipeName)], { timeout: 5000, windowsHide: true }, (error, stdout) => {
       resolve({ code: error ? (typeof error.code === "number" ? error.code : null) : 0, stdout: String(stdout ?? "") });
     });
   });
@@ -1247,7 +1207,7 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
   handleTrusted("goalport:core-command", (_, request) => invokeCore(request));
-  handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: PIPE_NAME }; });
+  handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });
   handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
   handleTrusted("goalport:request-close", async () => {
     if (allowQuitAfterCloseChoice) {
