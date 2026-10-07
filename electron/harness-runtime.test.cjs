@@ -58,6 +58,82 @@ test("the runtime starts the child with this process", async () => {
   }
 });
 
+test("a child that exits immediately resolves instead of crashing", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-exit-"));
+  const childPath = path.join(directory, "stub-child.cjs");
+  fs.writeFileSync(childPath, "process.exit(0);\n");
+  const runtime = createHarnessRuntime({
+    childPath,
+    stateDir: path.join(directory, "state"),
+    serverCwd: directory,
+  });
+  try {
+    const discovered = await Promise.race([
+      runtime.discover(),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error("an exited child left the request hanging")), 2000)),
+    ]);
+    assert.equal(discovered.ok, false);
+    assert.match(discovered.errorText, /stopped|could not be read/);
+  } finally {
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("stderr from the child does not block its reply", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-stderr-"));
+  const childPath = path.join(directory, "stub-child.cjs");
+  fs.writeFileSync(childPath, `
+    let message = null;
+    let flooded = false;
+    function reply() {
+      if (!message || !flooded) return;
+      process.stdout.write(JSON.stringify({ id: message.id, ok: true, providers: [], stopReason: null }) + "\\n");
+    }
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\\n");
+      if (newline < 0) return;
+      message = JSON.parse(buffer.slice(0, newline));
+      reply();
+    });
+    let sent = 0;
+    function more() {
+      let ok = true;
+      while (sent < 200 && ok) {
+        ok = process.stderr.write("x".repeat(1024));
+        sent += 1;
+      }
+      if (sent < 200) {
+        process.stderr.once("drain", more);
+        return;
+      }
+      flooded = true;
+      reply();
+    }
+    more();
+  `);
+  const runtime = createHarnessRuntime({
+    childPath,
+    stateDir: path.join(directory, "state"),
+    serverCwd: directory,
+  });
+  try {
+    const discovered = await Promise.race([
+      runtime.discover(),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error("stderr filled the pipe")), 2000)),
+    ]);
+    assert.equal(discovered.ok, true);
+    assert.equal(runtime.stderrTail().length, 8192);
+    assert.match(runtime.stderrTail(), /^x+$/);
+  } finally {
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("cancelling a generation releases the next request", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-cancel-"));
   const started = path.join(directory, "started.txt");
