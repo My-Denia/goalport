@@ -294,9 +294,7 @@ function App() {
         } : current);
         return;
       }
-      setDraftGoal(null);
-      setDraftError(null);
-      setDraftBlocked(false);
+      closeDraft();
     }
   }, [snapshot.activeCampaignId, draftGoal]);
 
@@ -544,14 +542,21 @@ function App() {
         } : current);
         return;
       }
-      setDraftGoal(null);
-      setDraftError(null);
-      setDraftBlocked(false);
-      setDraftDismissed(false);
+      closeDraft(false);
     } finally {
       draftInFlight.current = false;
       setDraftBusy(false);
     }
+  }
+
+  // Every way off a draft stops an in-flight assignment. New goal, discard,
+  // picking another goal, and Core opening a conversation all come through here.
+  function closeDraft(dismissed?: boolean) {
+    setDraftGoal(null);
+    setDraftError(null);
+    setDraftBlocked(false);
+    if (dismissed !== undefined) setDraftDismissed(dismissed);
+    abandonCoordination();
   }
 
   function abandonCoordination() {
@@ -570,14 +575,12 @@ function App() {
 
   function handleNewGoal() {
     if (window.innerWidth <= 860) setNavCollapsed(true);
-    setDraftDismissed(false);
-    setDraftError(null);
-    setDraftBlocked(false);
-    abandonCoordination();
+    const acceptNextCampaign = draftInFlight.current;
+    closeDraft(false);
     setDraftGoal({
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
-      acceptNextCampaign: draftInFlight.current,
+      acceptNextCampaign,
       workspace: snapshot.project.workspaceRoot || "",
       provider: "",
       message: ""
@@ -585,11 +588,7 @@ function App() {
   }
 
   function handleDiscardDraft() {
-    setDraftGoal(null);
-    setDraftError(null);
-    setDraftBlocked(false);
-    setDraftDismissed(true);
-    abandonCoordination();
+    closeDraft(true);
   }
 
   // -----------------------------------------------------------------------
@@ -940,12 +939,7 @@ function App() {
     if (client.mode === "linux-core") pushGoalRoute(campaignId);
     if (window.innerWidth <= 860) setNavCollapsed(true);
     // Explicit navigation closes a pending draft; it is not a submission.
-    if (draftGoal) {
-      setDraftGoal(null);
-      setDraftError(null);
-      setDraftBlocked(false);
-      setDraftDismissed(true);
-    }
+    if (draftGoal) closeDraft(true);
     if (client.selectCampaign) {
       const intent = ++selectionIntent.current;
       const next = await client.selectCampaign(campaignId);
