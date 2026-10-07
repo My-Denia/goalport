@@ -33,6 +33,7 @@ function createHarnessRuntime(options = {}) {
   const serverCwd = chosenPath(options, "serverCwd", "GOALPORT_HARNESS_SERVER_CWD") || (checkout ? path.join(checkout, "apps", "server") : "");
   let child = null;
   let buffer = "";
+  let stderrTail = "";
   let sequence = 0;
   const pending = new Map();
   const cancelledGenerations = new Set();
@@ -64,12 +65,22 @@ function createHarnessRuntime(options = {}) {
     env.GOALPORT_HARNESS_STATE_DIR = stateDir;
     if (checkout) env.GOALPORT_HARNESS_CHECKOUT = checkout;
     buffer = "";
+    stderrTail = "";
     const proc = spawn(nodeBin, ["--experimental-strip-types", childPath], {
       cwd: serverCwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     child = proc;
+    proc.stderr.setEncoding("utf8");
+    proc.stderr.on("data", (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-8192);
+    });
+    proc.stderr.on("error", () => { /* drained; a dead pipe must not take down the window */ });
+    proc.stdin.on("error", () => {
+      if (child !== proc) return;
+      failPending(STOPPED);
+    });
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk) => {
       buffer += chunk;
@@ -157,7 +168,10 @@ function createHarnessRuntime(options = {}) {
       }, timeoutMs);
       pending.set(id, { generation: token, finish });
       try {
-        proc.stdin.write(`${JSON.stringify({ id, method, ...extra })}\n`);
+        proc.stdin.write(`${JSON.stringify({ id, method, ...extra })}\n`, (error) => {
+          if (!error || child !== proc) return;
+          finish({ ok: false, errorText: STOPPED });
+        });
       } catch {
         finish({ ok: false, errorText: STOPPED });
       }
@@ -186,7 +200,7 @@ function createHarnessRuntime(options = {}) {
       failPending(STOPPED);
       if (!proc || proc.exitCode !== null) return;
       try {
-        proc.stdin.write(`${JSON.stringify({ id: "shutdown", method: "shutdown" })}\n`);
+        proc.stdin.write(`${JSON.stringify({ id: "shutdown", method: "shutdown" })}\n`, () => { /* async EPIPE is handled on the stream */ });
       } catch { /* pipe already closed */ }
       try { proc.kill("SIGTERM"); } catch { /* already gone */ }
       const killer = setTimeout(() => {
@@ -198,6 +212,9 @@ function createHarnessRuntime(options = {}) {
     },
     checkout,
     stateDir,
+    stderrTail() {
+      return stderrTail;
+    },
   };
 }
 
