@@ -990,16 +990,23 @@ function App() {
     try {
       const selected = await client.chooseWorkspace();
       if (selected) {
-        setDraftGoal((current) => current
-          ? { ...current, workspace: selected, intent: undefined, requestId: current.intent ? freshRequestId() : current.requestId }
-          : {
+        let workspaceChanged = false;
+        setDraftGoal((current) => {
+          if (!current) {
+            workspaceChanged = true;
+            return {
               workspace: selected,
               provider: "",
               message: "",
               requestId: freshRequestId(),
               baselineCampaignId: snapshot.activeCampaignId
-            });
+            };
+          }
+          if (current.workspace !== selected) workspaceChanged = true;
+          return { ...current, workspace: selected, intent: undefined, requestId: current.intent ? freshRequestId() : current.requestId };
+        });
         setDraftError(null);
+        if (workspaceChanged) abandonCoordination();
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
