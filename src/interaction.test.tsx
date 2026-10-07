@@ -881,3 +881,67 @@ describe("send without a Runtime", () => {
     expect(firstGeneration).not.toBe(secondGeneration);
   });
 });
+
+describe("leaving a draft during coordination", () => {
+  it("cancels the assignment when another goal is opened", async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const generations: string[] = [];
+    const cancels: string[] = [];
+    let launches = 0;
+    let discoverSettled = false;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => DEMO_SNAPSHOT,
+      command: async (request: CoreCommand) => ({
+        requestId: request.requestId,
+        accepted: true,
+        duplicate: false,
+        snapshot: request.messageType === "select_campaign"
+          ? { ...DEMO_SNAPSHOT, activeCampaignId: String(request.payload.campaignId) }
+          : DEMO_SNAPSHOT,
+      }),
+      startCore: async () => DEMO_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async (generation?: string) => {
+        generations.push(String(generation ?? ""));
+        await gate;
+        discoverSettled = true;
+        return { connected: true, sendAuthorized: false, providers: [], stopReason: null };
+      },
+      coordinateLaunch: async () => {
+        launches += 1;
+        return { text: "", errorText: "" };
+      },
+      coordinateCancel: async (generation: string) => {
+        cancels.push(generation);
+      },
+    } as never;
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(generations).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Evidence loop" }));
+    await waitFor(() => expect(cancels.at(-1)).toBe(generations[0]));
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+
+    release(undefined);
+    await waitFor(() => expect(discoverSettled).toBe(true));
+    expect(launches).toBe(0);
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(screen.queryByText("Two different harnesses are assigned. No model turn has been sent.")).toBeNull();
+  });
+});
