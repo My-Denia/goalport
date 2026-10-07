@@ -30,6 +30,8 @@ function viewFrom(input: {
   return input;
 }
 
+const REPLACED = "The coordination request was replaced, so nothing was sent.";
+
 function unavailable(stopReason: string): CoordinationView {
   return viewFrom({
     planningHarness: null,
@@ -49,6 +51,7 @@ export async function requestCoordination(
   input: { readonly workspacePath: string; readonly goal: string },
   discovery: CoordinationDiscovery | null,
   transport: CoordinateTransport,
+  stillCurrent: () => boolean = () => true,
 ): Promise<CoordinationView> {
   if (discovery === null || !discovery.connected) {
     return unavailable(discovery?.stopReason ?? "This window has no coordination service. Open the GoalPort app window and send the goal there.");
@@ -72,7 +75,9 @@ export async function requestCoordination(
   if (!discovery.sendAuthorized) {
     const planning = planned.commands[0];
     const review = planned.commands[1];
+    if (!stillCurrent()) return unavailable(REPLACED);
     const preparedPlanning = await transport.launch(planning);
+    if (!stillCurrent()) return unavailable(REPLACED);
     const preparedReview = await transport.launch(review);
     if (preparedPlanning.prepared !== true || preparedReview.prepared !== true) {
       const errorText = preparedPlanning.prepared !== true
@@ -98,6 +103,7 @@ export async function requestCoordination(
       reviewQuota: planned.reviewQuota,
     });
   }
+  if (!stillCurrent()) return unavailable(REPLACED);
   const sent = await runCoordinateSession(
     { catalog, goal: input.goal, workspacePath: input.workspacePath },
     { sendAuthorized: true },

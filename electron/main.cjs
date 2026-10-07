@@ -1353,8 +1353,12 @@ app.whenReady().then(() => {
       return { ok: false, requestId, choice: "stop", allowQuitLatch: false, coreAcknowledged: false, error: message };
     }
   });
-  handleTrusted("goalport:coordinate-discover", () => discoverCoordination(process.env, coordinationRuntime()));
-  handleTrusted("goalport:coordinate-launch", (_event, command) => launchOne(process.env, coordinationRuntime(), command));
+  handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation));
+  handleTrusted("goalport:coordinate-launch", (_event, command, generation) => launchOne(process.env, coordinationRuntime(), command, generation));
+  handleTrusted("goalport:coordinate-cancel", (_event, generation) => {
+    coordinationRuntime().cancel(generation);
+    return { ok: true };
+  });
   handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };

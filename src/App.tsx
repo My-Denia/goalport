@@ -450,21 +450,28 @@ function App() {
     if (!provider) {
       setDraftError(null);
       const request = ++coordinationRequest.current;
+      const generation = String(request);
+      const stillCurrent = () => coordinationRequest.current === request;
       setDraftBusy(true);
       try {
         const bridge = window.goalportCore;
-        const discovery = bridge?.coordinateDiscover ? await bridge.coordinateDiscover() : null;
+        const discovery = bridge?.coordinateDiscover ? await bridge.coordinateDiscover(generation) : null;
+        if (!stillCurrent()) return;
         const report = await requestCoordination(
           { workspacePath: workspace, goal: message },
           discovery,
           {
             launch: async (command: CoordinateTurnCommand) => {
+              if (!stillCurrent()) {
+                return { text: "", errorText: "The coordination request was replaced, so nothing was sent." };
+              }
               if (!bridge?.coordinateLaunch) {
                 return { text: "", errorText: "This window has no coordination service." };
               }
-              return bridge.coordinateLaunch(command);
+              return bridge.coordinateLaunch(command, generation);
             },
           },
+          stillCurrent,
         );
         if (coordinationRequest.current !== request) return;
         setCoordination(report);
@@ -520,7 +527,9 @@ function App() {
   }
 
   function abandonCoordination() {
+    const previous = coordinationRequest.current;
     coordinationRequest.current += 1;
+    if (previous > 0) void window.goalportCore?.coordinateCancel?.(String(previous));
     setCoordination(null);
     setDraftBusy(false);
   }

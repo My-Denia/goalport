@@ -291,7 +291,7 @@ declare global {
       onBootstrapState?: (callback: (state: BootstrapState) => void) => () => void;
       onClosePrompt?: (callback: () => void) => () => void;
       onCloseChoiceFailed?: (callback: (payload?: unknown) => void) => () => void;
-      coordinateDiscover?: () => Promise<{
+      coordinateDiscover?: (generation?: string) => Promise<{
         connected: boolean;
         sendAuthorized: boolean;
         providers: readonly {
@@ -316,7 +316,8 @@ declare global {
         sandboxPolicy: { type: "readOnly" };
         workspaceStrategy: { type: "root"; branch?: string } | { type: "existing_worktree"; worktreePath: string; branch?: string };
         initialMessage: { text: string };
-      }) => Promise<{ text: string; errorText: string; prepared?: boolean }>;
+      }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean }>;
+      coordinateCancel?: (generation: string) => Promise<unknown>;
     };
   }
 }

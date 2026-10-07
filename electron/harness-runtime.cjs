@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const STOPPED = "The coordination service stopped, so nothing was sent.";
 const UNCONFIGURED = "The pinned checkout is not configured, so no harness was assigned.";
+const CANCELLED = "The coordination request was replaced, so nothing was sent.";
 
 function configuredPath(value) {
   return typeof value === "string" && value.length > 0 ? value : "";
@@ -34,11 +35,23 @@ function createHarnessRuntime(options = {}) {
   let buffer = "";
   let sequence = 0;
   const pending = new Map();
+  const cancelledGenerations = new Set();
+  const cancelledOrder = [];
   let chain = Promise.resolve();
 
+  function generationOf(value) {
+    return typeof value === "string" && value.length > 0 ? value : "";
+  }
+
+  function markCancelled(generation) {
+    if (!generation || cancelledGenerations.has(generation)) return;
+    cancelledGenerations.add(generation);
+    cancelledOrder.push(generation);
+    while (cancelledOrder.length > 64) cancelledGenerations.delete(cancelledOrder.shift());
+  }
+
   function failPending(errorText) {
-    for (const waiter of pending.values()) waiter({ ok: false, errorText });
-    pending.clear();
+    for (const waiter of [...pending.values()]) waiter.finish({ ok: false, errorText });
   }
 
   function start() {
@@ -51,13 +64,14 @@ function createHarnessRuntime(options = {}) {
     env.GOALPORT_HARNESS_STATE_DIR = stateDir;
     if (checkout) env.GOALPORT_HARNESS_CHECKOUT = checkout;
     buffer = "";
-    child = spawn(nodeBin, ["--experimental-strip-types", childPath], {
+    const proc = spawn(nodeBin, ["--experimental-strip-types", childPath], {
       cwd: serverCwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
+    child = proc;
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (chunk) => {
       buffer += chunk;
       let newline = buffer.indexOf("\n");
       while (newline >= 0) {
@@ -73,22 +87,44 @@ function createHarnessRuntime(options = {}) {
         }
         const waiter = pending.get(message.id);
         if (!waiter) continue;
-        pending.delete(message.id);
-        waiter(message);
+        waiter.finish(message);
       }
     });
     const lost = () => {
+      if (child !== proc) return;
       child = null;
       failPending(STOPPED);
     };
-    child.on("exit", lost);
-    child.on("error", lost);
-    return child;
+    proc.on("exit", lost);
+    proc.on("error", lost);
+    return proc;
   }
 
-  function request(method, extra, timeoutMs, timeoutText) {
+  function cancel(generation) {
+    const token = generationOf(generation);
+    if (!token) return;
+    markCancelled(token);
+    let heldChild = false;
+    for (const waiter of [...pending.values()]) {
+      if (waiter.generation !== token) continue;
+      heldChild = true;
+      waiter.finish({ ok: false, errorText: CANCELLED });
+    }
+    if (!heldChild) return;
+    const proc = child;
+    if (!proc || proc.exitCode !== null) return;
+    child = null;
+    try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+
+  function request(method, extra, timeoutMs, timeoutText, generation) {
+    const token = generationOf(generation);
     const id = `goalport-${++sequence}`;
     const run = () => new Promise((resolve) => {
+      if (token && cancelledGenerations.has(token)) {
+        resolve({ ok: false, errorText: CANCELLED });
+        return;
+      }
       let proc;
       try {
         proc = start();
@@ -100,27 +136,30 @@ function createHarnessRuntime(options = {}) {
         resolve({ ok: false, errorText: UNCONFIGURED });
         return;
       }
-      if (!proc?.stdin || proc.stdin.destroyed || proc.exitCode !== null) {
+      if (!proc.stdin || proc.stdin.destroyed || proc.exitCode !== null) {
         resolve({ ok: false, errorText: STOPPED });
         return;
       }
-      const timer = setTimeout(() => {
-        if (!pending.has(id)) return;
-        pending.delete(id);
-        resolve({ ok: false, errorText: timeoutText });
-        try { proc.kill("SIGKILL"); } catch { /* already gone */ }
-        child = null;
-      }, timeoutMs);
-      pending.set(id, (message) => {
+      let settled = false;
+      const finish = (message) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        pending.delete(id);
         resolve(message);
-      });
+      };
+      const timer = setTimeout(() => {
+        finish({ ok: false, errorText: timeoutText });
+        if (child === proc) {
+          child = null;
+          try { proc.kill("SIGKILL"); } catch { /* already gone */ }
+        }
+      }, timeoutMs);
+      pending.set(id, { generation: token, finish });
       try {
         proc.stdin.write(`${JSON.stringify({ id, method, ...extra })}\n`);
       } catch {
-        clearTimeout(timer);
-        pending.delete(id);
-        resolve({ ok: false, errorText: STOPPED });
+        finish({ ok: false, errorText: STOPPED });
       }
     });
     const queued = chain.then(run, run);
@@ -129,17 +168,18 @@ function createHarnessRuntime(options = {}) {
   }
 
   return {
-    discover() {
-      return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.");
+    discover(generation) {
+      return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.", generation);
     },
-    prepare(command) {
+    prepare(command, generation) {
       const safe = command && typeof command === "object" ? { ...command } : {};
       delete safe.initialMessage;
-      return request("prepare", { command: safe }, 90000, "The read-only session was not prepared, so nothing was sent.");
+      return request("prepare", { command: safe }, 90000, "The read-only session was not prepared, so nothing was sent.", generation);
     },
-    run() {
-      return request("run", {}, 15000, "No model turn was sent, because this session is not authorized to spend subscription quota.");
+    run(generation) {
+      return request("run", {}, 15000, "No model turn was sent, because this session is not authorized to spend subscription quota.", generation);
     },
+    cancel,
     close() {
       const proc = child;
       child = null;
