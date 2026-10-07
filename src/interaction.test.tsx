@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import App from "./App";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
-import { DEMO_SNAPSHOT, type ProductConversationItem } from "./types";
+import { DEMO_SNAPSHOT, EMPTY_PREVIEW_SNAPSHOT, type ProductConversationItem } from "./types";
 
 afterEach(() => {
   cleanup();
@@ -684,5 +684,51 @@ describe("scroll anchor visible-content identity (hook contract)", () => {
     const { rerender } = renderAwayFromBottom(conversation("partial"));
     rerender(<StreamProbe items={[...conversation("partial"), msg("a2", "a whole new message")]} resetKey="c1" />);
     expect(screen.getByTestId("unseen").textContent).toBe("1");
+  });
+});
+
+describe("new goal during a selected-runtime send", () => {
+  it("keeps Send busy and leaves the replacement draft free of the old refusal", async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const starts: string[] = [];
+    mountElectron(EMPTY_PREVIEW_SNAPSHOT, async (request: CoreCommand) => {
+      if (request.messageType !== "start_conversation") {
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: EMPTY_PREVIEW_SNAPSHOT };
+      }
+      starts.push(String(request.payload.message));
+      await gate;
+      return {
+        goalportRejected: true,
+        requestId: request.requestId,
+        error: "runtime start refused",
+        snapshot: EMPTY_PREVIEW_SNAPSHOT
+      };
+    });
+
+    const message = await screen.findByRole("textbox", { name: "Message composer" });
+    fireEvent.change(message, { target: { value: "inspect the helper" } });
+    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    const claude = await screen.findByRole("option", { name: /Claude Code/ });
+    await waitFor(() => expect(document.activeElement).toBe(claude));
+    fireEvent.keyDown(claude, { key: "ArrowDown" });
+    const codex = screen.getByRole("option", { name: /Codex/ });
+    await waitFor(() => expect(document.activeElement).toBe(codex));
+    fireEvent.keyDown(codex, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).textContent).toContain("Starting…"));
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+
+    const send = screen.getByRole("button", { name: "Send message" });
+    expect(send.hasAttribute("disabled")).toBe(true);
+    expect(send.textContent).toContain("Starting…");
+    expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("");
+
+    release(undefined);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).textContent).not.toContain("Starting…"));
+    expect(screen.queryByText("GoalPort could not complete that action.")).toBeNull();
+    expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("");
+    expect(starts).toEqual(["inspect the helper"]);
   });
 });

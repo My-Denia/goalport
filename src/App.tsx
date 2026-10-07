@@ -183,6 +183,7 @@ function App() {
   }, [client]);
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
+  const draftEpoch = useRef(0);
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
   draftGoalRef.current = draftGoal;
@@ -500,6 +501,7 @@ function App() {
       return;
     }
     setCoordination(null);
+    const epoch = draftEpoch.current;
     draftInFlight.current = true;
     setDraftBusy(true);
     const intent = draftGoal.intent
@@ -509,6 +511,9 @@ function App() {
     try {
       const next = await client.startConversation(workspace, provider, message, intent.requestId);
       setSnapshot(next);
+      // New goal, discard, and a draft edit replace this send. Their draft
+      // stays; this result must not wipe it or paste the old error onto it.
+      if (epoch !== draftEpoch.current) return;
       const failure = client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation");
       if (failure) {
         setDraftError(failure);
@@ -532,11 +537,15 @@ function App() {
   }
 
   function abandonCoordination() {
+    draftEpoch.current += 1;
     const previous = coordinationRequest.current;
     coordinationRequest.current += 1;
     if (previous > 0) void window.goalportCore?.coordinateCancel?.(String(previous));
     setCoordination(null);
-    setDraftBusy(false);
+    // A selected Runtime send owns the busy flag until it settles. Clearing it
+    // here re-enables Send while that send is still in flight, and the click
+    // is then dropped.
+    if (!draftInFlight.current) setDraftBusy(false);
   }
 
   function handleNewGoal() {
