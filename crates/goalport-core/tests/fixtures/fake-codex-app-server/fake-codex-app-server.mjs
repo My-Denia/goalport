@@ -15,7 +15,7 @@
 //   thread_start_without_id  answer thread/start with {id, result: {}} (no thread id) and stay alive
 //   resume_ok                like linger; thread/resume is accepted
 //   resume_rejected          like linger; thread/resume is answered with an error
-// Every scenario exits 0 after 45 s at the latest (unconditional watchdog), so no node process
+// Every scenario exits 0 after 90 s at the latest (unconditional watchdog), so no node process
 // outlives a test binary, and every scenario also ends as soon as `.fake-codex-stop.marker` appears
 // in the cwd (polled every 100 ms) so a test can end a lingering fixture without any product kill
 // path. `.fake-codex-app-server.json` records argv/cwd/ppid/execPath at start (overwritten by a
@@ -60,7 +60,7 @@ function exitNow(reason) {
 }
 
 // Unconditional watchdog: the timer keeps the event loop alive and always fires.
-setTimeout(() => exitNow("watchdog"), 45_000);
+setTimeout(() => exitNow("watchdog"), 90_000);
 
 // Stop marker: a test that must end a lingering fixture writes this file; nothing in Core does.
 setInterval(() => {

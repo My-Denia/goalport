@@ -386,7 +386,7 @@ fn c2_live_app_server_is_confirmed_r1() {
     assert_eq!(classified["ok"], true, "{classified}");
     assert!(
         elapsed < Duration::from_secs(30),
-        "timing, not product: classify took {elapsed:?} since spawn (watchdog is 45 s)"
+        "timing, not product: classify took {elapsed:?} since spawn (watchdog is 90 s)"
     );
     let (class, identity) = classification(&server, &attempt);
     assert_eq!(class.as_deref(), Some("R1"), "a live, identity-confirmed app-server is R1 ({elapsed:?})");
@@ -394,8 +394,8 @@ fn c2_live_app_server_is_confirmed_r1() {
 
     // No leak: the fixture's unconditional watchdog ends the node process.
     assert!(
-        wait_for(&case.workspace.join(".fake-codex-exited.marker"), Duration::from_secs(50)),
-        "the lingering fixture must exit on its 45 s watchdog"
+        wait_for(&case.workspace.join(".fake-codex-exited.marker"), Duration::from_secs(100)),
+        "the lingering fixture must exit on its 90 s watchdog"
     );
 }
 

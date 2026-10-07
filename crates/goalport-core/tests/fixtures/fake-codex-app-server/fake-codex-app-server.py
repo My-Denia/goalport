@@ -27,7 +27,7 @@ Scenarios travel in `.fake-codex-scenario` in the cwd (one workspace per test ca
 Files written in the cwd (the per-case workspace): `.fake-codex-app-server.json` and `.<pid>.json` (argv, cwd, ppid,
 pid, execPath, scenario, startedAt, runtime), `.fake-codex-exited.marker` and `.<pid>.marker` ({reason, pid,
 elapsedMs}), `.fake-codex-turns.<pid>.json` ({count, inputs}, rewritten before every turn/start is answered). Every
-instance exits 0 after 45 s at the latest (watchdog) and as soon as `.fake-codex-stop.marker` appears. Stdin closing
+instance exits 0 after 90 s at the latest (watchdog) and as soon as `.fake-codex-stop.marker` appears. Stdin closing
 is not an exit signal. Nothing is written anywhere else. No network. `send()` swallows the OSError a closed stdout
 raises, so a write into a broken pipe never crashes the process (the node fixture's uncaught-EPIPE hazard cannot occur
 here).
@@ -41,7 +41,7 @@ import time
 STARTED_AT = time.time()
 CWD = os.getcwd()
 PID = os.getpid()
-WATCHDOG_S = 45.0
+WATCHDOG_S = 90.0
 OVERSIZED_BYTES = 16 * 1024 * 1024 + 1
 LOCK = threading.Lock()
 STDOUT_CLOSED = False

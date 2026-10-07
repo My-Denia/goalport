@@ -41,9 +41,9 @@ const ESTABLISHED_KIND: &str = "runtime.registration.established";
 const NOT_COMPLETE: &str = "initialization did not complete";
 const NOT_RECORDED: &str = "initialization or recovery success is not recorded";
 const NOT_RETRIED: &str = "not retried automatically";
-/// Hang bound for a restart case. The node fixture still exits 45s after that
-/// process starts. This clock starts earlier, during case setup, and CI finishes
-/// the real checks at about 48s while that process is still alive.
+/// Hang bound for a restart case. The node fixture exits 90s after that process
+/// starts. This clock starts earlier, during case setup. A slow Windows run
+/// finishes the real checks near 48s, which already outlived the old 45s timer.
 const WATCHDOG: Duration = Duration::from_secs(60);
 
 static CODEX_LOCK: Mutex<()> = Mutex::new(());
