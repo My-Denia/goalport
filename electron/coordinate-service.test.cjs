@@ -45,6 +45,20 @@ test("a missing runtime does not invent a harness", async () => {
   assert.match(result.stopReason, /not connected/);
 });
 
+test("an unconfigured runtime keeps its own discovery sentence", async () => {
+  const result = await discoverCoordination({}, {
+    async discover() {
+      return { ok: false, errorText: "The pinned checkout is not configured, so no harness was assigned." };
+    },
+    async prepare() {
+      return held;
+    },
+  });
+  assert.equal(result.connected, false);
+  assert.equal(result.providers.length, 0);
+  assert.equal(result.stopReason, "The pinned checkout is not configured, so no harness was assigned.");
+});
+
 test("a pinned checkout mismatch fails discovery", async () => {
   const result = await discoverCoordination({}, {
     async discover() {

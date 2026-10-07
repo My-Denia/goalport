@@ -21,6 +21,14 @@ function runtimeReady(runtime) {
   return Boolean(runtime && typeof runtime.discover === "function" && typeof runtime.prepare === "function");
 }
 
+function discoveryFailureText(discovered) {
+  const stopReason = typeof discovered?.stopReason === "string" ? discovered.stopReason.trim() : "";
+  if (stopReason) return stopReason;
+  const errorText = typeof discovered?.errorText === "string" ? discovered.errorText.trim() : "";
+  if (errorText) return errorText;
+  return "The harness list could not be read, so no harness was assigned.";
+}
+
 async function discoverCoordination(env, runtime, generation) {
   if (!runtimeReady(runtime)) {
     return {
@@ -42,9 +50,7 @@ async function discoverCoordination(env, runtime, generation) {
     };
   }
   if (!discovered || discovered.ok === false) {
-    const stopReason = typeof discovered?.stopReason === "string" && discovered.stopReason.trim()
-      ? discovered.stopReason
-      : "The harness list could not be read, so no harness was assigned.";
+    const stopReason = discoveryFailureText(discovered);
     return {
       connected: false,
       sendAuthorized: false,
