@@ -4,7 +4,25 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createHarnessRuntime } = require("./harness-runtime.cjs");
+const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
+
+test("coordination stays unavailable until a harness checkout can start", () => {
+  assert.equal(harnessLaunchConfigured({}), false);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_CHECKOUT: "/pin" }), false);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_STATE_DIR: "/state" }), false);
+  assert.equal(harnessLaunchConfigured({
+    GOALPORT_HARNESS_CHECKOUT: "",
+    GOALPORT_HARNESS_STATE_DIR: "/state",
+  }), false);
+  assert.equal(harnessLaunchConfigured({
+    GOALPORT_HARNESS_CHECKOUT: "/pin",
+    GOALPORT_HARNESS_STATE_DIR: "/state",
+  }), true);
+  assert.equal(harnessLaunchConfigured({
+    GOALPORT_HARNESS_STATE_DIR: "/state",
+    GOALPORT_HARNESS_SERVER_CWD: "/server",
+  }), true);
+});
 
 const SENTINEL = "goalport-sentinel-do-not-send-9c2e";
 

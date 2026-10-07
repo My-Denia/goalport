@@ -13,7 +13,7 @@ const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne } = require("./coordinate-service.cjs");
-const { createHarnessRuntime } = require("./harness-runtime.cjs");
+const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
 function reportStartupFailure(error) {
@@ -1179,7 +1179,8 @@ app.whenReady().then(() => {
     // Profile-less legacy isolated runs keep reporting their env-bound
     // userData as both.
     dataPath: profile?.durableDirectory ?? app.getPath("userData"),
-    browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData")
+    browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData"),
+    coordinationConfigured: harnessLaunchConfigured()
   }));
   handleTrusted("goalport:bootstrap-current", () => {
     // An additive optional diagnostics child exposes

@@ -732,3 +732,70 @@ describe("new goal during a selected-runtime send", () => {
     expect(starts).toEqual(["inspect the helper"]);
   });
 });
+
+describe("send without a Runtime", () => {
+  function mountCoordination(configured: boolean) {
+    let discoverCalls = 0;
+    let appInfoSeen = false;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => {
+        appInfoSeen = true;
+        return {
+          version: "test",
+          channel: "test",
+          testMode: false,
+          dataPath: "profile",
+          coordinationConfigured: configured,
+        };
+      },
+      coordinateDiscover: async () => {
+        discoverCalls += 1;
+        return {
+          connected: false,
+          sendAuthorized: false,
+          providers: [],
+          stopReason: "No model turn was sent.",
+        };
+      },
+      coordinateLaunch: async () => ({ text: "", errorText: "" }),
+    } as never;
+    render(<App />);
+    return {
+      discoverCalls: () => discoverCalls,
+      appInfoSeen: () => appInfoSeen,
+    };
+  }
+
+  async function openDraft(message: string) {
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: message },
+    });
+  }
+
+  it("keeps a Runtime required when the preload methods exist but the checkout is unset", async () => {
+    const bridge = mountCoordination(false);
+    await openDraft("plan the helper");
+    await waitFor(() => expect(bridge.appInfoSeen()).toBe(true));
+    expect(screen.queryByText("Send without picking, or pick the single-harness path.")).toBeNull();
+    expect(screen.getByText("Choose a Runtime before sending.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+    expect(bridge.discoverCalls()).toBe(0);
+    expect(screen.getByRole("alert").textContent).toContain("Choose a Runtime before sending.");
+  });
+
+  it("allows send without a Runtime once the checkout is configured", async () => {
+    const bridge = mountCoordination(true);
+    await openDraft("plan the helper");
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(bridge.discoverCalls()).toBe(1));
+    expect(await screen.findByText("No model turn was sent.")).toBeTruthy();
+  });
+});
