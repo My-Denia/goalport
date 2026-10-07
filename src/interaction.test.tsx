@@ -6,7 +6,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import App from "./App";
+import App, { coordinationGeneration } from "./App";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, EMPTY_PREVIEW_SNAPSHOT, type ProductConversationItem } from "./types";
@@ -737,6 +737,7 @@ describe("send without a Runtime", () => {
   function mountCoordination(configured: boolean) {
     let discoverCalls = 0;
     let appInfoSeen = false;
+    const generations: string[] = [];
     window.__GOALPORT_ELECTRON__ = true;
     window.goalportCore = {
       snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
@@ -753,8 +754,9 @@ describe("send without a Runtime", () => {
           coordinationConfigured: configured,
         };
       },
-      coordinateDiscover: async () => {
+      coordinateDiscover: async (generation?: string) => {
         discoverCalls += 1;
+        generations.push(String(generation ?? ""));
         return {
           connected: false,
           sendAuthorized: false,
@@ -768,6 +770,7 @@ describe("send without a Runtime", () => {
     return {
       discoverCalls: () => discoverCalls,
       appInfoSeen: () => appInfoSeen,
+      generations: () => generations,
     };
   }
 
@@ -797,5 +800,33 @@ describe("send without a Runtime", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(bridge.discoverCalls()).toBe(1));
     expect(await screen.findByText("No model turn was sent.")).toBeTruthy();
+  });
+
+  it("uses a fresh generation after the window reloads", async () => {
+    expect(coordinationGeneration("window-a", 6)).toBe("window-a-6");
+    expect(coordinationGeneration("window-a", 6)).not.toBe(coordinationGeneration("window-b", 6));
+
+    const first = mountCoordination(true);
+    await openDraft("plan the helper");
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(first.discoverCalls()).toBe(1));
+
+    cleanup();
+    delete window.goalportCore;
+    delete window.__GOALPORT_ELECTRON__;
+
+    const second = mountCoordination(true);
+    await openDraft("plan the helper again");
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(second.discoverCalls()).toBe(1));
+
+    const firstGeneration = first.generations()[0] ?? "";
+    const secondGeneration = second.generations()[0] ?? "";
+    expect(firstGeneration).not.toMatch(/^\d+$/);
+    expect(secondGeneration).not.toMatch(/^\d+$/);
+    expect(firstGeneration.split("-").at(-1)).toBe(secondGeneration.split("-").at(-1));
+    expect(firstGeneration).not.toBe(secondGeneration);
   });
 });

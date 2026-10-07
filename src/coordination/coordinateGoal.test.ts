@@ -148,9 +148,9 @@ describe("Synthetic path", () => {
       goal,
       workspacePath,
       catalog: [
-        instance({ instanceId: "pi-local", name: "Pi", quota: "available" }),
+        instance({ instanceId: "pi-local", name: "Pi", quota: "available", models: ["pi-default"] }),
         instance({ instanceId: "spent-window", name: "Spent Window", quota: "exhausted" }),
-        instance({ instanceId: "cursor-local", name: "Cursor", quota: "available" }),
+        instance({ instanceId: "cursor-local", name: "Cursor", quota: "available", models: ["cursor-first"] }),
       ],
     });
     expect(paired.planningHarness).toBe("Pi");
@@ -183,6 +183,7 @@ describe("Synthetic path", () => {
           name: "Pi",
           quota: "UNKNOWN",
           billing: "subscription",
+          models: ["pi-default"],
         }),
         instance({
           instanceId: "metered-api",
@@ -195,6 +196,7 @@ describe("Synthetic path", () => {
           name: "Cursor",
           quota: "available",
           billing: "subscription",
+          models: ["cursor-first"],
         }),
       ],
     });
@@ -230,5 +232,23 @@ describe("Synthetic path", () => {
     expect(noFallback.result).toBeNull();
     expect(JSON.stringify(noFallback)).not.toContain("40");
     expect(JSON.stringify(noFallback)).not.toContain("Metered API");
+  });
+
+  it("skips a harness with no selectable model and pairs the later ones", () => {
+    const state = coordinateGoal({
+      goal,
+      workspacePath,
+      catalog: [
+        instance({ instanceId: "blank", name: "Blank", quota: "available", models: [] }),
+        instance({ instanceId: "omitted", name: "Omitted", quota: "available" }),
+        instance({ instanceId: "pi-local", name: "Pi", quota: "available", models: ["pi-default"] }),
+        instance({ instanceId: "cursor-local", name: "Cursor", quota: "available", models: ["cursor-first"] }),
+      ],
+    });
+
+    expect(state.planningHarness).toBe("Pi");
+    expect(state.reviewHarness).toBe("Cursor");
+    expect(state.commands.map((command) => command.modelSelection.model)).toEqual(["pi-default", "cursor-first"]);
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["pi-local", "cursor-local"]);
   });
 });

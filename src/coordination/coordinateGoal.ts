@@ -146,7 +146,7 @@ function isUsable(instance: SyntheticCatalogInstance): boolean {
   if (instance.launchable === false) return false;
   if (instance.billing === "paid-api") return false;
   if (quotaWord(instance.quota) === "exhausted") return false;
-  if (modelChoices(instance).length > 0 && publishedModel(instance).length === 0) return false;
+  if (publishedModel(instance).length === 0) return false;
   return true;
 }
 
