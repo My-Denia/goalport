@@ -189,6 +189,16 @@ describe("coordinate session", () => {
       usageLimits: { windows: [{ id: "five_hour", usedPercent: 100 }, { id: "seven_day_fable", usedPercent: 10 }] },
     }]);
     expect(generalSpent[0]?.quota).toBe("exhausted");
+
+    const onlyModelWindow = catalogFromProviderSnapshots([{
+      ...withFableSpent[0],
+      usageLimits: { windows: [{ id: "seven_day_fable", usedPercent: 100 }] },
+    }, withFableSpent[1]]);
+    expect(onlyModelWindow.find((instance) => instance.instanceId === "codex")?.quota).toBe("unknown");
+    const stillPaired = coordinateGoal({ catalog: onlyModelWindow, goal, workspacePath });
+    expect(stillPaired.commands).toHaveLength(2);
+    expect(stillPaired.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
+    expect(stillPaired.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
   });
 
   it("does not invent a harness when the coordination service is missing", async () => {
