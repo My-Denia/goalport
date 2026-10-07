@@ -25,7 +25,7 @@ function endpointSocketLeafName(endpoint, parentDir) {
 function resolveUnixSocket(endpoint, env = process.env) {
   const name = String(endpoint || "").trim();
   if (!name) throw new Error("Unix socket endpoint is empty");
-  if (path.isAbsolute(name)) {
+  if (path.posix.isAbsolute(name)) {
     if (Buffer.byteLength(name) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
       throw new Error(`Unix socket path is ${Buffer.byteLength(name)} bytes; Linux sun_path capacity is 107 bytes`);
     }
@@ -33,8 +33,8 @@ function resolveUnixSocket(endpoint, env = process.env) {
   }
   const home = env.HOME;
   if (!home) throw new Error("HOME is required");
-  const directory = path.join(home, ".goalport", "runtime");
-  const resolved = path.join(directory, endpointSocketLeafName(name, directory));
+  const directory = path.posix.join(home, ".goalport", "runtime");
+  const resolved = path.posix.join(directory, endpointSocketLeafName(name, directory));
   if (Buffer.byteLength(resolved) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
     throw new Error(`Unix socket path is ${Buffer.byteLength(resolved)} bytes; Linux sun_path capacity is 107 bytes`);
   }
