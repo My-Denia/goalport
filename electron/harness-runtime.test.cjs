@@ -58,6 +58,58 @@ test("the runtime starts the child with this process", async () => {
   }
 });
 
+test("cancelling a generation releases the next request", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-cancel-"));
+  const started = path.join(directory, "started.txt");
+  const childPath = path.join(directory, "stub-child.cjs");
+  fs.writeFileSync(childPath, `
+    const fs = require("node:fs");
+    const started = ${JSON.stringify(started)};
+    const count = fs.existsSync(started) ? Number(fs.readFileSync(started, "utf8")) : 0;
+    fs.writeFileSync(started, String(count + 1));
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\\n");
+        if (!line) continue;
+        const message = JSON.parse(line);
+        if (count === 0) return;
+        process.stdout.write(JSON.stringify({ id: message.id, ok: true, providers: [], stopReason: null }) + "\\n");
+      }
+    });
+  `);
+  const runtime = createHarnessRuntime({
+    childPath,
+    stateDir: path.join(directory, "state"),
+    serverCwd: directory,
+  });
+  try {
+    const first = runtime.discover("goal-a");
+    const deadline = Date.now() + 2000;
+    while (!fs.existsSync(started) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const second = runtime.discover("goal-b");
+    runtime.cancel("goal-a");
+    const firstResult = await first;
+    assert.match(firstResult.errorText, /replaced/);
+    const secondResult = await Promise.race([
+      second,
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error("next request stayed behind the cancelled one")), 2000)),
+    ]);
+    assert.equal(secondResult.ok, true);
+    assert.equal(fs.readFileSync(started, "utf8"), "2");
+  } finally {
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("an unconfigured runtime does not spawn a child", async () => {
   const runtime = createHarnessRuntime({
     childPath: path.join(os.tmpdir(), "goalport-harness-missing-child.cjs"),

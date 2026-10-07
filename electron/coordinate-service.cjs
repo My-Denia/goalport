@@ -21,7 +21,7 @@ function runtimeReady(runtime) {
   return Boolean(runtime && typeof runtime.discover === "function" && typeof runtime.prepare === "function");
 }
 
-async function discoverCoordination(env, runtime) {
+async function discoverCoordination(env, runtime, generation) {
   if (!runtimeReady(runtime)) {
     return {
       connected: false,
@@ -32,7 +32,7 @@ async function discoverCoordination(env, runtime) {
   }
   let discovered;
   try {
-    discovered = await runtime.discover();
+    discovered = await runtime.discover(generation);
   } catch {
     return {
       connected: false,
@@ -71,7 +71,7 @@ function prepareHeld(result) {
   );
 }
 
-async function launchOne(env, runtime, command) {
+async function launchOne(env, runtime, command, generation) {
   const problem = guardCoordinateCommand(command);
   if (problem) return { launched: false, prepared: false, text: "", errorText: problem };
   if (!runtimeReady(runtime)) {
@@ -79,7 +79,7 @@ async function launchOne(env, runtime, command) {
   }
   let prepared;
   try {
-    prepared = await runtime.prepare(command);
+    prepared = await runtime.prepare(command, generation);
   } catch {
     return { launched: false, prepared: false, text: "", errorText: PREPARE_FAILED };
   }
@@ -94,7 +94,7 @@ async function launchOne(env, runtime, command) {
   }
   let ran = null;
   try {
-    if (typeof runtime.run === "function") ran = await runtime.run();
+    if (typeof runtime.run === "function") ran = await runtime.run(generation);
   } catch {
     ran = null;
   }

@@ -142,6 +142,25 @@ describe("coordinate session", () => {
     expect(signedOut.stopReason).toBe("This harness is not signed in.");
   });
 
+  it("does not launch the review harness after the request is replaced", async () => {
+    let launches = 0;
+    const view = await requestCoordination(
+      { goal, workspacePath },
+      { connected: true, sendAuthorized: false, providers, stopReason: null },
+      {
+        async launch() {
+          launches += 1;
+          return { text: "", errorText: "", prepared: true };
+        },
+      },
+      () => launches === 0,
+    );
+    expect(launches).toBe(1);
+    expect(view.planningHarness).toBeNull();
+    expect(view.reviewHarness).toBeNull();
+    expect(view.stopReason).toMatch(/replaced/);
+  });
+
   it("does not invent a harness when the coordination service is missing", async () => {
     const view = await requestCoordination({ goal, workspacePath }, null, recordingTransport([]));
     expect(view.planningHarness).toBeNull();
