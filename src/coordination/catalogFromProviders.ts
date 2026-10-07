@@ -32,8 +32,8 @@ function quotaFromSnapshot(snapshot: ProviderSnapshot): SyntheticQuota {
   const windows = limits?.windows ?? [];
   if (limits === undefined || limits.unavailable !== undefined || windows.length === 0) return "unknown";
   const providerWide = windows.filter((window) => !modelSpecificWindow(window.id));
-  const considered = providerWide.length > 0 ? providerWide : windows;
-  if (considered.some((window) => typeof window.usedPercent === "number" && window.usedPercent >= 100)) {
+  if (providerWide.length === 0) return "unknown";
+  if (providerWide.some((window) => typeof window.usedPercent === "number" && window.usedPercent >= 100)) {
     return "exhausted";
   }
   return "available";
