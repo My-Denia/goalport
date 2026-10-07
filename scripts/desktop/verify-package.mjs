@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argsFor, artifactPaths, asarApi, COMPONENTS, fileHash, sha256 } from "./package.mjs";
@@ -40,6 +40,8 @@ export function verifyPackage(directory) {
   for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "harness-runtime.cjs", "dist/index.html"]) {
     if (!asar.extractFile(archive, name).length) throw new Error(`Missing app content: ${name}`);
   }
+  const unpackedChild = resolve(root, "resources/app.asar.unpacked/pinned-harness-child.ts");
+  if (!existsSync(unpackedChild) || statSync(unpackedChild).size === 0) throw new Error("Missing unpacked coordination child");
   return { status: "PASS", version: manifest.version, channel: manifest.channel, sourceRevision: manifest.source.revision, sourceDirty: manifest.source.dirty, sourceTreeSha256: digest, artifacts: manifest.artifacts };
 }
 

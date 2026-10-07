@@ -58,6 +58,8 @@ async function packageFixture(t, { version = "1.0.0-rc.1", source }) {
   const buildInfo = { schemaVersion: 1, product: "GoalPort", version, channel: "Stable V1 RC", electronVersion: "44.0.0", source, components: Object.fromEntries(COMPONENTS.map((name) => [name, fileHash(resolve(root, "resources", name))])) };
   writeFileSync(resolve(stage, "build-info.json"), JSON.stringify(buildInfo));
   await asarApi().createPackage(stage, resolve(root, "resources/app.asar"));
+  mkdirSync(resolve(root, "resources/app.asar.unpacked"), { recursive: true });
+  writeFileSync(resolve(root, "resources/app.asar.unpacked/pinned-harness-child.ts"), "test-only coordination child");
   const manifest = { ...buildInfo, artifacts: [] };
   manifest.artifacts = artifactPaths(root).map((name) => ({ path: name, bytes: statSync(resolve(root, name)).size, sha256: fileHash(resolve(root, name)) }));
   writeFileSync(resolve(root, "package-manifest.json"), JSON.stringify(manifest));

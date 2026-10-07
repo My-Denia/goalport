@@ -77,6 +77,16 @@ export function generate() {
   parts.push("Chromium/Node/V8 distribution (see LICENSE and LICENSES.chromium.html in");
   parts.push("the package root, provided unmodified by the Electron project).");
   parts.push("");
+  parts.push("--------------------------------------------------------------------");
+  parts.push("Copied source (resources/app.asar renderer)");
+  parts.push("--------------------------------------------------------------------");
+  parts.push("");
+  parts.push("T3 Code coordination policy, copied from T3 Tools Inc. under the MIT");
+  parts.push("License into src/coordination/AcpClientPolicy.ts. The notice below is");
+  parts.push("the upstream LICENSE text, kept beside that copy.");
+  parts.push("");
+  parts.push(readLicenseText(resolve(ROOT, "src/coordination/T3-LICENSE.txt")));
+  parts.push("");
   parts.push("None of the components below carried an upstream NOTICE file at the time");
   parts.push("this file was generated (checked directly against each crate's vendored");
   parts.push("source under the local Cargo registry cache), so no Apache License 2.0");
