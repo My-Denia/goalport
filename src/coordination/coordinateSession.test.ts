@@ -161,6 +161,36 @@ describe("coordinate session", () => {
     expect(view.stopReason).toMatch(/replaced/);
   });
 
+  it("keeps a harness when only another model's window is exhausted", () => {
+    const withFableSpent = providers.map((provider) => provider.instanceId === "codex"
+      ? {
+          ...provider,
+          models: [
+            { slug: "gpt-6-fable", name: "GPT-6 Fable", isDefault: false },
+            ...provider.models,
+          ],
+          usageLimits: {
+            windows: [
+              { id: "five_hour", usedPercent: 10 },
+              { id: "seven_day_fable", usedPercent: 100 },
+            ],
+          },
+        }
+      : provider);
+    const catalog = catalogFromProviderSnapshots(withFableSpent);
+    expect(catalog.find((instance) => instance.instanceId === "codex")?.quota).toBe("available");
+    const selected = coordinateGoal({ catalog, goal, workspacePath });
+    expect(selected.commands).toHaveLength(2);
+    expect(selected.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
+    expect(selected.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
+
+    const generalSpent = catalogFromProviderSnapshots([{
+      ...withFableSpent[0],
+      usageLimits: { windows: [{ id: "five_hour", usedPercent: 100 }, { id: "seven_day_fable", usedPercent: 10 }] },
+    }]);
+    expect(generalSpent[0]?.quota).toBe("exhausted");
+  });
+
   it("does not invent a harness when the coordination service is missing", async () => {
     const view = await requestCoordination({ goal, workspacePath }, null, recordingTransport([]));
     expect(view.planningHarness).toBeNull();

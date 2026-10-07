@@ -26,7 +26,6 @@ function DraftRuntimePicker({ runtimes, provider, connected, onSelect }: DraftRu
         selectedId={provider}
         triggerClassName="runtime-picker-button"
         triggerAriaLabel="Select Runtime"
-        triggerTitle="Send without picking, or pick the single-harness path."
         emptyText="No Runtime information from Core yet."
         blockedHint={!connected ? "Reconnect Core to select." : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}

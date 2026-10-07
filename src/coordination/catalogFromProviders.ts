@@ -23,11 +23,17 @@ export interface ProviderSnapshot {
   };
 }
 
+function modelSpecificWindow(id: unknown): boolean {
+  return typeof id === "string" && id.startsWith("seven_day_") && id !== "seven_day";
+}
+
 function quotaFromSnapshot(snapshot: ProviderSnapshot): SyntheticQuota {
   const limits = snapshot.usageLimits;
   const windows = limits?.windows ?? [];
   if (limits === undefined || limits.unavailable !== undefined || windows.length === 0) return "unknown";
-  if (windows.some((window) => typeof window.usedPercent === "number" && window.usedPercent >= 100)) {
+  const providerWide = windows.filter((window) => !modelSpecificWindow(window.id));
+  const considered = providerWide.length > 0 ? providerWide : windows;
+  if (considered.some((window) => typeof window.usedPercent === "number" && window.usedPercent >= 100)) {
     return "exhausted";
   }
   return "available";
