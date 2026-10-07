@@ -76,6 +76,8 @@ async function fixture(t) {
   // otherwise capture a partial archive and make the fixture fail at random.
   const archive = await asarApi().createPackage(stage, resolve(root, "resources/app.asar"));
   await finished(archive);
+  mkdirSync(resolve(root, "resources/app.asar.unpacked"), { recursive: true });
+  writeFileSync(resolve(root, "resources/app.asar.unpacked/pinned-harness-child.ts"), "test-only coordination child");
   manifest.artifacts = artifactPaths(root).map((name) => ({ path: name, bytes: statSync(resolve(root, name)).size, sha256: fileHash(resolve(root, name)) }));
   const save = () => writeFileSync(resolve(root, "package-manifest.json"), JSON.stringify(manifest));
   save();

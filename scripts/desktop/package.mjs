@@ -173,14 +173,14 @@ export async function main(argv = process.argv.slice(2)) {
     };
     const stage = resolve(out, "stage");
     mkdirSync(stage);
-    for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "harness-runtime.cjs"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
+    for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "harness-runtime.cjs", "pinned-harness-child.ts"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
     cpSync(frontend, resolve(stage, "dist"), { recursive: true });
     writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, main: "main.cjs" }, null, 2));
     writeFileSync(resolve(stage, "build-info.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);
     const { default: packager } = await import("electron-packager");
     const packages = await packager({
       dir: stage, name: "GoalPort", platform: "win32", arch: "x64", out,
-      overwrite: false, asar: true, prune: false,
+      overwrite: false, asar: { unpack: "pinned-harness-child.ts" }, prune: false,
       electronVersion: pkg.devDependencies.electron, appVersion: pkg.version,
       buildVersion: pkg.version, extraResource: binaries,
       win32metadata: { ProductName: "GoalPort", FileDescription: distribution === "dev-candidate" ? `GoalPort ${pkg.version} (RC, dev candidate)` : `GoalPort ${pkg.version} (RC)`, CompanyName: "GoalPort" }

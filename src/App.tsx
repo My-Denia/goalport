@@ -1113,17 +1113,22 @@ function App() {
                 canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                 workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                 onBrowse={() => { void chooseWorkspace(); }}
-                onChange={(value) => setDraftGoal((current) => {
-                  if (!current) return { ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId };
+                onChange={(value) => {
+                  const current = draftGoal;
+                  if (!current) {
+                    setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
+                    return;
+                  }
                   const changed = current.workspace !== value.workspace
                     || current.provider !== value.provider
                     || current.message !== value.message;
-                  return {
+                  if (changed) setCoordination(null);
+                  setDraftGoal({
                     ...current,
                     ...value,
                     ...(changed && current.intent ? { requestId: freshRequestId(), intent: undefined } : {})
-                  };
-                })}
+                  });
+                }}
                 onSubmit={handleDraftSend}
                 onDiscard={handleDiscardDraft}
               />

@@ -16,8 +16,15 @@ function chosenPath(options, key, envName) {
   return configuredPath(process.env[envName]);
 }
 
+function defaultChildPath() {
+  const alongside = path.join(__dirname, "pinned-harness-child.ts");
+  const unpacked = alongside.replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
+  if (unpacked !== alongside && fs.existsSync(unpacked)) return unpacked;
+  return alongside;
+}
+
 function createHarnessRuntime(options = {}) {
-  const childPath = options.childPath ?? path.join(__dirname, "pinned-harness-child.ts");
+  const childPath = options.childPath ?? defaultChildPath();
   const nodeBin = options.nodeBin ?? "node";
   const checkout = chosenPath(options, "checkout", "GOALPORT_HARNESS_CHECKOUT");
   const stateDir = chosenPath(options, "stateDir", "GOALPORT_HARNESS_STATE_DIR");
