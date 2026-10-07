@@ -25,6 +25,39 @@ function directoryHas(directory, needle) {
   }
   return false;
 }
+test("the runtime starts the child with this process", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-node-"));
+  const seen = path.join(directory, "seen.txt");
+  const childPath = path.join(directory, "stub-child.cjs");
+  fs.writeFileSync(childPath, `
+    const fs = require("node:fs");
+    fs.writeFileSync(${JSON.stringify(seen)}, process.execPath + "\\n" + (process.env.ELECTRON_RUN_AS_NODE || ""));
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      const newline = buffer.indexOf("\\n");
+      if (newline < 0) return;
+      const message = JSON.parse(buffer.slice(0, newline));
+      process.stdout.write(JSON.stringify({ id: message.id, ok: false, providers: [], stopReason: "seen" }) + "\\n");
+    });
+  `);
+  const runtime = createHarnessRuntime({
+    childPath,
+    stateDir: path.join(directory, "state"),
+    serverCwd: directory,
+  });
+  try {
+    await runtime.discover();
+    const [bin, flag] = fs.readFileSync(seen, "utf8").split("\n");
+    assert.equal(bin, process.execPath);
+    assert.equal(flag, "1");
+  } finally {
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("an unconfigured runtime does not spawn a child", async () => {
   const runtime = createHarnessRuntime({
     childPath: path.join(os.tmpdir(), "goalport-harness-missing-child.cjs"),
