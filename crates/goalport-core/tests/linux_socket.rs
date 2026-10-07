@@ -898,6 +898,15 @@ fn blackbox_serve_binary_round_trip() {
     snapshot_round_trip(&sock);
 }
 
+#[test]
+fn pipe_peer_reads_the_serving_process() {
+    let sock = unique_sock("pipe-peer");
+    let _server = spawn_server_at(sock.clone());
+    assert!(wait_until(|| sock.exists()), "socket was not bound");
+    let peer = goalport_core::ipc::verify_pipe_peer(sock.to_str().unwrap()).unwrap();
+    assert_eq!(peer.server_pid, std::process::id());
+}
+
 fn unique_suffix() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

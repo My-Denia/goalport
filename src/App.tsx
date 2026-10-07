@@ -20,6 +20,9 @@ import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
+import { CoordinationStatus, type CoordinationQuotaWord } from "./conversation/CoordinationStatus";
+import { requestCoordination } from "./coordination/requestCoordination";
+import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
 import { BackgroundAttention } from "./panels/BackgroundAttention";
 import { TurnResults } from "./panels/TurnResults";
@@ -115,6 +118,14 @@ function App() {
   snapshotRef.current = snapshot;
   const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
+  const [coordination, setCoordination] = useState<{
+    planningHarness: string | null;
+    reviewHarness: string | null;
+    result: string | null;
+    stopReason: string;
+    planningQuota: CoordinationQuotaWord | null;
+    reviewQuota: CoordinationQuotaWord | null;
+  } | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<ActiveNotice | null>(null);
   const [draftBlocked, setDraftBlocked] = useState(false);
@@ -425,11 +436,7 @@ function App() {
     const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
-    if (!workspace || !provider || !message) return;
-    if (!client.startConversation) {
-      setDraftError({ sentence: "This build of GoalPort cannot start a new conversation. Update GoalPort and try again." });
-      return;
-    }
+    if (!workspace || !message) return;
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
       setDraftError({ sentence: "Core confirmed the previous state but could not project enough control data to start new work. Retry a pending request or reconnect first." });
       return;
@@ -439,6 +446,44 @@ function App() {
       setDraftError({ sentence: "A held Stop governs a workspace in this view, so no new goal can start here." });
       return;
     }
+    if (!provider) {
+      setDraftError(null);
+      setDraftBusy(true);
+      try {
+        const bridge = window.goalportCore;
+        const discovery = bridge?.coordinateDiscover ? await bridge.coordinateDiscover() : null;
+        const report = await requestCoordination(
+          { workspacePath: workspace, goal: message },
+          discovery,
+          {
+            launch: async (command: CoordinateTurnCommand) => {
+              if (!bridge?.coordinateLaunch) {
+                return { text: "", errorText: "This window has no coordination service." };
+              }
+              return bridge.coordinateLaunch(command);
+            },
+          },
+        );
+        setCoordination(report);
+      } catch (error) {
+        setCoordination({
+          planningHarness: null,
+          reviewHarness: null,
+          result: null,
+          stopReason: error instanceof Error ? error.message : "The coordination service is not available.",
+          planningQuota: null,
+          reviewQuota: null,
+        });
+      } finally {
+        setDraftBusy(false);
+      }
+      return;
+    }
+    if (!client.startConversation) {
+      setDraftError({ sentence: "This build of GoalPort cannot start a new conversation. Update GoalPort and try again." });
+      return;
+    }
+    setCoordination(null);
     draftInFlight.current = true;
     setDraftBusy(true);
     const intent = draftGoal.intent
@@ -475,6 +520,7 @@ function App() {
     setDraftDismissed(false);
     setDraftError(null);
     setDraftBlocked(false);
+    setCoordination(null);
     setDraftGoal({
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
@@ -489,6 +535,7 @@ function App() {
     setDraftError(null);
     setDraftBlocked(false);
     setDraftDismissed(true);
+    setCoordination(null);
   }
 
   // -----------------------------------------------------------------------
@@ -1029,7 +1076,7 @@ function App() {
 
         <main className="conversation-column" aria-label="Goal conversation">
           <StatusBanners
-            browserPreview={client.mode === "browser-preview"}
+            browserPreview={client.mode === "browser-preview" && coordination === null}
             snapshot={snapshot}
             activeNotice={displayedNotice}
             onDismissNotice={() => {
@@ -1045,6 +1092,16 @@ function App() {
 
           {draftActive ? (
             <div className="timeline-scroll" tabIndex={-1} aria-label="New goal draft">
+              {coordination ? (
+                <CoordinationStatus
+                  planningHarness={coordination.planningHarness}
+                  reviewHarness={coordination.reviewHarness}
+                  result={coordination.result}
+                  stopReason={coordination.stopReason}
+                  planningQuota={coordination.planningQuota}
+                  reviewQuota={coordination.reviewQuota}
+                />
+              ) : null}
               <DraftGoalComposer
                 draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
                 runtimes={snapshot.runtimes}
