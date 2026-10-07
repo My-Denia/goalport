@@ -25,7 +25,8 @@ function defaultChildPath() {
 
 function createHarnessRuntime(options = {}) {
   const childPath = options.childPath ?? defaultChildPath();
-  const nodeBin = options.nodeBin ?? "node";
+  const nodeBin = options.nodeBin ?? process.execPath;
+  const useBundledNode = options.nodeBin == null || options.nodeBin === process.execPath;
   const checkout = chosenPath(options, "checkout", "GOALPORT_HARNESS_CHECKOUT");
   const stateDir = chosenPath(options, "stateDir", "GOALPORT_HARNESS_STATE_DIR");
   const serverCwd = chosenPath(options, "serverCwd", "GOALPORT_HARNESS_SERVER_CWD") || (checkout ? path.join(checkout, "apps", "server") : "");
@@ -46,6 +47,7 @@ function createHarnessRuntime(options = {}) {
     fs.mkdirSync(stateDir, { recursive: true });
     const env = { ...process.env };
     delete env.GOALPORT_COORDINATE_SEND;
+    if (useBundledNode) env.ELECTRON_RUN_AS_NODE = "1";
     env.GOALPORT_HARNESS_STATE_DIR = stateDir;
     if (checkout) env.GOALPORT_HARNESS_CHECKOUT = checkout;
     buffer = "";

@@ -183,6 +183,7 @@ function App() {
   }, [client]);
   const sendInFlight = useRef(false);
   const draftInFlight = useRef(false);
+  const coordinationRequest = useRef(0);
   const historyRequest = useRef(0);
 
   useEffect(() => {
@@ -448,6 +449,7 @@ function App() {
     }
     if (!provider) {
       setDraftError(null);
+      const request = ++coordinationRequest.current;
       setDraftBusy(true);
       try {
         const bridge = window.goalportCore;
@@ -464,8 +466,10 @@ function App() {
             },
           },
         );
+        if (coordinationRequest.current !== request) return;
         setCoordination(report);
       } catch (error) {
+        if (coordinationRequest.current !== request) return;
         setCoordination({
           planningHarness: null,
           reviewHarness: null,
@@ -475,7 +479,7 @@ function App() {
           reviewQuota: null,
         });
       } finally {
-        setDraftBusy(false);
+        if (coordinationRequest.current === request) setDraftBusy(false);
       }
       return;
     }
@@ -515,12 +519,18 @@ function App() {
     }
   }
 
+  function abandonCoordination() {
+    coordinationRequest.current += 1;
+    setCoordination(null);
+    setDraftBusy(false);
+  }
+
   function handleNewGoal() {
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setDraftDismissed(false);
     setDraftError(null);
     setDraftBlocked(false);
-    setCoordination(null);
+    abandonCoordination();
     setDraftGoal({
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
@@ -535,7 +545,7 @@ function App() {
     setDraftError(null);
     setDraftBlocked(false);
     setDraftDismissed(true);
-    setCoordination(null);
+    abandonCoordination();
   }
 
   // -----------------------------------------------------------------------
@@ -1122,7 +1132,7 @@ function App() {
                   const changed = current.workspace !== value.workspace
                     || current.provider !== value.provider
                     || current.message !== value.message;
-                  if (changed) setCoordination(null);
+                  if (changed) abandonCoordination();
                   setDraftGoal({
                     ...current,
                     ...value,
