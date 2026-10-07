@@ -501,15 +501,15 @@ async function discover() {
   const providers = await Effect.runPromise(Effect.gen(function* () {
     const registry = yield* mods.ProviderInstanceRegistry.ProviderInstanceRegistry;
     const instances = yield* registry.listInstances;
-    const rows = [];
-    for (const instance of instances) {
-      const snapshot = yield* instance.snapshot.refresh.pipe(
+    return yield* Effect.forEach(
+      instances,
+      (instance) => instance.snapshot.refresh.pipe(
         Effect.timeout("40 seconds"),
         Effect.catch(() => Effect.succeed(null)),
-      );
-      rows.push(snapshot ? publicProvider(snapshot) : failedProvider(instance));
-    }
-    return rows;
+        Effect.map((snapshot) => snapshot ? publicProvider(snapshot) : failedProvider(instance)),
+      ),
+      { concurrency: "unbounded" },
+    );
   }).pipe(Effect.provide(registryLayer(mods, stateDir())), Effect.scoped));
   return { ok: true, providers, stopReason: null };
 }
