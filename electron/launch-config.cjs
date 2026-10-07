@@ -2,6 +2,58 @@ const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
+const LINUX_UNIX_SOCKET_PATH_MAX_BYTES = 107;
+
+function endpointSocketLeafName(endpoint, parentDir) {
+  const hash = createHash("sha256").update(endpoint, "utf8").digest("hex").slice(0, 16);
+  const suffix = `--${hash}.sock`;
+  const maxLeaf = LINUX_UNIX_SOCKET_PATH_MAX_BYTES - (Buffer.byteLength(parentDir) + 1);
+  if (suffix.length > maxLeaf) {
+    throw new Error("Unix socket path would exceed Linux sun_path capacity (107 bytes)");
+  }
+  let prefix = Array.from(endpoint, (character) => (
+    /^[A-Za-z0-9]$/.test(character) || character === "-" || character === "_" || character === "."
+      ? character
+      : "_"
+  )).join("");
+  if (!prefix) prefix = "endpoint";
+  const maxPrefix = maxLeaf - suffix.length;
+  if (prefix.length > maxPrefix) prefix = prefix.slice(0, maxPrefix);
+  return `${prefix}${suffix}`;
+}
+
+function resolveUnixSocket(endpoint, env = process.env) {
+  const name = String(endpoint || "").trim();
+  if (!name) throw new Error("Unix socket endpoint is empty");
+  if (path.isAbsolute(name)) {
+    if (Buffer.byteLength(name) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+      throw new Error(`Unix socket path is ${Buffer.byteLength(name)} bytes; Linux sun_path capacity is 107 bytes`);
+    }
+    return name;
+  }
+  const home = env.HOME;
+  if (!home) throw new Error("HOME is required");
+  const directory = path.join(home, ".goalport", "runtime");
+  const resolved = path.join(directory, endpointSocketLeafName(name, directory));
+  if (Buffer.byteLength(resolved) > LINUX_UNIX_SOCKET_PATH_MAX_BYTES) {
+    throw new Error(`Unix socket path is ${Buffer.byteLength(resolved)} bytes; Linux sun_path capacity is 107 bytes`);
+  }
+  return resolved;
+}
+
+function windowsPipeName(configured) {
+  const name = String(configured ?? "");
+  return name.startsWith("\\\\.\\pipe\\") ? name : `\\\\.\\pipe\\${name}`;
+}
+
+function coreServePipe(platform, configured) {
+  return platform === "linux" ? String(configured ?? "") : windowsPipeName(configured);
+}
+
+function coreConnectEndpoint(platform, configured, env = process.env) {
+  return platform === "linux" ? resolveUnixSocket(configured, env) : windowsPipeName(configured);
+}
+
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 function canonicalPath(value) {
   const absolute = path.resolve(value);
@@ -222,5 +274,6 @@ function childEnvironment(env, profile) {
 module.exports = {
   launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
   childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
-  CHANNEL_DIRECTORIES, canonicalPath, storagePathRelationship, assertProfileStorageBoundary
+  CHANNEL_DIRECTORIES, canonicalPath, storagePathRelationship, assertProfileStorageBoundary,
+  resolveUnixSocket, windowsPipeName, coreServePipe, coreConnectEndpoint
 };
