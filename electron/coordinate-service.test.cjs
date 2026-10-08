@@ -73,7 +73,7 @@ test("a pinned checkout mismatch fails discovery", async () => {
   assert.match(result.stopReason, /pinned checkout does not match/);
 });
 
-test("an unauthorized launch prepares and does not run", async () => {
+test("an unauthorized launch does not prepare or run", async () => {
   let prepared = 0;
   let ran = 0;
   const result = await launchOne({}, {
@@ -89,7 +89,7 @@ test("an unauthorized launch prepares and does not run", async () => {
       return { ok: false, errorText: "sent" };
     },
   }, command);
-  assert.equal(prepared, 1);
+  assert.equal(prepared, 0);
   assert.equal(ran, 0);
   assert.equal(result.launched, false);
   assert.equal(result.prepared, true);
@@ -132,6 +132,31 @@ test("approval-required without never is refused before prepare", async () => {
   assert.match(result.errorText, /approvalPolicy must be never/);
 });
 
+test("an authorized runtime result is the turn text", async () => {
+  let prepared = 0;
+  let ran = 0;
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      prepared += 1;
+      return held;
+    },
+    async run(received) {
+      ran += 1;
+      assert.equal(received.initialMessage.text, "Plan only.");
+      return { ok: true, text: "Bounded plan.", errorText: "" };
+    },
+  }, command);
+  assert.equal(prepared, 0);
+  assert.equal(ran, 1);
+  assert.equal(result.launched, true);
+  assert.equal(result.prepared, true);
+  assert.equal(result.text, "Bounded plan.");
+  assert.equal(result.errorText, "");
+});
+
 test("the authorization flag still does not send a model turn", async () => {
   let prepared = 0;
   let ran = 0;
@@ -149,7 +174,7 @@ test("the authorization flag still does not send a model turn", async () => {
       return { ok: false, errorText: "No model turn was sent, because this session is not authorized to spend subscription quota." };
     },
   }, command);
-  assert.equal(prepared, 1);
+  assert.equal(prepared, 0);
   assert.equal(ran, 1);
   assert.equal(result.launched, false);
   assert.equal(result.prepared, true);

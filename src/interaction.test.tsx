@@ -832,7 +832,7 @@ describe("send without a Runtime", () => {
     });
   }
 
-  it("keeps a Runtime required when the preload methods exist but the checkout is unset", async () => {
+  it("asks for a Runtime when this build has no coordination service", async () => {
     const bridge = mountCoordination(false);
     await openDraft("plan the helper");
     await waitFor(() => expect(bridge.appInfoSeen()).toBe(true));
@@ -851,6 +851,204 @@ describe("send without a Runtime", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(bridge.discoverCalls()).toBe(1));
     expect(await screen.findByText("No model turn was sent.")).toBeTruthy();
+  });
+
+  it("reopens a saved plan without discovering or launching again", async () => {
+    let discoverCalls = 0;
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => {
+        discoverCalls += 1;
+        return { connected: false, sendAuthorized: false, providers: [], stopReason: "No model turn was sent." };
+      },
+      coordinateLaunch: async () => {
+        launches += 1;
+        return { text: "", errorText: "" };
+      },
+      coordinationRecords: async () => [{
+        requestId: "saved-plan",
+        workspacePath: "/work/goal",
+        goal: "Explain the failure.",
+        planningHarness: "Codex",
+        reviewHarness: "Claude",
+        planText: "Bounded plan.",
+        reviewText: "Needs a smaller step.\nVERDICT: revise",
+        result: "Needs a smaller step.\nVERDICT: revise",
+        verdict: "revise",
+        stopReason: "The independent check says the plan needs revision, so this stopped.",
+        planningQuota: "available",
+        reviewQuota: "available",
+        savedAt: "2026-10-08T06:10:00.000Z",
+      }],
+    } as never;
+    render(<App />);
+    expect(await screen.findByText("Needs revision")).toBeTruthy();
+    expect(screen.getByText("Bounded plan.")).toBeTruthy();
+    expect(screen.getByText(/needs revision, so this stopped/)).toBeTruthy();
+    expect(document.querySelector("time")?.getAttribute("dateTime")).toBe("2026-10-08T06:10:00.000Z");
+    expect(discoverCalls).toBe(0);
+    expect(launches).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    const composer = await screen.findByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
+    expect(composer.value).toBe("Explain the failure.");
+    expect(screen.getByText(/Nothing is sent until you press Send/)).toBeTruthy();
+    expect(screen.getByText(/The check said:/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Explain the failure/ })).toBeTruthy();
+    expect(discoverCalls).toBe(0);
+    expect(launches).toBe(0);
+  });
+
+  it("reopens a failed plan and a stopped plan without launching again", async () => {
+    let discoverCalls = 0;
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => {
+        discoverCalls += 1;
+        return { connected: true, sendAuthorized: true, providers: [], stopReason: null };
+      },
+      coordinateLaunch: async () => {
+        launches += 1;
+        return { text: "", errorText: "" };
+      },
+      coordinationRecords: async () => [
+        {
+          requestId: "failed-plan",
+          workspacePath: "/work/goal",
+          goal: "The send failed.",
+          planningHarness: "Codex",
+          reviewHarness: "Claude",
+          planText: null,
+          reviewText: null,
+          result: null,
+          verdict: "failed",
+          stopReason: "The harness did not finish, so this stopped.",
+          planningQuota: "unknown",
+          reviewQuota: "unknown",
+        },
+        {
+          requestId: "stopped-plan",
+          workspacePath: "/work/goal",
+          goal: "The check said stop.",
+          planningHarness: "Codex",
+          reviewHarness: "Claude",
+          planText: "Bounded plan.",
+          reviewText: "VERDICT: stop",
+          result: "VERDICT: stop",
+          verdict: "stopped",
+          stopReason: "The independent check says to stop, so this stopped.",
+          planningQuota: "unknown",
+          reviewQuota: "unknown",
+        },
+      ],
+    } as never;
+    render(<App />);
+    expect(await screen.findByText("Failed")).toBeTruthy();
+    expect(screen.getByText(/did not finish, so this stopped/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /The check said stop/ }));
+    expect(await screen.findByText("Stopped")).toBeTruthy();
+    expect(screen.getByText("Bounded plan.")).toBeTruthy();
+    expect(discoverCalls).toBe(0);
+    expect(launches).toBe(0);
+  });
+
+  it("saves a real send before the harness returns and keeps the failure", async () => {
+    let release: (value?: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const order: string[] = [];
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async () => {
+        launches += 1;
+        order.push("launch");
+        if (launches === 1) await gate;
+        return { text: "", errorText: "The harness did not finish, so this stopped." };
+      },
+      coordinationSave: async (record: { verdict: string }) => {
+        order.push(`save:${record.verdict}`);
+        return record;
+      },
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(order).toContain("launch"));
+    expect(order[0]).toBe("save:unconfirmed");
+    expect(order.filter((item) => item === "launch")).toHaveLength(1);
+    release();
+    expect(await screen.findByText("Failed")).toBeTruthy();
+    await waitFor(() => expect(order).toContain("save:failed"));
+    expect(launches).toBe(1);
   });
 
   it("uses a fresh generation after the window reloads", async () => {

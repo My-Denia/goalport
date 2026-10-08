@@ -22,7 +22,7 @@ test("every real IPC channel uses one fail-closed sender gate", () => {
   const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /ipcMain\.handle\(/);
   const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 14);
+  assert.equal(channels.length, 16);
   for (const channel of channels) {
     const f = fixture(); let calls = 0;
     f.handle(channel, () => ++calls);

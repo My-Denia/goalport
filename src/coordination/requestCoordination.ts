@@ -2,11 +2,15 @@ import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFr
 import { coordinateGoal } from "./coordinateGoal";
 import { runCoordinateSession, type CoordinateTransport } from "./coordinateSession";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
+import type { CoordinationVerdict } from "./verdict";
 
 export interface CoordinationView {
   planningHarness: string | null;
   reviewHarness: string | null;
+  planText: string | null;
+  reviewText: string | null;
   result: string | null;
+  verdict: CoordinationVerdict | null;
   stopReason: string;
   planningQuota: CoordinationQuotaWord | null;
   reviewQuota: CoordinationQuotaWord | null;
@@ -19,24 +23,20 @@ export interface CoordinationDiscovery {
   readonly stopReason: string | null;
 }
 
-function viewFrom(input: {
-  planningHarness: string | null;
-  reviewHarness: string | null;
-  result: string | null;
-  stopReason: string;
-  planningQuota: CoordinationQuotaWord | null;
-  reviewQuota: CoordinationQuotaWord | null;
-}): CoordinationView {
+function viewFrom(input: CoordinationView): CoordinationView {
   return input;
 }
 
 const REPLACED = "The coordination request was replaced, so nothing was sent.";
 
-function unavailable(stopReason: string): CoordinationView {
+function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped"): CoordinationView {
   return viewFrom({
     planningHarness: null,
     reviewHarness: null,
+    planText: null,
+    reviewText: null,
     result: null,
+    verdict,
     stopReason,
     planningQuota: null,
     reviewQuota: null,
@@ -48,7 +48,12 @@ function unavailable(stopReason: string): CoordinationView {
  * harness, the review harness, and why the product stopped.
  */
 export async function requestCoordination(
-  input: { readonly workspacePath: string; readonly goal: string },
+  input: {
+    readonly workspacePath: string;
+    readonly goal: string;
+    readonly priorPlan?: string | null;
+    readonly priorReview?: string | null;
+  },
   discovery: CoordinationDiscovery | null,
   transport: CoordinateTransport,
   stillCurrent: () => boolean = () => true,
@@ -61,58 +66,60 @@ export async function requestCoordination(
     catalog,
     goal: input.goal,
     workspacePath: input.workspacePath,
+    priorPlan: input.priorPlan,
+    priorReview: input.priorReview,
   });
   if (planned.commands.length !== 2) {
     return viewFrom({
       planningHarness: planned.planningHarness,
       reviewHarness: planned.reviewHarness,
+      planText: null,
+      reviewText: null,
       result: null,
+      verdict: "stopped",
       stopReason: planned.stopReason,
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
     });
   }
+  if (!stillCurrent()) return unavailable(REPLACED);
   if (!discovery.sendAuthorized) {
-    const planning = planned.commands[0];
-    const review = planned.commands[1];
-    if (!stillCurrent()) return unavailable(REPLACED);
-    const preparedPlanning = await transport.launch(planning);
-    if (!stillCurrent()) return unavailable(REPLACED);
-    const preparedReview = await transport.launch(review);
-    if (preparedPlanning.prepared !== true || preparedReview.prepared !== true) {
-      const errorText = preparedPlanning.prepared !== true
-        ? preparedPlanning.errorText
-        : preparedReview.errorText;
-      return viewFrom({
-        planningHarness: null,
-        reviewHarness: null,
-        result: null,
-        stopReason: errorText.trim().length > 0
-          ? errorText
-          : "The read-only session was not prepared, so nothing was sent.",
-        planningQuota: null,
-        reviewQuota: null,
-      });
-    }
     return viewFrom({
       planningHarness: planned.planningHarness,
       reviewHarness: planned.reviewHarness,
+      planText: null,
+      reviewText: null,
       result: null,
+      verdict: "stopped",
       stopReason: "Planning and review are assigned to two different harnesses. No model turn was sent, because this session is not authorized to spend subscription quota.",
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
     });
   }
-  if (!stillCurrent()) return unavailable(REPLACED);
   const sent = await runCoordinateSession(
-    { catalog, goal: input.goal, workspacePath: input.workspacePath },
+    {
+      catalog,
+      goal: input.goal,
+      workspacePath: input.workspacePath,
+      priorPlan: input.priorPlan,
+      priorReview: input.priorReview,
+    },
     { sendAuthorized: true },
-    transport,
+    {
+      async launch(command) {
+        if (!stillCurrent()) return { text: "", errorText: REPLACED };
+        return transport.launch(command);
+      },
+    },
   );
+  if (sent.stopReason.toLowerCase().includes("replaced")) return unavailable(REPLACED);
   return viewFrom({
     planningHarness: sent.planningHarness,
     reviewHarness: sent.reviewHarness,
+    planText: sent.planText,
+    reviewText: sent.reviewText,
     result: sent.result,
+    verdict: sent.verdict,
     stopReason: sent.stopReason,
     planningQuota: sent.planningQuota,
     reviewQuota: sent.reviewQuota,

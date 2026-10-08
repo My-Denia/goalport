@@ -76,8 +76,7 @@ describe("coordinate session", () => {
     expect(view.reviewQuota).toBe("available");
     expect(view.result).toBeNull();
     expect(view.stopReason).toMatch(/not authorized to spend subscription quota/);
-    expect(transport.calls).toHaveLength(2);
-    expect(transport.calls[0]?.modelSelection.instanceId).not.toBe(transport.calls[1]?.modelSelection.instanceId);
+    expect(transport.calls).toHaveLength(0);
     const selected = coordinateGoal({
       catalog: catalogFromProviderSnapshots(providers),
       goal,
@@ -92,7 +91,7 @@ describe("coordinate session", () => {
   it("stops after the critic and does not start an implementation turn", async () => {
     const transport = recordingTransport([
       { text: "Bounded plan.", errorText: "" },
-      { text: "The plan can be carried out.", errorText: "" },
+      { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" },
     ]);
     const catalog = catalogFromProviderSnapshots(providers);
     const state = await runCoordinateSession(
@@ -105,8 +104,25 @@ describe("coordinate session", () => {
     expect(transport.calls[1]?.modelSelection.model).toBe("claude-opus-5-5");
     expect(transport.calls[0]?.modelSelection.instanceId).not.toBe(transport.calls[1]?.modelSelection.instanceId);
     expect(transport.calls[1]?.initialMessage.text).toContain("Bounded plan.");
-    expect(state.result).toBe("The plan can be carried out.");
+    expect(state.planText).toBe("Bounded plan.");
+    expect(state.reviewText).toBe("The plan can be carried out.\nVERDICT: carry-out");
+    expect(state.verdict).toBe("checked");
+    expect(state.result).toBe("The plan can be carried out.\nVERDICT: carry-out");
     expect(state.stopReason).toBe("The independent check finished, so this stopped.");
+  });
+
+  it("does not treat a review without a verdict line as carried out", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "Bounded plan.", errorText: "" },
+        { text: "The plan can be carried out.", errorText: "" },
+      ]),
+    );
+    expect(state.planText).toBe("Bounded plan.");
+    expect(state.verdict).toBe("unconfirmed");
+    expect(state.stopReason).toBe("The independent check did not confirm the plan, so this stopped.");
   });
 
   it("shows a credits refusal as credits, not as a usage-limit wait, and does not launch the critic", async () => {
@@ -146,11 +162,11 @@ describe("coordinate session", () => {
     let launches = 0;
     const view = await requestCoordination(
       { goal, workspacePath },
-      { connected: true, sendAuthorized: false, providers, stopReason: null },
+      { connected: true, sendAuthorized: true, providers, stopReason: null },
       {
         async launch() {
           launches += 1;
-          return { text: "", errorText: "", prepared: true };
+          return { text: "Bounded plan.", errorText: "" };
         },
       },
       () => launches === 0,
@@ -199,6 +215,23 @@ describe("coordinate session", () => {
     expect(stillPaired.commands).toHaveLength(2);
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
+  });
+
+  it("does not send a revision when this session is not authorized", async () => {
+    const transport = recordingTransport([]);
+    const view = await requestCoordination(
+      {
+        goal,
+        workspacePath,
+        priorPlan: "Bounded plan.",
+        priorReview: "The contract path is missing.\nVERDICT: revise",
+      },
+      { connected: true, sendAuthorized: false, providers, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(0);
+    expect(view.stopReason).toMatch(/not authorized to spend subscription quota/);
+    expect(view.planText).toBeNull();
   });
 
   it("does not invent a harness when the coordination service is missing", async () => {

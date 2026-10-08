@@ -20,8 +20,9 @@ import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
-import { CoordinationStatus, type CoordinationQuotaWord } from "./conversation/CoordinationStatus";
-import { requestCoordination } from "./coordination/requestCoordination";
+import { CoordinationStatus } from "./conversation/CoordinationStatus";
+import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
+import type { SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
 import { BackgroundAttention } from "./panels/BackgroundAttention";
@@ -111,6 +112,7 @@ interface GoalDraft extends GoalDraftValue {
   baselineCampaignId: string;
   acceptNextCampaign?: boolean;
   intent?: SendIntent;
+  revision?: { planText: string | null; reviewText: string | null };
 }
 
 function App() {
@@ -123,14 +125,9 @@ function App() {
   snapshotRef.current = snapshot;
   const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
-  const [coordination, setCoordination] = useState<{
-    planningHarness: string | null;
-    reviewHarness: string | null;
-    result: string | null;
-    stopReason: string;
-    planningQuota: CoordinationQuotaWord | null;
-    reviewQuota: CoordinationQuotaWord | null;
-  } | null>(null);
+  const [coordination, setCoordination] = useState<CoordinationView | null>(null);
+  const [plans, setPlans] = useState<SavedPlan[]>([]);
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<ActiveNotice | null>(null);
   const [draftBlocked, setDraftBlocked] = useState(false);
@@ -255,8 +252,25 @@ function App() {
     if (!booted || projectionUnavailable) return;
     setConfirmedEmptyProfile(snapshot.activeCampaignId.trim() === "");
   }, [booted, projectionUnavailable, snapshot.activeCampaignId]);
-  const draftActive = draftGoal !== null
-    || (confirmedEmptyProfile && !hasGoal && !draftDismissed);
+  const selectedPlan = plans.find((plan) => plan.requestId === selectedPlanId) ?? null;
+  const draftActive = selectedPlan === null && (draftGoal !== null
+    || (confirmedEmptyProfile && !hasGoal && !draftDismissed));
+
+  useEffect(() => {
+    const list = window.goalportCore?.coordinationRecords;
+    if (!list) return;
+    let cancelled = false;
+    void list().then((records) => {
+      if (!cancelled) setPlans(records);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!booted || draftGoal || selectedPlanId || snapshot.activeCampaignId.trim() || plans.length === 0) return;
+    const newest = plans[0];
+    if (newest) setSelectedPlanId(newest.requestId);
+  }, [booted, draftGoal, selectedPlanId, snapshot.activeCampaignId, plans]);
   const activeSendIntent = sendIntents[draftCampaignId];
   const activeRetryLabel = retryLabel(activeSendIntent);
   const draftRetryLabel = retryLabel(draftGoal?.intent);
@@ -474,21 +488,57 @@ function App() {
         setDraftError({ sentence: "Choose a Runtime before sending." });
         return;
       }
+      const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);
+      if (remembered) {
+        setCoordination(remembered);
+        setSelectedPlanId(remembered.requestId);
+        return;
+      }
       setDraftError(null);
       const request = ++coordinationRequest.current;
       const generation = coordinationGeneration(coordinationScope.current, request);
       const stillCurrent = () => coordinationRequest.current === request;
+      let sendRecorded = false;
       setDraftBusy(true);
       try {
         const discovery = await discover(generation);
         if (!stillCurrent()) return;
         const report = await requestCoordination(
-          { workspacePath: workspace, goal: message },
+          {
+            workspacePath: workspace,
+            goal: message,
+            priorPlan: draftGoal.revision?.planText ?? null,
+            priorReview: draftGoal.revision?.reviewText ?? null,
+          },
           discovery,
           {
             launch: async (command: CoordinateTurnCommand) => {
               if (!stillCurrent()) {
                 return { text: "", errorText: "The coordination request was replaced, so nothing was sent." };
+              }
+              // The user just sent a goal that will call a harness. The record
+              // has to be on disk before that call returns, so a crash or a
+              // closed window still shows the send and does not start another.
+              if (!sendRecorded) {
+                sendRecorded = true;
+                const pending: CoordinationView = {
+                  planningHarness: null,
+                  reviewHarness: null,
+                  planText: null,
+                  reviewText: null,
+                  result: null,
+                  verdict: "unconfirmed",
+                  stopReason: "A send started and will not be repeated.",
+                  planningQuota: null,
+                  reviewQuota: null,
+                };
+                const saved = await rememberPlan(draftGoal.requestId, workspace, message, pending);
+                if (!stillCurrent()) {
+                  return { text: "", errorText: "The coordination request was replaced, so nothing was sent." };
+                }
+                if (saved) {
+                  setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
+                }
               }
               return launch(command, generation);
             },
@@ -497,16 +547,28 @@ function App() {
         );
         if (coordinationRequest.current !== request) return;
         setCoordination(report);
+        const saved = await rememberPlan(draftGoal.requestId, workspace, message, report);
+        if (coordinationRequest.current !== request) return;
+        if (saved) {
+          setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
+          setSelectedPlanId(saved.requestId);
+        }
       } catch (error) {
         if (coordinationRequest.current !== request) return;
-        setCoordination({
+        const failed: CoordinationView = {
           planningHarness: null,
           reviewHarness: null,
+          planText: null,
+          reviewText: null,
           result: null,
+          verdict: "failed",
           stopReason: error instanceof Error ? error.message : "The coordination service is not available.",
           planningQuota: null,
           reviewQuota: null,
-        });
+        };
+        setCoordination(failed);
+        const saved = await rememberPlan(draftGoal.requestId, workspace, message, failed);
+        if (saved) setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
       } finally {
         if (coordinationRequest.current === request) setDraftBusy(false);
       }
@@ -573,8 +635,36 @@ function App() {
     if (!draftInFlight.current) setDraftBusy(false);
   }
 
+  async function rememberPlan(requestId: string, workspacePath: string, goal: string, view: CoordinationView): Promise<SavedPlan | null> {
+    if (!view.verdict || view.stopReason.toLowerCase().includes("replaced")) return null;
+    const record: SavedPlan = { ...view, requestId, workspacePath, goal };
+    const save = window.goalportCore?.coordinationSave;
+    if (!save) return record;
+    try {
+      return await save(record);
+    } catch {
+      setActiveNotice({ sentence: "The plan is on screen, but it could not be saved for the next time you open GoalPort." });
+      return record;
+    }
+  }
+
+  function handleRevise(plan: SavedPlan) {
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    closeDraft(false);
+    setSelectedPlanId(null);
+    setDraftGoal({
+      requestId: freshRequestId(),
+      baselineCampaignId: snapshot.activeCampaignId,
+      workspace: plan.workspacePath,
+      provider: "",
+      message: plan.goal,
+      revision: { planText: plan.planText, reviewText: plan.reviewText },
+    });
+  }
+
   function handleNewGoal() {
     if (window.innerWidth <= 860) setNavCollapsed(true);
+    setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
     closeDraft(false);
     setDraftGoal({
@@ -1120,7 +1210,20 @@ function App() {
         <CampaignNav
           snapshot={snapshot}
           collapsed={navCollapsed}
-          onSelectCampaign={(campaignId) => { void selectCampaign(campaignId); }}
+          plans={plans.map((plan) => ({
+            requestId: plan.requestId,
+            title: plan.goal,
+            active: plan.requestId === selectedPlanId,
+            verdict: plan.verdict,
+          }))}
+          onSelectPlan={(requestId) => {
+            closeDraft(false);
+            setSelectedPlanId(requestId);
+          }}
+          onSelectCampaign={(campaignId) => {
+            setSelectedPlanId(null);
+            void selectCampaign(campaignId);
+          }}
           onSelectProject={(projectId) => { void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
         />
@@ -1141,17 +1244,42 @@ function App() {
             onReconnect={handleReconnect}
           />
 
-          {draftActive ? (
+          {selectedPlan ? (
+            <div className="timeline-scroll" tabIndex={-1} aria-label="Saved plan">
+              <CoordinationStatus
+                goal={selectedPlan.goal}
+                planningHarness={selectedPlan.planningHarness}
+                reviewHarness={selectedPlan.reviewHarness}
+                planText={selectedPlan.planText}
+                reviewText={selectedPlan.reviewText}
+                verdict={selectedPlan.verdict}
+                stopReason={selectedPlan.stopReason}
+                planningQuota={selectedPlan.planningQuota}
+                reviewQuota={selectedPlan.reviewQuota}
+                savedAt={selectedPlan.savedAt}
+                onRevise={selectedPlan.verdict === "revise" ? () => handleRevise(selectedPlan) : undefined}
+              />
+            </div>
+          ) : draftActive ? (
             <div className="timeline-scroll" tabIndex={-1} aria-label="New goal draft">
               {coordination ? (
                 <CoordinationStatus
+                  goal={draftGoal?.message}
                   planningHarness={coordination.planningHarness}
                   reviewHarness={coordination.reviewHarness}
-                  result={coordination.result}
+                  planText={coordination.planText}
+                  reviewText={coordination.reviewText}
+                  verdict={coordination.verdict}
                   stopReason={coordination.stopReason}
                   planningQuota={coordination.planningQuota}
                   reviewQuota={coordination.reviewQuota}
                 />
+              ) : null}
+              {draftGoal?.revision ? (
+                <p className="revision-note">
+                  Revising a saved plan. The earlier plan stays in Plans. Nothing is sent until you press Send.
+                  {draftGoal.revision.reviewText ? `\n\nThe check said:\n${draftGoal.revision.reviewText}` : ""}
+                </p>
               ) : null}
               <DraftGoalComposer
                 draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
@@ -1175,10 +1303,11 @@ function App() {
                     || current.provider !== value.provider
                     || current.message !== value.message;
                   if (changed) abandonCoordination();
+                  const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
                   setDraftGoal({
                     ...current,
                     ...value,
-                    ...(changed && current.intent ? { requestId: freshRequestId(), intent: undefined } : {})
+                    ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
                   });
                 }}
                 onSubmit={handleDraftSend}

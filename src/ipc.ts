@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SavedPlan } from "./coordination/savedPlan";
 import {
   appendPreviewConversationMessage,
   appendPreviewMessage,
@@ -319,6 +320,8 @@ declare global {
         initialMessage: { text: string };
       }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
+      coordinationRecords?: () => Promise<SavedPlan[]>;
+      coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
     };
   }
 }

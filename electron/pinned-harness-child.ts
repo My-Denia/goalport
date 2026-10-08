@@ -666,11 +666,135 @@ async function prepare(command: Record<string, unknown>) {
   return { ok: false, disposition: null, sandbox: null, approval: null, messageDispatched: false, errorText: PREPARE_FAILED };
 }
 
-async function run() {
-  if (!stateDir()) return { ok: false, errorText: UNAUTHORIZED };
-  const authFile = path.join(stateDir(), "send-authorization");
-  if (!fs.existsSync(authFile)) return { ok: false, errorText: UNAUTHORIZED };
-  return { ok: false, errorText: UNAUTHORIZED };
+function grantLines(): string[] {
+  const file = path.join(stateDir(), "send-authorization");
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+}
+
+function grantListed(commandId: string): boolean {
+  return commandId.length > 0 && grantLines().includes(commandId);
+}
+
+function takeGrant(commandId: string): boolean {
+  if (!grantListed(commandId)) return false;
+  const next = grantLines().filter((line) => line !== commandId);
+  const file = path.join(stateDir(), "send-authorization");
+  if (next.length === 0) fs.rmSync(file, { force: true });
+  else fs.writeFileSync(file, `${next.join("\n")}\n`);
+  return true;
+}
+
+function projectionStatus(projection: { runs?: ReadonlyArray<{ status?: string }> }): string {
+  const runs = projection.runs ?? [];
+  const last = runs[runs.length - 1];
+  return typeof last?.status === "string" ? last.status : "";
+}
+
+function assistantReply(projection: { messages?: ReadonlyArray<{ role?: string; streaming?: boolean; text?: string }> }): string {
+  let text = "";
+  for (const message of projection.messages ?? []) {
+    if (message.role === "assistant" && message.streaming !== true && typeof message.text === "string" && message.text.trim().length > 0) {
+      text = message.text.trim();
+    }
+  }
+  return text;
+}
+
+async function sendGranted(command: Record<string, unknown>) {
+  const selection = command.modelSelection as { instanceId?: unknown; model?: unknown };
+  const instanceId = typeof selection.instanceId === "string" ? selection.instanceId : "";
+  const model = typeof selection.model === "string" ? selection.model : "";
+  const worktreePath = worktreePathOf(command);
+  const text = (command.initialMessage as { text?: unknown } | undefined)?.text;
+  if (typeof text !== "string" || text.trim().length === 0 || !instanceId || !model || !worktreePath) {
+    return { ok: false, text: "", errorText: PREPARE_FAILED, messageDispatched: false };
+  }
+  const mods = await modules();
+  const { Effect } = mods;
+  const directory = stateDir();
+  const projectId = mods.contracts.ProjectId.make("project-goalport-harness");
+  const modelSelection = {
+    instanceId: mods.contracts.ProviderInstanceId.make(instanceId),
+    model,
+  };
+  const sent = await Effect.runPromise(Effect.gen(function* () {
+    const launches = yield* mods.ThreadLaunch.ThreadLaunchService;
+    const threads = yield* mods.ThreadManagement.ThreadManagementService;
+    const result = yield* launches.launch({
+      commandId: mods.contracts.CommandId.make(`command-send-${randomUUID()}`),
+      projectId,
+      title: "Read-only session",
+      modelSelection,
+      runtimeMode: "approval-required" as const,
+      interactionMode: "default" as const,
+      coordinateCommand: {
+        type: "goalport.coordinateTurn" as const,
+        sandboxPolicy: { type: "readOnly" as const },
+        approvalPolicy: "never" as const,
+      },
+      workspaceStrategy: { type: "existing_worktree" as const, worktreePath },
+      initialMessage: { text },
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+    });
+    let status = "";
+    let replyText = "";
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      const projection = yield* threads.getThreadProjection(result.threadId);
+      status = projectionStatus(projection);
+      replyText = assistantReply(projection);
+      if (status === "waiting") break;
+      if (status === "completed" || status === "failed" || status === "interrupted" || status === "cancelled" || status === "rolled_back") break;
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 4000)));
+    }
+    yield* threads.dispatch({
+      type: "thread.stop",
+      commandId: mods.contracts.CommandId.make(`command-stop-${randomUUID()}`),
+      threadId: result.threadId,
+      reason: "the check stopped",
+    }).pipe(Effect.exit);
+    return { status, replyText };
+  }).pipe(
+    Effect.provide(executionLayer(mods, directory)),
+    Effect.scoped,
+    Effect.catchCause((cause) => {
+      process.stderr.write(`${redact(mods.Cause.pretty(cause))}\n`);
+      return Effect.succeed({ status: "failed", replyText: "" });
+    }),
+  ));
+  if (sent.status === "completed" && sent.replyText.length > 0) {
+    return { ok: true, text: sent.replyText, errorText: "", messageDispatched: true };
+  }
+  if (sent.status === "waiting") {
+    return { ok: false, text: sent.replyText, errorText: "The harness asked for approval, so this stopped.", messageDispatched: true };
+  }
+  if (sent.status === "completed") {
+    return { ok: false, text: "", errorText: "The harness finished without any text, so this stopped.", messageDispatched: true };
+  }
+  return { ok: false, text: sent.replyText, errorText: "The harness did not finish, so this stopped.", messageDispatched: true };
+}
+
+async function run(command: Record<string, unknown> = {}) {
+  if (!stateDir()) return { ok: false, text: "", errorText: UNAUTHORIZED, messageDispatched: false };
+  const commandId = typeof command.commandId === "string" ? command.commandId.trim() : "";
+  if (!grantListed(commandId)) return { ok: false, text: "", errorText: UNAUTHORIZED, messageDispatched: false };
+  const missing = configured();
+  if (missing) return { ok: false, text: "", errorText: missing, messageDispatched: false };
+  const head = await pinnedHead();
+  if (head !== PIN) return { ok: false, text: "", errorText: PIN_MISMATCH, messageDispatched: false };
+  const prepared = await prepare(command);
+  if (!prepared.ok || prepared.messageDispatched) {
+    if (prepared.messageDispatched) takeGrant(commandId);
+    return {
+      ok: false,
+      text: "",
+      errorText: prepared.errorText || (prepared.messageDispatched ? TURN_STARTED : PREPARE_FAILED),
+      messageDispatched: prepared.messageDispatched === true,
+    };
+  }
+  if (!takeGrant(commandId)) return { ok: false, text: "", errorText: UNAUTHORIZED, messageDispatched: false };
+  return sendGranted(command);
 }
 
 async function handle(message: { id?: string; method?: string; command?: Record<string, unknown> }) {
@@ -687,7 +811,7 @@ async function handle(message: { id?: string; method?: string; command?: Record<
     return;
   }
   if (message.method === "run") {
-    reply(id, await run());
+    reply(id, await run(message.command ?? {}));
     return;
   }
   reply(id, { ok: false, errorText: PREPARE_FAILED });

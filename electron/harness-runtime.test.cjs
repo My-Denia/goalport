@@ -6,22 +6,11 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
-test("coordination stays unavailable until a harness checkout can start", () => {
-  assert.equal(harnessLaunchConfigured({}), false);
-  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_CHECKOUT: "/pin" }), false);
-  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_STATE_DIR: "/state" }), false);
-  assert.equal(harnessLaunchConfigured({
-    GOALPORT_HARNESS_CHECKOUT: "",
-    GOALPORT_HARNESS_STATE_DIR: "/state",
-  }), false);
-  assert.equal(harnessLaunchConfigured({
-    GOALPORT_HARNESS_CHECKOUT: "/pin",
-    GOALPORT_HARNESS_STATE_DIR: "/state",
-  }), true);
-  assert.equal(harnessLaunchConfigured({
-    GOALPORT_HARNESS_STATE_DIR: "/state",
-    GOALPORT_HARNESS_SERVER_CWD: "/server",
-  }), false);
+test("coordination does not wait for an external checkout", () => {
+  assert.equal(harnessLaunchConfigured(), true);
+  assert.equal(harnessLaunchConfigured({}), true);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_CHECKOUT: "" }), true);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_STATE_DIR: "/state" }), true);
 });
 
 const SENTINEL = "goalport-sentinel-do-not-send-9c2e";
@@ -204,16 +193,36 @@ test("cancelling a generation releases the next request", async () => {
   }
 });
 
-test("an unconfigured runtime does not spawn a child", async () => {
+test("an unconfigured runtime reads installed CLIs and does not spawn the checkout child", async () => {
+  let probes = 0;
+  let spawned = 0;
   const runtime = createHarnessRuntime({
     childPath: path.join(os.tmpdir(), "goalport-harness-missing-child.cjs"),
     checkout: "",
     stateDir: "",
     serverCwd: "",
+    spawnTurn() {
+      spawned += 1;
+      return { code: 0, stdout: "" };
+    },
+    cliProbe: {
+      execFile() {
+        probes += 1;
+        throw new Error("missing");
+      },
+      readFile() {
+        return "";
+      },
+      home: "/tmp/none",
+    },
   });
   const discovered = await runtime.discover();
-  assert.equal(discovered.ok, false);
-  assert.match(discovered.errorText, /pinned checkout is not configured/);
+  assert.equal(discovered.ok, true);
+  assert.deepEqual(discovered.providers, []);
+  assert.equal(probes, 2);
+  const ran = await runtime.run({ commandId: "coordinate-plan-1", type: "goalport.coordinateTurn" });
+  assert.match(ran.errorText, /not authorized/);
+  assert.equal(spawned, 0);
   runtime.close();
 });
 
@@ -268,6 +277,37 @@ test("the runtime strips the goal text before it reaches the child", async () =>
     });
     assert.equal(prepared.leaked, false);
     assert.equal(prepared.messageDispatched, false);
+  } finally {
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("run stays unauthorized without a grant and keeps the grant when the checkout is missing", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-grant-"));
+  const stateDir = path.join(directory, "state");
+  fs.mkdirSync(stateDir);
+  const runtime = createHarnessRuntime({
+    childPath: path.join(__dirname, "pinned-harness-child.ts"),
+    stateDir,
+    serverCwd: directory,
+    checkout: "",
+  });
+  const command = {
+    commandId: "coordinate-plan-1",
+    type: "goalport.coordinateTurn",
+    initialMessage: { text: "secret goal" },
+  };
+  try {
+    const refused = await runtime.run(command);
+    assert.match(refused.errorText, /not authorized/);
+    assert.equal(refused.messageDispatched, false);
+    const grant = path.join(stateDir, "send-authorization");
+    fs.writeFileSync(grant, "coordinate-plan-1\n");
+    const missing = await runtime.run(command);
+    assert.match(missing.errorText, /not configured/);
+    assert.equal(missing.messageDispatched, false);
+    assert.equal(fs.readFileSync(grant, "utf8").includes("coordinate-plan-1"), true);
   } finally {
     runtime.close();
     fs.rmSync(directory, { recursive: true, force: true });

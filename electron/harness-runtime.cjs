@@ -3,6 +3,7 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { discoverCliProviders, runCliTurn } = require("./cli-coordinate.cjs");
 
 const STOPPED = "The coordination service stopped, so nothing was sent.";
 const UNCONFIGURED = "The pinned checkout is not configured, so no harness was assigned.";
@@ -17,10 +18,8 @@ function chosenPath(options, key, envName) {
   return configuredPath(process.env[envName]);
 }
 
-function harnessLaunchConfigured(env = process.env) {
-  const checkout = configuredPath(env.GOALPORT_HARNESS_CHECKOUT);
-  const stateDir = configuredPath(env.GOALPORT_HARNESS_STATE_DIR);
-  return Boolean(checkout && stateDir);
+function harnessLaunchConfigured() {
+  return true;
 }
 
 function defaultChildPath() {
@@ -127,6 +126,10 @@ function createHarnessRuntime(options = {}) {
       heldChild = true;
       waiter.finish({ ok: false, errorText: CANCELLED });
     }
+    const kills = localKills.get(token);
+    if (kills) {
+      for (const kill of kills) kill();
+    }
     if (!heldChild) return;
     const proc = child;
     if (!proc || proc.exitCode !== null) return;
@@ -187,20 +190,75 @@ function createHarnessRuntime(options = {}) {
     return queued;
   }
 
+  const localCli = !checkout && !serverCwd;
+  const localKills = new Map();
+
+  function localRun(command, generation) {
+    const token = generationOf(generation);
+    if (token && cancelledGenerations.has(token)) {
+      return Promise.resolve({ ok: false, text: "", errorText: CANCELLED, messageDispatched: false });
+    }
+    return runCliTurn(command, {
+      stateDir,
+      cancelled: () => Boolean(token && cancelledGenerations.has(token)),
+      spawnTurn: options.spawnTurn,
+      register(child) {
+        if (!token) return;
+        const kill = () => {
+          try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        };
+        const kills = localKills.get(token) ?? new Set();
+        kills.add(kill);
+        localKills.set(token, kills);
+        child.on?.("close", () => {
+          kills.delete(kill);
+          if (kills.size === 0) localKills.delete(token);
+        });
+      },
+    });
+  }
+
   return {
     discover(generation) {
+      if (localCli) {
+        try {
+          return Promise.resolve(discoverCliProviders(options.cliProbe));
+        } catch {
+          return Promise.resolve({
+            ok: false,
+            providers: [],
+            errorText: "The harness list could not be read, so no harness was assigned.",
+          });
+        }
+      }
       return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.", generation);
     },
     prepare(command, generation) {
       const safe = command && typeof command === "object" ? { ...command } : {};
       delete safe.initialMessage;
+      if (localCli) {
+        return Promise.resolve({
+          ok: true,
+          disposition: "deny",
+          sandbox: "readOnly",
+          approval: "never",
+          messageDispatched: false,
+          errorText: "",
+        });
+      }
       return request("prepare", { command: safe }, 90000, "The read-only session was not prepared, so nothing was sent.", generation);
     },
-    run(generation) {
-      return request("run", {}, 15000, "No model turn was sent, because this session is not authorized to spend subscription quota.", generation);
+    run(command, generation) {
+      const body = command && typeof command === "object" ? command : {};
+      if (localCli) return localRun(body, generation);
+      return request("run", { command: body }, 660000, "The harness did not finish, so this stopped.", generation);
     },
     cancel,
     close() {
+      for (const kills of localKills.values()) {
+        for (const kill of kills) kill();
+      }
+      localKills.clear();
       const proc = child;
       child = null;
       failPending(STOPPED);

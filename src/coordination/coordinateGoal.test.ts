@@ -36,8 +36,34 @@ describe("Synthetic path", () => {
     expect(state.commands[0]?.initialMessage.text).toContain(goal);
     expect(state.commands[0]?.initialMessage.text).toContain(workspacePath);
     expect(state.commands[0]?.initialMessage.text).toContain("without claiming the review passed");
+    expect(state.commands[0]?.initialMessage.text).toContain("Find the product contract in this workspace");
+    expect(state.commands[0]?.initialMessage.text).toContain("If you cannot confirm one, say so.");
     expect(state.commands[1]?.initialMessage.text).toContain("done-claim is not a pass");
+    expect(state.commands[1]?.initialMessage.text).toContain("where that contract is");
     expect(state.commands).toHaveLength(2);
+  });
+
+  it("a revision cites the saved plan and check and does not reuse the first turn", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+    const first = coordinateGoal({ goal, workspacePath, catalog });
+    const revised = coordinateGoal({
+      goal,
+      workspacePath,
+      catalog,
+      priorPlan: "Bounded plan.",
+      priorReview: "The contract path is missing.\nVERDICT: revise",
+    });
+    const plan = revised.commands[0]?.initialMessage.text ?? "";
+    expect(plan).toContain("This is a revision of a saved plan.");
+    expect(plan).toContain("Bounded plan.");
+    expect(plan).toContain("The contract path is missing.");
+    expect(plan).not.toContain("AGENTS.md");
+    expect(revised.commands[1]?.initialMessage.text).toContain("The contract path is missing.");
+    expect(revised.commands[0]?.commandId).not.toBe(first.commands[0]?.commandId);
+    expect(revised.commands[1]?.commandId).not.toBe(first.commands[1]?.commandId);
   });
 
   it("does not select a default model that requires extra usage credits", () => {
@@ -94,6 +120,33 @@ describe("Synthetic path", () => {
     });
     expect(onlyCredits.commands).toEqual([]);
     expect(onlyCredits.stopReason).toMatch(/extra usage credits/);
+  });
+
+  it("does not invent a model when a signed-in harness has none", () => {
+    const state = coordinateGoal({
+      goal,
+      workspacePath,
+      catalog: [
+        instance({
+          instanceId: "codex",
+          name: "Codex",
+          quota: "unknown",
+          authenticated: true,
+          models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+        }),
+        instance({
+          instanceId: "claude",
+          name: "Claude",
+          quota: "unknown",
+          authenticated: true,
+          billing: "subscription",
+          models: [],
+        }),
+      ],
+    });
+
+    expect(state.commands).toEqual([]);
+    expect(state.stopReason).toMatch(/no included model/);
   });
 
   it("stops an empty catalog because no harness catalog is connected", () => {
