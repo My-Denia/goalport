@@ -58,9 +58,14 @@ describe("Synthetic path", () => {
     });
     const plan = revised.commands[0]?.initialMessage.text ?? "";
     expect(plan).toContain("This is a revision of a saved plan.");
+    expect(plan).toContain("Answer every point the independent check raised, one by one.");
+    expect(plan).toContain("State the workspace state this plan relies on");
     expect(plan).toContain("Bounded plan.");
     expect(plan).toContain("The contract path is missing.");
     expect(plan).not.toContain("AGENTS.md");
+    const firstSend = first.commands[0]?.initialMessage.text ?? "";
+    expect(firstSend).not.toContain("Answer every point the independent check raised");
+    expect(firstSend).not.toContain("State the workspace state");
     expect(revised.commands[1]?.initialMessage.text).toContain("The contract path is missing.");
     expect(revised.commands[0]?.commandId).not.toBe(first.commands[0]?.commandId);
     expect(revised.commands[1]?.commandId).not.toBe(first.commands[1]?.commandId);

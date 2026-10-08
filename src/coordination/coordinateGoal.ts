@@ -223,6 +223,8 @@ function plannerText(input: CoordinateGoalInput): string {
   if (priorPlan || priorReview) {
     lines.push(
       "This is a revision of a saved plan. Use the saved plan and the independent check below. Do not start as if they were never written.",
+      "Answer every point the independent check raised, one by one. A point left unanswered keeps the plan unconfirmed.",
+      "State the workspace state this plan relies on, such as the commit or the range it reviews.",
       "Saved plan:",
       priorPlan || "(none)",
       "Independent check:",
