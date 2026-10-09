@@ -12,7 +12,7 @@ export interface CoordinateLaunchResult {
    * dispatched (not authorized, not installed, unrecorded) may be retried
    * explicitly by the user; a dispatched or unknown outcome may not.
    */
-  readonly dispatched?: boolean;
+  readonly dispatched?: boolean | null;
 }
 
 export interface CoordinateTransport {

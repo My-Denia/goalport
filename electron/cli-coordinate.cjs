@@ -20,8 +20,11 @@ function creditGated(model) {
 }
 
 function codexModel(configText) {
-  const match = /^[ \t]*model[ \t]*=[ \t]*"([^"\n]+)"[ \t]*$/m.exec(String(configText));
-  return match ? match[1].trim() : "";
+  // Top-level TOML strings come double- or single-quoted; anything else
+  // (project/profile/managed/built-in precedence) is left to codex itself.
+  const match = /^[ \t]*model[ \t]*=[ \t]*("([^"\n]+)"|'([^'\n]+)')[ \t]*$/m.exec(String(configText));
+  if (!match) return "";
+  return (match[2] ?? match[3] ?? "").trim();
 }
 
 function scrub(env) {
@@ -194,8 +197,11 @@ async function codexProvider(io) {
       type: api ? "apiKey" : "chatgpt",
       label: api ? "API key" : "ChatGPT",
     },
-    models: !api && model
-      ? [{ slug: model, name: model, isDefault: true, isLegacy: false }]
+    // Without an explicit user model, codex still runs on its own effective
+    // default (the launch passes no --model), so the harness stays eligible;
+    // excluding it here would make a normal install unable to take a role.
+    models: !api
+      ? [{ slug: model || "default", name: model || "Codex built-in default", isDefault: true, isLegacy: false }]
       : [],
   });
 }

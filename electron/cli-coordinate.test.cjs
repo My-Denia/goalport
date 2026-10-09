@@ -332,3 +332,33 @@ test("a clean stop without stderr keeps the generic sentence", async () => {
     fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
   }
 });
+
+test("a ChatGPT login without an explicit model still names the built-in default", async () => {
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return "enable_experimental_thread_store_compression = true\n";
+    },
+    execFile(file) {
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
+    },
+  });
+  assert.equal(discovered.providers[0].models.length, 1);
+  assert.equal(discovered.providers[0].models[0].slug, "default");
+  assert.equal(discovered.providers[0].models[0].isDefault, true);
+});
+
+test("a single-quoted top-level model line is read", async () => {
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return "model = 'gpt-6.1-sol'\n";
+    },
+    execFile(file) {
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) };
+    },
+  });
+  assert.equal(discovered.providers[0].models[0].slug, "gpt-6.1-sol");
+});
