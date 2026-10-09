@@ -392,7 +392,8 @@ function codexEnvironmentBlocked(stdout) {
   return detail;
 }
 
-function claudeReply(stdout) {  try {
+function claudeReply(stdout) {
+  try {
     const parsed = JSON.parse(String(stdout));
     if (typeof parsed?.result === "string") {
       return { text: parsed.result.trim(), failed: parsed.is_error === true };
