@@ -110,7 +110,7 @@ test("a granted command spawns once and a repeat returns the stored text", async
     assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
     assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-plan-codex")), true);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -131,7 +131,7 @@ test("a missing grant and a credit model do not spawn", async () => {
     assert.equal(spawned, 0);
     assert.equal(turnSpec(command("codex", "gpt-6.1-sol")).args.includes("--sandbox"), true);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -168,7 +168,7 @@ test("a process that never starts can be tried once later, and a started turn ca
     assert.equal(again.text, "partial");
     assert.equal(calls, 2);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -187,7 +187,7 @@ test("a Windows cmd shim is quoted and launched through cmd.exe", () => {
     assert.deepEqual(spec.args.slice(0, 3), ["/d", "/s", "/c"]);
     assert.match(spec.args[3], /^".*codex\.cmd \^\^\^"login\^\^\^" \^\^\^"status\^\^\^""$/);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 

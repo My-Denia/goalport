@@ -61,7 +61,7 @@ test("the runtime starts the child with this process", async () => {
     assert.equal(flag, "1");
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -83,7 +83,7 @@ test("a child that exits immediately resolves instead of crashing", async () => 
     assert.match(discovered.errorText, /stopped|could not be read/);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -137,7 +137,7 @@ test("stderr from the child does not block its reply", async () => {
     assert.match(runtime.stderrTail(), /^x+$/);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -189,7 +189,7 @@ test("cancelling a generation releases the next request", async () => {
     assert.equal(fs.readFileSync(started, "utf8"), "2");
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -279,7 +279,7 @@ test("the runtime strips the goal text before it reaches the child", async () =>
     assert.equal(prepared.messageDispatched, false);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -310,7 +310,7 @@ test("run stays unauthorized without a grant and keeps the grant when the checko
     assert.equal(fs.readFileSync(grant, "utf8").includes("coordinate-plan-1"), true);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 

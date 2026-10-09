@@ -37,7 +37,7 @@ test("a saved plan reopens as the same record and a repeat request does not appe
     assert.equal(records[0].planText, "Revised plan.");
     assert.equal(records[0].verdict, "revise");
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -66,7 +66,7 @@ test("saving a later plan keeps the earlier plan's saved time", () => {
     ]);
     assert.equal(fs.readFileSync(file, "utf8"), stored);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
@@ -77,6 +77,6 @@ test("a replaced request and an unknown outcome are not stored", () => {
     assert.throws(() => saveRecord(directory, record({ verdict: "passed" })));
     assert.deepEqual(readRecords(directory), []);
   } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
