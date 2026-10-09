@@ -1,6 +1,6 @@
 import { coordinateGoal, type CoordinateGoalInput, type CoordinateGoalState } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
-import { classifyProviderError, providerErrorSentence } from "./providerError";
+import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
 import { verdictFromReview, type CoordinationVerdict } from "./verdict";
 
 export interface CoordinateLaunchResult {
@@ -13,6 +13,20 @@ export interface CoordinateLaunchResult {
    * explicitly by the user; a dispatched or unknown outcome may not.
    */
   readonly dispatched?: boolean | null;
+  /**
+   * Typed flag set by the CLI layer when the turn's own tool events prove the
+   * harness cannot run tools on this machine (sandbox helper failure). It
+   * wins over the stderr-signature fallback in classifyProviderError.
+   */
+  readonly environmentBlocked?: boolean | null;
+  readonly environmentDetail?: string | null;
+}
+
+export interface EnvironmentBlockedInfo {
+  readonly role: "planning" | "review";
+  readonly instanceId: string;
+  readonly harness: string | null;
+  readonly detail: string | null;
 }
 
 export interface CoordinateTransport {
@@ -28,6 +42,7 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly reviewText: string | null;
   readonly verdict: CoordinationVerdict | null;
   readonly messageDispatched: boolean | null;
+  readonly environmentBlocked?: EnvironmentBlockedInfo | null;
 }
 
 function reportFromPlan(
@@ -39,6 +54,7 @@ function reportFromPlan(
     verdict?: CoordinationVerdict | null;
     result?: string | null;
     messageDispatched?: boolean | null;
+    environmentBlocked?: EnvironmentBlockedInfo | null;
   } = {},
 ): CoordinateSessionState {
   return {
@@ -51,7 +67,29 @@ function reportFromPlan(
     // An explicit null (unknown dispatch) must survive; only an unset field
     // falls back to "nothing was sent".
     messageDispatched: fields.messageDispatched === undefined ? false : fields.messageDispatched,
+    environmentBlocked: fields.environmentBlocked ?? null,
   };
+}
+
+/**
+ * Typed JSONL-event flag first (the CLI layer watched the turn's own tool
+ * events); the stderr-signature fallback covers harnesses that only leave
+ * the failure in stderr. Neither means the model misbehaved — the machine
+ * could not run the harness's tools.
+ */
+function environmentFromLaunch(
+  launch: CoordinateLaunchResult,
+  role: "planning" | "review",
+  instanceId: string,
+  harness: string | null,
+): EnvironmentBlockedInfo | null {
+  if (launch.environmentBlocked === true) {
+    return { role, instanceId, harness, detail: launch.environmentDetail?.trim() || null };
+  }
+  if (classifyProviderError(launch.errorText) === "environment") {
+    return { role, instanceId, harness, detail: environmentSignature(launch.errorText) };
+  }
+  return null;
 }
 
 function checkStopReason(verdict: CoordinationVerdict): string {
@@ -117,18 +155,28 @@ export async function runCoordinateSession(
 
   const planned = await transport.launch(planning);
   const planError = classifyProviderError(planned.errorText);
+  const planEnvironment = environmentFromLaunch(planned, "planning", planning.modelSelection.instanceId, plan.planningHarness);
   const planText = planned.text.trim();
-  if (planError === "usage_credits" || planError === "authentication" || planned.errorText.trim().length > 0) {
+  if (
+    planEnvironment !== null ||
+    planError === "usage_credits" ||
+    planError === "authentication" ||
+    planned.errorText.trim().length > 0
+  ) {
     return reportFromPlan(
       { ...plan, commands: [planning], roles: ["planning", "review"], result: null },
       {
         verdict: "failed",
         planText: planText.length > 0 ? planText : null,
-        stopReason: providerErrorSentence(planned.errorText),
+        stopReason:
+          planEnvironment !== null
+            ? "The harness could not finish the turn, so this stopped."
+            : providerErrorSentence(planned.errorText),
         // Tri-state passthrough: a null (the runtime died mid-turn, the turn
         // may have reached the provider) must never read as "nothing was
         // sent" — that would make an unknown outcome retryable.
         messageDispatched: planned.dispatched ?? null,
+        environmentBlocked: planEnvironment,
       },
     );
   }
@@ -141,15 +189,20 @@ export async function runCoordinateSession(
 
   const checked = await transport.launch(withPlanText(review, planText));
   const reviewText = checked.text.trim();
-  if (checked.errorText.trim().length > 0) {
+  const reviewEnvironment = environmentFromLaunch(checked, "review", review.modelSelection.instanceId, plan.reviewHarness);
+  if (reviewEnvironment !== null || checked.errorText.trim().length > 0) {
     return reportFromPlan(
       { ...plan, result: null },
       {
         verdict: "failed",
         planText,
         reviewText: reviewText.length > 0 ? reviewText : null,
-        stopReason: providerErrorSentence(checked.errorText),
+        stopReason:
+          reviewEnvironment !== null
+            ? "The harness could not finish the turn, so this stopped."
+            : providerErrorSentence(checked.errorText),
         messageDispatched: true,
+        environmentBlocked: reviewEnvironment,
       },
     );
   }

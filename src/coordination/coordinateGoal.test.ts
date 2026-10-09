@@ -337,4 +337,41 @@ describe("Synthetic path", () => {
     expect(repeat.commands[0]?.commandId).toBe(first.commands[0]?.commandId);
     expect(repeat.commands[1]?.commandId).toBe(first.commands[1]?.commandId);
   });
+
+  it("an avoided harness receives no role while the others keep both roles", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "available" }),
+      instance({ instanceId: "claude", name: "Claude", models: ["claude-a"], quota: "available" }),
+      instance({ instanceId: "grok", name: "Grok", models: ["grok-a"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog, avoidInstances: ["codex"] });
+
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["claude", "grok"]);
+    expect(state.planningHarness).toBe("Claude");
+    expect(state.reviewHarness).toBe("Grok");
+    expect(state.quotaLabels.codex).toBe("available");
+  });
+
+  it("avoiding down to one harness names the harness that cannot run", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "available" }),
+      instance({ instanceId: "claude", name: "Claude", models: ["claude-a"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog, avoidInstances: ["codex"] });
+
+    expect(state.commands).toHaveLength(0);
+    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+    expect(state.quotaLabels.codex).toBe("available");
+  });
+
+  it("an unusable catalog keeps its original stop reason even with an avoidance", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "exhausted" }),
+      instance({ instanceId: "claude", name: "Claude", models: ["claude-a"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog, avoidInstances: ["codex"] });
+
+    expect(state.commands).toHaveLength(0);
+    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  });
 });

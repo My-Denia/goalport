@@ -1,6 +1,6 @@
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import { coordinateGoal } from "./coordinateGoal";
-import { runCoordinateSession, type CoordinateTransport } from "./coordinateSession";
+import { runCoordinateSession, type CoordinateTransport, type EnvironmentBlockedInfo } from "./coordinateSession";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -21,6 +21,8 @@ export interface CoordinationView {
    * existed) must never be resent silently.
    */
   readonly messageDispatched?: boolean | null;
+  /** Set when a turn proved the harness cannot run its tools on this machine. */
+  readonly environmentBlocked?: EnvironmentBlockedInfo | null;
 }
 
 export interface CoordinationDiscovery {
@@ -48,6 +50,7 @@ function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped
     planningQuota: null,
     reviewQuota: null,
     messageDispatched: false,
+    environmentBlocked: null,
   });
 }
 
@@ -62,6 +65,7 @@ export async function requestCoordination(
     readonly sendKey: string;
     readonly priorPlan?: string | null;
     readonly priorReview?: string | null;
+    readonly avoidInstances?: readonly string[];
   },
   discovery: CoordinationDiscovery | null,
   transport: CoordinateTransport,
@@ -78,6 +82,7 @@ export async function requestCoordination(
     sendKey: input.sendKey,
     priorPlan: input.priorPlan,
     priorReview: input.priorReview,
+    avoidInstances: input.avoidInstances,
   };
   const planned = coordinateGoal(goalInput);
   if (planned.commands.length !== 2) {
@@ -92,6 +97,7 @@ export async function requestCoordination(
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
       messageDispatched: false,
+      environmentBlocked: null,
     });
   }
   if (!stillCurrent()) return unavailable(REPLACED);
@@ -107,6 +113,7 @@ export async function requestCoordination(
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
       messageDispatched: false,
+      environmentBlocked: null,
     });
   }
   const sent = await runCoordinateSession(
@@ -131,5 +138,6 @@ export async function requestCoordination(
     planningQuota: sent.planningQuota,
     reviewQuota: sent.reviewQuota,
     messageDispatched: sent.messageDispatched,
+    environmentBlocked: sent.environmentBlocked ?? null,
   });
 }

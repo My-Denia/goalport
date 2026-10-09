@@ -46,7 +46,7 @@ const providers = [
   },
 ] as const;
 
-function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
+function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean; environmentBlocked?: boolean; environmentDetail?: string | null }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
   const calls: CoordinateTurnCommand[] = [];
   return {
     calls,
@@ -277,5 +277,83 @@ describe("coordinate session", () => {
     );
     expect(state.verdict).toBe("failed");
     expect(state.messageDispatched).toBeNull();
+  });
+
+  it("an environment-blocked planner turn stops without sending the review", async () => {
+    const transport = recordingTransport([
+      {
+        text: "I couldn't read the file because the sandbox failed to initialize.",
+        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        dispatched: true,
+        environmentBlocked: true,
+        environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+      },
+    ]);
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(1);
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBe(true);
+    expect(state.planText).toBe("I couldn't read the file because the sandbox failed to initialize.");
+    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
+    expect(state.environmentBlocked).toEqual({
+      role: "planning",
+      instanceId: "codex",
+      harness: "Codex",
+      detail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+    });
+  });
+
+  it("an environment-blocked review turn fails the round and names the review role", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "Bounded plan.", errorText: "" },
+        {
+          text: "",
+          errorText: "This harness cannot run its tools on this machine, so this stopped.",
+          dispatched: true,
+          environmentBlocked: true,
+          environmentDetail: "windows sandbox failed: helper_unknown_error",
+        },
+      ]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.planText).toBe("Bounded plan.");
+    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
+    expect(state.environmentBlocked).toEqual({
+      role: "review",
+      instanceId: "claude",
+      harness: "Claude",
+      detail: "windows sandbox failed: helper_unknown_error",
+    });
+  });
+
+  it("a stderr signature alone still classifies the round as environment-blocked", async () => {
+    const transport = recordingTransport([
+      {
+        text: "",
+        errorText: "The harness did not finish, so this stopped. ERROR codex_core::tools::router: Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+        dispatched: true,
+      },
+    ]);
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(1);
+    expect(state.verdict).toBe("failed");
+    expect(state.environmentBlocked).toEqual({
+      role: "planning",
+      instanceId: "codex",
+      harness: "Codex",
+      detail: "helper_unknown_error",
+    });
+    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
   });
 });

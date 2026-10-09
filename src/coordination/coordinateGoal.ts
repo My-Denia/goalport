@@ -39,6 +39,13 @@ export interface CoordinateGoalInput {
   readonly sendKey: string;
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
+  /**
+   * Instance ids that must not receive a role this round, set when a turn on
+   * that harness proved it cannot run its tools on this machine. Draft-only:
+   * it is never persisted as harness health, so a fixed machine stops being
+   * avoided on the next fresh send.
+   */
+  readonly avoidInstances?: readonly string[];
 }
 
 export interface CatalogModel {
@@ -180,6 +187,11 @@ function uniqueInstances(catalog: readonly SyntheticCatalogInstance[]): Syntheti
   return unique;
 }
 
+/** Instance ids that can receive a role right now, in assignment order. */
+export function usableInstanceIds(catalog: readonly SyntheticCatalogInstance[]): readonly string[] {
+  return uniqueInstances(catalog).filter(isUsable).map((instance) => instance.instanceId);
+}
+
 function quotaLabelsFor(instances: readonly SyntheticCatalogInstance[]): Record<string, QuotaWord> {
   const labels: Record<string, QuotaWord> = {};
   for (const instance of instances) {
@@ -281,7 +293,9 @@ function turnCommand(input: {
 export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState {
   const unique = uniqueInstances(input.catalog);
   const quotaLabels = quotaLabelsFor(unique);
-  const usable = unique.filter(isUsable);
+  const avoid = input.avoidInstances ?? [];
+  const usableWithoutAvoid = unique.filter(isUsable);
+  const usable = usableWithoutAvoid.filter((instance) => !avoid.includes(instance.instanceId));
   if (input.catalog.length === 0) {
     return stopped(
       quotaLabels,
@@ -289,6 +303,13 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
   if (usable.length < 2) {
+    const avoided = unique.find((instance) => avoid.includes(instance.instanceId));
+    if (avoided && usableWithoutAvoid.length >= 2) {
+      return stopped(
+        quotaLabels,
+        `Stopped. ${harnessLabel(avoided)} cannot run on this machine right now, and an independent check needs two harnesses that can run.`,
+      );
+    }
     const credits = unique.some(creditsBlocked);
     const unnamed = unique.some(modelUnnamed);
     return stopped(
