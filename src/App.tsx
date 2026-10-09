@@ -1215,6 +1215,7 @@ function App() {
             title: plan.goal,
             active: plan.requestId === selectedPlanId,
             verdict: plan.verdict,
+            savedAt: plan.savedAt,
           }))}
           onSelectPlan={(requestId) => {
             closeDraft(false);

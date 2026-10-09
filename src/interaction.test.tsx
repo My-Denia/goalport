@@ -898,6 +898,7 @@ describe("send without a Runtime", () => {
     expect(screen.getByText("Bounded plan.")).toBeTruthy();
     expect(screen.getByText(/needs revision, so this stopped/)).toBeTruthy();
     expect(document.querySelector("time")?.getAttribute("dateTime")).toBe("2026-10-08T06:10:00.000Z");
+    expect(screen.getByRole("button", { name: /Needs revision · / })).toBeTruthy();
     expect(discoverCalls).toBe(0);
     expect(launches).toBe(0);
 
@@ -967,10 +968,10 @@ describe("send without a Runtime", () => {
       ],
     } as never;
     render(<App />);
-    expect(await screen.findByText("Failed")).toBeTruthy();
+    expect(await screen.findByText("Failed", { selector: "dd" })).toBeTruthy();
     expect(screen.getByText(/did not finish, so this stopped/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /The check said stop/ }));
-    expect(await screen.findByText("Stopped")).toBeTruthy();
+    expect(await screen.findByText("Stopped", { selector: "dd" })).toBeTruthy();
     expect(screen.getByText("Bounded plan.")).toBeTruthy();
     expect(discoverCalls).toBe(0);
     expect(launches).toBe(0);
@@ -1046,7 +1047,7 @@ describe("send without a Runtime", () => {
     expect(order[0]).toBe("save:unconfirmed");
     expect(order.filter((item) => item === "launch")).toHaveLength(1);
     release();
-    expect(await screen.findByText("Failed")).toBeTruthy();
+    expect(await screen.findByText("Failed", { selector: "dd" })).toBeTruthy();
     await waitFor(() => expect(order).toContain("save:failed"));
     expect(launches).toBe(1);
   });

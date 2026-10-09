@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { CoreSnapshot, GoalCard } from "../types";
+import { outcomeLabel } from "../coordination/verdict";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
   collapsed: boolean;
-  plans?: readonly { requestId: string; title: string; active: boolean; verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null }[];
+  plans?: readonly { requestId: string; title: string; active: boolean; verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null; savedAt?: string | null }[];
   onSelectPlan?: (requestId: string) => void;
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
@@ -212,6 +213,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
                   <span className="campaign-item-copy">
                     <strong>{plan.title}</strong>
+                    <small>{planSubline(plan.verdict, plan.savedAt)}</small>
                   </span>
                   {plan.active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                 </button>
@@ -224,6 +226,15 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
       <div className="nav-spacer" />
     </nav>
   );
+}
+
+function planSubline(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null, savedAt?: string | null): string {
+  const label = outcomeLabel(verdict);
+  if (!savedAt) return label;
+  const parsed = Date.parse(savedAt);
+  if (Number.isNaN(parsed)) return label;
+  const saved = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" }).format(parsed);
+  return `${label} · ${saved}`;
 }
 
 function planStateClass(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null): string {
