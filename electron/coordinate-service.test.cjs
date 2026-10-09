@@ -180,3 +180,21 @@ test("the authorization flag still does not send a model turn", async () => {
   assert.equal(result.prepared, true);
   assert.equal(result.text, "");
 });
+
+test("a failed turn keeps the partial text the harness did produce", async () => {
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    async run() {
+      return { ok: false, text: "Half a plan before the harness died.", errorText: "The harness did not finish, so this stopped." };
+    },
+  }, command);
+  assert.equal(result.launched, false);
+  assert.equal(result.prepared, true);
+  assert.equal(result.text, "Half a plan before the harness died.");
+  assert.equal(result.errorText, "The harness did not finish, so this stopped.");
+});

@@ -87,8 +87,10 @@ async function launchOne(env, runtime, command, generation) {
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
     return { launched: true, prepared: true, text, errorText: "" };
   }
+  // A turn that produced text and then failed keeps that text: the partial
+  // plan or check is real model output the saved Plan can still show.
   const errorText = typeof ran?.errorText === "string" && ran.errorText.trim() ? ran.errorText : UNAUTHORIZED;
-  return { launched: false, prepared: true, text: "", errorText };
+  return { launched: false, prepared: true, text, errorText };
 }
 
 module.exports = { guardCoordinateCommand, discoverCoordination, launchOne };

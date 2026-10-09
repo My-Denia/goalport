@@ -78,7 +78,7 @@ export function generate() {
   parts.push("the package root, provided unmodified by the Electron project).");
   parts.push("");
   parts.push("--------------------------------------------------------------------");
-  parts.push("Copied source (resources/app.asar renderer)");
+  parts.push("Copied source (resources/app.asar)");
   parts.push("--------------------------------------------------------------------");
   parts.push("");
   parts.push("T3 Code coordination policy, copied from T3 Tools Inc. under the MIT");
@@ -86,6 +86,13 @@ export function generate() {
   parts.push("the upstream LICENSE text, kept beside that copy.");
   parts.push("");
   parts.push(readLicenseText(resolve(ROOT, "src/coordination/T3-LICENSE.txt")));
+  parts.push("");
+  parts.push("cross-spawn cmd.exe quoting, adapted under the MIT License from");
+  parts.push("cross-spawn (moxystudio/node-cross-spawn) into");
+  parts.push("electron/cli-coordinate.cjs. The notice below is the upstream LICENSE");
+  parts.push("text (cross-spawn 7.0.6), kept beside that copy.");
+  parts.push("");
+  parts.push(readLicenseText(resolve(ROOT, "electron/CROSS-SPAWN-LICENSE.txt")));
   parts.push("");
   parts.push("None of the components below carried an upstream NOTICE file at the time");
   parts.push("this file was generated (checked directly against each crate's vendored");

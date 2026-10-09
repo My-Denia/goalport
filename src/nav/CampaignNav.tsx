@@ -209,6 +209,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   className={`campaign-item${plan.active ? " campaign-active" : ""}`}
                   type="button"
                   onClick={() => onSelectPlan?.(plan.requestId)}
+                  title={planSubline(plan.verdict, plan.savedAt)}
+                  aria-label={`Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
                 >
                   <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
                   <span className="campaign-item-copy">
