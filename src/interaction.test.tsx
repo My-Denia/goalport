@@ -1633,3 +1633,136 @@ describe("leaving a draft during coordination", () => {
     expect(screen.queryByText("Two different harnesses are assigned. No model turn has been sent.")).toBeNull();
   });
 });
+
+describe("environment-blocked harness", () => {
+  function providerBridge(options: {
+    providers: Array<{ instanceId: string; displayName: string }>;
+    launch: (command: { commandId: string; modelSelection: { instanceId: string } }, call: number) => Promise<{ text: string; errorText: string; dispatched?: boolean; environmentBlocked?: boolean; environmentDetail?: string }>;
+    records?: () => Promise<unknown[]>;
+  }) {
+    let calls = 0;
+    const launched: Array<{ commandId: string; instanceId: string }> = [];
+    const saved: Array<{ requestId?: string; verdict?: string; environmentBlocked?: unknown }> = [];
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: options.providers.map((provider) => ({
+          instanceId: provider.instanceId,
+          displayName: provider.displayName,
+          enabled: true,
+          installed: true,
+          availability: "available",
+          status: "ready",
+          auth: { status: "authenticated", type: "subscription" },
+          models: [{ slug: `${provider.instanceId}-model`, name: `${provider.instanceId}-model`, isDefault: true }],
+          usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+        })),
+      }),
+      coordinateLaunch: async (command: { commandId: string; modelSelection: { instanceId: string } }) => {
+        calls += 1;
+        launched.push({ commandId: command.commandId, instanceId: command.modelSelection.instanceId });
+        return options.launch(command, calls);
+      },
+      coordinationSave: async (record: { requestId?: string; verdict?: string; environmentBlocked?: unknown }) => {
+        const index = saved.findIndex((item) => item.requestId === record.requestId);
+        if (index >= 0) saved[index] = record;
+        else saved.unshift(record);
+        return record;
+      },
+      coordinationRecords: options.records ?? (async () => saved),
+    } as never;
+    return { launched, saved, launchCount: () => calls };
+  }
+
+  it("stops after the environment-blocked planner, names the machine, and never sends the check", async () => {
+    const bridge = providerBridge({
+      providers: [
+        { instanceId: "codex", displayName: "Codex" },
+        { instanceId: "claude", displayName: "Claude" },
+      ],
+      launch: async () => ({
+        text: "I couldn't read the file because the sandbox failed to initialize.",
+        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        dispatched: true,
+        environmentBlocked: true,
+        environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+      }),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText(/Codex cannot run its tools on this machine right now/)).toBeTruthy();
+    expect(screen.getByText(/machine problem, not a plan problem/)).toBeTruthy();
+    expect(screen.getByText(/Only 1 other usable harness is signed in/)).toBeTruthy();
+    // The check turn was never sent: one launch, and it was the codex planner.
+    expect(bridge.launchCount()).toBe(1);
+    expect(bridge.launched[0]?.instanceId).toBe("codex");
+    // The folded raw evidence is there and stays folded until opened.
+    const summary = screen.getByText("Technical details");
+    fireEvent.click(summary);
+    expect(await screen.findByText(/helper_unknown_error/)).toBeTruthy();
+    // No button to send again: with one other harness a round is impossible.
+    expect(screen.queryByRole("button", { name: /send again without codex/i })).toBeNull();
+    await waitFor(() => expect(bridge.saved.some((record) => record.verdict === "failed")).toBe(true));
+  });
+
+  it("Send again without the blocked harness drafts a new round that assigns it no role", async () => {
+    const bridge = providerBridge({
+      providers: [
+        { instanceId: "codex", displayName: "Codex" },
+        { instanceId: "claude", displayName: "Claude" },
+        { instanceId: "grok", displayName: "Grok" },
+      ],
+      launch: async (command) => {
+        if (command.modelSelection.instanceId === "codex") {
+          return {
+            text: "I couldn't read the file because the sandbox failed to initialize.",
+            errorText: "This harness cannot run its tools on this machine, so this stopped.",
+            dispatched: true,
+            environmentBlocked: true,
+            environmentDetail: "windows sandbox failed: helper_unknown_error: setup refresh had errors",
+          };
+        }
+        return command.commandId.includes("plan")
+          ? { text: "Bounded plan.", errorText: "" }
+          : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
+      },
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    const again = await screen.findByRole("button", { name: /send again without codex/i });
+    // The failed round is the only launch so far.
+    expect(bridge.launchCount()).toBe(1);
+    fireEvent.click(again);
+    // The new draft says up front who it will not use, and nothing was sent.
+    expect(await screen.findByText(/This send will not use Codex/)).toBeTruthy();
+    expect(screen.getByText(/Nothing is sent until you press Send/)).toBeTruthy();
+    expect(bridge.launchCount()).toBe(1);
+    // Sending the draft starts a new round whose planner is not codex.
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(bridge.launchCount()).toBe(3));
+    expect(bridge.launched.slice(1).map((item) => item.instanceId)).toEqual(["claude", "grok"]);
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+  });
+});

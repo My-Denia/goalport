@@ -22,6 +22,8 @@ import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
 import { CoordinationStatus } from "./conversation/CoordinationStatus";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
+import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
+import { usableInstanceIds } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
@@ -35,7 +37,7 @@ import { CloseChoiceDialog } from "./dialog/CloseChoiceDialog";
 import { HandoffDialog } from "./dialog/HandoffDialog";
 import { BootstrapScreen } from "./dialog/BootstrapScreen";
 import type { BootstrapState } from "./ipc";
-import { conversationTitle, headlineState } from "./lib/display";
+import { conversationTitle, headlineState, formatTimestamp } from "./lib/display";
 import { GoalDialog } from "./ui/GoalDialog";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { useCoreSnapshot } from "./lib/useCoreSnapshot";
@@ -113,6 +115,12 @@ interface GoalDraft extends GoalDraftValue {
   acceptNextCampaign?: boolean;
   intent?: SendIntent;
   revision?: { planText: string | null; reviewText: string | null };
+  /**
+   * Set when this draft continues a round whose harness proved it cannot run
+   * its tools on this machine: that harness receives no role on this send.
+   * Draft-only, never persisted as harness health.
+   */
+  avoid?: { instanceId: string; harness: string; startedAt: string | null };
 }
 
 function App() {
@@ -126,6 +134,10 @@ function App() {
   const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
   const [coordination, setCoordination] = useState<CoordinationView | null>(null);
+  // The most recent coordination discovery, so an environment failure can say
+  // honestly whether another usable harness exists. Null until this window
+  // has discovered at least once.
+  const discoveredProvidersRef = useRef<readonly ProviderSnapshot[] | null>(null);
   const [plans, setPlans] = useState<SavedPlan[]>([]);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
@@ -455,6 +467,16 @@ function App() {
 
   const activeTargetKey = snapshotTargetKey(snapshot);
   const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
+  // Usable harness ids from the last discovery in this window, so an
+  // environment failure can honestly say whether a round without that
+  // harness is possible (an independent check needs two).
+  const usableProviderIds = discoveredProvidersRef.current === null
+    ? null
+    : usableInstanceIds(catalogFromProviderSnapshots(discoveredProvidersRef.current));
+  const environmentAlternatives = (blocked: { instanceId: string } | null | undefined): number | null => {
+    if (!blocked || usableProviderIds === null) return null;
+    return usableProviderIds.filter((id) => id !== blocked.instanceId).length;
+  };
 
   // -----------------------------------------------------------------------
   // First send: ONE start_conversation dispatch with a caller-stable request
@@ -531,6 +553,7 @@ function App() {
         const sendKey = `send-${recordCount}`;
         const discovery = await discover(generation);
         if (!stillCurrent()) return;
+        if (discovery.connected) discoveredProvidersRef.current = discovery.providers;
         const report = await requestCoordination(
           {
             workspacePath: workspace,
@@ -538,6 +561,7 @@ function App() {
             sendKey,
             priorPlan: draftGoal.revision?.planText ?? null,
             priorReview: draftGoal.revision?.reviewText ?? null,
+            avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
           },
           discovery,
           {
@@ -704,6 +728,30 @@ function App() {
       provider: "",
       message: plan.goal,
       revision: { planText: plan.planText, reviewText: plan.reviewText },
+    });
+  }
+
+  // Continue a round whose harness proved it cannot run its tools on this
+  // machine: a fresh draft of the same goal that assigns no role to that
+  // harness. Nothing is sent until the user presses Send, and the new send is
+  // a new round with its own grant — the failed round is never replayed.
+  function handleSendAgainWithout(plan: SavedPlan) {
+    const blocked = plan.environmentBlocked;
+    if (!blocked) return;
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    closeDraft(false);
+    setSelectedPlanId(null);
+    setDraftGoal({
+      requestId: freshRequestId(),
+      baselineCampaignId: snapshot.activeCampaignId,
+      workspace: plan.workspacePath,
+      provider: "",
+      message: plan.goal,
+      avoid: {
+        instanceId: blocked.instanceId,
+        harness: blocked.harness ?? blocked.instanceId,
+        startedAt: plan.savedAt ?? null,
+      },
     });
   }
 
@@ -1309,6 +1357,9 @@ function App() {
                 reviewQuota={selectedPlan.reviewQuota}
                 savedAt={selectedPlan.savedAt}
                 onRevise={selectedPlan.verdict === "revise" ? () => handleRevise(selectedPlan) : undefined}
+                environmentBlocked={selectedPlan.environmentBlocked ?? null}
+                environmentAlternatives={environmentAlternatives(selectedPlan.environmentBlocked)}
+                onSendAgainWithout={selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
               />
             </div>
           ) : draftActive ? (
@@ -1324,12 +1375,28 @@ function App() {
                   stopReason={coordination.stopReason}
                   planningQuota={coordination.planningQuota}
                   reviewQuota={coordination.reviewQuota}
+                  environmentBlocked={coordination.environmentBlocked ?? null}
+                  environmentAlternatives={environmentAlternatives(coordination.environmentBlocked)}
+                  onSendAgainWithout={() => handleSendAgainWithout({
+                    requestId: draftGoal?.requestId ?? "",
+                    goal: draftGoal?.message ?? "",
+                    workspacePath: draftGoal?.workspace ?? "",
+                    ...coordination,
+                    savedAt: null,
+                  })}
                 />
               ) : null}
               {draftGoal?.revision ? (
                 <p className="revision-note">
                   Revising a saved plan. The earlier plan stays in Plans. Nothing is sent until you press Send.
                   {draftGoal.revision.reviewText ? `\n\nThe check said:\n${draftGoal.revision.reviewText}` : ""}
+                </p>
+              ) : null}
+              {draftGoal?.avoid ? (
+                <p className="revision-note">
+                  This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
+                  {draftGoal.avoid.startedAt ? ` in the round started ${formatTimestamp(draftGoal.avoid.startedAt)}` : ""}.
+                  Nothing is sent until you press Send.
                 </p>
               ) : null}
               <DraftGoalComposer
