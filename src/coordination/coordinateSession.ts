@@ -38,7 +38,7 @@ function reportFromPlan(
     reviewText?: string | null;
     verdict?: CoordinationVerdict | null;
     result?: string | null;
-    messageDispatched?: boolean;
+    messageDispatched?: boolean | null;
   } = {},
 ): CoordinateSessionState {
   return {
@@ -48,7 +48,9 @@ function reportFromPlan(
     planText: fields.planText ?? null,
     reviewText: fields.reviewText ?? null,
     verdict: fields.verdict ?? null,
-    messageDispatched: fields.messageDispatched ?? false,
+    // An explicit null (unknown dispatch) must survive; only an unset field
+    // falls back to "nothing was sent".
+    messageDispatched: fields.messageDispatched === undefined ? false : fields.messageDispatched,
   };
 }
 
@@ -123,7 +125,10 @@ export async function runCoordinateSession(
         verdict: "failed",
         planText: planText.length > 0 ? planText : null,
         stopReason: providerErrorSentence(planned.errorText),
-        messageDispatched: planned.dispatched === true,
+        // Tri-state passthrough: a null (the runtime died mid-turn, the turn
+        // may have reached the provider) must never read as "nothing was
+        // sent" — that would make an unknown outcome retryable.
+        messageDispatched: planned.dispatched ?? null,
       },
     );
   }

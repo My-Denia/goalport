@@ -1054,6 +1054,7 @@ describe("send without a Runtime", () => {
 
   it("sends the same words again as a new round, not a replay of the first", async () => {
     const commandIds: string[] = [];
+    const stored: Array<{ requestId?: string }> = [];
     const plans = ["Bounded plan from the first send.", "Bounded plan from the second send."];
     let launches = 0;
     window.__GOALPORT_ELECTRON__ = true;
@@ -1107,8 +1108,13 @@ describe("send without a Runtime", () => {
           ? { text: plan, errorText: "" }
           : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
       },
-      coordinationSave: async (record: { requestId?: string }) => record,
-      coordinationRecords: async () => [],
+      coordinationSave: async (record: { requestId?: string }) => {
+        const index = stored.findIndex((item) => item.requestId === record.requestId);
+        if (index >= 0) stored[index] = record;
+        else stored.unshift(record);
+        return record;
+      },
+      coordinationRecords: async () => stored,
     } as never;
     render(<App />);
 
@@ -1275,6 +1281,81 @@ describe("send without a Runtime", () => {
     expect(await screen.findByText(/independent check finished, so this stopped/i)).toBeTruthy();
     expect(discoverCalls).toBe(2);
     expect(screen.getAllByRole("button", { name: /Plan: plan the helper/ }).length).toBe(1);
+  });
+
+  it("blocks the send while the saved plans cannot be read, then runs once they can", async () => {
+    let recordsBroken = true;
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async () => {
+        launches += 1;
+        return launches % 2 === 1
+          ? { text: "Bounded plan.", errorText: "", dispatched: true }
+          : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "", dispatched: true };
+      },
+      coordinationSave: async (record: { requestId?: string }) => record,
+      coordinationRecords: async () => {
+        if (recordsBroken) throw new Error("records unreadable");
+        return [];
+      },
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    // No launch may happen while the record count — which keys the command
+    // identity — cannot be read from disk.
+    expect(await screen.findByText(/saved plans could not be read/i)).toBeTruthy();
+    expect(launches).toBe(0);
+
+    recordsBroken = false;
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(launches).toBe(2));
+    expect(await screen.findByText(/independent check finished, so this stopped/i)).toBeTruthy();
   });
 
   it("shows a mid-turn failure again without resending it", async () => {

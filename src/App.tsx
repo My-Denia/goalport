@@ -501,14 +501,34 @@ function App() {
       const request = ++coordinationRequest.current;
       const generation = coordinationGeneration(coordinationScope.current, request);
       const stillCurrent = () => coordinationRequest.current === request;
-      // Each recorded send gets its own command identity, so a second send of
-      // the same words is a new round, not a replay of the first round's
-      // stored result. The count comes from the saved plans, which mirror the
-      // persisted records; a send only launches after its record is on disk.
-      const sendKey = `send-${plans.length}`;
       let sendRecorded = false;
       setDraftBusy(true);
       try {
+        // Each recorded send gets its own command identity, so a second send
+        // of the same words is a new round, not a replay of the first round's
+        // stored result. The count must be the records on disk right now —
+        // the same number an owner precomputes for the authorization — not
+        // the asynchronously loaded plans list: sending before that load
+        // settles (or after it failed) would recycle an earlier round's id
+        // and replay its stored result.
+        let recordCount = plans.length;
+        const listRecords = window.goalportCore?.coordinationRecords;
+        if (listRecords) {
+          let disk: SavedPlan[] | null = null;
+          try {
+            disk = await listRecords();
+          } catch {
+            disk = null;
+          }
+          if (!stillCurrent()) return;
+          if (!Array.isArray(disk)) {
+            setDraftError({ sentence: "The saved plans could not be read, so nothing was sent. Try again in a moment." });
+            return;
+          }
+          recordCount = disk.length;
+          setPlans(disk);
+        }
+        const sendKey = `send-${recordCount}`;
         const discovery = await discover(generation);
         if (!stillCurrent()) return;
         const report = await requestCoordination(

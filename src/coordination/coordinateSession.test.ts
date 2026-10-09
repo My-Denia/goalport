@@ -268,4 +268,14 @@ describe("coordinate session", () => {
     expect(state.verdict).toBe("failed");
     expect(state.messageDispatched).toBe(true);
   });
+
+  it("a launch result without a dispatch state is unknown, never retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([{ text: "", errorText: "The coordination service stopped." }]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBeNull();
+  });
 });
