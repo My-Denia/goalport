@@ -1,6 +1,6 @@
 "use strict";
 
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -88,17 +88,63 @@ function launchSpec(file, args, env = process.env, platform = process.platform) 
   return { file: resolved, args, verbatim: false };
 }
 
-function defaultExec(file, args) {
+// TerminateProcess reaches only the child it is handed. When the CLI resolved
+// to a .cmd/.bat shim the child is cmd.exe and the real CLI is its grandchild,
+// so a plain kill leaves the model turn running and spending quota. taskkill
+// /T is the Windows tree terminator; the child's own close event still settles
+// whoever is waiting on it.
+function killProcessTree(child, options = {}) {
+  const platform = options.platform ?? process.platform;
+  const spawnFn = options.spawnFn ?? spawn;
+  if (platform === "win32" && child && typeof child.pid === "number") {
+    try {
+      const killer = spawnFn("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+      killer?.on?.("error", () => {
+        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      });
+      return;
+    } catch { /* fall through to a direct kill */ }
+  }
+  try { child.kill("SIGKILL"); } catch { /* already gone */ }
+}
+
+function defaultExec(file, args, options = {}) {
   const spec = launchSpec(file, args);
-  const result = spawnSync(spec.file, spec.args, {
-    encoding: "utf8",
-    timeout: 8000,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: scrub(process.env),
-    windowsVerbatimArguments: spec.verbatim,
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(spec.file, spec.args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: scrub(options.env ?? process.env),
+        windowsVerbatimArguments: spec.verbatim,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { stdout += chunk; });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle(value);
+    };
+    const timer = setTimeout(() => {
+      killProcessTree(child);
+      finish(reject, Object.assign(new Error("Timed out"), { code: "ETIMEDOUT" }));
+    }, options.timeoutMs ?? 8000);
+    child.on("error", (error) => finish(reject, error));
+    // A nonzero exit still hands back the output: the login-status text is
+    // parsed downstream regardless of the exit code, as the old synchronous
+    // probe did.
+    child.on("close", () => finish(resolve, { stdout, stderr }));
   });
-  if (result.error) throw result.error;
-  return { stdout: result.stdout, stderr: result.stderr };
 }
 
 function provider(input) {
@@ -115,10 +161,10 @@ function provider(input) {
   };
 }
 
-function codexProvider(io) {
+async function codexProvider(io) {
   let status = "";
   try {
-    status = outputText(io.execFile("codex", ["login", "status"]));
+    status = outputText(await io.execFile("codex", ["login", "status"]));
   } catch {
     return null;
   }
@@ -146,10 +192,10 @@ function codexProvider(io) {
   });
 }
 
-function claudeProvider(io) {
+async function claudeProvider(io) {
   let raw = "";
   try {
-    const text = outputText(io.execFile("claude", ["auth", "status", "--json"]));
+    const text = outputText(await io.execFile("claude", ["auth", "status", "--json"]));
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     raw = start >= 0 && end > start ? text.slice(start, end + 1) : text;
@@ -184,15 +230,15 @@ function claudeProvider(io) {
   });
 }
 
-function discoverCliProviders(io = {}) {
+async function discoverCliProviders(io = {}) {
   const probe = {
-    execFile: io.execFile ?? defaultExec,
+    execFile: io.execFile ?? ((file, args) => defaultExec(file, args, { timeoutMs: io.timeoutMs, env: io.env })),
     readFile: io.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
     home: io.home ?? os.homedir(),
   };
   return {
     ok: true,
-    providers: [codexProvider(probe), claudeProvider(probe)].filter(Boolean),
+    providers: (await Promise.all([codexProvider(probe), claudeProvider(probe)])).filter(Boolean),
     stopReason: null,
   };
 }
@@ -399,7 +445,7 @@ function defaultSpawn(spec) {
       resolve(result);
     };
     const timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      killProcessTree(child);
       finish({ code: null, stdout, timedOut: true });
     }, spec.timeoutMs ?? 660000);
     child.on("error", () => finish({ code: null, stdout, spawnError: true }));
@@ -476,4 +522,6 @@ module.exports = {
   claudeReply,
   turnSpec,
   launchSpec,
+  killProcessTree,
+  defaultExec,
 };

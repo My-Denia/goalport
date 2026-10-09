@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, claudeReply, turnSpec, launchSpec } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -18,8 +18,8 @@ function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`)
   };
 }
 
-test("installed subscription CLIs are visible without a checkout", () => {
-  const discovered = discoverCliProviders({
+test("installed subscription CLIs are visible without a checkout", async () => {
+  const discovered = await discoverCliProviders({
     home: "/home/person",
     readFile(file) {
       assert.equal(file, path.join("/home/person", ".codex", "config.toml"));
@@ -43,8 +43,8 @@ test("installed subscription CLIs are visible without a checkout", () => {
   assert.equal(JSON.stringify(discovered).includes("fable"), false);
 });
 
-test("Codex login status on stderr still counts as signed in", () => {
-  const discovered = discoverCliProviders({
+test("Codex login status on stderr still counts as signed in", async () => {
+  const discovered = await discoverCliProviders({
     home: "/home/person",
     readFile() {
       return 'model = "gpt-6.1-sol"\n';
@@ -59,8 +59,8 @@ test("Codex login status on stderr still counts as signed in", () => {
   assert.equal(discovered.providers[1].models[0].slug, "opus");
 });
 
-test("an API-key login is not given an included model", () => {
-  const discovered = discoverCliProviders({
+test("an API-key login is not given an included model", async () => {
+  const discovered = await discoverCliProviders({
     home: "/home/person",
     readFile() {
       return 'model = "gpt-6.1-sol"\n';
@@ -228,4 +228,71 @@ test("cmd argument escaping doubles backslashes before quotes and at the end", (
     ComSpec: "cmd.exe",
   }, "win32");
   assert.equal(empty.args[3], String.raw`"C:\x\codex.cmd ^^^"^^^""`);
+});
+
+test("discovery never blocks the Electron main thread synchronously", () => {
+  const source = fs.readFileSync(path.join(__dirname, "cli-coordinate.cjs"), "utf8");
+  assert.equal(source.includes("spawnSync"), false);
+});
+
+test("an async probe timeout rejects instead of hanging discovery", async () => {
+  await assert.rejects(
+    defaultExec(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { timeoutMs: 100 }),
+    (error) => error.code === "ETIMEDOUT",
+  );
+});
+
+test("an async probe with a nonzero exit still hands back its output", async () => {
+  const result = await defaultExec(process.execPath, ["-e", "process.stdout.write('Logged in using ChatGPT\\n'); process.exit(3)"], { timeoutMs: 8000 });
+  assert.match(result.stdout, /Logged in using ChatGPT/);
+});
+
+test("an async probe for a missing binary rejects", async () => {
+  await assert.rejects(defaultExec("goalport-definitely-missing-binary", ["--version"], { timeoutMs: 8000 }));
+});
+
+test("a Windows cancellation terminates the whole process tree", () => {
+  const calls = [];
+  const spawnFn = (file, args) => {
+    calls.push([file, args]);
+    return { on() { /* the killer needs no events in this test */ } };
+  };
+  killProcessTree({ pid: 4242, kill() { calls.push(["direct-kill"]); } }, { platform: "win32", spawnFn });
+  assert.deepEqual(calls, [[
+    "taskkill",
+    ["/T", "/F", "/PID", "4242"],
+  ]]);
+});
+
+test("a Windows cancellation falls back to a direct kill if taskkill cannot start", () => {
+  const kills = [];
+  const spawnFn = () => ({
+    on(event, handler) {
+      if (event === "error") setImmediate(handler);
+    },
+  });
+  killProcessTree({ pid: 99, kill() { kills.push("direct"); } }, { platform: "win32", spawnFn });
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      assert.deepEqual(kills, ["direct"]);
+      resolve();
+    });
+  });
+});
+
+test("a non-Windows cancellation keeps the direct kill", () => {
+  const kills = [];
+  const spawnFn = () => { throw new Error("taskkill must not spawn off Windows"); };
+  killProcessTree({ pid: 7, kill(signal) { kills.push(signal); } }, { platform: "linux", spawnFn });
+  killProcessTree({ pid: 8, kill(signal) { kills.push(signal); } }, { platform: "win32", spawnFn: () => ({
+    on(event, handler) {
+      if (event === "error") setImmediate(handler);
+    },
+  }) });
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      assert.deepEqual(kills, ["SIGKILL", "SIGKILL"]);
+      resolve();
+    });
+  });
 });

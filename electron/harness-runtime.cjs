@@ -3,7 +3,7 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, killProcessTree } = require("./cli-coordinate.cjs");
 
 const STOPPED = "The coordination service stopped, so nothing was sent.";
 const UNCONFIGURED = "The pinned checkout is not configured, so no harness was assigned.";
@@ -204,9 +204,7 @@ function createHarnessRuntime(options = {}) {
       spawnTurn: options.spawnTurn,
       register(child) {
         if (!token) return;
-        const kill = () => {
-          try { child.kill("SIGKILL"); } catch { /* already gone */ }
-        };
+        const kill = () => killProcessTree(child);
         const kills = localKills.get(token) ?? new Set();
         kills.add(kill);
         localKills.set(token, kills);
@@ -221,15 +219,14 @@ function createHarnessRuntime(options = {}) {
   return {
     discover(generation) {
       if (localCli) {
-        try {
-          return Promise.resolve(discoverCliProviders(options.cliProbe));
-        } catch {
-          return Promise.resolve({
-            ok: false,
-            providers: [],
-            errorText: "The harness list could not be read, so no harness was assigned.",
-          });
-        }
+        // The probes run off the main thread; a rejection here means a CLI
+        // could not be asked at all, which is "no harness assigned", not a
+        // crash of the window.
+        return discoverCliProviders(options.cliProbe).catch(() => ({
+          ok: false,
+          providers: [],
+          errorText: "The harness list could not be read, so no harness was assigned.",
+        }));
       }
       return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.", generation);
     },
