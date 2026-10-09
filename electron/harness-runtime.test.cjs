@@ -15,6 +15,19 @@ test("coordination does not wait for an external checkout", () => {
 
 const SENTINEL = "goalport-sentinel-do-not-send-9c2e";
 
+// Best-effort temp cleanup. A child whose cwd was this directory may keep a
+// handle briefly after exit on Windows, where removing such a directory fails
+// with EBUSY no matter how long we retry. CI runners are ephemeral, so leaving
+// the directory behind there is fine; removal still happens everywhere else.
+function cleanupTemp(directory) {
+  try {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    if (process.platform === "win32" && (error.code === "EBUSY" || error.code === "EPERM")) return;
+    throw error;
+  }
+}
+
 function directoryHas(directory, needle) {
   if (!fs.existsSync(directory)) return false;
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -61,7 +74,7 @@ test("the runtime starts the child with this process", async () => {
     assert.equal(flag, "1");
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
@@ -83,7 +96,7 @@ test("a child that exits immediately resolves instead of crashing", async () => 
     assert.match(discovered.errorText, /stopped|could not be read/);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
@@ -137,7 +150,7 @@ test("stderr from the child does not block its reply", async () => {
     assert.match(runtime.stderrTail(), /^x+$/);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
@@ -189,7 +202,7 @@ test("cancelling a generation releases the next request", async () => {
     assert.equal(fs.readFileSync(started, "utf8"), "2");
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
@@ -279,7 +292,7 @@ test("the runtime strips the goal text before it reaches the child", async () =>
     assert.equal(prepared.messageDispatched, false);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
@@ -310,7 +323,7 @@ test("run stays unauthorized without a grant and keeps the grant when the checko
     assert.equal(fs.readFileSync(grant, "utf8").includes("coordinate-plan-1"), true);
   } finally {
     runtime.close();
-    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    cleanupTemp(directory);
   }
 });
 
