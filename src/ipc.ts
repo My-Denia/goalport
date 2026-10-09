@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SavedPlan } from "./coordination/savedPlan";
 import {
   appendPreviewConversationMessage,
   appendPreviewMessage,
@@ -317,8 +318,10 @@ declare global {
         sandboxPolicy: { type: "readOnly" };
         workspaceStrategy: { type: "root"; branch?: string } | { type: "existing_worktree"; worktreePath: string; branch?: string };
         initialMessage: { text: string };
-      }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean }>;
+      }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean | null }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
+      coordinationRecords?: () => Promise<SavedPlan[]>;
+      coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
     };
   }
 }

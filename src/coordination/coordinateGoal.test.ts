@@ -13,6 +13,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
         instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
@@ -36,14 +37,47 @@ describe("Synthetic path", () => {
     expect(state.commands[0]?.initialMessage.text).toContain(goal);
     expect(state.commands[0]?.initialMessage.text).toContain(workspacePath);
     expect(state.commands[0]?.initialMessage.text).toContain("without claiming the review passed");
+    expect(state.commands[0]?.initialMessage.text).toContain("Find the product contract in this workspace");
+    expect(state.commands[0]?.initialMessage.text).toContain("If you cannot confirm one, say so.");
     expect(state.commands[1]?.initialMessage.text).toContain("done-claim is not a pass");
+    expect(state.commands[1]?.initialMessage.text).toContain("where that contract is");
     expect(state.commands).toHaveLength(2);
+  });
+
+  it("a revision cites the saved plan and check and does not reuse the first turn", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+    const first = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
+    const revised = coordinateGoal({
+      goal,
+      workspacePath,
+      sendKey: "send-0",
+      catalog,
+      priorPlan: "Bounded plan.",
+      priorReview: "The contract path is missing.\nVERDICT: revise",
+    });
+    const plan = revised.commands[0]?.initialMessage.text ?? "";
+    expect(plan).toContain("This is a revision of a saved plan.");
+    expect(plan).toContain("Answer every point the independent check raised, one by one.");
+    expect(plan).toContain("State the workspace state this plan relies on");
+    expect(plan).toContain("Bounded plan.");
+    expect(plan).toContain("The contract path is missing.");
+    expect(plan).not.toContain("AGENTS.md");
+    const firstSend = first.commands[0]?.initialMessage.text ?? "";
+    expect(firstSend).not.toContain("Answer every point the independent check raised");
+    expect(firstSend).not.toContain("State the workspace state");
+    expect(revised.commands[1]?.initialMessage.text).toContain("The contract path is missing.");
+    expect(revised.commands[0]?.commandId).not.toBe(first.commands[0]?.commandId);
+    expect(revised.commands[1]?.commandId).not.toBe(first.commands[1]?.commandId);
   });
 
   it("does not select a default model that requires extra usage credits", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "codex",
@@ -77,6 +111,7 @@ describe("Synthetic path", () => {
     const onlyCredits = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "codex",
@@ -96,10 +131,39 @@ describe("Synthetic path", () => {
     expect(onlyCredits.stopReason).toMatch(/extra usage credits/);
   });
 
+  it("does not invent a model when a signed-in harness has none", () => {
+    const state = coordinateGoal({
+      goal,
+      workspacePath,
+      sendKey: "send-0",
+      catalog: [
+        instance({
+          instanceId: "codex",
+          name: "Codex",
+          quota: "unknown",
+          authenticated: true,
+          models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+        }),
+        instance({
+          instanceId: "claude",
+          name: "Claude",
+          quota: "unknown",
+          authenticated: true,
+          billing: "subscription",
+          models: [],
+        }),
+      ],
+    });
+
+    expect(state.commands).toEqual([]);
+    expect(state.stopReason).toMatch(/no included model/);
+  });
+
   it("stops an empty catalog because no harness catalog is connected", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [],
     });
 
@@ -115,6 +179,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [instance({ instanceId: "pi-local", name: "Pi", quota: "available" })],
     });
 
@@ -130,6 +195,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "same-instance", name: "Pi", quota: "available" }),
         instance({ instanceId: "same-instance", name: "Pi", quota: "available" }),
@@ -147,6 +213,7 @@ describe("Synthetic path", () => {
     const paired = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "available", models: ["pi-default"] }),
         instance({ instanceId: "spent-window", name: "Spent Window", quota: "exhausted" }),
@@ -162,6 +229,7 @@ describe("Synthetic path", () => {
     const onlyOneLeft = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "available" }),
         instance({ instanceId: "spent-window", name: "Spent Window", quota: "exhausted" }),
@@ -177,6 +245,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "pi-local",
@@ -216,6 +285,7 @@ describe("Synthetic path", () => {
     const noFallback = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "UNKNOWN" }),
         instance({
@@ -238,6 +308,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "blank", name: "Blank", quota: "available", models: [] }),
         instance({ instanceId: "omitted", name: "Omitted", quota: "available" }),
@@ -250,5 +321,20 @@ describe("Synthetic path", () => {
     expect(state.reviewHarness).toBe("Cursor");
     expect(state.commands.map((command) => command.modelSelection.model)).toEqual(["pi-default", "cursor-first"]);
     expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["pi-local", "cursor-local"]);
+  });
+
+  it("keys the commands to the individual send, not only the prompt text", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+    const first = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
+    const repeat = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
+    const secondSend = coordinateGoal({ goal, workspacePath, sendKey: "send-1", catalog });
+
+    expect(secondSend.commands[0]?.commandId).not.toBe(first.commands[0]?.commandId);
+    expect(secondSend.commands[1]?.commandId).not.toBe(first.commands[1]?.commandId);
+    expect(repeat.commands[0]?.commandId).toBe(first.commands[0]?.commandId);
+    expect(repeat.commands[1]?.commandId).toBe(first.commands[1]?.commandId);
   });
 });

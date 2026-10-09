@@ -46,7 +46,7 @@ const providers = [
   },
 ] as const;
 
-function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
+function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
   const calls: CoordinateTurnCommand[] = [];
   return {
     calls,
@@ -66,7 +66,7 @@ describe("coordinate session", () => {
       { text: "", errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.", prepared: true },
     ]);
     const view = await requestCoordination(
-      { goal, workspacePath },
+      { goal, workspacePath, sendKey: "send-0" },
       { connected: true, sendAuthorized: false, providers, stopReason: null },
       transport,
     );
@@ -76,12 +76,12 @@ describe("coordinate session", () => {
     expect(view.reviewQuota).toBe("available");
     expect(view.result).toBeNull();
     expect(view.stopReason).toMatch(/not authorized to spend subscription quota/);
-    expect(transport.calls).toHaveLength(2);
-    expect(transport.calls[0]?.modelSelection.instanceId).not.toBe(transport.calls[1]?.modelSelection.instanceId);
+    expect(transport.calls).toHaveLength(0);
     const selected = coordinateGoal({
       catalog: catalogFromProviderSnapshots(providers),
       goal,
       workspacePath,
+      sendKey: "send-0",
     });
     expect(selected.commands.map((command) => command.modelSelection.model)).toEqual([
       "gpt-6-astra",
@@ -92,11 +92,11 @@ describe("coordinate session", () => {
   it("stops after the critic and does not start an implementation turn", async () => {
     const transport = recordingTransport([
       { text: "Bounded plan.", errorText: "" },
-      { text: "The plan can be carried out.", errorText: "" },
+      { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" },
     ]);
     const catalog = catalogFromProviderSnapshots(providers);
     const state = await runCoordinateSession(
-      { catalog, goal, workspacePath },
+      { catalog, goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       transport,
     );
@@ -105,8 +105,26 @@ describe("coordinate session", () => {
     expect(transport.calls[1]?.modelSelection.model).toBe("claude-opus-5-5");
     expect(transport.calls[0]?.modelSelection.instanceId).not.toBe(transport.calls[1]?.modelSelection.instanceId);
     expect(transport.calls[1]?.initialMessage.text).toContain("Bounded plan.");
-    expect(state.result).toBe("The plan can be carried out.");
+    expect(state.planText).toBe("Bounded plan.");
+    expect(state.reviewText).toBe("The plan can be carried out.\nVERDICT: carry-out");
+    expect(state.verdict).toBe("checked");
+    expect(state.result).toBe("The plan can be carried out.\nVERDICT: carry-out");
     expect(state.stopReason).toBe("The independent check finished, so this stopped.");
+    expect(state.messageDispatched).toBe(true);
+  });
+
+  it("does not treat a review without a verdict line as carried out", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "Bounded plan.", errorText: "" },
+        { text: "The plan can be carried out.", errorText: "" },
+      ]),
+    );
+    expect(state.planText).toBe("Bounded plan.");
+    expect(state.verdict).toBe("unconfirmed");
+    expect(state.stopReason).toBe("The independent check did not confirm the plan, so this stopped.");
   });
 
   it("shows a credits refusal as credits, not as a usage-limit wait, and does not launch the critic", async () => {
@@ -115,7 +133,7 @@ describe("coordinate session", () => {
       { text: "should not run", errorText: "" },
     ]);
     const state = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       transport,
     );
@@ -127,7 +145,7 @@ describe("coordinate session", () => {
 
   it("keeps a real usage limit and an authentication failure distinct", async () => {
     const limited = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([{ text: "", errorText: "Codex usage limit reached. The session limit resets in 3h." }]),
     );
@@ -135,7 +153,7 @@ describe("coordinate session", () => {
     expect(limited.stopReason).toContain("3h");
 
     const signedOut = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([{ text: "", errorText: "authentication failed" }]),
     );
@@ -145,12 +163,12 @@ describe("coordinate session", () => {
   it("does not launch the review harness after the request is replaced", async () => {
     let launches = 0;
     const view = await requestCoordination(
-      { goal, workspacePath },
-      { connected: true, sendAuthorized: false, providers, stopReason: null },
+      { goal, workspacePath, sendKey: "send-0" },
+      { connected: true, sendAuthorized: true, providers, stopReason: null },
       {
         async launch() {
           launches += 1;
-          return { text: "", errorText: "", prepared: true };
+          return { text: "Bounded plan.", errorText: "" };
         },
       },
       () => launches === 0,
@@ -179,7 +197,7 @@ describe("coordinate session", () => {
       : provider);
     const catalog = catalogFromProviderSnapshots(withFableSpent);
     expect(catalog.find((instance) => instance.instanceId === "codex")?.quota).toBe("available");
-    const selected = coordinateGoal({ catalog, goal, workspacePath });
+    const selected = coordinateGoal({ catalog, goal, workspacePath, sendKey: "send-0" });
     expect(selected.commands).toHaveLength(2);
     expect(selected.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
     expect(selected.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
@@ -195,16 +213,69 @@ describe("coordinate session", () => {
       usageLimits: { windows: [{ id: "seven_day_fable", usedPercent: 100 }] },
     }, withFableSpent[1]]);
     expect(onlyModelWindow.find((instance) => instance.instanceId === "codex")?.quota).toBe("unknown");
-    const stillPaired = coordinateGoal({ catalog: onlyModelWindow, goal, workspacePath });
+    const stillPaired = coordinateGoal({ catalog: onlyModelWindow, goal, workspacePath, sendKey: "send-0" });
     expect(stillPaired.commands).toHaveLength(2);
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
   });
 
+  it("does not send a revision when this session is not authorized", async () => {
+    const transport = recordingTransport([]);
+    const view = await requestCoordination(
+      {
+        goal,
+        workspacePath,
+        sendKey: "send-0",
+        priorPlan: "Bounded plan.",
+        priorReview: "The contract path is missing.\nVERDICT: revise",
+      },
+      { connected: true, sendAuthorized: false, providers, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(0);
+    expect(view.stopReason).toMatch(/not authorized to spend subscription quota/);
+    expect(view.planText).toBeNull();
+  });
+
   it("does not invent a harness when the coordination service is missing", async () => {
-    const view = await requestCoordination({ goal, workspacePath }, null, recordingTransport([]));
+    const view = await requestCoordination({ goal, workspacePath, sendKey: "send-0" }, null, recordingTransport([]));
     expect(view.planningHarness).toBeNull();
     expect(view.reviewHarness).toBeNull();
     expect(view.stopReason).toMatch(/no coordination service/);
+  });
+
+  it("maps a stderr-borne authentication phrase and keeps the round retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "", errorText: "The harness finished without any text, so this stopped. stream error: You are not logged in. Run codex login.", dispatched: false },
+      ]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.stopReason).toBe("This harness is not signed in.");
+    expect(state.messageDispatched).toBe(false);
+  });
+
+  it("a dispatched failure is never marked retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "", errorText: "The harness did not finish, so this stopped.", dispatched: true },
+      ]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBe(true);
+  });
+
+  it("a launch result without a dispatch state is unknown, never retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([{ text: "", errorText: "The coordination service stopped." }]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBeNull();
   });
 });

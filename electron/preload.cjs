@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld("goalportCore", {
   coordinateDiscover: (generation) => ipcRenderer.invoke("goalport:coordinate-discover", generation),
   coordinateLaunch: (command, generation) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation),
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
+  coordinationRecords: () => ipcRenderer.invoke("goalport:coordination-records"),
+  coordinationSave: (record) => ipcRenderer.invoke("goalport:coordination-save", record),
   onClosePrompt: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("goalport:close-prompt", listener);

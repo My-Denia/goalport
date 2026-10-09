@@ -13,6 +13,7 @@ const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne } = require("./coordinate-service.cjs");
+const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
@@ -666,8 +667,16 @@ function importFacts(discovery) {
   };
 }
 let harnessRuntime = null;
+function coordinationDirectory() {
+  return profile?.durableDirectory ?? app.getPath("userData");
+}
+
 function coordinationRuntime() {
-  if (!harnessRuntime) harnessRuntime = createHarnessRuntime();
+  if (!harnessRuntime) {
+    harnessRuntime = createHarnessRuntime({
+      stateDir: process.env.GOALPORT_HARNESS_STATE_DIR || path.join(coordinationDirectory(), "harness-state"),
+    });
+  }
   return harnessRuntime;
 }
 function closeHarnessRuntime() {
@@ -1320,6 +1329,8 @@ app.whenReady().then(() => {
     coordinationRuntime().cancel(generation);
     return { ok: true };
   });
+  handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
+  handleTrusted("goalport:coordination-save", (_event, record) => saveRecord(coordinationDirectory(), record));
   handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };

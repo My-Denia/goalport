@@ -73,7 +73,7 @@ test("a pinned checkout mismatch fails discovery", async () => {
   assert.match(result.stopReason, /pinned checkout does not match/);
 });
 
-test("an unauthorized launch prepares and does not run", async () => {
+test("an unauthorized launch does not prepare or run", async () => {
   let prepared = 0;
   let ran = 0;
   const result = await launchOne({}, {
@@ -89,7 +89,7 @@ test("an unauthorized launch prepares and does not run", async () => {
       return { ok: false, errorText: "sent" };
     },
   }, command);
-  assert.equal(prepared, 1);
+  assert.equal(prepared, 0);
   assert.equal(ran, 0);
   assert.equal(result.launched, false);
   assert.equal(result.prepared, true);
@@ -132,6 +132,32 @@ test("approval-required without never is refused before prepare", async () => {
   assert.match(result.errorText, /approvalPolicy must be never/);
 });
 
+test("an authorized runtime result is the turn text", async () => {
+  let prepared = 0;
+  let ran = 0;
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      prepared += 1;
+      return held;
+    },
+    async run(received) {
+      ran += 1;
+      assert.equal(received.initialMessage.text, "Plan only.");
+      return { ok: true, text: "Bounded plan.", errorText: "" };
+    },
+  }, command);
+  assert.equal(prepared, 0);
+  assert.equal(ran, 1);
+  assert.equal(result.launched, true);
+  assert.equal(result.prepared, true);
+  assert.equal(result.text, "Bounded plan.");
+  assert.equal(result.errorText, "");
+  assert.equal(result.dispatched, true);
+});
+
 test("the authorization flag still does not send a model turn", async () => {
   let prepared = 0;
   let ran = 0;
@@ -149,9 +175,78 @@ test("the authorization flag still does not send a model turn", async () => {
       return { ok: false, errorText: "No model turn was sent, because this session is not authorized to spend subscription quota." };
     },
   }, command);
-  assert.equal(prepared, 1);
+  assert.equal(prepared, 0);
   assert.equal(ran, 1);
   assert.equal(result.launched, false);
   assert.equal(result.prepared, true);
   assert.equal(result.text, "");
+});
+
+test("a failed turn keeps the partial text the harness did produce", async () => {
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    async run() {
+      return { ok: false, text: "Half a plan before the harness died.", errorText: "The harness did not finish, so this stopped." };
+    },
+  }, command);
+  assert.equal(result.launched, false);
+  assert.equal(result.prepared, true);
+  assert.equal(result.text, "Half a plan before the harness died.");
+  assert.equal(result.errorText, "The harness did not finish, so this stopped.");
+});
+
+test("a refused launch and a dispatched failure report their dispatched state", async () => {
+  const runtime = (run) => ({
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    run,
+  });
+  const refused = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime(async () => ({
+    ok: false,
+    text: "",
+    errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.",
+    messageDispatched: false,
+  })), command);
+  assert.equal(refused.dispatched, false);
+
+  const dispatched = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime(async () => ({
+    ok: false,
+    text: "Half a plan.",
+    errorText: "The harness did not finish, so this stopped.",
+    messageDispatched: true,
+  })), command);
+  assert.equal(dispatched.dispatched, true);
+  assert.equal(dispatched.text, "Half a plan.");
+
+  const unknown = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime(async () => ({
+    ok: false,
+    text: "",
+    errorText: "The harness did not finish, so this stopped.",
+  })), command);
+  assert.equal(unknown.dispatched, false);
+});
+
+test("a runtime that throws mid-turn reports an unknown dispatch state", async () => {
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    async run() {
+      throw new Error("transport died");
+    },
+  }, command);
+  assert.equal(result.launched, false);
+  assert.equal(result.dispatched, null);
 });

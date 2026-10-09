@@ -7,7 +7,7 @@ Chromium/Node/V8 distribution (see LICENSE and LICENSES.chromium.html in
 the package root, provided unmodified by the Electron project).
 
 --------------------------------------------------------------------
-Copied source (resources/app.asar renderer)
+Copied source (resources/app.asar)
 --------------------------------------------------------------------
 
 T3 Code coordination policy, copied from T3 Tools Inc. under the MIT
@@ -35,6 +35,33 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+cross-spawn cmd.exe quoting, adapted under the MIT License from
+cross-spawn (moxystudio/node-cross-spawn) into
+electron/cli-coordinate.cjs. The notice below is the upstream LICENSE
+text (cross-spawn 7.0.6), kept beside that copy.
+
+The MIT License (MIT)
+
+Copyright (c) 2018 Made With MOXY Lda <hello@moxy.studio>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 None of the components below carried an upstream NOTICE file at the time
 this file was generated (checked directly against each crate's vendored

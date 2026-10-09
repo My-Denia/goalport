@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { CoreSnapshot, GoalCard } from "../types";
+import { outcomeLabel } from "../coordination/verdict";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
   collapsed: boolean;
+  plans?: readonly { requestId: string; title: string; active: boolean; verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null; savedAt?: string | null }[];
+  onSelectPlan?: (requestId: string) => void;
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
@@ -19,7 +22,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectProject, onRenameCampaign }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -193,9 +196,65 @@ export function CampaignNav({ snapshot, collapsed, onSelectCampaign, onSelectPro
         )}
       </div>
 
+      {plans.length > 0 ? (
+        <>
+          <div className="sidebar-section-title">
+            <span>Plans</span>
+            <span className="count-badge">{plans.length}</span>
+          </div>
+          <div className="campaign-list">
+            {plans.map((plan) => (
+              <div key={plan.requestId} className={`campaign-item-wrap${plan.active ? " campaign-active" : ""}`}>
+                <button
+                  className={`campaign-item${plan.active ? " campaign-active" : ""}`}
+                  type="button"
+                  onClick={() => onSelectPlan?.(plan.requestId)}
+                  title={planSubline(plan.verdict, plan.savedAt)}
+                  aria-label={`Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
+                >
+                  <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
+                  <span className="campaign-item-copy">
+                    <strong>{plan.title}</strong>
+                    <small>{planSubline(plan.verdict, plan.savedAt)}</small>
+                  </span>
+                  {plan.active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+
       <div className="nav-spacer" />
     </nav>
   );
+}
+
+function planSubline(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null, savedAt?: string | null): string {
+  const label = outcomeLabel(verdict);
+  if (!savedAt) return label;
+  const parsed = Date.parse(savedAt);
+  if (Number.isNaN(parsed)) return label;
+  const saved = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" }).format(parsed);
+  return `${label} · ${saved}`;
+}
+
+function planStateClass(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null): string {
+  switch (verdict) {
+    case "checked":
+      return "campaign-state-complete";
+    case "failed":
+      return "campaign-state-failed";
+    case "revise":
+    case "stopped":
+    case "unconfirmed":
+    case null:
+      return "campaign-state-paused";
+    default: {
+      const unreachable: never = verdict;
+      return unreachable;
+    }
+  }
 }
 
 function attentionClass(goal: GoalCard): string {

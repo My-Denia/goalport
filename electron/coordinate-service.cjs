@@ -3,7 +3,6 @@
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
 const DISCONNECTED_DISCOVER = "The coordination server is not connected, so no harness was assigned.";
 const DISCONNECTED_LAUNCH = "The coordination server is not connected, so no model turn was sent.";
-const PREPARE_FAILED = "The read-only session was not prepared, so nothing was sent.";
 
 function guardCoordinateCommand(command) {
   if (!command || command.type !== "goalport.coordinateTurn") return "The command is not a coordinate turn.";
@@ -66,46 +65,38 @@ async function discoverCoordination(env, runtime, generation) {
   };
 }
 
-function prepareHeld(result) {
-  return Boolean(
-    result
-    && result.ok === true
-    && result.messageDispatched === false
-    && result.disposition === "deny"
-    && result.sandbox === "readOnly"
-    && result.approval === "never",
-  );
-}
-
 async function launchOne(env, runtime, command, generation) {
   const problem = guardCoordinateCommand(command);
   if (problem) return { launched: false, prepared: false, text: "", errorText: problem };
   if (!runtimeReady(runtime)) {
     return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
   }
-  let prepared;
-  try {
-    prepared = await runtime.prepare(command, generation);
-  } catch {
-    return { launched: false, prepared: false, text: "", errorText: PREPARE_FAILED };
-  }
-  if (!prepareHeld(prepared)) {
-    const errorText = typeof prepared?.errorText === "string" && prepared.errorText.trim()
-      ? prepared.errorText
-      : PREPARE_FAILED;
-    return { launched: false, prepared: false, text: "", errorText };
-  }
   if (env.GOALPORT_COORDINATE_SEND !== "1") {
     return { launched: false, prepared: true, text: "", errorText: UNAUTHORIZED };
   }
-  let ran = null;
-  try {
-    if (typeof runtime.run === "function") ran = await runtime.run(generation);
-  } catch {
-    ran = null;
+  if (typeof runtime.run !== "function") {
+    return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
   }
+  let ran = null;
+  let runThrew = false;
+  try {
+    ran = await runtime.run(command, generation);
+  } catch {
+    runThrew = true;
+  }
+  const text = typeof ran?.text === "string" ? ran.text.trim() : "";
+  if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
+    return { launched: true, prepared: true, text, errorText: "", dispatched: true };
+  }
+  // A turn that produced text and then failed keeps that text: the partial
+  // plan or check is real model output the saved Plan can still show.
   const errorText = typeof ran?.errorText === "string" && ran.errorText.trim() ? ran.errorText : UNAUTHORIZED;
-  return { launched: false, prepared: true, text: "", errorText };
+  // runCliTurn is total, so a throw means the transport died mid-turn. The
+  // session layer flattens this null to "not dispatched" (retryable), which
+  // is acceptable only because every retry needs its own owner grant; the
+  // renderer-side throw path is separately pinned to unknown (unretryable)
+  // by the send-recorded flag in the app.
+  return { launched: false, prepared: true, text, errorText, dispatched: runThrew ? null : (ran?.messageDispatched === true) };
 }
 
 module.exports = { guardCoordinateCommand, discoverCoordination, launchOne };

@@ -31,6 +31,14 @@ export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
   readonly goal: string;
   readonly workspacePath: string;
+  /**
+   * Identity of the user send this round belongs to. Two sends of the same
+   * goal text are different rounds; hashing only the prompt made the second
+   * send replay the first round's stored result.
+   */
+  readonly sendKey: string;
+  readonly priorPlan?: string | null;
+  readonly priorReview?: string | null;
 }
 
 export interface CatalogModel {
@@ -139,6 +147,17 @@ function harnessLabel(instance: SyntheticCatalogInstance): string {
   return name.length > 0 ? name : instance.instanceId;
 }
 
+function modelUnnamed(instance: SyntheticCatalogInstance): boolean {
+  if (instance.authenticated !== true) return false;
+  if (instance.enabled === false) return false;
+  if (instance.installed === false) return false;
+  if (instance.launchable === false) return false;
+  if (instance.billing === "paid-api") return false;
+  if (quotaWord(instance.quota) === "exhausted") return false;
+  if (creditsBlocked(instance)) return false;
+  return publishedModel(instance).length === 0;
+}
+
 function isUsable(instance: SyntheticCatalogInstance): boolean {
   if (instance.enabled === false) return false;
   if (instance.installed === false) return false;
@@ -183,6 +202,58 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
   };
 }
 
+function commandKey(role: "plan" | "review", text: string, sendKey: string): string {
+  let hash = 2166136261;
+  const data = `${role}\n${sendKey}\n${text}`;
+  for (let index = 0; index < data.length; index += 1) {
+    hash ^= data.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `coordinate-${role}-${(hash >>> 0).toString(16)}`;
+}
+
+function present(value: string | null | undefined): string {
+  const text = value?.trim() ?? "";
+  return text.length > 0 ? text : "";
+}
+
+function plannerText(input: CoordinateGoalInput): string {
+  const lines = [
+    input.goal,
+    input.workspacePath,
+    "Find the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.",
+    "Hand back a bounded plan without claiming the review passed.",
+  ];
+  const priorPlan = present(input.priorPlan);
+  const priorReview = present(input.priorReview);
+  if (priorPlan || priorReview) {
+    lines.push(
+      "This is a revision of a saved plan. Use the saved plan and the independent check below. Do not start as if they were never written.",
+      "Answer every point the independent check raised, one by one. A point left unanswered keeps the plan unconfirmed.",
+      "State the workspace state this plan relies on, such as the commit or the range it reviews.",
+      "Saved plan:",
+      priorPlan || "(none)",
+      "Independent check:",
+      priorReview || "(none)",
+    );
+  }
+  return lines.join("\n");
+}
+
+function reviewText(input: CoordinateGoalInput): string {
+  const lines = [
+    input.goal,
+    "The planner's done-claim is not a pass. Judge only whether the plan can be carried out.",
+    "The plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.",
+    "End with exactly one of these lines: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.",
+  ];
+  const priorReview = present(input.priorReview);
+  if (priorReview) {
+    lines.push("The previous independent check is below. Say whether this plan answers it.", priorReview);
+  }
+  return lines.join("\n");
+}
+
 function turnCommand(input: {
   commandId: string;
   instance: SyntheticCatalogInstance;
@@ -219,11 +290,14 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   }
   if (usable.length < 2) {
     const credits = unique.some(creditsBlocked);
+    const unnamed = unique.some(modelUnnamed);
     return stopped(
       quotaLabels,
       credits
         ? "Stopped. A model that requires extra usage credits was not selected, and an independent check still needs a second harness with an included model."
-        : "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
+        : unnamed
+          ? "Stopped. A signed-in harness has no included model GoalPort can name, so an extra-credit model was not selected."
+          : "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
     );
   }
 
@@ -236,18 +310,11 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
 
-  const planText = [
-    input.goal,
-    input.workspacePath,
-    "Hand back a bounded plan without claiming the review passed.",
-  ].join("\n");
-  const reviewText = [
-    input.goal,
-    "The planner's done-claim is not a pass. Judge only whether the plan can be carried out.",
-  ].join("\n");
+  const planMessage = plannerText(input);
+  const reviewMessage = reviewText(input);
   const commands = [
-    turnCommand({ commandId: "coordinate-plan", instance: planner, workspacePath: input.workspacePath, text: planText }),
-    turnCommand({ commandId: "coordinate-review", instance: reviewer, workspacePath: input.workspacePath, text: reviewText }),
+    turnCommand({ commandId: commandKey("plan", planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {
