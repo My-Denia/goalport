@@ -14,6 +14,13 @@ export interface CoordinationView {
   stopReason: string;
   planningQuota: CoordinationQuotaWord | null;
   reviewQuota: CoordinationQuotaWord | null;
+  /**
+   * False only when the round provably dispatched no model turn (not
+   * authorized, not installed, unrecorded): such a failure may be retried
+   * explicitly. True, null, or absent (a record from before this field
+   * existed) must never be resent silently.
+   */
+  readonly messageDispatched?: boolean | null;
 }
 
 export interface CoordinationDiscovery {
@@ -40,6 +47,7 @@ function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped
     stopReason,
     planningQuota: null,
     reviewQuota: null,
+    messageDispatched: false,
   });
 }
 
@@ -83,6 +91,7 @@ export async function requestCoordination(
       stopReason: planned.stopReason,
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
+      messageDispatched: false,
     });
   }
   if (!stillCurrent()) return unavailable(REPLACED);
@@ -97,6 +106,7 @@ export async function requestCoordination(
       stopReason: "Planning and review are assigned to two different harnesses. No model turn was sent, because this session is not authorized to spend subscription quota.",
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
+      messageDispatched: false,
     });
   }
   const sent = await runCoordinateSession(
@@ -120,5 +130,6 @@ export async function requestCoordination(
     stopReason: sent.stopReason,
     planningQuota: sent.planningQuota,
     reviewQuota: sent.reviewQuota,
+    messageDispatched: sent.messageDispatched,
   });
 }

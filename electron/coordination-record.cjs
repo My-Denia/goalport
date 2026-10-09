@@ -23,6 +23,14 @@ function quota(value) {
   return undefined;
 }
 
+// Tri-state: false = provably nothing dispatched (retryable), true = a turn
+// went out (never silently resend), null/absent = unknown, treated as sent.
+function dispatched(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
 function savedAtOf(value) {
   if (typeof value !== "string") return null;
   const text = value.trim();
@@ -68,6 +76,7 @@ function normalize(input) {
     stopReason,
     planningQuota,
     reviewQuota,
+    messageDispatched: dispatched(input.messageDispatched),
     savedAt: savedAtOf(input.savedAt),
   };
 }

@@ -80,3 +80,20 @@ test("a replaced request and an unknown outcome are not stored", () => {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+test("the dispatched tri-state survives a save and a reload", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-"));
+  try {
+    saveRecord(directory, record({ requestId: "sent-1", messageDispatched: true }));
+    saveRecord(directory, record({ requestId: "refused-1", messageDispatched: false }));
+    saveRecord(directory, record({ requestId: "old-1" }));
+    saveRecord(directory, record({ requestId: "garbage-1", messageDispatched: "yes" }));
+    const states = Object.fromEntries(readRecords(directory).map((item) => [item.requestId, item.messageDispatched]));
+    assert.equal(states["sent-1"], true);
+    assert.equal(states["refused-1"], false);
+    assert.equal(states["old-1"], null);
+    assert.equal(states["garbage-1"], null);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
+  }
+});

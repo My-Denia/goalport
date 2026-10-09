@@ -7,6 +7,12 @@ export interface CoordinateLaunchResult {
   readonly text: string;
   readonly errorText: string;
   readonly prepared?: boolean;
+  /**
+   * Whether a model turn was actually dispatched. A failed launch that never
+   * dispatched (not authorized, not installed, unrecorded) may be retried
+   * explicitly by the user; a dispatched or unknown outcome may not.
+   */
+  readonly dispatched?: boolean;
 }
 
 export interface CoordinateTransport {
@@ -21,6 +27,7 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly planText: string | null;
   readonly reviewText: string | null;
   readonly verdict: CoordinationVerdict | null;
+  readonly messageDispatched: boolean | null;
 }
 
 function reportFromPlan(
@@ -31,6 +38,7 @@ function reportFromPlan(
     reviewText?: string | null;
     verdict?: CoordinationVerdict | null;
     result?: string | null;
+    messageDispatched?: boolean;
   } = {},
 ): CoordinateSessionState {
   return {
@@ -40,6 +48,7 @@ function reportFromPlan(
     planText: fields.planText ?? null,
     reviewText: fields.reviewText ?? null,
     verdict: fields.verdict ?? null,
+    messageDispatched: fields.messageDispatched ?? false,
   };
 }
 
@@ -114,13 +123,14 @@ export async function runCoordinateSession(
         verdict: "failed",
         planText: planText.length > 0 ? planText : null,
         stopReason: providerErrorSentence(planned.errorText),
+        messageDispatched: planned.dispatched === true,
       },
     );
   }
   if (planText.length === 0) {
     return reportFromPlan(
       { ...plan, result: null },
-      { verdict: "failed", stopReason: "The planner returned no text, so the check was not sent." },
+      { verdict: "failed", stopReason: "The planner returned no text, so the check was not sent.", messageDispatched: true },
     );
   }
 
@@ -134,6 +144,7 @@ export async function runCoordinateSession(
         planText,
         reviewText: reviewText.length > 0 ? reviewText : null,
         stopReason: providerErrorSentence(checked.errorText),
+        messageDispatched: true,
       },
     );
   }
@@ -146,6 +157,7 @@ export async function runCoordinateSession(
       planText,
       reviewText: reviewText.length > 0 ? reviewText : null,
       stopReason,
+      messageDispatched: true,
     },
   );
 }

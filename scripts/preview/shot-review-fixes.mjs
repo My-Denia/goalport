@@ -15,6 +15,15 @@ const distRoot = resolve("dist");
 // mode still renders the Plans sidebar).
 const records = [
   {
+    requestId: "shot-plan-4", workspacePath: "C:\\workspace\\goalport", goal: "Ship the review fixes",
+    planningHarness: "Codex", reviewHarness: "Claude",
+    planText: null, reviewText: null, result: null,
+    verdict: "failed",
+    stopReason: "The harness finished without any text, so this stopped. stream error: You are not logged in. Run codex login.",
+    planningQuota: "available", reviewQuota: "unknown",
+    messageDispatched: false, savedAt: "2026-10-09T09:50:00.000Z",
+  },
+  {
     requestId: "shot-plan-3", workspacePath: "C:\\workspace\\goalport", goal: "Ship the review fixes",
     planningHarness: "Codex", reviewHarness: "Claude",
     planText: "Bounded plan from the third send.",
@@ -40,7 +49,14 @@ const records = [
     planningQuota: "unknown", reviewQuota: "unknown", savedAt: "2026-10-08T18:45:00.000Z",
   },
 ];
-const stub = `    <script>window.goalportCore = { coordinationRecords: async () => ${JSON.stringify(records)} };</script>\n`;
+// Embedding JSON inside a <script> tag requires escaping "<" (a literal
+// "</script>" inside a string would close the tag early) and the two JS line
+// separators; this is the sanitization CodeQL expects for this construction.
+const stubJson = JSON.stringify(records)
+  .replace(/</g, "\\u003c")
+  .replace(/\u2028/g, "\\u2028")
+  .replace(/\u2029/g, "\\u2029");
+const stub = `    <script>window.goalportCore = { coordinationRecords: async () => ${stubJson} };</script>\n`;
 const index = readFileSync(resolve(distRoot, "index.html"), "utf8");
 writeFileSync(resolve(distRoot, "shot-plans.html"), index.replace("  </head>", `${stub}  </head>`));
 
@@ -74,6 +90,12 @@ for (const [w, label] of widths) {
   await viewport(w, 900);
   await setNavCollapsed(false);
   await screenshot(resolve(outDir, `plans-expanded-${label}.png`));
+  // The failed round with its stderr detail: the real reason a user can act on.
+  await click('button[aria-label^="Plan: Ship the review fixes, Failed"]');
+  await until("Boolean(document.body.innerText.includes('You are not logged in'))");
+  await screenshot(resolve(outDir, `plans-failed-${label}.png`));
+  await click('button[aria-label^="Plan: Ship the review fixes, Can be carried out"]');
+  await until("Boolean(document.querySelector('.timeline-scroll[aria-label=\"Saved plan\"]'))");
   await setNavCollapsed(true);
   if (label === "1440") {
     // Show the collapsed-rail tooltip that now carries the plan's outcome.

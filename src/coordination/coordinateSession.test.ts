@@ -46,7 +46,7 @@ const providers = [
   },
 ] as const;
 
-function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
+function recordingTransport(results: Array<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean }>): CoordinateTransport & { calls: CoordinateTurnCommand[] } {
   const calls: CoordinateTurnCommand[] = [];
   return {
     calls,
@@ -110,6 +110,7 @@ describe("coordinate session", () => {
     expect(state.verdict).toBe("checked");
     expect(state.result).toBe("The plan can be carried out.\nVERDICT: carry-out");
     expect(state.stopReason).toBe("The independent check finished, so this stopped.");
+    expect(state.messageDispatched).toBe(true);
   });
 
   it("does not treat a review without a verdict line as carried out", async () => {
@@ -241,5 +242,30 @@ describe("coordinate session", () => {
     expect(view.planningHarness).toBeNull();
     expect(view.reviewHarness).toBeNull();
     expect(view.stopReason).toMatch(/no coordination service/);
+  });
+
+  it("maps a stderr-borne authentication phrase and keeps the round retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "", errorText: "The harness finished without any text, so this stopped. stream error: You are not logged in. Run codex login.", dispatched: false },
+      ]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.stopReason).toBe("This harness is not signed in.");
+    expect(state.messageDispatched).toBe(false);
+  });
+
+  it("a dispatched failure is never marked retryable", async () => {
+    const state = await runCoordinateSession(
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
+      { sendAuthorized: true },
+      recordingTransport([
+        { text: "", errorText: "The harness did not finish, so this stopped.", dispatched: true },
+      ]),
+    );
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBe(true);
   });
 });

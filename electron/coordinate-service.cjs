@@ -78,19 +78,25 @@ async function launchOne(env, runtime, command, generation) {
     return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
   }
   let ran = null;
+  let runThrew = false;
   try {
     ran = await runtime.run(command, generation);
   } catch {
-    ran = null;
+    runThrew = true;
   }
   const text = typeof ran?.text === "string" ? ran.text.trim() : "";
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
-    return { launched: true, prepared: true, text, errorText: "" };
+    return { launched: true, prepared: true, text, errorText: "", dispatched: true };
   }
   // A turn that produced text and then failed keeps that text: the partial
   // plan or check is real model output the saved Plan can still show.
   const errorText = typeof ran?.errorText === "string" && ran.errorText.trim() ? ran.errorText : UNAUTHORIZED;
-  return { launched: false, prepared: true, text, errorText };
+  // runCliTurn is total, so a throw means the transport died mid-turn. The
+  // session layer flattens this null to "not dispatched" (retryable), which
+  // is acceptable only because every retry needs its own owner grant; the
+  // renderer-side throw path is separately pinned to unknown (unretryable)
+  // by the send-recorded flag in the app.
+  return { launched: false, prepared: true, text, errorText, dispatched: runThrew ? null : (ran?.messageDispatched === true) };
 }
 
 module.exports = { guardCoordinateCommand, discoverCoordination, launchOne };

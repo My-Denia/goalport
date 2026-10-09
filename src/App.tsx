@@ -489,7 +489,10 @@ function App() {
         return;
       }
       const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);
-      if (remembered) {
+      // Only a round that provably dispatched nothing (not authorized, not
+      // installed, never recorded) may be sent again from this draft; a
+      // dispatched or unknown outcome is shown, never silently resent.
+      if (remembered && remembered.messageDispatched !== false) {
         setCoordination(remembered);
         setSelectedPlanId(remembered.requestId);
         return;
@@ -537,6 +540,7 @@ function App() {
                   stopReason: "A send started and will not be repeated.",
                   planningQuota: null,
                   reviewQuota: null,
+                  messageDispatched: true,
                 };
                 const remembered = await rememberPlan(draftGoal.requestId, workspace, message, pending);
                 if (!stillCurrent()) {
@@ -574,6 +578,9 @@ function App() {
           stopReason: error instanceof Error ? error.message : "The coordination service is not available.",
           planningQuota: null,
           reviewQuota: null,
+          // sendRecorded means the launch callback was entered: the outcome
+          // is unknown, so the failure must not be resendable.
+          messageDispatched: sendRecorded,
         };
         setCoordination(failed);
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, failed);

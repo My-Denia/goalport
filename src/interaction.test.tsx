@@ -1203,6 +1203,150 @@ describe("send without a Runtime", () => {
     expect(screen.queryAllByRole("button", { name: /plan the helper/ })).toHaveLength(0);
   });
 
+  it("retries for real after a discovery failure that dispatched nothing", async () => {
+    let discoverCalls = 0;
+    let launches = 0;
+    const providers = [
+      {
+        instanceId: "codex",
+        displayName: "Codex",
+        enabled: true,
+        installed: true,
+        availability: "available",
+        status: "ready",
+        auth: { status: "authenticated", type: "chatgpt" },
+        models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+        usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+      },
+      {
+        instanceId: "claude",
+        displayName: "Claude",
+        enabled: true,
+        installed: true,
+        availability: "available",
+        status: "ready",
+        auth: { status: "authenticated", type: "subscription" },
+        models: [{ slug: "opus", name: "opus", isDefault: true }],
+        usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+      },
+    ];
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => {
+        discoverCalls += 1;
+        if (discoverCalls === 1) throw new Error("The harness list could not be read.");
+        return { connected: true, sendAuthorized: true, stopReason: null, providers };
+      },
+      coordinateLaunch: async () => {
+        launches += 1;
+        return launches % 2 === 1
+          ? { text: "Bounded plan.", errorText: "", dispatched: true }
+          : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "", dispatched: true };
+      },
+      coordinationSave: async (record: { requestId?: string }) => record,
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    // The catch path leaves the draft mounted with the failure on it.
+    expect(await screen.findByText(/harness list could not be read/i)).toBeTruthy();
+    expect(launches).toBe(0);
+
+    // The outage clears: an explicit second press must rediscover and run the
+    // round instead of echoing the failed record.
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(launches).toBe(2));
+    expect(await screen.findByText(/independent check finished, so this stopped/i)).toBeTruthy();
+    expect(discoverCalls).toBe(2);
+    expect(screen.getAllByRole("button", { name: /Plan: plan the helper/ }).length).toBe(1);
+  });
+
+  it("shows a mid-turn failure again without resending it", async () => {
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async () => {
+        launches += 1;
+        // The transport dies mid-turn: the outcome is unknown, so the failure
+        // must be shown, never resent.
+        throw new Error("The coordination service stopped.");
+      },
+      coordinationSave: async (record: { requestId?: string }) => record,
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText(/coordination service stopped/i)).toBeTruthy();
+    expect(launches).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(screen.getByText(/coordination service stopped/i)).toBeTruthy());
+    expect(launches).toBe(1);
+    expect(screen.getAllByRole("button", { name: /Plan: plan the helper/ }).length).toBe(1);
+  });
+
+
   it("closes the planning draft when the user returns to the active goal", async () => {
     let launches = 0;
     window.__GOALPORT_ELECTRON__ = true;
