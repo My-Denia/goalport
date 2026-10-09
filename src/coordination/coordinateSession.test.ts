@@ -66,7 +66,7 @@ describe("coordinate session", () => {
       { text: "", errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.", prepared: true },
     ]);
     const view = await requestCoordination(
-      { goal, workspacePath },
+      { goal, workspacePath, sendKey: "send-0" },
       { connected: true, sendAuthorized: false, providers, stopReason: null },
       transport,
     );
@@ -81,6 +81,7 @@ describe("coordinate session", () => {
       catalog: catalogFromProviderSnapshots(providers),
       goal,
       workspacePath,
+      sendKey: "send-0",
     });
     expect(selected.commands.map((command) => command.modelSelection.model)).toEqual([
       "gpt-6-astra",
@@ -95,7 +96,7 @@ describe("coordinate session", () => {
     ]);
     const catalog = catalogFromProviderSnapshots(providers);
     const state = await runCoordinateSession(
-      { catalog, goal, workspacePath },
+      { catalog, goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       transport,
     );
@@ -113,7 +114,7 @@ describe("coordinate session", () => {
 
   it("does not treat a review without a verdict line as carried out", async () => {
     const state = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([
         { text: "Bounded plan.", errorText: "" },
@@ -131,7 +132,7 @@ describe("coordinate session", () => {
       { text: "should not run", errorText: "" },
     ]);
     const state = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       transport,
     );
@@ -143,7 +144,7 @@ describe("coordinate session", () => {
 
   it("keeps a real usage limit and an authentication failure distinct", async () => {
     const limited = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([{ text: "", errorText: "Codex usage limit reached. The session limit resets in 3h." }]),
     );
@@ -151,7 +152,7 @@ describe("coordinate session", () => {
     expect(limited.stopReason).toContain("3h");
 
     const signedOut = await runCoordinateSession(
-      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath },
+      { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([{ text: "", errorText: "authentication failed" }]),
     );
@@ -161,7 +162,7 @@ describe("coordinate session", () => {
   it("does not launch the review harness after the request is replaced", async () => {
     let launches = 0;
     const view = await requestCoordination(
-      { goal, workspacePath },
+      { goal, workspacePath, sendKey: "send-0" },
       { connected: true, sendAuthorized: true, providers, stopReason: null },
       {
         async launch() {
@@ -195,7 +196,7 @@ describe("coordinate session", () => {
       : provider);
     const catalog = catalogFromProviderSnapshots(withFableSpent);
     expect(catalog.find((instance) => instance.instanceId === "codex")?.quota).toBe("available");
-    const selected = coordinateGoal({ catalog, goal, workspacePath });
+    const selected = coordinateGoal({ catalog, goal, workspacePath, sendKey: "send-0" });
     expect(selected.commands).toHaveLength(2);
     expect(selected.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
     expect(selected.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
@@ -211,7 +212,7 @@ describe("coordinate session", () => {
       usageLimits: { windows: [{ id: "seven_day_fable", usedPercent: 100 }] },
     }, withFableSpent[1]]);
     expect(onlyModelWindow.find((instance) => instance.instanceId === "codex")?.quota).toBe("unknown");
-    const stillPaired = coordinateGoal({ catalog: onlyModelWindow, goal, workspacePath });
+    const stillPaired = coordinateGoal({ catalog: onlyModelWindow, goal, workspacePath, sendKey: "send-0" });
     expect(stillPaired.commands).toHaveLength(2);
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).toContain("gpt-6-astra");
     expect(stillPaired.commands.map((command) => command.modelSelection.model)).not.toContain("gpt-6-fable");
@@ -223,6 +224,7 @@ describe("coordinate session", () => {
       {
         goal,
         workspacePath,
+        sendKey: "send-0",
         priorPlan: "Bounded plan.",
         priorReview: "The contract path is missing.\nVERDICT: revise",
       },
@@ -235,7 +237,7 @@ describe("coordinate session", () => {
   });
 
   it("does not invent a harness when the coordination service is missing", async () => {
-    const view = await requestCoordination({ goal, workspacePath }, null, recordingTransport([]));
+    const view = await requestCoordination({ goal, workspacePath, sendKey: "send-0" }, null, recordingTransport([]));
     expect(view.planningHarness).toBeNull();
     expect(view.reviewHarness).toBeNull();
     expect(view.stopReason).toMatch(/no coordination service/);

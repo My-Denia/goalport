@@ -31,6 +31,12 @@ export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
   readonly goal: string;
   readonly workspacePath: string;
+  /**
+   * Identity of the user send this round belongs to. Two sends of the same
+   * goal text are different rounds; hashing only the prompt made the second
+   * send replay the first round's stored result.
+   */
+  readonly sendKey: string;
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
 }
@@ -196,9 +202,9 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
   };
 }
 
-function commandKey(role: "plan" | "review", text: string): string {
+function commandKey(role: "plan" | "review", text: string, sendKey: string): string {
   let hash = 2166136261;
-  const data = `${role}\n${text}`;
+  const data = `${role}\n${sendKey}\n${text}`;
   for (let index = 0; index < data.length; index += 1) {
     hash ^= data.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -307,8 +313,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   const planMessage = plannerText(input);
   const reviewMessage = reviewText(input);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planMessage), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewMessage), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {

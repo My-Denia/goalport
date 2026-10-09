@@ -51,6 +51,7 @@ export async function requestCoordination(
   input: {
     readonly workspacePath: string;
     readonly goal: string;
+    readonly sendKey: string;
     readonly priorPlan?: string | null;
     readonly priorReview?: string | null;
   },
@@ -62,13 +63,15 @@ export async function requestCoordination(
     return unavailable(discovery?.stopReason ?? "This window has no coordination service. Open the GoalPort app window and send the goal there.");
   }
   const catalog = catalogFromProviderSnapshots(discovery.providers);
-  const planned = coordinateGoal({
+  const goalInput = {
     catalog,
     goal: input.goal,
     workspacePath: input.workspacePath,
+    sendKey: input.sendKey,
     priorPlan: input.priorPlan,
     priorReview: input.priorReview,
-  });
+  };
+  const planned = coordinateGoal(goalInput);
   if (planned.commands.length !== 2) {
     return viewFrom({
       planningHarness: planned.planningHarness,
@@ -97,13 +100,7 @@ export async function requestCoordination(
     });
   }
   const sent = await runCoordinateSession(
-    {
-      catalog,
-      goal: input.goal,
-      workspacePath: input.workspacePath,
-      priorPlan: input.priorPlan,
-      priorReview: input.priorReview,
-    },
+    goalInput,
     { sendAuthorized: true },
     {
       async launch(command) {

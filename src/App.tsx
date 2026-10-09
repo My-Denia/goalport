@@ -498,6 +498,11 @@ function App() {
       const request = ++coordinationRequest.current;
       const generation = coordinationGeneration(coordinationScope.current, request);
       const stillCurrent = () => coordinationRequest.current === request;
+      // Each recorded send gets its own command identity, so a second send of
+      // the same words is a new round, not a replay of the first round's
+      // stored result. The count comes from the saved plans, which mirror the
+      // persisted records; a send only launches after its record is on disk.
+      const sendKey = `send-${plans.length}`;
       let sendRecorded = false;
       setDraftBusy(true);
       try {
@@ -507,6 +512,7 @@ function App() {
           {
             workspacePath: workspace,
             goal: message,
+            sendKey,
             priorPlan: draftGoal.revision?.planText ?? null,
             priorReview: draftGoal.revision?.reviewText ?? null,
           },
@@ -532,12 +538,15 @@ function App() {
                   planningQuota: null,
                   reviewQuota: null,
                 };
-                const saved = await rememberPlan(draftGoal.requestId, workspace, message, pending);
+                const remembered = await rememberPlan(draftGoal.requestId, workspace, message, pending);
                 if (!stillCurrent()) {
                   return { text: "", errorText: "The coordination request was replaced, so nothing was sent." };
                 }
-                if (saved) {
-                  setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
+                if (remembered && !remembered.recorded) {
+                  return { text: "", errorText: "The send could not be recorded, so nothing was sent." };
+                }
+                if (remembered) {
+                  setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
                 }
               }
               return launch(command, generation);
@@ -549,9 +558,9 @@ function App() {
         setCoordination(report);
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, report);
         if (coordinationRequest.current !== request) return;
-        if (saved) {
-          setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
-          setSelectedPlanId(saved.requestId);
+        if (saved?.recorded) {
+          setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]);
+          setSelectedPlanId(saved.record.requestId);
         }
       } catch (error) {
         if (coordinationRequest.current !== request) return;
@@ -568,7 +577,7 @@ function App() {
         };
         setCoordination(failed);
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, failed);
-        if (saved) setPlans((current) => [saved, ...current.filter((plan) => plan.requestId !== saved.requestId)]);
+        if (saved?.recorded) setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]);
       } finally {
         if (coordinationRequest.current === request) setDraftBusy(false);
       }
@@ -635,16 +644,25 @@ function App() {
     if (!draftInFlight.current) setDraftBusy(false);
   }
 
-  async function rememberPlan(requestId: string, workspacePath: string, goal: string, view: CoordinationView): Promise<SavedPlan | null> {
+  // A plan that could not be persisted is returned with recorded=false: it
+  // must not enter the plans list, because that list mirrors the persisted
+  // records and its count keys the next send's command identity.
+  async function rememberPlan(
+    requestId: string,
+    workspacePath: string,
+    goal: string,
+    view: CoordinationView,
+  ): Promise<{ record: SavedPlan; recorded: boolean } | null> {
     if (!view.verdict || view.stopReason.toLowerCase().includes("replaced")) return null;
     const record: SavedPlan = { ...view, requestId, workspacePath, goal };
     const save = window.goalportCore?.coordinationSave;
-    if (!save) return record;
+    if (!save) return { record, recorded: true };
     try {
-      return await save(record);
+      const stamped = await save(record);
+      return { record: stamped ?? record, recorded: true };
     } catch {
       setActiveNotice({ sentence: "The plan is on screen, but it could not be saved for the next time you open GoalPort." });
-      return record;
+      return { record, recorded: false };
     }
   }
 
@@ -1025,11 +1043,16 @@ function App() {
   async function selectCampaign(campaignId: string) {
     const known = snapshot.campaigns.some((campaign) => campaign.id === campaignId)
       || snapshot.goalOverview?.goals.some((goal) => goal.campaignId === campaignId);
-    if (!known || campaignId === snapshot.activeCampaignId) return;
-    if (client.mode === "linux-core") pushGoalRoute(campaignId);
-    if (window.innerWidth <= 860) setNavCollapsed(true);
-    // Explicit navigation closes a pending draft; it is not a submission.
+    if (!known) return;
+    // Explicit navigation closes a pending draft first — also for the
+    // already-active goal, where the early return below used to keep a
+    // planning draft mounted over the conversation.
     if (draftGoal) closeDraft(true);
+    // Narrow widths: choosing any goal, including the active one, puts the
+    // drawer away so the conversation is what the user sees next.
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    if (campaignId === snapshot.activeCampaignId) return;
+    if (client.mode === "linux-core") pushGoalRoute(campaignId);
     if (client.selectCampaign) {
       const intent = ++selectionIntent.current;
       const next = await client.selectCampaign(campaignId);

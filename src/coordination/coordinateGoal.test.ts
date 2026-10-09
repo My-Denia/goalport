@@ -13,6 +13,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
         instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
@@ -48,10 +49,11 @@ describe("Synthetic path", () => {
       instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
       instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
     ];
-    const first = coordinateGoal({ goal, workspacePath, catalog });
+    const first = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
     const revised = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog,
       priorPlan: "Bounded plan.",
       priorReview: "The contract path is missing.\nVERDICT: revise",
@@ -75,6 +77,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "codex",
@@ -108,6 +111,7 @@ describe("Synthetic path", () => {
     const onlyCredits = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "codex",
@@ -131,6 +135,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "codex",
@@ -158,6 +163,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [],
     });
 
@@ -173,6 +179,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [instance({ instanceId: "pi-local", name: "Pi", quota: "available" })],
     });
 
@@ -188,6 +195,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "same-instance", name: "Pi", quota: "available" }),
         instance({ instanceId: "same-instance", name: "Pi", quota: "available" }),
@@ -205,6 +213,7 @@ describe("Synthetic path", () => {
     const paired = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "available", models: ["pi-default"] }),
         instance({ instanceId: "spent-window", name: "Spent Window", quota: "exhausted" }),
@@ -220,6 +229,7 @@ describe("Synthetic path", () => {
     const onlyOneLeft = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "available" }),
         instance({ instanceId: "spent-window", name: "Spent Window", quota: "exhausted" }),
@@ -235,6 +245,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({
           instanceId: "pi-local",
@@ -274,6 +285,7 @@ describe("Synthetic path", () => {
     const noFallback = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "pi-local", name: "Pi", quota: "UNKNOWN" }),
         instance({
@@ -296,6 +308,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({
       goal,
       workspacePath,
+      sendKey: "send-0",
       catalog: [
         instance({ instanceId: "blank", name: "Blank", quota: "available", models: [] }),
         instance({ instanceId: "omitted", name: "Omitted", quota: "available" }),
@@ -308,5 +321,20 @@ describe("Synthetic path", () => {
     expect(state.reviewHarness).toBe("Cursor");
     expect(state.commands.map((command) => command.modelSelection.model)).toEqual(["pi-default", "cursor-first"]);
     expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["pi-local", "cursor-local"]);
+  });
+
+  it("keys the commands to the individual send, not only the prompt text", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+    const first = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
+    const repeat = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog });
+    const secondSend = coordinateGoal({ goal, workspacePath, sendKey: "send-1", catalog });
+
+    expect(secondSend.commands[0]?.commandId).not.toBe(first.commands[0]?.commandId);
+    expect(secondSend.commands[1]?.commandId).not.toBe(first.commands[1]?.commandId);
+    expect(repeat.commands[0]?.commandId).toBe(first.commands[0]?.commandId);
+    expect(repeat.commands[1]?.commandId).toBe(first.commands[1]?.commandId);
   });
 });

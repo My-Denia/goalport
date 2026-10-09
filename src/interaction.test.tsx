@@ -1052,6 +1052,270 @@ describe("send without a Runtime", () => {
     expect(launches).toBe(1);
   });
 
+  it("sends the same words again as a new round, not a replay of the first", async () => {
+    const commandIds: string[] = [];
+    const plans = ["Bounded plan from the first send.", "Bounded plan from the second send."];
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async (command: { commandId: string }) => {
+        launches += 1;
+        commandIds.push(command.commandId);
+        // Odd launches are the planner turn of each round.
+        const plan = plans[Math.floor((launches - 1) / 2)] ?? "";
+        return launches % 2 === 1
+          ? { text: plan, errorText: "" }
+          : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
+      },
+      coordinationSave: async (record: { requestId?: string }) => record,
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+
+    const sendOnce = async () => {
+      fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+      fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+        target: { value: "the same words" },
+      });
+      await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    };
+
+    await sendOnce();
+    expect(await screen.findByText("Bounded plan from the first send.")).toBeTruthy();
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+
+    await sendOnce();
+    expect(await screen.findByText("Bounded plan from the second send.")).toBeTruthy();
+    await waitFor(() => expect(launches).toBe(4));
+    expect(new Set(commandIds).size).toBe(4);
+    expect(screen.getAllByRole("button", { name: /the same words/ }).length).toBe(2);
+  });
+
+  it("does not launch a turn the app could not record on disk", async () => {
+    let launches = 0;
+    let saves = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async () => {
+        launches += 1;
+        return { text: "Never reached.", errorText: "" };
+      },
+      coordinationSave: async () => {
+        saves += 1;
+        throw new Error("disk unavailable");
+      },
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText(/could not be recorded, so nothing was sent/i)).toBeTruthy();
+    expect(launches).toBe(0);
+    expect(saves).toBeGreaterThan(0);
+    // The unrecordable send must not enter the Plans list: that list mirrors
+    // the persisted records, and its count keys the next send's identity.
+    expect(screen.queryAllByRole("button", { name: /plan the helper/ })).toHaveLength(0);
+  });
+
+  it("closes the planning draft when the user returns to the active goal", async () => {
+    let launches = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => DEMO_SNAPSHOT,
+      command: async (request: CoreCommand) => ({
+        requestId: request.requestId,
+        accepted: true,
+        duplicate: false,
+        snapshot: DEMO_SNAPSHOT,
+      }),
+      startCore: async () => DEMO_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({
+        connected: true,
+        sendAuthorized: true,
+        stopReason: null,
+        providers: [
+          {
+            instanceId: "codex",
+            displayName: "Codex",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "chatgpt" },
+            models: [{ slug: "gpt-6.1-sol", name: "GPT-6.1-Sol", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+          {
+            instanceId: "claude",
+            displayName: "Claude",
+            enabled: true,
+            installed: true,
+            availability: "available",
+            status: "ready",
+            auth: { status: "authenticated", type: "subscription" },
+            models: [{ slug: "opus", name: "opus", isDefault: true }],
+            usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+          },
+        ],
+      }),
+      coordinateLaunch: async () => {
+        launches += 1;
+        return launches % 2 === 1
+          ? { text: "Bounded plan.", errorText: "" }
+          : { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
+      },
+      coordinationSave: async (record: { requestId?: string }) => record,
+      coordinationRecords: async () => [],
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
+      target: { value: "plan the helper" },
+    });
+    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("Bounded plan.")).toBeTruthy();
+
+    // The active goal is already selected; clicking it again used to leave the
+    // planning draft mounted over the conversation.
+    fireEvent.click(screen.getByRole("button", { name: "Build a durable preview" }));
+    await waitFor(() => expect(screen.queryByText("Bounded plan.")).toBeNull());
+    expect(screen.queryByRole("form", { name: "Start a goal" })).toBeNull();
+    // The conversation's own composer is what remains in the main pane.
+    expect(screen.getByRole("textbox", { name: "Message composer" })).toBeTruthy();
+  });
+
+  it("labels every saved plan for keyboard and collapsed-rail use", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => ({ connected: false, sendAuthorized: false, providers: [], stopReason: "No model turn was sent." }),
+      coordinateLaunch: async () => ({ text: "", errorText: "" }),
+      coordinationRecords: async () => [{
+        requestId: "saved-plan",
+        workspacePath: "/work/goal",
+        goal: "Explain the failure.",
+        planningHarness: "Codex",
+        reviewHarness: "Claude",
+        planText: "Bounded plan.",
+        reviewText: "Needs a smaller step.\nVERDICT: revise",
+        result: "Needs a smaller step.\nVERDICT: revise",
+        verdict: "revise",
+        stopReason: "The independent check says the plan needs revision, so this stopped.",
+        planningQuota: "available",
+        reviewQuota: "available",
+        savedAt: "2026-10-08T06:10:00.000Z",
+      }],
+    } as never;
+    render(<App />);
+    const button = await screen.findByRole("button", { name: /^Plan: Explain the failure., Needs revision/ });
+    expect(button.getAttribute("title")).toMatch(/Needs revision/);
+  });
+
   it("uses a fresh generation after the window reloads", async () => {
     expect(coordinationGeneration("window-a", 6)).toBe("window-a-6");
     expect(coordinationGeneration("window-a", 6)).not.toBe(coordinationGeneration("window-b", 6));
