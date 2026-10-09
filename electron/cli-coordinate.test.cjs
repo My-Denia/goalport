@@ -296,3 +296,39 @@ test("a non-Windows cancellation keeps the direct kill", () => {
     });
   });
 });
+
+test("a nonzero exit keeps the stderr reason next to the stop sentence", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-stderr-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  try {
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "loading config\nstream error: You are not logged in. Run codex login.\n",
+      }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.errorText, /finished without any text/);
+    assert.match(result.errorText, /You are not logged in\. Run codex login\./);
+    assert.equal(result.text, "");
+    assert.equal(result.messageDispatched, true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
+  }
+});
+
+test("a clean stop without stderr keeps the generic sentence", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-stderr-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  try {
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({ code: 1, stdout: "" }),
+    });
+    assert.equal(result.errorText, "The harness finished without any text, so this stopped.");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
+  }
+});

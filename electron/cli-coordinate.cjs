@@ -34,6 +34,14 @@ function outputText(result) {
   return `${result?.stdout ?? ""}\n${result?.stderr ?? ""}`;
 }
 
+// The last thing a CLI printed before dying is usually the actual reason.
+// One line, bounded, so a failing turn can show it instead of a generic stop.
+function stderrDetail(stderr) {
+  const lines = String(stderr ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] ?? "";
+  return last.slice(0, 300);
+}
+
 // Canonical cmd.exe quoting for .cmd/.bat launch, adapted from cross-spawn
 // (MIT, Copyright (c) 2018 Made With MOXY Lda). With /d /s /c, cmd strips the
 // payload's first and last quote; quoting each element alone makes a resolved
@@ -436,7 +444,13 @@ function defaultSpawn(spec) {
     child.stdout.on("data", (chunk) => {
       stdout = (stdout + chunk).slice(-200000);
     });
-    child.stderr.on("data", () => { /* discarded; the reply is stdout */ });
+    // The reply is stdout, but a nonzero exit often carries the real reason
+    // (authentication, quota, provider errors) on stderr only.
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk).slice(-4096);
+    });
     let settled = false;
     const finish = (result) => {
       if (settled) return;
@@ -446,10 +460,10 @@ function defaultSpawn(spec) {
     };
     const timer = setTimeout(() => {
       killProcessTree(child);
-      finish({ code: null, stdout, timedOut: true });
+      finish({ code: null, stdout, stderr, timedOut: true });
     }, spec.timeoutMs ?? 660000);
-    child.on("error", () => finish({ code: null, stdout, spawnError: true }));
-    child.on("close", (code) => finish({ code, stdout, timedOut: false }));
+    child.on("error", () => finish({ code: null, stdout, stderr, spawnError: true }));
+    child.on("close", (code) => finish({ code, stdout, stderr, timedOut: false }));
   });
 }
 
@@ -504,10 +518,15 @@ async function runCliTurn(command, options = {}) {
     finishTurn(stateDir, commandId, done);
     return done;
   }
+  // The stderr tail rides along on the stop sentence (never into `text`) so
+  // the typed provider-error mapping can see the real reason and the user is
+  // not left with a generic "finished without any text".
+  const detail = stderrDetail(spawned?.stderr);
+  const stopSentence = !reply.text ? NO_TEXT : (reply.failed ? reply.text : NOT_FINISHED);
   const failed = {
     ok: false,
     text: reply.text,
-    errorText: !reply.text ? NO_TEXT : (reply.failed ? reply.text : NOT_FINISHED),
+    errorText: detail ? `${stopSentence} ${detail}` : stopSentence,
     messageDispatched: true,
   };
   finishTurn(stateDir, commandId, failed);
