@@ -4,7 +4,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { guardCoordinateCommand } = require("./coordinate-service.cjs");
+const { guardCoordinateCommand } = require("./coordinate-guard.cjs");
 const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
 const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
@@ -271,9 +271,17 @@ async function discoverCliProviders(io = {}) {
   };
 }
 
-function commandIdOf(command) {
-  const commandId = typeof command?.commandId === "string" ? command.commandId.trim() : "";
+// The one canonical command-id rule, shared with the coordination scope:
+// anything that is not a non-empty [a-zA-Z0-9._-] token (a newline, a space,
+// a path) is not an id, and every writer must refuse it before any side
+// effect.
+function isValidCommandId(text) {
+  const commandId = typeof text === "string" ? text.trim() : "";
   return /^[a-zA-Z0-9._-]+$/.test(commandId) ? commandId : "";
+}
+
+function commandIdOf(command) {
+  return isValidCommandId(command?.commandId);
 }
 
 function worktreeOf(command) {
@@ -475,6 +483,10 @@ function claimFile(stateDir, commandId) {
   return path.join(stateDir, `claim-${commandId}`);
 }
 
+function hasClaim(stateDir, commandId) {
+  return Boolean(stateDir) && fs.existsSync(claimFile(stateDir, commandId));
+}
+
 function storedResult(stateDir, commandId) {
   const stored = readLedger(stateDir)[commandId];
   if (stored && typeof stored === "object") return stored;
@@ -528,11 +540,19 @@ function takeGrant(stateDir, commandId) {
   return true;
 }
 
-function restoreGrant(stateDir, commandId) {
+// Append-if-absent, shared with the coordination scope's JIT grant path.
+// Returns whether this call inserted the line, so the writer knows whether it
+// owns what it just wrote.
+function writeGrant(stateDir, commandId) {
   const lines = grantLines(stateDir);
-  if (lines.includes(commandId)) return;
+  if (lines.includes(commandId)) return false;
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(grantFile(stateDir), `${[...lines, commandId].join("\n")}\n`);
+  return true;
+}
+
+function restoreGrant(stateDir, commandId) {
+  writeGrant(stateDir, commandId);
 }
 
 function defaultSpawn(spec) {
@@ -584,7 +604,7 @@ async function runCliTurn(command, options = {}) {
   const stateDir = typeof options.stateDir === "string" ? options.stateDir : "";
   const commandId = commandIdOf(command);
   if (!stateDir || !commandId) return refused;
-  if (fs.existsSync(claimFile(stateDir, commandId))) return storedResult(stateDir, commandId);
+  if (hasClaim(stateDir, commandId)) return storedResult(stateDir, commandId);
   if (!grantLines(stateDir).includes(commandId)) return refused;
   const problem = guardCoordinateCommand(command);
   if (problem) return { ok: false, text: "", errorText: problem, messageDispatched: false };
@@ -617,7 +637,7 @@ async function runCliTurn(command, options = {}) {
   if (spawned?.spawnError) {
     releaseTurn(stateDir, commandId);
     restoreGrant(stateDir, commandId);
-    return { ok: false, text: "", errorText: NOT_INSTALLED, messageDispatched: false };
+    return { ok: false, text: "", errorText: NOT_INSTALLED, messageDispatched: false, stopCode: "not-installed" };
   }
   if (options.cancelled?.()) {
     const replaced = { ok: false, text: "", errorText: REPLACED, messageDispatched: true };
@@ -656,11 +676,24 @@ async function runCliTurn(command, options = {}) {
   // not left with a generic "finished without any text".
   const detail = stderrDetail(spawned?.stderr);
   const stopSentence = !reply.text ? NO_TEXT : (reply.failed ? reply.text : NOT_FINISHED);
+  // Structured stop codes, emitted only here and nowhere else: "no-text" is a
+  // clean-exit-only fact, "not-finished" needs a nonzero exit with text, and
+  // a provider-level failure (reply.failed, e.g. a claude is_error) gets NO
+  // code at all — its classification falls to the errorText mapping, and it
+  // must never masquerade as a resumable completion code.
+  const stopCode = reply.failed === true
+    ? null
+    : spawned?.code === 0 && !reply.text
+      ? "no-text"
+      : spawned?.code !== 0 && reply.text
+        ? "not-finished"
+        : null;
   const failed = {
     ok: false,
     text: reply.text,
     errorText: detail ? `${stopSentence} ${detail}` : stopSentence,
     messageDispatched: true,
+    stopCode,
   };
   finishTurn(stateDir, commandId, failed);
   // The stderr-signature fallback: when the bounded tail carries one of the
@@ -685,4 +718,8 @@ module.exports = {
   launchSpec,
   killProcessTree,
   defaultExec,
+  isValidCommandId,
+  hasClaim,
+  writeGrant,
+  takeGrant,
 };

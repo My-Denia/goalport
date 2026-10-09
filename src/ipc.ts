@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SavedPlan } from "./coordination/savedPlan";
+import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import {
   appendPreviewConversationMessage,
   appendPreviewMessage,
@@ -311,16 +312,24 @@ declare global {
         }[];
         stopReason: string | null;
       }>;
-      coordinateLaunch?: (command: {
-        type: "goalport.coordinateTurn";
-        modelSelection: { instanceId: string; model: string };
-        runtimeMode: "approval-required";
-        approvalPolicy: "never";
-        sandboxPolicy: { type: "readOnly" };
-        workspaceStrategy: { type: "root"; branch?: string } | { type: "existing_worktree"; worktreePath: string; branch?: string };
-        initialMessage: { text: string };
-      }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean | null; environmentBlocked?: boolean | null; environmentDetail?: string | null }>;
+      // The launch command is the audited CoordinateTurnCommand; the third
+      // argument is the scope generation captured at authorize (a launch
+      // without it stays the legacy two-argument launch).
+      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number) => Promise<{
+        text: string;
+        errorText: string;
+        prepared?: boolean;
+        dispatched?: boolean | null;
+        environmentBlocked?: boolean | null;
+        environmentDetail?: string | null;
+        stopCode?: "no-text" | "not-finished" | "not-installed" | "scope-exhausted" | "scope-revoked" | null;
+        turnsRemaining?: number | null;
+        scopeExhausted?: boolean;
+      }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
+      coordinationAuthorize?: (scope: { instances: string[]; maxTurns: number }) => Promise<{ ok: boolean; generation: number; remaining: number; errorText?: string }>;
+      coordinationScope?: () => Promise<{ instances: string[]; maxTurns: number; remaining: number; generation: number } | null>;
+      coordinationRevoke?: () => Promise<{ ok: boolean }>;
       coordinationRecords?: () => Promise<SavedPlan[]>;
       coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
       coordinationUnblock?: (instanceId: string) => Promise<{ ok: boolean }>;

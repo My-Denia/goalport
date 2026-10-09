@@ -1,23 +1,31 @@
 "use strict";
 
+const { guardCoordinateCommand } = require("./coordinate-guard.cjs");
+
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
 const DISCONNECTED_DISCOVER = "The coordination server is not connected, so no harness was assigned.";
 const DISCONNECTED_LAUNCH = "The coordination server is not connected, so no model turn was sent.";
 
-function guardCoordinateCommand(command) {
-  if (!command || command.type !== "goalport.coordinateTurn") return "The command is not a coordinate turn.";
-  if (command.runtimeMode !== "approval-required") return "runtimeMode must be approval-required.";
-  if (command.approvalPolicy !== "never") {
-    return "approvalPolicy must be never. approval-required alone asks for every read.";
-  }
-  if (!command.sandboxPolicy || command.sandboxPolicy.type !== "readOnly") {
-    return "sandboxPolicy.type must be readOnly.";
-  }
-  return null;
-}
+// guardCoordinateCommand lives in the zero-import leaf coordinate-guard.cjs
+// and is re-exported unchanged, so every existing require path stays green.
 
 function runtimeReady(runtime) {
   return Boolean(runtime && typeof runtime.discover === "function" && typeof runtime.prepare === "function");
+}
+
+function scopeReady(scopeCtx) {
+  return Boolean(scopeCtx && scopeCtx.scope && typeof scopeCtx.scope.reserve === "function" && typeof scopeCtx.scope.settle === "function");
+}
+
+function scopedLaunch(scopeCtx) {
+  return scopeReady(scopeCtx) ? scopeCtx.scope : null;
+}
+
+// Reported after settle, so a refunded reservation shows the budget it actually
+// has left, and a scope revoked mid-run reports null instead of a stale number.
+function remainingAfter(scopeModule) {
+  const snapshot = typeof scopeModule.current === "function" ? scopeModule.current() : null;
+  return snapshot ? snapshot.remaining : null;
 }
 
 function discoveryFailureText(discovered) {
@@ -65,7 +73,7 @@ async function discoverCoordination(env, runtime, generation) {
   };
 }
 
-async function launchOne(env, runtime, command, generation) {
+async function launchOne(env, runtime, command, generation, scopeCtx) {
   const problem = guardCoordinateCommand(command);
   if (problem) return { launched: false, prepared: false, text: "", errorText: problem };
   if (!runtimeReady(runtime)) {
@@ -77,34 +85,86 @@ async function launchOne(env, runtime, command, generation) {
   if (typeof runtime.run !== "function") {
     return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
   }
-  let ran = null;
-  let runThrew = false;
+  // A scoped launch reserves first: the scope module validates in its
+  // load-bearing order, writes the JIT grant line and charges one turn BEFORE
+  // runtime.run, then settles the reservation against the decision table.
+  const scopeModule = scopedLaunch(scopeCtx);
+  let reserved = null;
+  let reservation = null;
+  if (scopeModule) {
+    reserved = scopeModule.reserve(command, scopeCtx.scopeGeneration, typeof runtime.stateDir === "string" ? runtime.stateDir : "");
+    if (!reserved.ok) {
+      return {
+        launched: false,
+        prepared: true,
+        text: "",
+        errorText: reserved.errorText,
+        dispatched: false,
+        ...(reserved.stopCode ? { stopCode: reserved.stopCode } : {}),
+        ...(reserved.scopeExhausted ? { scopeExhausted: true } : {}),
+        turnsRemaining: typeof reserved.turnsRemaining === "number" ? reserved.turnsRemaining : null,
+      };
+    }
+    reservation = reserved.existing ? null : reserved.reservation;
+  }
+  // The call is split so a synchronous throw is distinguishable from a
+  // mid-turn transport death: a run that throws before producing any promise
+  // cannot have claimed or spawned, which the scope's cleanup is allowed to
+  // treat as proven-not-sent.
+  let pending;
+  let neverStarted = false;
   try {
-    ran = await runtime.run(command, generation);
+    pending = runtime.run(command, generation);
   } catch {
-    runThrew = true;
+    neverStarted = true;
+  }
+  let ran = null;
+  if (!neverStarted) {
+    try {
+      ran = await pending;
+    } catch {
+      ran = null;
+    }
   }
   const text = typeof ran?.text === "string" ? ran.text.trim() : "";
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
-    return { launched: true, prepared: true, text, errorText: "", dispatched: true };
+    if (scopeModule) scopeModule.settle(reservation, { dispatched: true }, runtime.stateDir);
+    return {
+      launched: true,
+      prepared: true,
+      text,
+      errorText: "",
+      dispatched: true,
+      ...(scopeModule ? { turnsRemaining: remainingAfter(scopeModule) } : {}),
+    };
   }
   // A turn that produced text and then failed keeps that text: the partial
   // plan or check is real model output the saved Plan can still show.
   const errorText = typeof ran?.errorText === "string" && ran.errorText.trim() ? ran.errorText : UNAUTHORIZED;
-  // runCliTurn is total, so a throw means the transport died mid-turn. The
-  // session layer flattens this null to "not dispatched" (retryable), which
-  // is acceptable only because every retry needs its own owner grant; the
-  // renderer-side throw path is separately pinned to unknown (unretryable)
-  // by the send-recorded flag in the app.
   const environmentBlocked = ran?.environmentBlocked === true;
+  // The failure-path dispatch mapping is literal (plan R2-2): a literal true
+  // or false survives; everything else — absent, null, undefined, or a thrown
+  // transport — is unknown (null). Absence must never be flattened into
+  // "proven not sent", because an unknown dispatch may already have spent
+  // quota; only a literal false may be treated as not sent.
+  const dispatched = ran == null
+    ? null
+    : ran.messageDispatched === true
+      ? true
+      : ran.messageDispatched === false
+        ? false
+        : null;
+  if (scopeModule) scopeModule.settle(reservation, { dispatched, neverStarted }, runtime.stateDir);
   return {
     launched: false,
     prepared: true,
     text,
     errorText,
-    dispatched: runThrew ? null : (ran?.messageDispatched === true),
+    dispatched,
     environmentBlocked,
     environmentDetail: environmentBlocked && typeof ran?.environmentDetail === "string" ? ran.environmentDetail : null,
+    ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+    ...(scopeModule ? { turnsRemaining: remainingAfter(scopeModule) } : {}),
   };
 }
 

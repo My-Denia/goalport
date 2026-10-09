@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
@@ -596,4 +596,62 @@ test("codexToolSuccess demands a completed non-failed tool event", () => {
   assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"failed","aggregated_output":"boom"}}\n'), false);
   assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"completed","aggregated_output":"ok"}}\n'), true);
   assert.equal(codexToolSuccess('not json at all'), false);
+});
+
+test("writeGrant appends only when the line is absent and preserves hand-written lines", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-writegrant-"));
+  try {
+    // Absent line: inserted, and the caller learns it owns the line.
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), true);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-plan-codex\n");
+    // Same line again: no duplicate, no write.
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), false);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-plan-codex\n");
+    // A hand-written line is preserved; a new line is appended after it.
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), true);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-review-claude\ncoordinate-plan-codex\n");
+    // The pre-existing line is never duplicated either.
+    assert.equal(writeGrant(directory, "coordinate-review-claude"), false);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-review-claude\ncoordinate-plan-codex\n");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("failure branches emit their stop codes: no-text, not-finished, not-installed, and none for is_error", async () => {
+  const run = async (instanceId, model, spawnTurn, commandId = `coordinate-plan-${instanceId}`) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-stopcode-"));
+    try {
+      fs.writeFileSync(path.join(directory, "send-authorization"), `${commandId}\n`);
+      return await runCliTurn(command(instanceId, model, commandId), { stateDir: directory, spawnTurn });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  };
+  // Clean exit without any reply text is the only producer of "no-text".
+  const noText = await run("codex", "gpt-6.1-sol", async () => ({ code: 0, stdout: "" }));
+  assert.equal(noText.errorText, "The harness finished without any text, so this stopped.");
+  assert.equal(noText.stopCode, "no-text");
+  // A nonzero exit with text that is not a provider-level failure is "not-finished".
+  const notFinished = await run("codex", "gpt-6.1-sol", async () => ({
+    code: 1,
+    stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}\n',
+  }));
+  assert.equal(notFinished.stopCode, "not-finished");
+  assert.equal(notFinished.messageDispatched, true);
+  // A provider-level failure (claude is_error) gets NO stop code: its class
+  // falls to the errorText mapping and it must never look resumable.
+  const isError = await run("claude", "opus", async () => ({
+    code: 1,
+    stdout: '{"result":"Model refused.","is_error":true}',
+  }), "coordinate-review-claude");
+  assert.equal(isError.text, "Model refused.");
+  assert.equal(isError.messageDispatched, true);
+  assert.equal(isError.stopCode, null);
+  // A spawn failure is "not-installed", and the grant came back for a retry.
+  const notInstalled = await run("codex", "gpt-6.1-sol", async () => ({ spawnError: true }));
+  assert.match(notInstalled.errorText, /not installed/);
+  assert.equal(notInstalled.stopCode, "not-installed");
+  assert.equal(notInstalled.messageDispatched, false);
 });

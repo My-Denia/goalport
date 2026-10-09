@@ -13,8 +13,10 @@ const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne } = require("./coordinate-service.cjs");
+const coordinationScope = require("./coordination-scope.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
+const { discoverCliProviders } = require("./cli-coordinate.cjs");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
@@ -1325,9 +1327,43 @@ app.whenReady().then(() => {
     }
   });
   handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation));
-  handleTrusted("goalport:coordinate-launch", (_event, command, generation) => launchOne(process.env, coordinationRuntime(), command, generation));
+  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => launchOne(
+    process.env,
+    coordinationRuntime(),
+    command,
+    generation,
+    // The third argument is the scope generation captured at authorize. A
+    // launch without it stays exactly the legacy two-argument launch.
+    typeof scopeGeneration === "number" ? { scope: coordinationScope, scopeGeneration } : undefined
+  ));
   handleTrusted("goalport:coordinate-cancel", (_event, generation) => {
     coordinationRuntime().cancel(generation);
+    return { ok: true };
+  });
+  handleTrusted("goalport:coordination-authorize", async (_event, payload) => {
+    const requested = Array.isArray(payload?.instances) ? payload.instances : [];
+    // Authorize-time membership check against a FRESH zero-quota discovery:
+    // every requested harness must be discovered right now, and an
+    // apiKey-typed login never enters a scope (the budget authority would
+    // otherwise front a pay-per-call credential).
+    let discovered = null;
+    try {
+      discovered = await discoverCliProviders({ stateDir: coordinationRuntime().stateDir });
+    } catch {
+      discovered = { ok: false, providers: [] };
+    }
+    const discoveredById = new Map(discovered.providers.map((provider) => [provider.instanceId, provider]));
+    for (const instance of requested) {
+      const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
+      if (!provider || provider.auth?.type === "apiKey") {
+        return { ok: false, generation: 0, remaining: 0, errorText: "Only harnesses signed in with their own subscription can be authorized." };
+      }
+    }
+    return coordinationScope.authorize(requested, payload?.maxTurns);
+  });
+  handleTrusted("goalport:coordination-scope", () => coordinationScope.current());
+  handleTrusted("goalport:coordination-revoke", () => {
+    coordinationScope.revoke();
     return { ok: true };
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
