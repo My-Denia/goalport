@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
+const { readHealth, markBlocked } = require("./harness-health.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -447,4 +448,152 @@ test("a claude turn never reports environment blocking even with a signature on 
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
+});
+
+test("an environment-blocked turn leaves a health record for its instance", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-env-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  try {
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({ code: 0, stdout: DIAGNOSTIC_STDOUT, stderr: "" }),
+    });
+    assert.equal(result.environmentBlocked, true);
+    const health = readHealth(directory);
+    assert.deepEqual(Object.keys(health), ["codex"]);
+    assert.equal(health.codex.commandId, "coordinate-plan-codex");
+    assert.equal(typeof health.codex.blockedAt, "string");
+    assert.equal(Number.isNaN(Date.parse(health.codex.blockedAt)), false);
+    assert.ok(health.codex.detail.length <= 300);
+    assert.match(health.codex.detail, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a failing turn whose stderr tail carries a proven signature marks claude too", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-stderr-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  try {
+    const result = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "setup\nwindows sandbox failed: helper_unknown_error: setup refresh had errors\n",
+      }),
+    });
+    // The turn result keeps today's shape: no typed flag, just the stop text.
+    assert.equal(result.ok, false);
+    assert.equal(result.environmentBlocked, undefined);
+    assert.match(result.errorText, /helper_unknown_error/);
+    const health = readHealth(directory);
+    assert.equal(health.claude.commandId, "coordinate-review-claude");
+    assert.match(health.claude.detail, /sandbox failed/);
+    assert.ok(health.claude.detail.length <= 300);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a codex success turn without tool events keeps an existing health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-keep-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-older");
+  try {
+    const done = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n',
+      }),
+    });
+    assert.equal(done.ok, true);
+    const health = readHealth(directory);
+    assert.match(health.codex.detail, /sandbox failed/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a codex success turn with a completed tool clears the health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-clear-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-older");
+  try {
+    const done = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: [
+          '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"AGENTS.md","exit_code":0,"status":"completed"}}',
+          '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}',
+        ].join("\n") + "\n",
+      }),
+    });
+    assert.equal(done.ok, true);
+    assert.deepEqual(readHealth(directory), {});
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a claude ok turn clears its own health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-claude-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  markBlocked(directory, "claude", "sandbox failed", "coordinate-review-older");
+  try {
+    const done = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: '{"type":"result","result":"Stop.\\nVERDICT: stop","is_error":false}',
+      }),
+    });
+    assert.equal(done.ok, true);
+    assert.deepEqual(readHealth(directory), {});
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("discovery merges health onto matching instances and leaves the rest byte-identical", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-discover-"));
+  const probe = {
+    home: "/home/person",
+    readFile() {
+      return 'model = "gpt-6.1-sol"\n';
+    },
+    execFile(file) {
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
+    },
+  };
+  try {
+    const base = await discoverCliProviders(probe);
+    assert.equal(JSON.stringify(base).includes("environmentHealth"), false);
+    // No health file at all: identical snapshot.
+    const withoutFile = await discoverCliProviders({ ...probe, stateDir: directory });
+    assert.deepEqual(withoutFile.providers, base.providers);
+    // A record lands only on its own instance.
+    markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-codex");
+    const merged = await discoverCliProviders({ ...probe, stateDir: directory });
+    assert.deepEqual(merged.providers.find((item) => item.instanceId === "claude"), base.providers.find((item) => item.instanceId === "claude"));
+    const codex = merged.providers.find((item) => item.instanceId === "codex");
+    assert.equal(codex.environmentHealth.detail, "sandbox failed");
+    assert.equal(typeof codex.environmentHealth.since, "string");
+    // An empty state dir behaves as no health.
+    const emptyState = await discoverCliProviders({ ...probe, stateDir: "" });
+    assert.deepEqual(emptyState.providers, base.providers);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("codexToolSuccess demands a completed non-failed tool event", () => {
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.started","item":{"type":"command_execution","command":"ls","status":"in_progress"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"failed","aggregated_output":"boom"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"completed","aggregated_output":"ok"}}\n'), true);
+  assert.equal(codexToolSuccess('not json at all'), false);
 });

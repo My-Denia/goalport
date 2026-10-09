@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld("goalportCore", {
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
   coordinationRecords: () => ipcRenderer.invoke("goalport:coordination-records"),
   coordinationSave: (record) => ipcRenderer.invoke("goalport:coordination-save", record),
+  coordinationUnblock: (instanceId) => ipcRenderer.invoke("goalport:coordination-unblock", instanceId),
   onClosePrompt: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("goalport:close-prompt", listener);

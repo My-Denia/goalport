@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { guardCoordinateCommand } = require("./coordinate-service.cjs");
+const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
 const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
@@ -251,9 +252,21 @@ async function discoverCliProviders(io = {}) {
     readFile: io.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
     home: io.home ?? os.homedir(),
   };
+  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe)])).filter(Boolean);
+  // Harnesses blocked on this machine are still discovered, but the snapshot
+  // carries the stamped evidence. Without a state dir or a health record every
+  // provider object stays exactly as it was.
+  const stateDir = typeof io.stateDir === "string" && io.stateDir ? io.stateDir : "";
+  if (stateDir) {
+    const health = readHealth(stateDir);
+    for (const provider of providers) {
+      const record = health[provider.instanceId];
+      if (record) provider.environmentHealth = { since: record.blockedAt, detail: record.detail };
+    }
+  }
   return {
     ok: true,
-    providers: (await Promise.all([codexProvider(probe), claudeProvider(probe)])).filter(Boolean),
+    providers,
     stopReason: null,
   };
 }
@@ -390,6 +403,34 @@ function codexEnvironmentBlocked(stdout) {
   }
   if (tools === 0 || failed !== tools || detail === null) return null;
   return detail;
+}
+
+// Evidence that the sandbox truly ran: at least one completed codex tool
+// event whose status is not "failed". A text-only success is not this
+// evidence — ok:true never required tool events.
+function codexToolSuccess(stdout) {
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== "item.completed") continue;
+    const item = event?.item ?? event?.params?.item;
+    const kind = typeof item?.type === "string" ? item.type : "";
+    if (kind !== "command_execution" && kind !== "mcp_tool_call") continue;
+    if (item?.status !== "failed") return true;
+  }
+  return false;
+}
+
+// Clearing is evidence-based: codex must show a ran tool; any other instance
+// clears on the ok turn itself, the strongest evidence it can offer.
+function clearHealthOnSuccess(stateDir, instanceId, stdout) {
+  if (instanceId === "codex" && !codexToolSuccess(stdout)) return;
+  clearBlocked(stateDir, instanceId);
 }
 
 function claudeReply(stdout) {
@@ -599,11 +640,15 @@ async function runCliTurn(command, options = {}) {
       environmentDetail: environment,
     };
     finishTurn(stateDir, commandId, blocked);
+    // The evidence is persisted so discovery can steer later rounds away from
+    // this harness; a failed note must never change this turn's result.
+    markBlocked(stateDir, instanceOf(command), environment, commandId);
     return blocked;
   }
   if (spawned?.code === 0 && reply.text && !reply.failed) {
     const done = { ok: true, text: reply.text, errorText: "", messageDispatched: true };
     finishTurn(stateDir, commandId, done);
+    clearHealthOnSuccess(stateDir, instanceOf(command), spawned?.stdout ?? "");
     return done;
   }
   // The stderr tail rides along on the stop sentence (never into `text`) so
@@ -618,6 +663,13 @@ async function runCliTurn(command, options = {}) {
     messageDispatched: true,
   };
   finishTurn(stateDir, commandId, failed);
+  // The stderr-signature fallback: when the bounded tail carries one of the
+  // already-proven environment signatures, persist the block for this
+  // instance too. No new signatures — the same set the typed codex path and
+  // the provider-error classification already use.
+  if (detail && ENVIRONMENT_SIGNATURES.some((pattern) => pattern.test(detail))) {
+    markBlocked(stateDir, instanceOf(command), detail, commandId);
+  }
   return failed;
 }
 
@@ -627,6 +679,7 @@ module.exports = {
   codexModel,
   codexReply,
   codexEnvironmentBlocked,
+  codexToolSuccess,
   claudeReply,
   turnSpec,
   launchSpec,

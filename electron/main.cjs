@@ -14,6 +14,7 @@ const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCor
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne } = require("./coordinate-service.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
+const { clearBlocked } = require("./harness-health.cjs");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
@@ -1331,6 +1332,10 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
   handleTrusted("goalport:coordination-save", (_event, record) => saveRecord(coordinationDirectory(), record));
+  handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
+    clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
+    return { ok: true };
+  });
   handleTrusted("goalport:dismiss-close-choice", () => {
     closePromptOpen = false;
     return { ok: true, allowQuitLatch: allowQuitAfterCloseChoice };

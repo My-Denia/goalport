@@ -307,6 +307,7 @@ declare global {
           auth?: { status?: string; type?: string; label?: string };
           models?: readonly { slug?: string; name?: string; isDefault?: boolean; isLegacy?: boolean }[];
           usageLimits?: { unavailable?: unknown; windows?: readonly { id?: string; usedPercent?: number }[] };
+          environmentHealth?: { since: string; detail: string } | null;
         }[];
         stopReason: string | null;
       }>;
@@ -322,6 +323,7 @@ declare global {
       coordinateCancel?: (generation: string) => Promise<unknown>;
       coordinationRecords?: () => Promise<SavedPlan[]>;
       coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
+      coordinationUnblock?: (instanceId: string) => Promise<{ ok: boolean }>;
     };
   }
 }
