@@ -97,3 +97,43 @@ test("the dispatched tri-state survives a save and a reload", () => {
     fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
   }
 });
+
+test("an environment block survives a save and a reload", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-env-"));
+  try {
+    const saved = saveRecord(directory, record({
+      verdict: "failed",
+      stopReason: "The harness could not finish the turn, so this stopped.",
+      environmentBlocked: {
+        role: "planning",
+        instanceId: "codex",
+        harness: "Codex",
+        detail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+      },
+    }));
+    assert.deepEqual(saved.environmentBlocked, {
+      role: "planning",
+      instanceId: "codex",
+      harness: "Codex",
+      detail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+    });
+    const records = readRecords(directory);
+    assert.equal(records[0].environmentBlocked.role, "planning");
+    assert.equal(records[0].environmentBlocked.instanceId, "codex");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a malformed environment block degrades to null instead of rejecting the plan", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-env-bad-"));
+  try {
+    const saved = saveRecord(directory, record({ verdict: "failed", environmentBlocked: { role: "planner", instanceId: "" } }));
+    assert.equal(saved.environmentBlocked, null);
+    assert.equal(readRecords(directory)[0].environmentBlocked, null);
+    const stringBlock = saveRecord(directory, record({ requestId: "request-2", verdict: "failed", environmentBlocked: "sandbox failed" }));
+    assert.equal(stringBlock.environmentBlocked, null);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});

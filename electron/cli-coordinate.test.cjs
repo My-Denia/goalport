@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -361,4 +361,90 @@ test("a single-quoted top-level model line is read", async () => {
     },
   });
   assert.equal(discovered.providers[0].models[0].slug, "gpt-6.1-sol");
+});
+
+// The captured diagnostic turn (goal-runs/goalport-pr26-blockers-codex-diag/
+// evidence/diag/stdout.jsonl), with the username and home path redacted. The
+// structure is byte-faithful: two config warnings, an honest intent, three
+// failed tool calls (two carrying sandbox-helper signatures), and the model's
+// honest final report. codex exits 0 on this turn.
+const DIAGNOSTIC_STDOUT = "{\"type\": \"thread.started\", \"thread_id\": \"01a11e93-bded-7ee3-919e-9f38d019ba92\"}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_0\", \"type\": \"error\", \"message\": \"Under-development features enabled: local_thread_store_compression. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in C:\\\\Users\\\\user\\\\.codex\\\\config.toml.\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_1\", \"type\": \"error\", \"message\": \"Configured service tier `standard` is not advertised as supported for model `gpt-6.1-sol` and will be omitted from requests.\"}}\n{\"type\": \"turn.started\"}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_2\", \"type\": \"agent_message\", \"text\": \"I’ll read the root AGENTS.md and quote its first heading.\\n\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_3\", \"type\": \"command_execution\", \"command\": \"\\\"C:\\\\\\\\Users\\\\\\\\user\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Microsoft\\\\\\\\WindowsApps\\\\\\\\pwsh.exe\\\" -Command \\\"Get-Content -LiteralPath 'C:\\\\\\\\Files\\\\\\\\goalport\\\\\\\\AGENTS.md' -TotalCount 12\\\"\", \"aggregated_output\": \"\", \"exit_code\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_3\", \"type\": \"command_execution\", \"command\": \"\\\"C:\\\\\\\\Users\\\\\\\\user\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Microsoft\\\\\\\\WindowsApps\\\\\\\\pwsh.exe\\\" -Command \\\"Get-Content -LiteralPath 'C:\\\\\\\\Files\\\\\\\\goalport\\\\\\\\AGENTS.md' -TotalCount 12\\\"\", \"aggregated_output\": \"Failed to create unified exec process: helper_unknown_error: setup refresh had errors\", \"exit_code\": -1, \"status\": \"failed\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_4\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read first heading of AGENTS.md\"}, \"result\": null, \"error\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_4\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read first heading of AGENTS.md\"}, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"trusted Node process exited unexpectedly; kernel reset, rerun your request\"}], \"structured_content\": null}, \"error\": null, \"status\": \"failed\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_5\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read AGENTS.md heading\"}, \"result\": null, \"error\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_5\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read AGENTS.md heading\"}, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"node_repl kernel exited unexpectedly\\n\\nnode_repl diagnostics: {\\\"kernel_pid\\\":18040,\\\"kernel_status\\\":\\\"exited(code=1)\\\",\\\"kernel_stderr_tail\\\":\\\"windows sandbox failed: helper_unknown_error: setup refresh had errors\\\",\\\"reason\\\":\\\"stdout_eof\\\",\\\"stream_error\\\":null}\"}], \"structured_content\": null}, \"error\": null, \"status\": \"failed\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_6\", \"type\": \"agent_message\", \"text\": \"I couldn’t read the file because the sandbox failed to initialize. The AGENTS.md text supplied in your message starts with:\\n\\n```text\\n# Codex adapter for shared owner policy\\n```\\n\\nNo files were created, modified, or deleted.\"}}\n{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 154539, \"cached_input_tokens\": 118784, \"cache_write_input_tokens\": 0, \"output_tokens\": 388, \"reasoning_output_tokens\": 17}}";
+
+test("codexEnvironmentBlocked recognizes the captured diagnostic turn", () => {
+  const detail = codexEnvironmentBlocked(DIAGNOSTIC_STDOUT);
+  assert.ok(detail, "the diagnostic turn is environment-blocked");
+  assert.match(detail, /helper_unknown_error/);
+});
+
+test("a turn with a successful tool call is not environment-blocked", () => {
+  const stdout = [
+    '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"AGENTS.md","exit_code":0,"status":"completed"}}',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"grep x","aggregated_output":"helper_unknown_error in a doc","exit_code":0,"status":"completed"}}',
+  ].join("\n");
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("failed tool calls without a signature are not environment-blocked", () => {
+  const stdout = [
+    '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"node_repl","tool":"js","result":{"content":[{"type":"text","text":"trusted Node process exited unexpectedly; kernel reset, rerun your request"}]},"status":"failed"}}',
+  ].join("\n");
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("a turn with no tool events is not environment-blocked", () => {
+  const stdout = '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n';
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("an environment-blocked turn fails with the machine sentence, stays dispatched, and is never respawned", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-env-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  let spawns = 0;
+  const spawnTurn = async () => {
+    spawns += 1;
+    return { code: 0, stdout: DIAGNOSTIC_STDOUT, stderr: "" };
+  };
+  try {
+    const first = await runCliTurn(command("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(first.ok, false);
+    assert.equal(first.environmentBlocked, true);
+    assert.equal(first.messageDispatched, true);
+    assert.match(first.text, /sandbox failed to initialize/);
+    assert.equal(first.errorText, "This harness cannot run its tools on this machine, so this stopped.");
+    assert.match(first.environmentDetail, /helper_unknown_error/);
+    assert.ok(first.environmentDetail.length <= 300);
+    // The quota was spent, so the grant is consumed and the claim persists.
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-plan-codex")), true);
+    // A repeat of the same command id replays the stored result, never a new turn.
+    const second = await runCliTurn(command("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(second.ok, false);
+    assert.equal(second.environmentBlocked, true);
+    assert.equal(second.environmentDetail, first.environmentDetail);
+    assert.equal(spawns, 1);
+    const ledger = JSON.parse(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"));
+    assert.equal(ledger["coordinate-plan-codex"].environmentBlocked, true);
+    assert.match(ledger["coordinate-plan-codex"].environmentDetail, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a claude turn never reports environment blocking even with a signature on stderr", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-env-claude-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  try {
+    const ran = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 1,
+        stdout: '{"result":"partial","is_error":false}',
+        stderr: "ERROR windows sandbox failed: helper_unknown_error",
+      }),
+    });
+    assert.equal(ran.environmentBlocked, undefined);
+    assert.match(ran.errorText, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });

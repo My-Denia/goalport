@@ -96,7 +96,16 @@ async function launchOne(env, runtime, command, generation) {
   // is acceptable only because every retry needs its own owner grant; the
   // renderer-side throw path is separately pinned to unknown (unretryable)
   // by the send-recorded flag in the app.
-  return { launched: false, prepared: true, text, errorText, dispatched: runThrew ? null : (ran?.messageDispatched === true) };
+  const environmentBlocked = ran?.environmentBlocked === true;
+  return {
+    launched: false,
+    prepared: true,
+    text,
+    errorText,
+    dispatched: runThrew ? null : (ran?.messageDispatched === true),
+    environmentBlocked,
+    environmentDetail: environmentBlocked && typeof ran?.environmentDetail === "string" ? ran.environmentDetail : null,
+  };
 }
 
 module.exports = { guardCoordinateCommand, discoverCoordination, launchOne };

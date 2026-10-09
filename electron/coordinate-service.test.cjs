@@ -250,3 +250,44 @@ test("a runtime that throws mid-turn reports an unknown dispatch state", async (
   assert.equal(result.launched, false);
   assert.equal(result.dispatched, null);
 });
+
+test("an environment-blocked turn passes its typed fields through", async () => {
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    async run() {
+      return {
+        ok: false,
+        text: "I couldn't read the file because the sandbox failed to initialize.",
+        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        messageDispatched: true,
+        environmentBlocked: true,
+        environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+      };
+    },
+  }, command);
+  assert.equal(result.launched, false);
+  assert.equal(result.text, "I couldn't read the file because the sandbox failed to initialize.");
+  assert.equal(result.environmentBlocked, true);
+  assert.equal(result.environmentDetail, "Failed to create unified exec process: helper_unknown_error: setup refresh had errors");
+});
+
+test("a normal failure reports no environment fields", async () => {
+  const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
+    async discover() {
+      return { ok: true, providers: [] };
+    },
+    async prepare() {
+      return held;
+    },
+    async run() {
+      return { ok: false, text: "", errorText: "The harness did not finish, so this stopped.", messageDispatched: true };
+    },
+  }, command);
+  assert.equal(result.environmentBlocked, false);
+  assert.equal(result.environmentDetail, null);
+});

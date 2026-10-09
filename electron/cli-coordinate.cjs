@@ -14,6 +14,7 @@ const NO_TEXT = "The harness finished without any text, so this stopped.";
 const NOT_FINISHED = "The harness did not finish, so this stopped.";
 const NOT_INSTALLED = "This harness is not installed, so nothing was sent.";
 const CREDITS = "This model requires extra usage credits. It was not used.";
+const ENVIRONMENT_STOP = "This harness cannot run its tools on this machine, so this stopped.";
 
 function creditGated(model) {
   return typeof model === "string" && /fable/i.test(model);
@@ -327,8 +328,71 @@ function codexReply(stdout) {
   return text;
 }
 
-function claudeReply(stdout) {
-  try {
+// Sandbox-helper signatures proven by the captured diagnostic turn
+// (goal-runs/goalport-pr26-blockers-codex-diag/evidence/diag/stdout.jsonl):
+// the read-only sandbox helper fails to initialize, so every tool call dies
+// in the sandbox layer while codex still exits 0 with an honest text reply.
+const ENVIRONMENT_SIGNATURES = [
+  /helper_unknown_error/i,
+  /Failed to create unified exec process/i,
+  /sandbox failed/i,
+];
+
+function toolEventText(item) {
+  // command_execution carries its failure in aggregated_output; an
+  // mcp_tool_call carries it in result.content[].text and sometimes error.
+  const parts = [];
+  if (typeof item?.aggregated_output === "string") parts.push(item.aggregated_output);
+  const content = item?.result?.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block && typeof block.text === "string") parts.push(block.text);
+    }
+  }
+  if (typeof item?.error === "string") parts.push(item.error);
+  return parts.join("\n");
+}
+
+/**
+ * A codex turn is environment-blocked when the model issued at least one tool
+ * call, every one of them failed, and at least one failure carries a proven
+ * sandbox-helper signature. Any successful tool call, or failures without a
+ * signature (a grep with no match), is a normal turn. Returns the bounded
+ * signature-bearing detail, or null.
+ */
+function codexEnvironmentBlocked(stdout) {
+  let tools = 0;
+  let failed = 0;
+  let detail = null;
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== "item.completed") continue;
+    const item = event?.item ?? event?.params?.item;
+    const kind = typeof item?.type === "string" ? item.type : "";
+    if (kind !== "command_execution" && kind !== "mcp_tool_call") continue;
+    tools += 1;
+    if (item?.status === "failed") failed += 1;
+    const text = toolEventText(item);
+    if (text && detail === null) {
+      for (const pattern of ENVIRONMENT_SIGNATURES) {
+        if (pattern.test(text)) {
+          detail = text.slice(0, 300);
+          break;
+        }
+      }
+    }
+  }
+  if (tools === 0 || failed !== tools || detail === null) return null;
+  return detail;
+}
+
+function claudeReply(stdout) {  try {
     const parsed = JSON.parse(String(stdout));
     if (typeof parsed?.result === "string") {
       return { text: parsed.result.trim(), failed: parsed.is_error === true };
@@ -519,6 +583,23 @@ async function runCliTurn(command, options = {}) {
     return replaced;
   }
   const reply = replyFrom(instanceOf(command), spawned?.stdout ?? "");
+  // Environment-blocked turns exit 0 with an honest text reply (the model
+  // reports it could not run its tools), so this check must come before the
+  // success branch. The quota was spent, so the turn stays dispatched and the
+  // claim ledger keeps blocking a resend of this command id.
+  const environment = instanceOf(command) === "codex" ? codexEnvironmentBlocked(spawned?.stdout ?? "") : null;
+  if (environment) {
+    const blocked = {
+      ok: false,
+      text: reply.text,
+      errorText: ENVIRONMENT_STOP,
+      messageDispatched: true,
+      environmentBlocked: true,
+      environmentDetail: environment,
+    };
+    finishTurn(stateDir, commandId, blocked);
+    return blocked;
+  }
   if (spawned?.code === 0 && reply.text && !reply.failed) {
     const done = { ok: true, text: reply.text, errorText: "", messageDispatched: true };
     finishTurn(stateDir, commandId, done);
@@ -544,6 +625,7 @@ module.exports = {
   runCliTurn,
   codexModel,
   codexReply,
+  codexEnvironmentBlocked,
   claudeReply,
   turnSpec,
   launchSpec,

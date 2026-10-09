@@ -38,6 +38,22 @@ function savedAtOf(value) {
   return Number.isNaN(Date.parse(text)) ? null : text;
 }
 
+// A malformed environment block degrades to null (the fact is dropped) rather
+// than rejecting the whole plan record: a saved plan must survive even when
+// this field predates the format or arrives corrupted.
+function environmentBlockedOf(value) {
+  if (typeof value !== "object" || value === null) return null;
+  const role = value.role === "planning" || value.role === "review" ? value.role : null;
+  const instanceId = typeof value.instanceId === "string" && value.instanceId.trim() ? value.instanceId.trim() : null;
+  if (!role || !instanceId) return null;
+  return {
+    role,
+    instanceId,
+    harness: nullableText(value.harness) ?? null,
+    detail: nullableText(value.detail) ?? null,
+  };
+}
+
 function normalize(input) {
   if (!input || typeof input !== "object") return null;
   const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
@@ -77,6 +93,7 @@ function normalize(input) {
     planningQuota,
     reviewQuota,
     messageDispatched: dispatched(input.messageDispatched),
+    environmentBlocked: environmentBlockedOf(input.environmentBlocked),
     savedAt: savedAtOf(input.savedAt),
   };
 }
