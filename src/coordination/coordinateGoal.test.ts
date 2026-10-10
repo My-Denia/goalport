@@ -374,4 +374,68 @@ describe("Synthetic path", () => {
     expect(state.commands).toHaveLength(0);
     expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
   });
+
+  it("excludes a health-blocked harness from both initial roles", () => {
+    const catalog = [
+      instance({ instanceId: "blocked", name: "Blocked", models: ["model-a"], quota: "available", environmentAvoided: { since: "2026-10-09T14:00:00.000Z", detail: "sandbox failed" } }),
+      instance({ instanceId: "planner", name: "Planner", models: ["model-b"], quota: "available" }),
+      instance({ instanceId: "reviewer", name: "Reviewer", models: ["model-c"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "health-0", catalog });
+
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["planner", "reviewer"]);
+    expect(state.planningHarness).toBe("Planner");
+    expect(state.reviewHarness).toBe("Reviewer");
+  });
+
+  it("treats health-blocked and draft-avoided instances as a union", () => {
+    const catalog = [
+      instance({ instanceId: "health-blocked", name: "Health", models: ["model-a"], quota: "available", environmentAvoided: { since: "2026-10-09T14:00:00.000Z", detail: "sandbox failed" } }),
+      instance({ instanceId: "draft-avoided", name: "Avoided", models: ["model-b"], quota: "available" }),
+      instance({ instanceId: "planner", name: "Planner", models: ["model-c"], quota: "available" }),
+      instance({ instanceId: "reviewer", name: "Reviewer", models: ["model-d"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "health-avoid-0", catalog, avoidInstances: ["draft-avoided"] });
+
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["planner", "reviewer"]);
+  });
+
+  it("names the health blocker when it prevents the independent pair", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", models: ["model-a"], quota: "available", environmentAvoided: { since: "2026-10-09T14:00:00.000Z", detail: "helper_unknown_error" } }),
+      instance({ instanceId: "claude", name: "Claude", models: ["model-b"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "health-stop-0", catalog });
+
+    expect(state.commands).toEqual([]);
+    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+  });
+
+  it("filters initial role assignment to the authorized instances", () => {
+    const catalog = [
+      instance({ instanceId: "outside", name: "Outside", models: ["model-a"], quota: "available" }),
+      instance({ instanceId: "planner", name: "Planner", models: ["model-b"], quota: "available" }),
+      instance({ instanceId: "reviewer", name: "Reviewer", models: ["model-c"], quota: "available" }),
+    ];
+    const state = coordinateGoal({ goal, workspacePath, sendKey: "scope-0", catalog, allowedInstances: ["reviewer", "planner"] });
+
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["planner", "reviewer"]);
+    const tooNarrow = coordinateGoal({ goal, workspacePath, sendKey: "scope-1", catalog, allowedInstances: ["planner"] });
+    expect(tooNarrow.commands).toEqual([]);
+  });
+
+  it("keeps an instance command key stable and derives a fresh key for another instance", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", models: ["model-a"], quota: "available" }),
+      instance({ instanceId: "claude", name: "Claude", models: ["model-b"], quota: "available" }),
+      instance({ instanceId: "grok", name: "Grok", models: ["model-c"], quota: "available" }),
+    ];
+    const original = coordinateGoal({ goal, workspacePath, sendKey: "same-send", catalog });
+    const sameInstance = coordinateGoal({ goal, workspacePath, sendKey: "same-send", catalog });
+    const differentInstance = coordinateGoal({ goal, workspacePath, sendKey: "same-send", catalog: [catalog[2]!, catalog[1]!, catalog[0]!] });
+
+    expect(sameInstance.commands[0]?.commandId).toBe(original.commands[0]?.commandId);
+    expect(differentInstance.commands[0]?.modelSelection.instanceId).not.toBe(original.commands[0]?.modelSelection.instanceId);
+    expect(differentInstance.commands[0]?.commandId).not.toBe(original.commands[0]?.commandId);
+  });
 });

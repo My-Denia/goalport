@@ -30,6 +30,7 @@ test("a saved plan reopens as the same record and a repeat request does not appe
     const saved = saveRecord(directory, record());
     assert.equal(saved.verdict, "revise");
     assert.equal(saved.planText, "Bounded plan.");
+    assert.equal(Object.hasOwn(saved, "roundEvents"), false);
     const again = saveRecord(directory, record({ planText: "Revised plan." }));
     const records = readRecords(directory);
     assert.equal(records.length, 1);
@@ -133,6 +134,63 @@ test("a malformed environment block degrades to null instead of rejecting the pl
     assert.equal(readRecords(directory)[0].environmentBlocked, null);
     const stringBlock = saveRecord(directory, record({ requestId: "request-2", verdict: "failed", environmentBlocked: "sandbox failed" }));
     assert.equal(stringBlock.environmentBlocked, null);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("completed round events survive save and reload", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-events-"));
+  const roundEvents = [
+    {
+      kind: "failed",
+      role: "planning",
+      instanceId: "codex",
+      harness: "Codex",
+      sentence: "Codex could not run its tools on this machine, so this stopped for it.",
+      detail: "helper_unknown_error",
+    },
+    {
+      kind: "continued",
+      role: "planning",
+      instanceId: "claude",
+      harness: "Claude",
+      sentence: "Claude is planning instead.",
+    },
+  ];
+  try {
+    const saved = saveRecord(directory, record({ roundEvents }));
+    assert.deepEqual(saved.roundEvents, roundEvents);
+    assert.deepEqual(readRecords(directory)[0].roundEvents, roundEvents);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("malformed round-event entries are dropped without rejecting a record", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-events-bad-"));
+  const valid = {
+    kind: "failed",
+    role: "review",
+    instanceId: "claude",
+    harness: null,
+    sentence: "The check failed.",
+  };
+  try {
+    const saved = saveRecord(directory, record({ roundEvents: [
+      valid,
+      null,
+      { ...valid, kind: "started" },
+      { ...valid, role: "planner" },
+      { ...valid, instanceId: " " },
+      { ...valid, harness: {} },
+      { ...valid, sentence: " " },
+      { ...valid, detail: 42 },
+    ] }));
+    assert.deepEqual(saved.roundEvents, [valid]);
+    assert.deepEqual(readRecords(directory)[0].roundEvents, [valid]);
+    const oldStyle = saveRecord(directory, record({ requestId: "old-round-events", roundEvents: "broken" }));
+    assert.equal(Object.hasOwn(oldStyle, "roundEvents"), false);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }

@@ -25,6 +25,13 @@ export interface SyntheticCatalogInstance {
   readonly launchable?: boolean;
   readonly quota?: SyntheticQuota;
   readonly billing?: "subscription" | "paid-api" | "included";
+  /**
+   * Persisted evidence that this harness's tools cannot run on this machine
+   * (harness health, stamped at the failure). Present means blocked exactly
+   * like an avoidInstances entry; null means a malformed record degraded to
+   * "no evidence" and the harness stays selectable.
+   */
+  readonly environmentAvoided?: { readonly since: string; readonly detail: string } | null;
 }
 
 export interface CoordinateGoalInput {
@@ -46,6 +53,23 @@ export interface CoordinateGoalInput {
    * avoided on the next fresh send.
    */
   readonly avoidInstances?: readonly string[];
+  /**
+   * When present, only these instance ids may take a role this round. A
+   * scoped recovery round passes its authorized scope here; usability,
+   * avoidance, health blocking, and the two-harness requirement all apply
+   * within it.
+   */
+  readonly allowedInstances?: readonly string[];
+}
+
+/** Exclusions applied on top of the base catalog filters. */
+export interface EligibilityFilter {
+  /** Instance ids that may not receive a role (failed turns, roles already assigned). */
+  readonly exclude?: readonly string[];
+  /** Draft avoidance (Send again without X) — blocked like persisted health. */
+  readonly avoidInstances?: readonly string[];
+  /** Scoped round membership — when present, only these may take a role. */
+  readonly allowedInstances?: readonly string[];
 }
 
 export interface CatalogModel {
@@ -189,7 +213,31 @@ function uniqueInstances(catalog: readonly SyntheticCatalogInstance[]): Syntheti
 
 /** Instance ids that can receive a role right now, in assignment order. */
 export function usableInstanceIds(catalog: readonly SyntheticCatalogInstance[]): readonly string[] {
-  return uniqueInstances(catalog).filter(isUsable).map((instance) => instance.instanceId);
+  return eligibleInstances(catalog).map((instance) => instance.instanceId);
+}
+
+/**
+ * The one selection rule: every instance that may receive a role right now,
+ * in catalog order. Usable by the existing filters, not health-blocked, not
+ * avoided, not excluded, and inside the allowed scope when one is set. Both
+ * selection sites (initial assignment and recovery re-selection) and the
+ * session's chain pre-check go through this helper so the rules exist once.
+ */
+export function eligibleInstances(
+  catalog: readonly SyntheticCatalogInstance[],
+  filter: EligibilityFilter = {},
+): readonly SyntheticCatalogInstance[] {
+  const exclude = new Set(filter.exclude ?? []);
+  const avoid = new Set(filter.avoidInstances ?? []);
+  const allowed = filter.allowedInstances === undefined ? null : new Set(filter.allowedInstances);
+  return uniqueInstances(catalog).filter((instance) => {
+    if (!isUsable(instance)) return false;
+    if (instance.environmentAvoided) return false;
+    if (avoid.has(instance.instanceId)) return false;
+    if (exclude.has(instance.instanceId)) return false;
+    if (allowed !== null && !allowed.has(instance.instanceId)) return false;
+    return true;
+  });
 }
 
 function quotaLabelsFor(instances: readonly SyntheticCatalogInstance[]): Record<string, QuotaWord> {
@@ -214,9 +262,16 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
   };
 }
 
-function commandKey(role: "plan" | "review", text: string, sendKey: string): string {
+/**
+ * The id carries the role, the instance, the send, and the prompt text. The
+ * instance id is load-bearing: the same instance with the same text and send
+ * key keeps one id, so the stored-result ledger blocks a replay forever, and
+ * a different instance derives a different id, which is what makes a
+ * recovery turn a fresh grant instead of a resend.
+ */
+function commandKey(role: "plan" | "review", instanceId: string, text: string, sendKey: string): string {
   let hash = 2166136261;
-  const data = `${role}\n${sendKey}\n${text}`;
+  const data = `${role}\n${instanceId}\n${sendKey}\n${text}`;
   for (let index = 0; index < data.length; index += 1) {
     hash ^= data.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -286,6 +341,31 @@ function turnCommand(input: {
 }
 
 /**
+ * Build one replacement turn for a role on a specific instance: the same
+ * planner or review text the round started with, an id keyed to the instance,
+ * and the same read-only gate re-check the initial assignment passed.
+ */
+export function replacementCommand(
+  role: "plan" | "review",
+  instance: SyntheticCatalogInstance,
+  input: CoordinateGoalInput,
+  sendKey: string,
+): CoordinateTurnCommand {
+  const text = role === "plan" ? plannerText(input) : reviewText(input);
+  const command = turnCommand({
+    commandId: commandKey(role, instance.instanceId, text, sendKey),
+    instance,
+    workspacePath: input.workspacePath,
+    text,
+  });
+  const authorization = authorizeCoordinateTurn(command);
+  if (authorization.outcome !== "write-denied") {
+    throw new Error("The replacement turn did not pass the read-only gate.");
+  }
+  return command;
+}
+
+/**
  * Pick two different catalog instances for a plan and a check.
  * The returned commands are not sent. A later session may send them.
  * Assigning both roles is not a completed review.
@@ -293,9 +373,10 @@ function turnCommand(input: {
 export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState {
   const unique = uniqueInstances(input.catalog);
   const quotaLabels = quotaLabelsFor(unique);
-  const avoid = input.avoidInstances ?? [];
-  const usableWithoutAvoid = unique.filter(isUsable);
-  const usable = usableWithoutAvoid.filter((instance) => !avoid.includes(instance.instanceId));
+  const usable = eligibleInstances(unique, {
+    avoidInstances: input.avoidInstances,
+    allowedInstances: input.allowedInstances,
+  });
   if (input.catalog.length === 0) {
     return stopped(
       quotaLabels,
@@ -303,15 +384,31 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
   if (usable.length < 2) {
-    const avoided = unique.find((instance) => avoid.includes(instance.instanceId));
-    if (avoided && usableWithoutAvoid.length >= 2) {
+    // The named sentence fires only when the blockings are the cause:
+    // ignoring avoidance and health evidence, two allowed harnesses could
+    // still run. Health-blocked and avoided instances are one union here.
+    const allowed = input.allowedInstances === undefined ? null : new Set(input.allowedInstances);
+    const withinAllowed = unique.filter((instance) =>
+      isUsable(instance) && (allowed === null || allowed.has(instance.instanceId))
+    );
+    // Name a blocker only when that same blocked instance is inside the
+    // authorized pool and is the reason two otherwise usable harnesses cannot
+    // be assigned. Unrelated health evidence outside scope is not a reason.
+    const blocked = withinAllowed.find(
+      (instance) => Boolean(instance.environmentAvoided)
+        || (input.avoidInstances ?? []).includes(instance.instanceId),
+    );
+    if (blocked && withinAllowed.length >= 2) {
       return stopped(
         quotaLabels,
-        `Stopped. ${harnessLabel(avoided)} cannot run on this machine right now, and an independent check needs two harnesses that can run.`,
+        `Stopped. ${harnessLabel(blocked)} cannot run on this machine right now, and an independent check needs two harnesses that can run.`,
       );
     }
-    const credits = unique.some(creditsBlocked);
-    const unnamed = unique.some(modelUnnamed);
+    const authorizedPool = allowed === null
+      ? unique
+      : unique.filter((instance) => allowed.has(instance.instanceId));
+    const credits = authorizedPool.some(creditsBlocked);
+    const unnamed = authorizedPool.some(modelUnnamed);
     return stopped(
       quotaLabels,
       credits
@@ -334,8 +431,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   const planMessage = plannerText(input);
   const reviewMessage = reviewText(input);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {

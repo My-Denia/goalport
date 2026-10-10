@@ -1,6 +1,12 @@
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import { coordinateGoal } from "./coordinateGoal";
-import { runCoordinateSession, type CoordinateTransport, type EnvironmentBlockedInfo } from "./coordinateSession";
+import {
+  runCoordinateSession,
+  type CoordinateSessionEvent,
+  type CoordinateTransport,
+  type EnvironmentBlockedInfo,
+} from "./coordinateSession";
+import type { RoundEvent } from "./savedPlan";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -23,6 +29,12 @@ export interface CoordinationView {
   readonly messageDispatched?: boolean | null;
   /** Set when a turn proved the harness cannot run its tools on this machine. */
   readonly environmentBlocked?: EnvironmentBlockedInfo | null;
+  /** Completed recovery facts (failures and takeovers) for this round. */
+  readonly roundEvents?: readonly RoundEvent[];
+  /** Scope budget after the last launch; present only on scoped rounds. */
+  readonly authorizedTurnsLeft?: number | null;
+  /** True when the authorized scope ran out of model turns. */
+  readonly scopeExhausted?: boolean;
 }
 
 export interface CoordinationDiscovery {
@@ -51,6 +63,7 @@ function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped
     reviewQuota: null,
     messageDispatched: false,
     environmentBlocked: null,
+    roundEvents: [],
   });
 }
 
@@ -66,6 +79,10 @@ export async function requestCoordination(
     readonly priorPlan?: string | null;
     readonly priorReview?: string | null;
     readonly avoidInstances?: readonly string[];
+    /** Scoped round membership: present means recovery is authorized. */
+    readonly allowedInstances?: readonly string[];
+    /** Synchronous round events (started is transient; failed/continued persist). */
+    readonly onEvent?: (event: CoordinateSessionEvent) => void;
   },
   discovery: CoordinationDiscovery | null,
   transport: CoordinateTransport,
@@ -83,6 +100,7 @@ export async function requestCoordination(
     priorPlan: input.priorPlan,
     priorReview: input.priorReview,
     avoidInstances: input.avoidInstances,
+    allowedInstances: input.allowedInstances,
   };
   const planned = coordinateGoal(goalInput);
   if (planned.commands.length !== 2) {
@@ -98,6 +116,7 @@ export async function requestCoordination(
       reviewQuota: planned.reviewQuota,
       messageDispatched: false,
       environmentBlocked: null,
+      roundEvents: [],
     });
   }
   if (!stillCurrent()) return unavailable(REPLACED);
@@ -118,7 +137,11 @@ export async function requestCoordination(
   }
   const sent = await runCoordinateSession(
     goalInput,
-    { sendAuthorized: true },
+    {
+      sendAuthorized: true,
+      allowedInstances: input.allowedInstances,
+      onEvent: input.onEvent,
+    },
     {
       async launch(command) {
         if (!stillCurrent()) return { text: "", errorText: REPLACED };
@@ -139,5 +162,8 @@ export async function requestCoordination(
     reviewQuota: sent.reviewQuota,
     messageDispatched: sent.messageDispatched,
     environmentBlocked: sent.environmentBlocked ?? null,
+    roundEvents: sent.roundEvents,
+    authorizedTurnsLeft: sent.authorizedTurnsLeft,
+    scopeExhausted: sent.scopeExhausted,
   });
 }

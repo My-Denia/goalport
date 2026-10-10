@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SavedPlan } from "./coordination/savedPlan";
+import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
+
+type CoordinationRecord = Omit<SavedPlan, "roundEvents"> & {
+  /** Optional for records saved before completed recovery events existed. */
+  readonly roundEvents?: readonly RoundEvent[];
+};
 import {
   appendPreviewConversationMessage,
   appendPreviewMessage,
@@ -330,8 +335,8 @@ declare global {
       coordinationAuthorize?: (scope: { instances: string[]; maxTurns: number }) => Promise<{ ok: boolean; generation: number; remaining: number; errorText?: string }>;
       coordinationScope?: () => Promise<{ instances: string[]; maxTurns: number; remaining: number; generation: number } | null>;
       coordinationRevoke?: () => Promise<{ ok: boolean }>;
-      coordinationRecords?: () => Promise<SavedPlan[]>;
-      coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
+      coordinationRecords?: () => Promise<CoordinationRecord[]>;
+      coordinationSave?: (record: CoordinationRecord) => Promise<CoordinationRecord>;
       coordinationUnblock?: (instanceId: string) => Promise<{ ok: boolean }>;
     };
   }

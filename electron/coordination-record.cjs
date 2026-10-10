@@ -54,6 +54,35 @@ function environmentBlockedOf(value) {
   };
 }
 
+function roundEventOf(value) {
+  if (typeof value !== "object" || value === null) return null;
+  const kind = value.kind === "failed" || value.kind === "continued" ? value.kind : null;
+  const role = value.role === "planning" || value.role === "review" ? value.role : null;
+  const instanceId = typeof value.instanceId === "string" && value.instanceId.trim() ? value.instanceId.trim() : null;
+  const harness = nullableText(value.harness);
+  const sentence = nullableText(value.sentence);
+  if (!kind || !role || !instanceId || harness === undefined || !sentence) return null;
+  const event = { kind, role, instanceId, harness, sentence };
+  if (value.detail !== undefined) {
+    const detail = nullableText(value.detail);
+    if (detail === undefined) return null;
+    event.detail = detail;
+  }
+  return event;
+}
+
+function roundEventsOf(value) {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((item) => {
+    try {
+      const event = roundEventOf(item);
+      return event ? [event] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 function normalize(input) {
   if (!input || typeof input !== "object") return null;
   const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
@@ -79,6 +108,14 @@ function normalize(input) {
     || planningQuota === undefined
     || reviewQuota === undefined
   ) return null;
+  let roundEvents;
+  try {
+    roundEvents = roundEventsOf(input.roundEvents);
+  } catch {
+    // Round-event metadata is best-effort; malformed access never rejects
+    // the otherwise valid saved plan.
+    roundEvents = undefined;
+  }
   return {
     requestId,
     workspacePath,
@@ -94,6 +131,7 @@ function normalize(input) {
     reviewQuota,
     messageDispatched: dispatched(input.messageDispatched),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
+    ...(roundEvents === undefined ? {} : { roundEvents }),
     savedAt: savedAtOf(input.savedAt),
   };
 }

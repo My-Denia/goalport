@@ -619,6 +619,30 @@ test("writeGrant appends only when the line is absent and preserves hand-written
   }
 });
 
+test("an old-format command id with a claim still returns its stored result without replay", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-old-command-id-"));
+  const oldCommandId = "coordinate-plan-legacyhash";
+  let spawns = 0;
+  try {
+    fs.writeFileSync(path.join(directory, `claim-${oldCommandId}`), "");
+    fs.writeFileSync(path.join(directory, "sent-turns.json"), JSON.stringify({
+      [oldCommandId]: { ok: true, text: "Legacy stored plan.", errorText: "", messageDispatched: true },
+    }));
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol", oldCommandId), {
+      stateDir: directory,
+      spawnTurn: async () => {
+        spawns += 1;
+        return { code: 0, stdout: "must not run" };
+      },
+    });
+
+    assert.deepEqual(result, { ok: true, text: "Legacy stored plan.", errorText: "", messageDispatched: true });
+    assert.equal(spawns, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 test("failure branches emit their stop codes: no-text, not-finished, not-installed, and none for is_error", async () => {
   const run = async (instanceId, model, spawnTurn, commandId = `coordinate-plan-${instanceId}`) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-stopcode-"));
