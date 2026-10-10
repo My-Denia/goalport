@@ -168,4 +168,21 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
   };
 }
 
-module.exports = { guardCoordinateCommand, discoverCoordination, launchOne };
+// Authorize-time membership: every requested harness must appear in a FRESH
+// zero-quota discovery right now, and an apiKey-typed login never enters a
+// scope (the budget authority would otherwise front a pay-per-call
+// credential). A discovery that fails at all refuses everything (fail-closed).
+// Returns null when the request is admissible, or the human refusal sentence.
+function authorizeMembershipError(discovered, requested) {
+  const providers = Array.isArray(discovered?.providers) ? discovered.providers : [];
+  const discoveredById = new Map(providers.map((provider) => [provider.instanceId, provider]));
+  for (const instance of requested) {
+    const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
+    if (!provider || provider?.auth?.type === "apiKey") {
+      return "Only harnesses signed in with their own subscription can be authorized.";
+    }
+  }
+  return null;
+}
+
+module.exports = { guardCoordinateCommand, discoverCoordination, launchOne, authorizeMembershipError };

@@ -516,3 +516,52 @@ test("a claimed command passes free at a zero budget (claim hit before any budge
     scopeCleanup(directory);
   }
 });
+
+test("authorize membership refuses an apiKey login even when it is discovered", () => {
+  const { authorizeMembershipError } = require("./coordinate-service.cjs");
+  const discovered = {
+    ok: true,
+    providers: [
+      { instanceId: "codex", auth: { status: "authenticated", type: "chatgpt" } },
+      { instanceId: "claude", auth: { status: "authenticated", type: "apiKey" } },
+    ],
+    stopReason: null,
+  };
+  // Plan M2: "apiKey authorize 拒" — the refusal the main-process handler
+  // enforces before any scope is minted; the budget authority must never
+  // front a pay-per-call credential.
+  assert.equal(
+    authorizeMembershipError(discovered, ["codex", "claude"]),
+    "Only harnesses signed in with their own subscription can be authorized.",
+  );
+  assert.equal(authorizeMembershipError(discovered, ["codex"]), null);
+});
+
+test("authorize membership refuses an instance the fresh discovery does not know", () => {
+  const { authorizeMembershipError } = require("./coordinate-service.cjs");
+  const discovered = {
+    ok: true,
+    providers: [{ instanceId: "codex", auth: { status: "authenticated", type: "chatgpt" } }],
+    stopReason: null,
+  };
+  // Plan M2: "未知实例拒" — a name that is not a discovered harness right
+  // now never enters a scope.
+  assert.equal(
+    authorizeMembershipError(discovered, ["codex", "grok"]),
+    "Only harnesses signed in with their own subscription can be authorized.",
+  );
+});
+
+test("authorize membership fails closed when discovery cannot run", () => {
+  const { authorizeMembershipError } = require("./coordinate-service.cjs");
+  // A discovery that failed at all (or returned nothing) refuses everything:
+  // membership cannot be verified, so nothing is authorized.
+  assert.equal(
+    authorizeMembershipError({ ok: false, providers: [] }, ["codex"]),
+    "Only harnesses signed in with their own subscription can be authorized.",
+  );
+  assert.equal(
+    authorizeMembershipError(null, ["codex"]),
+    "Only harnesses signed in with their own subscription can be authorized.",
+  );
+});

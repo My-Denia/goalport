@@ -1983,6 +1983,29 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   }
 
+  it("never lands a paid-api scope member in the checked set when echoing a scope", async () => {
+    // An impossible-but-defensive case: a scope that somehow names the
+    // apiKey login. The checked set stays a subset of subscription logins;
+    // the summary sentence never claims GoalPort may use the paid-API one.
+    scopedBridge({
+      providers: [
+        usableHarness("codex", "Codex"),
+        usableHarness("claude", "Claude"),
+        { ...usableHarness("grok", "Grok"), auth: { status: "authenticated", type: "apiKey" } },
+      ],
+      scope: { instances: ["codex", "claude", "grok"], maxTurns: 4, remaining: 2, generation: 1 },
+      launch: async () => ({ text: "", errorText: "" }),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    expect(await screen.findByText("2 of 4 authorized model turns left.")).toBeTruthy();
+    expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy();
+    // The paid-api row is displayed (its unselectable reason) but never gets
+    // a checkbox, and the summary never claims GoalPort may use it.
+    expect(screen.queryByRole("checkbox", { name: "Select Grok" })).toBeNull();
+    expect(screen.getByText(/bills through its own API key/)).toBeTruthy();
+  });
+
   it("renders the three panel row states: usable, blocked with Use again, and paid-api", async () => {
     scopedBridge({
       providers: [
