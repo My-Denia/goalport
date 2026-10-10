@@ -9,6 +9,8 @@ const { runCliTurn } = require("./cli-coordinate.cjs");
 
 const { authorize, current, reserve, revoke, settle } = coordinationScope;
 
+const WRITE_ROOT = path.resolve(os.tmpdir(), "goalport-authorized-workspace");
+
 function command(instanceId, commandId = `coordinate-plan-${instanceId}`) {
   return {
     commandId,
@@ -22,9 +24,21 @@ function command(instanceId, commandId = `coordinate-plan-${instanceId}`) {
   };
 }
 
-function freshScope(instances = ["codex"], maxTurns = 4) {
+function writeCommand(instanceId, commandId = `coordinate-execute-${instanceId}`, worktreePath = WRITE_ROOT) {
+  return {
+    ...command(instanceId, commandId),
+    sandboxPolicy: { type: "workspaceWrite" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath },
+  };
+}
+
+function writeAuthorization(instances = ["codex"], maxTurns = 2, workspaceRoot = WRITE_ROOT) {
+  return { instances, maxTurns, workspaceRoot };
+}
+
+function freshScope(instances = ["codex"], maxTurns = 4, write) {
   revoke();
-  const granted = authorize(instances, maxTurns);
+  const granted = authorize(instances, maxTurns, write);
   assert.equal(granted.ok, true);
   return granted;
 }
@@ -67,6 +81,7 @@ test("authorize starts at generation 1 with the full budget remaining", () => {
     assert.equal(granted.ok, true);
     assert.equal(granted.generation, 1);
     assert.equal(granted.remaining, 4);
+    assert.deepEqual(granted, { ok: true, generation: 1, remaining: 4 });
     assert.deepEqual(current(), { generation: 1, instances: ["codex", "claude"], maxTurns: 4, remaining: 4 });
   } finally {
     revoke();
@@ -169,14 +184,14 @@ test("an invalid command id is rejected before any side effect, including throug
   }
 });
 
-test("a command id outside the plan/review roles is refused with zero side effects", () => {
+test("an unknown coordination role is refused with zero side effects", () => {
   const directory = tempDir();
   try {
     const granted = freshScope(["codex"], 4);
     const before = snapshotDir(directory);
-    const rejected = reserve(command("codex", "coordinate-execute-codex"), granted.generation, directory);
+    const rejected = reserve(command("codex", "coordinate-admin-codex"), granted.generation, directory);
     assert.equal(rejected.ok, false);
-    assert.match(rejected.errorText, /plan or check turn/);
+    assert.match(rejected.errorText, /not an authorized coordination turn/);
     assert.deepEqual(snapshotDir(directory), before);
     assert.equal(current().remaining, 4);
   } finally {
@@ -381,5 +396,271 @@ test("the guard leaf loads in both fresh-require orders and keeps its four check
     }
   } finally {
     dropCache();
+  }
+});
+
+test("explicit write authorization has its own canonical members, root, and clamped [1, 8] budget", () => {
+  try {
+    const root = path.join(os.tmpdir(), "goalport-write-root");
+    const granted = authorize([" reader ", "reader"], 2, writeAuthorization([" writer ", "writer"], 0, root));
+    assert.equal(granted.ok, true);
+    assert.equal(granted.remaining, 2);
+    assert.equal(granted.writeTurnsRemaining, 1);
+    assert.deepEqual(current(), {
+      generation: granted.generation,
+      instances: ["reader"],
+      maxTurns: 2,
+      remaining: 2,
+      write: { instances: ["writer"], maxTurns: 1, remaining: 1, workspaceRoot: root },
+    });
+    const mirror = current();
+    mirror.instances.push("mutated-read");
+    mirror.write.instances.push("mutated-write");
+    assert.deepEqual(current().instances, ["reader"]);
+    assert.deepEqual(current().write.instances, ["writer"]);
+
+    const upper = authorize(["reader"], 2, writeAuthorization(["writer"], 99, root));
+    assert.equal(upper.writeTurnsRemaining, 8);
+    assert.equal(current().write.maxTurns, 8);
+  } finally {
+    revoke();
+  }
+});
+
+test("malformed explicit write authorization leaves the live generation unchanged", () => {
+  try {
+    const root = path.join(os.tmpdir(), "goalport-write-root");
+    const first = authorize(["reader"], 2, writeAuthorization(["writer"], 3, root));
+    const before = current();
+    for (const bad of [
+      null,
+      {},
+      writeAuthorization([], 2, root),
+      writeAuthorization(["writer", 42], 2, root),
+      writeAuthorization(["  "], 2, root),
+      writeAuthorization(["writer"], Number.POSITIVE_INFINITY, root),
+      writeAuthorization(["writer"], "2", root),
+      writeAuthorization(["writer"], 2, "relative/workspace"),
+      writeAuthorization(["writer"], 2, ""),
+    ]) {
+      const refused = authorize(["replacement"], 8, bad);
+      assert.equal(refused.ok, false);
+      assert.match(refused.errorText, /workspace-change authorization is invalid/);
+      assert.deepEqual(current(), before);
+    }
+    const next = authorize(["replacement"], 8, writeAuthorization(["writer-2"], 1, root));
+    assert.equal(next.generation, first.generation + 1);
+  } finally {
+    revoke();
+  }
+});
+
+test("a no-write scope cannot reserve execution and keeps the legacy read-only response shape", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["codex"], 4);
+    assert.deepEqual(granted, { ok: true, generation: granted.generation, remaining: 4 });
+    const before = snapshotDir(directory);
+    const rejected = reserve(writeCommand("codex"), granted.generation, directory);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.errorText, "This execution turn needs an explicit workspace-change authorization, so nothing was sent.");
+    assert.equal(rejected.turnsRemaining, 4);
+    assert.equal("writeTurnsRemaining" in rejected, false);
+    assert.deepEqual(current(), { generation: granted.generation, instances: ["codex"], maxTurns: 4, remaining: 4 });
+    assert.deepEqual(snapshotDir(directory), before);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("role/sandbox pairing, pinned root, and per-dimension membership refuse before grant effects", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    const before = snapshotDir(directory);
+    const noWriteSandbox = reserve(command("writer", "coordinate-execute-writer"), granted.generation, directory);
+    assert.equal(noWriteSandbox.errorText, "An execution turn must use the workspaceWrite sandbox, so nothing was sent.");
+    const wrongRoot = reserve(writeCommand("reader", "coordinate-execute-reader", `${WRITE_ROOT}-other`), granted.generation, directory);
+    assert.equal(wrongRoot.errorText, "An execution turn must use the authorized workspace, so nothing was sent.");
+    const wrongReadSandbox = reserve(writeCommand("reader", "coordinate-plan-reader"), granted.generation, directory);
+    assert.equal(wrongReadSandbox.errorText, "A planning, checking, or verification turn must use the readOnly sandbox, so nothing was sent.");
+    const wrongWriteMember = reserve(writeCommand("reader", "coordinate-execute-not-a-member"), granted.generation, directory);
+    assert.equal(wrongWriteMember.errorText, "The harness is not in the authorized scope, so no model turn was sent.");
+    const wrongReadMember = reserve(command("writer", "coordinate-review-writer"), granted.generation, directory);
+    assert.equal(wrongReadMember.errorText, "The harness is not in the authorized scope, so no model turn was sent.");
+    assert.equal(current().remaining, 2);
+    assert.equal(current().write.remaining, 2);
+    assert.deepEqual(snapshotDir(directory), before);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("write-reservation validation keeps canonical-id and generation checks ahead of role checks", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    const before = snapshotDir(directory);
+    const invalidId = reserve(writeCommand("writer", "coordinate-execute-writer\ncoordinate-audit-writer"), granted.generation + 1, directory);
+    assert.equal(invalidId.errorText, "The command id is not valid, so nothing was sent.");
+    const stale = reserve(command("reader", "coordinate-admin-reader"), granted.generation + 1, directory);
+    assert.equal(stale.stopCode, "scope-revoked");
+    assert.equal(stale.errorText, "The authorized harness scope was revoked or replaced, so no model turn was sent.");
+    assert.deepEqual(snapshotDir(directory), before);
+    assert.equal(current().write.remaining, 2);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("read and write reservations spend independent budgets; read budget two remains valid", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 1));
+    const plan = reserve(command("reader", "coordinate-plan-reader"), granted.generation, directory);
+    assert.equal(plan.turnsRemaining, 1);
+    assert.equal(plan.writeTurnsRemaining, 1);
+    assert.equal("dimension" in plan.reservation, false);
+    const review = reserve(command("reader", "coordinate-review-reader"), granted.generation, directory);
+    assert.equal(review.turnsRemaining, 0);
+    assert.equal(review.writeTurnsRemaining, 1);
+    const execution = reserve(writeCommand("writer"), granted.generation, directory);
+    assert.equal(execution.ok, true);
+    assert.equal(execution.turnsRemaining, 0);
+    assert.equal(execution.writeTurnsRemaining, 0);
+    assert.equal(execution.reservation.dimension, "write");
+    assert.equal(current().remaining, 0);
+    assert.equal(current().write.remaining, 0);
+
+    const readExhausted = reserve(command("reader", "coordinate-plan-after-read-exhaustion"), granted.generation, directory);
+    assert.equal(readExhausted.errorText, "All authorized model turns were used, so this stopped.");
+    assert.equal(readExhausted.turnsRemaining, 0);
+    assert.equal(readExhausted.writeTurnsRemaining, 0);
+    const writeExhausted = reserve(writeCommand("writer", "coordinate-execute-after-write-exhaustion"), granted.generation, directory);
+    assert.equal(writeExhausted.errorText, "All authorized workspace-change turns were used, so this stopped.");
+    assert.equal(writeExhausted.turnsRemaining, 0);
+    assert.equal(writeExhausted.writeTurnsRemaining, 0);
+    assert.equal(writeExhausted.stopCode, "scope-exhausted");
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a write claim hit remains free and is checked before the exhausted write budget", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 1));
+    const charged = reserve(writeCommand("writer", "coordinate-execute-charged"), granted.generation, directory);
+    assert.equal(charged.writeTurnsRemaining, 0);
+    fs.writeFileSync(path.join(directory, "claim-coordinate-execute-claimed"), "");
+    const before = snapshotDir(directory);
+    const free = reserve(writeCommand("writer", "coordinate-execute-claimed"), granted.generation, directory);
+    assert.equal(free.ok, true);
+    assert.equal(free.existing, true);
+    assert.equal(free.turnsRemaining, 2);
+    assert.equal(free.writeTurnsRemaining, 0);
+    assert.equal(free.reservation, undefined);
+    assert.deepEqual(snapshotDir(directory), before);
+    assert.equal(current().write.remaining, 0);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a write ledger entry without a claim still makes a fresh charged reservation", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    fs.writeFileSync(path.join(directory, "sent-turns.json"), JSON.stringify({ "coordinate-execute-ledger": { ok: true, text: "old" } }));
+    const result = reserve(writeCommand("writer", "coordinate-execute-ledger"), granted.generation, directory);
+    assert.equal(result.ok, true);
+    assert.equal(result.existing, false);
+    assert.equal(result.reservation.dimension, "write");
+    assert.equal(result.writeTurnsRemaining, 1);
+    assert.equal(current().remaining, 2);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-ledger")), false);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("settling a claimed write reservation keeps its charge", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    const result = reserve(writeCommand("writer", "coordinate-execute-claimed"), granted.generation, directory);
+    fs.writeFileSync(path.join(directory, "claim-coordinate-execute-claimed"), "");
+    settle(result.reservation, { dispatched: false }, directory);
+    assert.equal(current().write.remaining, 1);
+    assert.equal(current().remaining, 2);
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), true);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("proven-not-sent write settles refund even for a hand-written grant and never delete it", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    const line = "coordinate-execute-manual\n";
+    fs.writeFileSync(path.join(directory, "send-authorization"), line);
+    const result = reserve(writeCommand("writer", "coordinate-execute-manual"), granted.generation, directory);
+    assert.equal(result.reservation.insertedByScope, false);
+    assert.equal(current().write.remaining, 1);
+    settle(result.reservation, { dispatched: false }, directory);
+    assert.equal(current().write.remaining, 2);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), line);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("unknown write dispatch keeps its charge and removes only the scope-inserted unclaimed grant", () => {
+  const directory = tempDir();
+  try {
+    const granted = freshScope(["reader"], 2, writeAuthorization(["writer"], 2));
+    const result = reserve(writeCommand("writer", "coordinate-execute-unknown"), granted.generation, directory);
+    assert.equal(result.reservation.insertedByScope, true);
+    settle(result.reservation, { dispatched: null }, directory);
+    assert.equal(current().write.remaining, 1);
+    assert.equal(current().remaining, 2);
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("late write settlements never credit a replacement or re-authorized generation", () => {
+  const directory = tempDir();
+  try {
+    const first = authorize(["reader"], 2, writeAuthorization(["writer"], 1));
+    const old = reserve(writeCommand("writer", "coordinate-execute-old"), first.generation, directory);
+    assert.equal(old.writeTurnsRemaining, 0);
+    const second = authorize(["reader-2"], 2, writeAuthorization(["writer-2"], 2));
+    settle(old.reservation, { dispatched: false }, directory);
+    assert.equal(current().generation, second.generation);
+    assert.equal(current().write.remaining, 2);
+
+    const pending = reserve(writeCommand("writer-2", "coordinate-execute-pending"), second.generation, directory);
+    assert.equal(current().write.remaining, 1);
+    revoke();
+    assert.equal(current(), null);
+    const third = authorize(["reader-3"], 2, writeAuthorization(["writer-3"], 3));
+    settle(pending.reservation, { dispatched: false }, directory);
+    assert.equal(current().generation, third.generation);
+    assert.equal(current().write.remaining, 3);
+  } finally {
+    revoke();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
