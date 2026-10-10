@@ -12,6 +12,10 @@ export interface CoordinationStatusProps {
   reviewHarness: string | null;
   planText: string | null;
   reviewText: string | null;
+  executionText?: string | null;
+  auditText?: string | null;
+  executionHarness?: string | null;
+  auditHarness?: string | null;
   verdict: CoordinationVerdict | null;
   stopReason: string;
   planningQuota: CoordinationQuotaWord | null;
@@ -38,6 +42,7 @@ export interface CoordinationStatusProps {
   budget?: { readonly remaining: number; readonly maxTurns: number } | null;
   /** True when the current round ran out of authorized model turns. */
   scopeExhausted?: boolean;
+  writeBudget?: { remaining: number | null; maxTurns: number } | null;
   onAllowMoreTurns?: () => void;
   /** Harness access management, reachable only on the current round. */
   onChangeAccess?: () => void;
@@ -92,7 +97,7 @@ function EnvironmentBlockedCard({
   onUseAgain?: () => void;
 }) {
   const harness = blocked.harness ?? blocked.instanceId;
-  const step = blocked.role === "planning" ? "plan" : "check";
+  const step = blocked.role === "planning" ? "plan" : blocked.role === "review" ? "check" : blocked.role === "execution" ? "changes" : "verification";
   const enoughOthers = alternatives !== null && alternatives >= 2;
   return (
     <article className="tl-event tl-system card-accent-red" data-kind="environment-blocked">
@@ -149,6 +154,10 @@ export function CoordinationStatus({
   reviewHarness,
   planText,
   reviewText,
+  executionText,
+  auditText,
+  executionHarness,
+  auditHarness,
   verdict,
   stopReason,
   planningQuota,
@@ -163,14 +172,37 @@ export function CoordinationStatus({
   roundSummary,
   budget,
   scopeExhausted,
+  writeBudget,
   onAllowMoreTurns,
   onChangeAccess,
   onStopAllowing,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
+  // An assigned writer alone is not evidence it launched: the read-budget
+  // feasibility stop assigns one before refusing all edits.
+  const executionEvidence = Boolean(executionText || auditHarness || auditText)
+    || roundEvents?.some((event) => event.role === "execution") === true;
   return (
     <section className="coordination-status" aria-label="Plan and check">
-      <p>You sent a goal without picking a runtime. Below are the planning harness, the review harness, the plan, the check, and why this stopped.</p>
+      <dl className="coordination-outcome">
+        <dt>Outcome</dt><dd>{outcomeLabel(verdict)}</dd>
+        <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
+      </dl>
+      {verdict === "checked" && !executionHarness && !executionText ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
+      {executionEvidence ? (
+        <article className="coordination-result" aria-label="Workspace changes result">
+          <h3>Changes{executionHarness ? ` — ${executionHarness}` : ""}</h3>
+          <p>{fact(executionText ?? null)}</p>
+          {(verdict === "failed" || (!auditText && verdict !== "verified")) && !stopReason.toLowerCase().includes("inspect")
+            ? <p>Files may have changed. Inspect the workspace before sending a new goal; this write will not be retried automatically.</p> : null}
+        </article>
+      ) : null}
+      {auditHarness || auditText ? (
+        <article className="coordination-result" aria-label="Independent verification result">
+          <h3>Independent verification{auditHarness ? ` — ${auditHarness}` : ""}</h3>
+          <p>{fact(auditText ?? null)}</p>
+        </article>
+      ) : null}
       {roundSummary ? <p className="coordination-summary">{roundSummary}</p> : null}
       {environmentBlocked ? (
         <EnvironmentBlockedCard
@@ -210,10 +242,6 @@ export function CoordinationStatus({
         <dd>{fact(planText)}</dd>
         <dt>Check</dt>
         <dd>{fact(reviewText)}</dd>
-        <dt>Outcome</dt>
-        <dd>{outcomeLabel(verdict)}</dd>
-        <dt>Stop reason</dt>
-        <dd>{fact(stopReason)}</dd>
       </dl>
       {scopeExhausted ? (
         <div className="coordination-budget" role="status">
@@ -233,6 +261,7 @@ export function CoordinationStatus({
       ) : budget ? (
         <p className="coordination-budget">{budget.remaining} of {budget.maxTurns} authorized model turns left.</p>
       ) : null}
+      {writeBudget ? <p className="coordination-budget">{writeBudget.remaining ?? "Unknown"} of {writeBudget.maxTurns} write turns left.</p> : null}
       {onChangeAccess || onStopAllowing ? (
         <div className="coordination-access">
           <span className="coordination-access-label">Harness access</span>
@@ -269,6 +298,8 @@ export interface CoordinationProgressProps {
   readonly activity: string | null;
   readonly remaining: number | null;
   readonly maxTurns: number | null;
+  readonly writeRemaining?: number | null;
+  readonly maxWriteTurns?: number | null;
 }
 
 /**
@@ -276,7 +307,7 @@ export interface CoordinationProgressProps {
  * user sees which harness is working, which failed, who took over, and how
  * many authorized model turns are left.
  */
-export function CoordinationProgress({ failures, activity, remaining, maxTurns }: CoordinationProgressProps) {
+export function CoordinationProgress({ failures, activity, remaining, maxTurns, writeRemaining, maxWriteTurns }: CoordinationProgressProps) {
   return (
     <section className="coordination-status coordination-progress" aria-label="Round in progress" aria-live="polite">
       <p>You sent a goal without picking a runtime. The harnesses you allowed are working on it now.</p>
@@ -287,6 +318,7 @@ export function CoordinationProgress({ failures, activity, remaining, maxTurns }
       {remaining !== null && maxTurns !== null ? (
         <p>{remaining} of {maxTurns} authorized model turns left.</p>
       ) : null}
+      {maxWriteTurns != null ? <p>{writeRemaining ?? "Unknown"} of {maxWriteTurns} write turns left.</p> : null}
     </section>
   );
 }

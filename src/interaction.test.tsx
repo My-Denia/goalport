@@ -5,7 +5,10 @@
 // scroll anchoring under mocked geometry.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createRequire } from "node:module";
 import App, { coordinationGeneration } from "./App";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
@@ -1634,106 +1637,19 @@ describe("leaving a draft during coordination", () => {
   });
 });
 
-/**
- * Mirrors electron/coordination-record.cjs normalize: only whitelisted fields
- * survive a save. In particular the transient overlay fields
- * (authorizedTurnsLeft, scopeExhausted) are DROPPED, and malformed
- * roundEvents entries are discarded without rejecting the record.
- */
-const RECORD_VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed"]);
-const RECORD_QUOTAS = new Set(["unknown", "available", "exhausted"]);
-
-function nullableText(value: unknown): string | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== "string") return undefined;
-  const text = value.trim();
-  return text.length > 0 ? text : null;
-}
-
-function normalizeEnvironmentBlockedForTest(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null) return null;
-  const input = value as Record<string, unknown>;
-  const role = input.role === "planning" || input.role === "review" ? input.role : null;
-  const instanceId = typeof input.instanceId === "string" && input.instanceId.trim() ? input.instanceId.trim() : null;
-  if (!role || !instanceId) return null;
-  return {
-    role,
-    instanceId,
-    harness: nullableText(input.harness) ?? null,
-    detail: nullableText(input.detail) ?? null,
-  };
-}
-
-function normalizeRoundEventForTest(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null) return null;
-  const input = value as Record<string, unknown>;
-  const kind = input.kind === "failed" || input.kind === "continued" ? input.kind : null;
-  const role = input.role === "planning" || input.role === "review" ? input.role : null;
-  const instanceId = typeof input.instanceId === "string" && input.instanceId.trim() ? input.instanceId.trim() : null;
-  const harness = nullableText(input.harness);
-  const sentence = nullableText(input.sentence);
-  if (!kind || !role || !instanceId || harness === undefined || !sentence) return null;
-  const event: Record<string, unknown> = { kind, role, instanceId, harness, sentence };
-  if (input.detail !== undefined) {
-    const detail = nullableText(input.detail);
-    if (detail === undefined) return null;
-    event.detail = detail;
-  }
-  return event;
-}
-
+// Execute the actual integrated M7 normalizer, not a permissive imitation.
+// All storage is isolated temporary test storage; no user profile is touched.
+const recordApi = createRequire(import.meta.url)("../electron/coordination-record.cjs") as {
+  saveRecord: (dir: string, input: Record<string, unknown>) => Record<string, unknown>;
+  readRecords: (dir: string) => Array<Record<string, unknown>>;
+};
 function normalizeCoordinationRecordForTest(input: Record<string, unknown>): Record<string, unknown> | null {
-  const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
-  const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : "";
-  const goal = typeof input.goal === "string" ? input.goal.trim() : "";
-  const stopReason = typeof input.stopReason === "string" ? input.stopReason.trim() : "";
-  const verdict = input.verdict;
-  if (!requestId || !workspacePath || !goal || !stopReason || !RECORD_VERDICTS.has(String(verdict))) return null;
-  if (stopReason.toLowerCase().includes("replaced")) return null;
-  const planningHarness = nullableText(input.planningHarness);
-  const reviewHarness = nullableText(input.reviewHarness);
-  const planText = nullableText(input.planText);
-  const reviewText = nullableText(input.reviewText);
-  const result = nullableText(input.result);
-  const planningQuota = input.planningQuota === null
-    ? null
-    : (RECORD_QUOTAS.has(String(input.planningQuota)) ? input.planningQuota : undefined);
-  const reviewQuota = input.reviewQuota === null
-    ? null
-    : (RECORD_QUOTAS.has(String(input.reviewQuota)) ? input.reviewQuota : undefined);
-  if (
-    planningHarness === undefined
-    || reviewHarness === undefined
-    || planText === undefined
-    || reviewText === undefined
-    || result === undefined
-    || planningQuota === undefined
-    || reviewQuota === undefined
-  ) return null;
-  const roundEvents = Array.isArray(input.roundEvents)
-    ? input.roundEvents.flatMap((item) => {
-      const event = normalizeRoundEventForTest(item);
-      return event ? [event] : [];
-    })
-    : undefined;
-  return {
-    requestId,
-    workspacePath,
-    goal,
-    planningHarness,
-    reviewHarness,
-    planText,
-    reviewText,
-    result,
-    verdict,
-    stopReason,
-    planningQuota,
-    reviewQuota,
-    messageDispatched: input.messageDispatched === true ? true : input.messageDispatched === false ? false : null,
-    environmentBlocked: normalizeEnvironmentBlockedForTest(input.environmentBlocked),
-    ...(roundEvents === undefined ? {} : { roundEvents }),
-    savedAt: typeof input.savedAt === "string" && !Number.isNaN(Date.parse(input.savedAt)) ? input.savedAt : null,
-  };
+  const dir = mkdtempSync(join(tmpdir(), "goalport-m8-record-"));
+  try {
+    recordApi.saveRecord(dir, input);
+    return recordApi.readRecords(dir)[0] ?? null;
+  } catch { return null; }
+  finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
 function saveCoordinationRecordForTest(
@@ -1903,15 +1819,22 @@ describe("harness access panel and scoped rounds", () => {
       : { text: CHECK_TEXT, errorText: "" };
   }
 
+  type AccessPayload = { instances: string[]; maxTurns: number; write?: { instances: string[]; maxTurns: number; workspaceRoot: string } };
   function scopedBridge(options: {
     providers: Array<Record<string, unknown>>;
     scope?: Record<string, unknown> | null;
     onUnblock?: (instanceId: string) => void;
-    authorize?: (payload: { instances: string[]; maxTurns: number }) => Promise<unknown>;
+    authorize?: (payload: AccessPayload) => Promise<unknown>;
+    readScope?: (scope: Record<string, unknown> | null, call: number) => Record<string, unknown> | null;
+    save?: (record: Record<string, unknown>, call: number) => Record<string, unknown>;
     launch: (command: { commandId: string; modelSelection: { instanceId: string } }, call: number) => Promise<Record<string, unknown>>;
     records?: Array<Record<string, unknown>> | (() => Promise<Array<Record<string, unknown>>>);
   }) {
     const order: string[] = [];
+    const authorizations: AccessPayload[] = [];
+    let currentScope = options.scope ?? null;
+    let scopeCalls = 0;
+    let saveCalls = 0;
     const saved: Array<Record<string, unknown>> = [];
     const launched: Array<{ commandId: string; instanceId: string }> = [];
     const launchArgs: unknown[][] = [];
@@ -1942,18 +1865,30 @@ describe("harness access panel and scoped rounds", () => {
         launchArgs.push(args);
         return options.launch(command, calls);
       },
-      coordinationAuthorize: async (payload: { instances: string[]; maxTurns: number }) => {
+      coordinationAuthorize: async (payload: AccessPayload) => {
         order.push("authorize");
-        return options.authorize ? options.authorize(payload) : { ok: true, generation: 1, remaining: payload.maxTurns };
+        authorizations.push(payload);
+        const result = options.authorize ? await options.authorize(payload) : { ok: true, generation: 1, remaining: payload.maxTurns };
+        if (result && typeof result === "object" && "ok" in result && result.ok === true) {
+          currentScope = { instances: payload.instances, maxTurns: payload.maxTurns, remaining: payload.maxTurns, generation: 1,
+            ...(payload.write ? { write: { ...payload.write, remaining: payload.write.maxTurns } } : {}) };
+        }
+        return result;
       },
-      coordinationScope: async () => options.scope ?? null,
-      coordinationRevoke: async () => ({ ok: true }),
+      coordinationScope: async () => {
+        scopeCalls += 1;
+        return options.readScope ? options.readScope(currentScope, scopeCalls) : currentScope;
+      },
+      coordinationRevoke: async () => { currentScope = null; return { ok: true }; },
       coordinationUnblock: async (instanceId: string) => {
         order.push(`unblock:${instanceId}`);
         options.onUnblock?.(instanceId);
         return { ok: true };
       },
-      coordinationSave: async (record: Record<string, unknown>) => saveCoordinationRecordForTest(saved, record),
+      coordinationSave: async (record: Record<string, unknown>) => {
+        saveCalls += 1;
+        return options.save ? options.save(record, saveCalls) : saveCoordinationRecordForTest(saved, record);
+      },
       coordinationRecords: async () => (typeof options.records === "function" ? options.records() : (options.records ?? saved)),
     } as never;
     return {
@@ -1961,6 +1896,7 @@ describe("harness access panel and scoped rounds", () => {
       saved,
       launched,
       launchArgs,
+      authorizations,
       launchCount: () => calls,
       setProviders: (providers: Array<Record<string, unknown>>) => { currentProviders = providers; },
     };
@@ -2304,5 +2240,176 @@ describe("harness access panel and scoped rounds", () => {
     await waitFor(() => expect(bridge.launchCount()).toBe(4));
     expect(bridge.launched.slice(2).map((item) => item.instanceId)).toEqual(["codex", "grok"]);
     expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+  });
+
+  function consentToChanges() {
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/goal" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow changes through Codex" }));
+    typeMessage("Fix the helper and check the changes.");
+  }
+  const writeProviders = () => [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")];
+  function writeRound(command: { commandId: string }, call: number): Record<string, unknown> {
+    const text = command.commandId.includes("-execute-") ? "Changed helper.ts and its test."
+      : command.commandId.includes("-audit-") ? "Checked helper.ts independently.\nVERDICT: verified"
+      : command.commandId.includes("-plan-") ? PLAN_TEXT : CHECK_TEXT;
+    return { text, errorText: "", dispatched: true, turnsRemaining: 4 - (call >= 3 ? call - 1 : call), writeTurnsRemaining: call >= 3 ? 1 : 2 };
+  }
+
+  it("starts write consent off and sends exactly the legacy read authorization when off", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command) => planOrReview(command) });
+    render(<App />); await openDraftWithPanel();
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value).toBe("2");
+    typeMessage("Only plan."); sendMessage();
+    await screen.findByText("Can be carried out", { selector: "dd" });
+    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4 }]);
+    expect(bridge.launchCount()).toBe(2);
+    expect(screen.getByText(/No harness is allowed to change files/)).toBeTruthy();
+  });
+
+  it("requires a workspace and explains unavailable write members without selecting them", async () => {
+    scopedBridge({ providers: [usableHarness("codex", "Codex"), { ...usableHarness("claude", "Claude"), auth: { status: "authenticated", type: "apiKey" } }], launch: async () => ({ text: "", errorText: "" }) });
+    render(<App />); await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "" } });
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Claude" }) as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText(/Choose a project folder before allowing/)).toBeTruthy();
+  });
+
+  it("passes the bound actual scope and both literal counters through a full engine/normalizer round", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => writeRound(command, call) });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText("Changes verified", { selector: "dd" });
+    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" } }]);
+    expect(bridge.launchArgs).toHaveLength(4);
+    expect(bridge.launchArgs.every((args) => args.length === 3 && args[2] === 1)).toBe(true);
+    expect(bridge.launched.map((item) => item.commandId.split("-")[1])).toEqual(["plan", "review", "execute", "audit"]);
+    expect(bridge.launched[2].instanceId).not.toBe(bridge.launched[3].instanceId);
+    expect(bridge.saved[0]).toMatchObject({ verdict: "verified", executionText: "Changed helper.ts and its test.", auditText: "Checked helper.ts independently.\nVERDICT: verified", messageDispatched: true });
+    expect(bridge.saved[0]).not.toHaveProperty("authorizedWriteTurnsLeft");
+    expect(screen.getByText("1 of 2 write turns left.")).toBeTruthy();
+    expect(screen.getByRole("article", { name: "Independent verification result" })).toBeTruthy();
+  });
+
+  it.each(["missing", "generation", "root", "members", "budget"])("refuses a %s actual write scope before any transport", async (kind) => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => writeRound(command, call), readScope: (scope, call) => {
+      if (call === 1) return null;
+      if (kind === "missing") return null;
+      const write = scope!.write as Record<string, unknown>;
+      return { ...scope, ...(kind === "generation" ? { generation: 88 } : {}), write: { ...write,
+        ...(kind === "root" ? { workspaceRoot: "/different" } : {}),
+        ...(kind === "members" ? { instances: ["claude"] } : {}),
+        ...(kind === "budget" ? { remaining: 0 } : {}),
+      } };
+    } });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText(/Workspace-change access changed or was stopped/);
+    expect(bridge.launchCount()).toBe(0); expect(bridge.saved).toHaveLength(0);
+  });
+
+  it("clears write consent on root changes and never silently expands an invalid budget", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command) => planOrReview(command) });
+    render(<App />); await openDraftWithPanel(); consentToChanges();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Write turns to allow" }), { target: { value: "0" } });
+    sendMessage(); await waitFor(() => expect(bridge.authorizations).toHaveLength(0));
+    expect((screen.getByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value).toBe("0");
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/another/root" } });
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("retains partial write failure without replay and without claiming verification", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => call === 3
+      ? { text: "Changed helper.ts; test unfinished.", errorText: "Write stopped midway.", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 }
+      : writeRound(command, call) });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText("Failed", { selector: "dd" });
+    expect(screen.getByText("Changed helper.ts; test unfinished.")).toBeTruthy();
+    expect(screen.getByText(/inspect any partial changes before sending again/)).toBeTruthy();
+    expect(bridge.launchCount()).toBe(3); expect(bridge.saved[0]).toMatchObject({ verdict: "failed", executionText: "Changed helper.ts; test unfinished.", messageDispatched: true, auditText: null });
+    expect(screen.queryByText("Changes verified")).toBeNull();
+  });
+
+  it("keeps actual execution and verification on screen when final save fails, never unsent", async () => {
+    const persisted: Array<Record<string, unknown>> = [];
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => writeRound(command, call), save: (record, call) => {
+      if (call === 2) throw new Error("disk full");
+      return saveCoordinationRecordForTest(persisted, record);
+    }, records: () => Promise.resolve(persisted) });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText(/could not be saved for the next time/);
+    expect(screen.getByText("Changes verified", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText("Changed helper.ts and its test.")).toBeTruthy();
+    expect(screen.getByText(/Checked helper.ts independently/)).toBeTruthy();
+    expect(persisted[0]).toMatchObject({ verdict: "unconfirmed", messageDispatched: true });
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(bridge.launchCount()).toBe(4);
+  });
+
+  it("stops a write-authorized read-budget-2 round before edits with write budget untouched", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => ({ ...writeRound(command, call), turnsRemaining: 2 - call, writeTurnsRemaining: 2 }) });
+    render(<App />); await openDraftWithPanel(); consentToChanges();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "2" } });
+    sendMessage(); await screen.findByText("Stopped", { selector: "dd" });
+    expect(bridge.launchCount()).toBe(2); expect(bridge.saved[0].executionText).toBeNull();
+    expect(screen.queryByText(/Files may have changed/)).toBeNull();
+    expect(screen.queryByRole("article", { name: "Workspace changes result" })).toBeNull();
+    expect(screen.getByText("2 of 2 write turns left.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Change" })).toBeTruthy();
+  });
+
+  it.each([null, "false", undefined])("does not reinterpret unknown dispatch %s or null budgets on write failure", async (dispatch) => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => call === 3
+      ? { text: "Partial changes.", errorText: "Unknown outcome.", dispatched: dispatch, turnsRemaining: null, writeTurnsRemaining: null }
+      : writeRound(command, call) });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText("Failed", { selector: "dd" });
+    expect(bridge.launchCount()).toBe(3);
+    expect(screen.getByText("Unknown of 2 write turns left.")).toBeTruthy();
+    expect(bridge.saved[0].messageDispatched).not.toBe(false);
+  });
+
+  it("reloads verified optional fields through actual normalization without transient access controls", async () => {
+    const record = normalizeCoordinationRecordForTest({ requestId: "historic-verified", workspacePath: "/work/goal", goal: "Fix helper.", planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: CHECK_TEXT, executionHarness: "Codex", auditHarness: "Claude", executionText: "Fixed helper.", auditText: "Checked independently.", result: "Checked independently.", verdict: "verified", stopReason: "Independent verification finished.", planningQuota: "available", reviewQuota: "available", messageDispatched: true, authorizedWriteTurnsLeft: 1 });
+    scopedBridge({ providers: writeProviders(), launch: async () => ({ text: "", errorText: "" }), records: [record!] });
+    render(<App />); await screen.findByText("Changes verified", { selector: "dd" });
+    expect(screen.getByText("Fixed helper.")).toBeTruthy();
+    for (const name of ["Change", "Stop allowing", "Allow more turns"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    expect(screen.queryByText(/write turns left/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /new goal/i })); await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("discards a replaced in-flight write result without saving a verified history or automatically retrying", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => {
+      if (call === 3) await gate;
+      return writeRound(command, call);
+    } });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText("Codex is making changes…");
+    fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+    await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+    release();
+    await waitFor(() => expect(bridge.launchCount()).toBe(3));
+    expect(bridge.saved).toHaveLength(1);
+    expect(bridge.saved[0]).toMatchObject({ verdict: "unconfirmed", messageDispatched: true });
+    expect(screen.queryByText("Changes verified")).toBeNull();
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("revoke clears both dimensions and a new draft never inherits previous write consent", async () => {
+    const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => writeRound(command, call) });
+    render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
+    await screen.findByText("Changes verified", { selector: "dd" });
+    fireEvent.click(screen.getByRole("button", { name: "Stop allowing" }));
+    await waitFor(() => expect(screen.queryByText(/write turns left/)).toBeNull());
+    expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
+    await openDraftWithPanel();
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+    typeMessage("Only plan again."); sendMessage();
+    await waitFor(() => expect(bridge.authorizations).toHaveLength(2));
+    expect(bridge.authorizations[1]).toEqual({ instances: ["codex", "claude"], maxTurns: 4 });
   });
 });

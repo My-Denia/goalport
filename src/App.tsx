@@ -24,7 +24,7 @@ import { CoordinationStatus, CoordinationProgress } from "./conversation/Coordin
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
-import { usableInstanceIds } from "./coordination/coordinateGoal";
+import { usableInstanceIds, type CoordinationWriteAuthorization } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
@@ -162,11 +162,14 @@ function App() {
   const [panelRequestId, setPanelRequestId] = useState<string | null>(null);
   const [selectedInstances, setSelectedInstances] = useState<readonly string[]>([]);
   const [allowedTurns, setAllowedTurns] = useState(4);
+  const [writeInstances, setWriteInstances] = useState<readonly string[]>([]);
+  const [writeTurns, setWriteTurns] = useState(2);
   const [scopeMirror, setScopeMirror] = useState<{
     instances: readonly string[];
     maxTurns: number;
     remaining: number;
     generation: number;
+    write?: { instances: readonly string[]; maxTurns: number; remaining: number | null; workspaceRoot: string };
   } | null>(null);
   const [panelChangeMode, setPanelChangeMode] = useState(false);
   // Transient state of the CURRENT round, keyed by its request id: never
@@ -178,6 +181,8 @@ function App() {
     turnsLeft: number | null;
     maxTurns: number | null;
     exhausted: boolean;
+    writeTurnsLeft: number | null;
+    maxWriteTurns: number | null;
   } | null>(null);
   // In-flight round progress from this window's onEvent stream.
   const [roundProgress, setRoundProgress] = useState<{
@@ -358,6 +363,11 @@ function App() {
     if (!discover || !readScope) return undefined;
     let cancelled = false;
     setPanelProviders(null);
+    setScopeMirror(null);
+    // Each fresh draft starts without file-change consent. Never restore it
+    // from history or from another draft's live scope.
+    setWriteInstances([]);
+    setWriteTurns(2);
     setPanelRequestId(runtimeLessDraftKey);
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
@@ -370,7 +380,7 @@ function App() {
       }
       if (cancelled) return;
       if (scope) {
-        setScopeMirror(scope);
+        setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation });
         setAllowedTurns(scope.maxTurns);
       }
       let discovery: {
@@ -644,6 +654,10 @@ function App() {
       // independent check, so nothing is authorized and nothing is sent.
       const panelForDraft = panelRequestId === draftGoal.requestId ? panelProviders : null;
       const scopedSend = scopeBridgeReady && panelForDraft !== null;
+      if (scopedSend && writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8)) {
+        setDraftError({ sentence: "Choose 1 to 8 write turns before allowing workspace changes." });
+        return;
+      }
       if (scopedSend && selectedInstances.length < 2) {
         setDraftError({ sentence: "An independent check needs two harnesses that can run, so select at least two." });
         return;
@@ -653,16 +667,21 @@ function App() {
       const generation = coordinationGeneration(coordinationScope.current, request);
       const stillCurrent = () => coordinationRequest.current === request;
       let sendRecorded = false;
+      let completedReport: CoordinationView | null = null;
       setDraftBusy(true);
       try {
         // Authorize before anything else: a failed authorization shows its
         // sentence and sends nothing at all.
         let scopeGeneration: number | undefined;
+        let writeAuthorization: CoordinationWriteAuthorization | undefined;
         if (scopedSend) {
           setCoordination(null);
           setRoundProgress({ requestId: draftGoal.requestId, failures: [], activity: null });
           const chosen = [...selectedInstances];
-          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns });
+          const requestedWrite = writeInstances.length > 0
+            ? { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: workspace }
+            : undefined;
+          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, ...(requestedWrite ? { write: requestedWrite } : {}) });
           if (!stillCurrent()) return;
           if (!authorized || authorized.ok !== true) {
             setDraftError({ sentence: authorized?.errorText?.trim() || "Harness access could not be authorized, so nothing was sent." });
@@ -670,6 +689,28 @@ function App() {
           }
           scopeGeneration = authorized.generation;
           setScopeMirror({ instances: chosen, maxTurns: allowedTurns, remaining: authorized.remaining, generation: authorized.generation });
+          if (requestedWrite) {
+            // Consent is not authority. The actual M6 scope must still be live,
+            // generation-matched and bound to this pinned workspace.
+            const scope = await window.goalportCore!.coordinationScope!();
+            if (!stillCurrent()) return;
+            const write = scope?.write;
+            if (!scope || scope.generation !== scopeGeneration || !write
+              || write.workspaceRoot !== workspace || draftGoalRef.current?.workspace.trim() !== workspace
+              || draftGoalRef.current?.requestId !== draftGoal.requestId
+              || write.maxTurns !== requestedWrite.maxTurns
+              || !Number.isInteger(write.remaining) || write.remaining < 1 || write.remaining > write.maxTurns
+              || write.instances.length !== requestedWrite.instances.length
+              || !write.instances.every((id) => requestedWrite.instances.includes(id))
+              || scope.instances.length !== chosen.length || !scope.instances.every((id) => chosen.includes(id))) {
+              setWriteInstances([]);
+              setScopeMirror(null);
+              setDraftError({ sentence: "Workspace-change access changed or was stopped. Check this workspace and authorize again; no edits were sent." });
+              return;
+            }
+            writeAuthorization = { instances: [...write.instances], workspaceRoot: write.workspaceRoot, remaining: write.remaining };
+            setScopeMirror(scope);
+          }
         }
         // Each recorded send gets its own command identity, so a second send
         // of the same words is a new round, not a replay of the first round's
@@ -708,6 +749,7 @@ function App() {
             priorReview: draftGoal.revision?.reviewText ?? null,
             avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
             allowedInstances: scopedSend ? [...selectedInstances] : undefined,
+            writeAuthorization,
             onEvent: scopedSend
               ? (event) => {
                 if (!stillCurrent()) return;
@@ -715,7 +757,7 @@ function App() {
                   const base = current ?? { requestId: draftGoal.requestId, failures: [], activity: null };
                   if (event.kind === "started") {
                     const harness = event.harness?.trim() || event.instanceId;
-                    return { ...base, activity: `${harness} is ${event.role === "planning" ? "planning" : "checking"}…` };
+                    return { ...base, activity: `${harness} is ${event.role === "planning" ? "planning" : event.role === "review" ? "checking" : event.role === "execution" ? "making changes" : "verifying"}…` };
                   }
                   if (event.kind === "continued") return { ...base, activity: event.sentence };
                   return { ...base, failures: [...base.failures, event.sentence], activity: null };
@@ -760,9 +802,19 @@ function App() {
               const result = await launch(command, generation, scopeGeneration);
               // Each launch reports the authorized budget it spent from; the
               // mirror (and the in-flight progress line) follow it live.
-              if (stillCurrent() && result && typeof result.turnsRemaining === "number") {
-                const turnsRemaining = result.turnsRemaining;
-                setScopeMirror((current) => (current ? { ...current, remaining: turnsRemaining } : current));
+              if (stillCurrent() && result) {
+                // Forward transport literally; null means unknown/revoked, not
+                // a stale last-known number. READ and WRITE are independent.
+                setScopeMirror((current) => {
+                  if (!current) return current;
+                  if (result.turnsRemaining === null) return null;
+                  return {
+                    ...current,
+                    remaining: typeof result.turnsRemaining === "number" ? result.turnsRemaining : current.remaining,
+                    ...(current.write && result.writeTurnsRemaining !== undefined
+                      ? { write: { ...current.write, remaining: result.writeTurnsRemaining } } : {}),
+                  };
+                });
               }
               return result;
             },
@@ -770,13 +822,17 @@ function App() {
           stillCurrent,
         );
         if (coordinationRequest.current !== request) return;
+        completedReport = report;
         setCoordination(report);
+        setDraftBlocked(report.messageDispatched !== false);
         setLiveRound({
           requestId: draftGoal.requestId,
           scoped: scopedSend,
           turnsLeft: report.authorizedTurnsLeft ?? null,
           maxTurns: scopedSend ? allowedTurns : null,
           exhausted: report.scopeExhausted === true,
+          writeTurnsLeft: report.authorizedWriteTurnsLeft ?? null,
+          maxWriteTurns: writeAuthorization ? writeTurns : null,
         });
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, report);
         if (coordinationRequest.current !== request) return;
@@ -786,6 +842,12 @@ function App() {
         }
       } catch (error) {
         if (coordinationRequest.current !== request) return;
+        if (completedReport) {
+          setCoordination(completedReport);
+          setDraftBlocked(completedReport.messageDispatched !== false);
+          setActiveNotice({ sentence: "The result is on screen, but it could not be saved. Do not resend without inspecting the workspace." });
+          return;
+        }
         const failed: CoordinationView = {
           planningHarness: null,
           reviewHarness: null,
@@ -890,7 +952,7 @@ function App() {
       const stamped = await save(record);
       return { record: stamped ?? record, recorded: true };
     } catch {
-      setActiveNotice({ sentence: "The plan is on screen, but it could not be saved for the next time you open GoalPort." });
+      setActiveNotice({ sentence: "The result is on screen, but it could not be saved for the next time you open GoalPort. Any changes already made are not undone; inspect the workspace before a new send." });
       return { record, recorded: false };
     }
   }
@@ -975,6 +1037,7 @@ function App() {
       return;
     }
     setScopeMirror(null);
+    setWriteInstances([]);
     setPanelChangeMode(false);
     // The finished round stays on screen, but its budget state belonged to
     // the revoked authorization: no authorization controls remain on it.
@@ -1017,7 +1080,12 @@ function App() {
     }
     let authorized: { ok: boolean; generation: number; remaining: number; errorText?: string };
     try {
-      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns });
+      if (writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8 || !draftGoal?.workspace.trim())) {
+        setDraftError({ sentence: "Choose a workspace and 1 to 8 write turns before allowing changes." });
+        return;
+      }
+      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns,
+        ...(writeInstances.length > 0 ? { write: { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: draftGoal!.workspace.trim() } } : {}) });
     } catch (error) {
       setDraftError({
         sentence: "Harness access could not be updated.",
@@ -1656,6 +1724,10 @@ function App() {
                 reviewHarness={selectedPlan.reviewHarness}
                 planText={selectedPlan.planText}
                 reviewText={selectedPlan.reviewText}
+                executionText={selectedPlan.executionText}
+                auditText={selectedPlan.auditText}
+                executionHarness={selectedPlan.executionHarness}
+                auditHarness={selectedPlan.auditHarness}
                 verdict={selectedPlan.verdict}
                 stopReason={selectedPlan.stopReason}
                 planningQuota={selectedPlan.planningQuota}
@@ -1675,6 +1747,8 @@ function App() {
                 budget={selectedPlanOverlay && selectedPlanOverlay.turnsLeft !== null && selectedPlanOverlay.maxTurns !== null
                   ? { remaining: selectedPlanOverlay.turnsLeft, maxTurns: selectedPlanOverlay.maxTurns }
                   : null}
+                writeBudget={selectedPlanOverlay && selectedPlanOverlay.maxWriteTurns !== null
+                  ? { remaining: selectedPlanOverlay.writeTurnsLeft, maxTurns: selectedPlanOverlay.maxWriteTurns } : null}
                 scopeExhausted={selectedPlanOverlay?.exhausted === true}
                 onAllowMoreTurns={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
                 onChangeAccess={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
@@ -1690,6 +1764,10 @@ function App() {
                   reviewHarness={coordination.reviewHarness}
                   planText={coordination.planText}
                   reviewText={coordination.reviewText}
+                  executionText={coordination.executionText}
+                  auditText={coordination.auditText}
+                  executionHarness={coordination.executionHarness}
+                  auditHarness={coordination.auditHarness}
                   verdict={coordination.verdict}
                   stopReason={coordination.stopReason}
                   planningQuota={coordination.planningQuota}
@@ -1713,6 +1791,8 @@ function App() {
                   budget={draftOverlay && draftOverlay.turnsLeft !== null && draftOverlay.maxTurns !== null
                     ? { remaining: draftOverlay.turnsLeft, maxTurns: draftOverlay.maxTurns }
                     : null}
+                  writeBudget={draftOverlay && draftOverlay.maxWriteTurns !== null
+                    ? { remaining: draftOverlay.writeTurnsLeft, maxTurns: draftOverlay.maxWriteTurns } : null}
                   scopeExhausted={draftOverlay?.exhausted === true}
                   onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
                   onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
@@ -1738,6 +1818,8 @@ function App() {
                   activity={roundProgress.activity}
                   remaining={scopeMirror?.remaining ?? null}
                   maxTurns={scopeMirror?.maxTurns ?? null}
+                  writeRemaining={scopeMirror?.write?.remaining ?? null}
+                  maxWriteTurns={scopeMirror?.write?.maxTurns ?? null}
                 />
               ) : (
                 <>
@@ -1752,6 +1834,13 @@ function App() {
                       }}
                       maxTurns={allowedTurns}
                       onMaxTurnsChange={(raw) => setAllowedTurns(clampTurns(raw))}
+                      workspaceRoot={draftGoal.workspace.trim()}
+                      writeSelected={writeInstances}
+                      onWriteToggle={(id, selected) => setWriteInstances((current) => selected
+                        ? (current.includes(id) ? current : [...current, id]) : current.filter((item) => item !== id))}
+                      writeTurns={writeTurns}
+                      onWriteTurnsChange={(raw) => setWriteTurns(raw === "" ? NaN : Number(raw))}
+                      writeScope={scopeMirror?.write ?? null}
                       scope={scopeMirror ? { remaining: scopeMirror.remaining, maxTurns: scopeMirror.maxTurns } : null}
                       changeMode={panelChangeMode}
                       onEnterChangeMode={() => setPanelChangeMode(true)}
@@ -1781,6 +1870,10 @@ function App() {
                       const changed = current.workspace !== value.workspace
                         || current.provider !== value.provider
                         || current.message !== value.message;
+                      if (current.workspace !== value.workspace) {
+                        setWriteInstances([]);
+                        setScopeMirror((scope) => scope ? { instances: scope.instances, generation: scope.generation, maxTurns: scope.maxTurns, remaining: scope.remaining } : null);
+                      }
                       if (changed) abandonCoordination();
                       const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
                       setDraftGoal({

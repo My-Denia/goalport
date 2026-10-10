@@ -18,6 +18,12 @@ export interface AuthorizationPanelProps {
   readonly providers: readonly ProviderSnapshot[];
   readonly selected: readonly string[];
   readonly onToggle: (instanceId: string, selected: boolean) => void;
+  readonly workspaceRoot: string;
+  readonly writeSelected: readonly string[];
+  readonly onWriteToggle: (instanceId: string, selected: boolean) => void;
+  readonly writeTurns: number;
+  readonly onWriteTurnsChange: (raw: string) => void;
+  readonly writeScope: { remaining: number | null; maxTurns: number; workspaceRoot: string } | null;
   readonly maxTurns: number;
   readonly onMaxTurnsChange: (raw: string) => void;
   /** The active authorization, mirrored from the app. */
@@ -72,6 +78,12 @@ export function AuthorizationPanel({
   onToggle,
   maxTurns,
   onMaxTurnsChange,
+  workspaceRoot,
+  writeSelected,
+  onWriteToggle,
+  writeTurns,
+  onWriteTurnsChange,
+  writeScope,
   scope,
   changeMode,
   onEnterChangeMode,
@@ -153,6 +165,41 @@ export function AuthorizationPanel({
           disabled={!editable}
           onChange={(event) => onMaxTurnsChange(event.target.value)}
         />
+      </div>
+      <div className="authorization-write-section" aria-label="Workspace changes">
+        <h3>Workspace changes</h3>
+        <p>File changes are a separate decision. GoalPort may edit files only in the workspace below, through the checked harnesses.</p>
+        <p className="authorization-workspace">{workspaceRoot || "Choose a project folder before allowing file changes."}</p>
+        <ul className="authorization-provider-list">
+          {catalog.map((instance) => {
+            const { state, reason } = rowState(instance);
+            return (
+              <li key={instance.instanceId} className={`authorization-row authorization-row-${state}`}>
+                <label className="authorization-row-select">
+                  <input type="checkbox" aria-label={`Allow changes through ${instance.name}`}
+                    checked={writeSelected.includes(instance.instanceId)}
+                    disabled={state !== "selectable" || !workspaceRoot || (writeScope !== null && !changeMode)}
+                    onChange={(event) => onWriteToggle(instance.instanceId, event.target.checked)} />
+                  <span>{instance.name}</span>
+                </label>
+                {state !== "selectable" ? <span className="authorization-row-reason">
+                  {state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
+                </span> : null}
+              </li>
+            );
+          })}
+        </ul>
+        <div className="authorization-turns-row">
+          <label className="field-label" htmlFor="authorization-write-turns">Write turns to allow</label>
+          <input id="authorization-write-turns" type="number" min={1} max={8}
+            aria-label="Write turns to allow" value={Number.isNaN(writeTurns) ? "" : writeTurns}
+            disabled={writeScope !== null && !changeMode}
+            onChange={(event) => onWriteTurnsChange(event.target.value)} />
+        </div>
+        {!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8
+          ? <p role="alert">Choose 1 to 8 write turns before allowing workspace changes.</p> : null}
+        {writeScope ? <p>{writeScope.remaining ?? "Unknown"} of {writeScope.maxTurns} write turns left.</p>
+          : <p>No file changes are allowed unless you check a harness here and press Send.</p>}
       </div>
       {scope && !changeMode ? (
         <p className="authorization-scope-line">
