@@ -74,6 +74,8 @@ test("prepareFreshEvidenceDir creates fresh dirs and refuses to touch existing e
   const { prepareFreshEvidenceDir } = await import(fixtureUrl.href);
   const root = mkdtempSync(join(tmpdir(), "execute-slice-test-"));
   try {
+    assert.throws(() => prepareFreshEvidenceDir(""), /explicit fresh output path/);
+    assert.throws(() => prepareFreshEvidenceDir("  "), /explicit fresh output path/);
     const fresh = prepareFreshEvidenceDir(join(root, "new-dir"));
     assert.equal(statSync(fresh).isDirectory(), true);
     assert.equal(prepareFreshEvidenceDir(join(root, "new-dir")), fresh, "empty existing dir is reusable");

@@ -247,6 +247,7 @@ export function executeSlicePageHtml(indexHtml) {
 // Explicit fresh evidence directory for driver outputs. Refuses to touch an
 // existing non-empty directory so old evidence is never overwritten or mixed.
 export function prepareFreshEvidenceDir(outPath, label = "evidence") {
+  if (typeof outPath !== "string" || !outPath.trim()) throw new Error(`${label} requires an explicit fresh output path`);
   const dir = resolve(outPath);
   if (existsSync(dir)) {
     if (!statSync(dir).isDirectory()) throw new Error(`${label} path exists and is not a directory: ${dir}`);
