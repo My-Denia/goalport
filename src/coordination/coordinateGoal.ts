@@ -1,4 +1,4 @@
-import { authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
+import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 
 /**
  * Caller-supplied catalog entry. Quota is a word from this object.
@@ -34,8 +34,17 @@ export interface SyntheticCatalogInstance {
   readonly environmentAvoided?: { readonly since: string; readonly detail: string } | null;
 }
 
+/** Snapshot of explicit M6 scope.write consent, NOT a shape-gate verdict.
+ * The transport must still reserve against the live scope generation. */
+export interface CoordinationWriteAuthorization {
+  readonly instances: readonly string[];
+  readonly workspaceRoot: string;
+  readonly remaining: number | null;
+}
+
 export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
+  readonly writeAuthorization?: CoordinationWriteAuthorization;
   readonly goal: string;
   readonly workspacePath: string;
   /**
@@ -88,7 +97,7 @@ export interface CoordinateGoalState {
   readonly stopReason: string;
   readonly planningQuota: QuotaWord | null;
   readonly reviewQuota: QuotaWord | null;
-  readonly roles: readonly ["planning", "review"] | readonly [];
+  readonly roles: readonly ["planning", "review"] | readonly ["planning", "review", "execution", "audit"] | readonly [];
   readonly commands: readonly CoordinateTurnCommand[];
   readonly quotaLabels: Readonly<Record<string, QuotaWord>>;
 }
@@ -269,7 +278,7 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
  * a different instance derives a different id, which is what makes a
  * recovery turn a fresh grant instead of a resend.
  */
-function commandKey(role: "plan" | "review", instanceId: string, text: string, sendKey: string): string {
+function commandKey(role: "plan" | "review" | "execute" | "audit", instanceId: string, text: string, sendKey: string): string {
   let hash = 2166136261;
   const data = `${role}\n${instanceId}\n${sendKey}\n${text}`;
   for (let index = 0; index < data.length; index += 1) {
@@ -326,6 +335,7 @@ function turnCommand(input: {
   instance: SyntheticCatalogInstance;
   workspacePath: string;
   text: string;
+  write?: boolean;
 }): CoordinateTurnCommand {
   return {
     type: "goalport.coordinateTurn",
@@ -334,7 +344,7 @@ function turnCommand(input: {
     modelSelection: { instanceId: input.instance.instanceId, model: publishedModel(input.instance) },
     runtimeMode: "approval-required",
     approvalPolicy: "never",
-    sandboxPolicy: { type: "readOnly" },
+    sandboxPolicy: { type: input.write ? "workspaceWrite" : "readOnly" },
     workspaceStrategy: { type: "existing_worktree", worktreePath: input.workspacePath },
     initialMessage: { text: input.text },
   };
@@ -358,9 +368,41 @@ export function replacementCommand(
     workspacePath: input.workspacePath,
     text,
   });
-  const authorization = authorizeCoordinateTurn(command);
-  if (authorization.outcome !== "write-denied") {
+  const authorization = input.writeAuthorization ? authorizeCoordinateWriteTurn(command) : authorizeCoordinateTurn(command);
+  if (authorization.outcome !== "write-denied" && authorization.outcome !== "write-authorized") {
     throw new Error("The replacement turn did not pass the read-only gate.");
+  }
+  return command;
+}
+
+/** Build only after the checked review / completed execution actually exist. */
+export function evidenceCommand(
+  role: "execute" | "audit",
+  instance: SyntheticCatalogInstance,
+  input: CoordinateGoalInput,
+  evidence: { planText: string; reviewText: string; executionText?: string; executionFacts?: string },
+): CoordinateTurnCommand {
+  if (!input.writeAuthorization || input.allowedInstances === undefined ||
+      input.workspacePath !== input.writeAuthorization.workspaceRoot ||
+      (role === "execute" && !input.writeAuthorization.instances.includes(instance.instanceId))) {
+    throw new Error("The evidence turn needs explicit workspace-bound write consent.");
+  }
+  const text = [
+    input.goal,
+    `Workspace: ${input.workspacePath}`,
+    role === "execute"
+      ? "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification."
+      : "Independently inspect the workspace read-only against the approved plan and execution report. Check the reported evidence; do not treat the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.",
+    "Approved plan:", evidence.planText,
+    "Independent plan check:", evidence.reviewText,
+    ...(role === "audit" ? ["Execution report:", evidence.executionText ?? "(none)", "Recorded execution facts:", evidence.executionFacts ?? "(none)"] : []),
+  ].join("\n");
+  const command = turnCommand({
+    commandId: commandKey(role, instance.instanceId, text, input.sendKey),
+    instance, workspacePath: input.workspacePath, text, write: role === "execute",
+  });
+  if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
+    throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
   }
   return command;
 }
@@ -419,6 +461,18 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
 
+  if (input.writeAuthorization !== undefined) {
+    const write = input.writeAuthorization;
+    const writers = eligibleInstances(unique, {
+      avoidInstances: input.avoidInstances, allowedInstances: write.instances,
+    });
+    if (input.allowedInstances === undefined || input.workspacePath !== write.workspaceRoot ||
+        !/^[/\\]|^[A-Za-z]:[/\\]/.test(write.workspaceRoot) ||
+        !writers.some((writer) => usable.some((reader) => reader.instanceId !== writer.instanceId))) {
+      return stopped(quotaLabels, "Stopped. Workspace changes need explicit scoped consent for this workspace and an independent verification harness.");
+    }
+  }
+
   const planner = usable[0];
   const reviewer = usable[1];
   if (!planner || !reviewer || planner.instanceId === reviewer.instanceId) {
@@ -436,8 +490,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   ] as const;
 
   for (const command of commands) {
-    const authorization = authorizeCoordinateTurn(command);
-    if (authorization.outcome !== "write-denied") {
+    const authorization = input.writeAuthorization ? authorizeCoordinateWriteTurn(command) : authorizeCoordinateTurn(command);
+    if (authorization.outcome !== "write-denied" && authorization.outcome !== "write-authorized") {
       return stopped(quotaLabels, "Stopped. The edit disposition was not deny, so no role was assigned.");
     }
   }
@@ -449,7 +503,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     stopReason: "Two different harnesses are assigned. No model turn has been sent.",
     planningQuota: quotaWord(planner.quota),
     reviewQuota: quotaWord(reviewer.quota),
-    roles: ["planning", "review"],
+    roles: input.writeAuthorization ? ["planning", "review", "execution", "audit"] : ["planning", "review"],
     commands,
     quotaLabels,
   };

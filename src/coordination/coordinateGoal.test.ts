@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { coordinateGoal, type SyntheticCatalogInstance } from "./coordinateGoal";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CampaignNav } from "../nav/CampaignNav";
+import { EMPTY_SNAPSHOT } from "../types";
+import { evidenceCommand, coordinateGoal, type CoordinateGoalInput, type SyntheticCatalogInstance } from "./coordinateGoal";
+
+import { authorizeCoordinateWriteTurn, roleOfCommandId } from "./coordinateTurn";
+import { verdictFromAudit, verdictFromReview, outcomeLabel } from "./verdict";
 
 const workspacePath = "/work/selected-goal";
 const goal = "Explain the failure and leave a bounded plan.";
@@ -438,4 +445,87 @@ describe("Synthetic path", () => {
     expect(differentInstance.commands[0]?.modelSelection.instanceId).not.toBe(original.commands[0]?.modelSelection.instanceId);
     expect(differentInstance.commands[0]?.commandId).not.toBe(original.commands[0]?.commandId);
   });
+});
+
+
+describe("explicit write assembly and phase verdicts", () => {
+  const catalog: SyntheticCatalogInstance[] = [
+    { instanceId: "a", name: "A", defaultModel: "included" },
+    { instanceId: "b", name: "B", defaultModel: "included" },
+  ];
+  const input: CoordinateGoalInput = {
+    catalog, goal, workspacePath, sendKey: "write-send", allowedInstances: ["a", "b"],
+    writeAuthorization: { instances: ["a"], workspaceRoot: workspacePath, remaining: 1 },
+  };
+  it("advertises four roles but creates only the first two read commands until evidence exists", () => {
+    const selected = coordinateGoal(input);
+    expect(selected.roles).toEqual(["planning", "review", "execution", "audit"]);
+    expect(selected.commands).toHaveLength(2);
+    expect(selected.commands.map((command) => roleOfCommandId(command.commandId))).toEqual(["plan", "review"]);
+    for (const command of selected.commands) {
+      expect(authorizeCoordinateWriteTurn(command).outcome).toBe("write-authorized");
+      expect(command.sandboxPolicy.type).toBe("readOnly");
+    }
+    const { writeAuthorization: _write, ...readInput } = input;
+    expect(JSON.stringify(coordinateGoal(readInput))).toBe(JSON.stringify(coordinateGoal({ ...readInput, writeAuthorization: undefined })));
+    expect(coordinateGoal(readInput).roles).toEqual(["planning", "review"]);
+  });
+  it.each([
+    { ...input, allowedInstances: undefined },
+    { ...input, workspacePath: "/work/other" },
+    { ...input, workspacePath: "relative", writeAuthorization: { ...input.writeAuthorization!, workspaceRoot: "relative" } },
+    { ...input, writeAuthorization: { ...input.writeAuthorization!, instances: [] } },
+    { ...input, writeAuthorization: { ...input.writeAuthorization!, instances: ["unknown"] } },
+  ])("refuses missing scope, wrong/relative root or unstaffable write membership before sending", (invalid) => {
+    expect(coordinateGoal(invalid).commands).toEqual([]);
+  });
+  it("pairs lazy roles with sandbox/root and keys ids to role, instance, send and evidence", () => {
+    const evidence = { planText: "Actual approved plan", reviewText: "VERDICT: carry-out", executionText: "Checks: exit 0", executionFacts: "actual facts" };
+    const writer = evidenceCommand("execute", catalog[0]!, input, evidence);
+    const audit = evidenceCommand("audit", catalog[1]!, input, evidence);
+    expect(roleOfCommandId(writer.commandId)).toBe("execute");
+    expect(roleOfCommandId(audit.commandId)).toBe("audit");
+    expect(writer.sandboxPolicy.type).toBe("workspaceWrite");
+    expect(audit.sandboxPolicy.type).toBe("readOnly");
+    expect(writer.workspaceStrategy).toEqual({ type: "existing_worktree", worktreePath: workspacePath });
+    for (const command of [writer, audit]) {
+      expect(authorizeCoordinateWriteTurn(command).outcome).toBe("write-authorized");
+      expect(command.initialMessage.text).toContain(evidence.planText);
+      expect(command.initialMessage.text).toContain(evidence.reviewText);
+    }
+    expect(writer.initialMessage.text).toContain("actual output and exit results");
+    expect(audit.initialMessage.text).toContain(evidence.executionText);
+    expect(audit.initialMessage.text).toContain(evidence.executionFacts);
+    expect(audit.initialMessage.text).toContain("GoalPort has not independently run a machine-test stage");
+    expect(evidenceCommand("execute", catalog[0]!, input, evidence)).toEqual(writer);
+    expect(evidenceCommand("execute", catalog[0]!, { ...input, sendKey: "new-send" }, evidence).commandId).not.toBe(writer.commandId);
+    expect(evidenceCommand("execute", catalog[0]!, input, { ...evidence, planText: "Other approved plan" }).commandId).not.toBe(writer.commandId);
+    expect(evidenceCommand("audit", catalog[0]!, input, evidence).commandId).not.toBe(audit.commandId);
+    expect(evidenceCommand("audit", catalog[1]!, input, { ...evidence, executionText: "different report" }).commandId).not.toBe(audit.commandId);
+    expect(() => evidenceCommand("execute", catalog[1]!, input, evidence)).toThrow(/consent/);
+  });
+  it.each([
+    ["VERDICT: verified", "unconfirmed", "verified"],
+    ["VERDICT: carry-out", "checked", "unconfirmed"],
+    ["VERDICT: revise", "revise", "revise"],
+    ["VERDICT: stop", "stopped", "stopped"],
+    ["VERDICT: verified\nMore prose", "unconfirmed", "unconfirmed"],
+    ["verified", "unconfirmed", "unconfirmed"],
+  ])("keeps verdicts phase-specific: %s", (text, review, audit) => {
+    expect(verdictFromReview(text)).toBe(review);
+    expect(verdictFromAudit(text)).toBe(audit);
+    expect(outcomeLabel("verified")).toBe("Changes verified");
+  });
+});
+
+// Compatibility regression only, not UI or product execution acceptance.
+it("the approved nav type seam renders verified with the existing complete class and outcome label", () => {
+  const html = renderToStaticMarkup(createElement(CampaignNav, {
+    snapshot: EMPTY_SNAPSHOT, collapsed: false,
+    plans: [{ requestId: "verified-type-seam", title: "Verified type seam", active: false, verdict: "verified" }],
+    onSelectCampaign() {}, onSelectProject() {}, onRenameCampaign() {},
+  }));
+  expect(html).toContain('aria-label="Plan: Verified type seam, Changes verified"');
+  expect(html).toContain('class="campaign-state campaign-state-complete"');
+  expect(html).toContain('<small>Changes verified</small>');
 });

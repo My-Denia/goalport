@@ -598,3 +598,284 @@ describe("coordinate session", () => {
     expect(new Set(transport.calls.map((command) => command.modelSelection.instanceId)).size).toBe(transport.calls.length);
   });
 });
+
+// All extra-catalog cases are synthetic staffing fixtures, not third-native admission.
+describe("explicitly authorized execution and independent audit", () => {
+  const catalog = catalogFromProviderSnapshots(providersWithThird);
+  const allowedInstances = ["codex", "claude", "grok"];
+  const writeAuthorization = { instances: allowedInstances, workspaceRoot: workspacePath, remaining: 1 };
+  const input = { catalog, goal, workspacePath, sendKey: "write-send", allowedInstances, writeAuthorization };
+  const ok = (text: string, turnsRemaining: number | null = 2, writeTurnsRemaining: number | null = 1): CoordinateLaunchResult => ({
+    text, errorText: "", dispatched: true, turnsRemaining, writeTurnsRemaining,
+  });
+  const planReply = ok("Approved bounded plan with workspace checks", 2);
+  const reviewReply = ok("Independent plan accepted\nVERDICT: carry-out", 1);
+  const executeReply = ok("Changed file; workspace checks actually ran: test exit 0", 1, 0);
+  const auditReply = ok("Independently inspected the workspace\nVERDICT: verified", 0, 0);
+  const run = async (results: CoordinateLaunchResult[], overrides: Partial<typeof input> = {}, onEvent?: (event: CoordinateSessionEvent) => void) => {
+    const transport = recordingTransport(results);
+    const state = await runCoordinateSession({ ...input, ...overrides }, { sendAuthorized: true, onEvent }, transport);
+    return { state, transport };
+  };
+  it("runs scoped A/B/A/B with independent READ/WRITE counters, lazy evidence and typed events", async () => {
+    let read = 3;
+    let write = 1;
+    const events: CoordinateSessionEvent[] = [];
+    const transport: CoordinateTransport & { calls: CoordinateTurnCommand[] } = {
+      calls: [],
+      async launch(command) {
+        expect(events.at(-1)?.kind).toBe("started");
+        expect(events.at(-1)?.instanceId).toBe(command.modelSelection.instanceId);
+        transport.calls.push(command);
+        if (command.sandboxPolicy.type === "workspaceWrite") write -= 1;
+        else read -= 1;
+        const replies = [planReply.text, reviewReply.text, executeReply.text, auditReply.text];
+        return ok(replies[transport.calls.length - 1]!, read, write);
+      },
+    };
+    const state = await runCoordinateSession(
+      { ...input, catalog: catalog.slice(0, 2), allowedInstances: ["codex", "claude"], writeAuthorization: { ...writeAuthorization, instances: ["codex", "claude"] } },
+      { sendAuthorized: true, allowedInstances: ["codex", "claude"], onEvent: (event) => events.push(event) }, transport,
+    );
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual(["codex", "claude", "codex", "claude"]);
+    expect(transport.calls.map((command) => command.sandboxPolicy.type)).toEqual(["readOnly", "readOnly", "workspaceWrite", "readOnly"]);
+    expect(transport.calls.map((command) => command.commandId.split("-")[1])).toEqual(["plan", "review", "execute", "audit"]);
+    expect(new Set(transport.calls.map((command) => command.commandId)).size).toBe(4);
+    expect(events.map((event) => `${event.kind}:${event.role}`)).toEqual(["started:planning", "started:review", "started:execution", "started:audit"]);
+    expect(state.roundEvents).toEqual([]);
+    expect(state.verdict).toBe("verified");
+    expect(state.executionHarness).toBe("Codex");
+    expect(state.auditHarness).toBe("Claude");
+    expect(state.executionText).toBe(executeReply.text);
+    expect(state.auditText).toBe(auditReply.text);
+    expect(state.authorizedTurnsLeft).toBe(0);
+    expect(state.authorizedWriteTurnsLeft).toBe(0);
+    expect([read, write]).toEqual([0, 0]);
+    const writer = transport.calls[2]!;
+    const audit = transport.calls[3]!;
+    expect(writer.initialMessage.text).toContain(planReply.text);
+    expect(writer.initialMessage.text).toContain(reviewReply.text);
+    expect(audit.initialMessage.text).toContain(executeReply.text);
+    expect(audit.initialMessage.text).toContain(writer.commandId);
+    expect(audit.initialMessage.text).toContain('"instanceId":"codex"');
+    expect(audit.initialMessage.text).toContain('"turnsRemaining":1');
+    expect(audit.initialMessage.text).toContain('"writeTurnsRemaining":0');
+    expect(audit.initialMessage.text).toContain(workspacePath);
+  });
+  it.each(["VERDICT: revise", "VERDICT: stop", "VERDICT: verified", "Looks fine."])("does not write without a checked review: %s", async (text) => {
+    const { state, transport } = await run([planReply, ok(text)]);
+    expect(transport.calls).toHaveLength(2);
+    expect(state.executionText).toBeNull();
+    expect(state.auditText).toBeNull();
+    expect(state.verdict).not.toBe("verified");
+    expect(state.authorizedWriteTurnsLeft).toBe(1);
+  });
+  it("keeps audit carry-out unconfirmed, not checked/verified", async () => {
+    const { state, transport } = await run([planReply, reviewReply, executeReply, ok("VERDICT: carry-out", 0, 0)]);
+    expect(transport.calls).toHaveLength(4);
+    expect(state.verdict).toBe("unconfirmed");
+    expect(state.stopReason).toContain("verification did not confirm");
+  });
+  it.each([0, null, undefined, Number.NaN])("read budget 2 or unknown (%s) runs plan+review then stops before write", async (remaining) => {
+    const { state, transport } = await run([ok(planReply.text, 1), { ...reviewReply, turnsRemaining: remaining }]);
+    expect(transport.calls).toHaveLength(2);
+    expect(transport.calls.every((command) => command.sandboxPolicy.type === "readOnly")).toBe(true);
+    expect(state.authorizedWriteTurnsLeft).toBe(1);
+    expect(state.executionText).toBeNull();
+    expect(state.stopReason).toBe("Verification needs one more authorized read turn, so no workspace changes were sent.");
+  });
+  it.each([0, null, undefined])("refuses unavailable/unknown write budget (%s) without swapping read and write", async (remaining) => {
+    const { state, transport } = await run([planReply, { ...reviewReply, writeTurnsRemaining: remaining }]);
+    expect(transport.calls).toHaveLength(2);
+    expect(state.authorizedTurnsLeft).toBe(1);
+    expect(state.authorizedWriteTurnsLeft).toBe(remaining ?? null);
+    expect(state.stopReason).toContain("available authorized write turn");
+  });
+  it("staffs independent audit when write and read memberships differ", async () => {
+    const { state, transport } = await run([planReply, reviewReply, executeReply, auditReply], {
+      allowedInstances: ["codex", "claude"], writeAuthorization: { ...writeAuthorization, instances: ["grok"] },
+    });
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual(["codex", "claude", "grok", "codex"]);
+    expect(state.executionHarness).toBe("Grok");
+    expect(state.auditHarness).toBe("Codex");
+    expect(state.verdict).toBe("verified");
+  });
+  it.each(["planning", "review"])("keeps %s failures global while two surviving successes may take later roles", async (role) => {
+    const failed: CoordinateLaunchResult = { text: "", errorText: "authentication failed", dispatched: true, turnsRemaining: 5, writeTurnsRemaining: 1 };
+    const results = role === "planning" ? [failed, planReply, reviewReply, executeReply, auditReply] : [planReply, failed, reviewReply, executeReply, auditReply];
+    const { state, transport } = await run(results);
+    const expected = role === "planning" ? ["codex", "claude", "grok", "claude", "grok"] : ["codex", "claude", "grok", "codex", "grok"];
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual(expected);
+    expect(state.verdict).toBe("verified");
+    expect(new Set(transport.calls.map((command) => command.commandId)).size).toBe(5);
+    const burned = role === "planning" ? "codex" : "claude";
+    expect(transport.calls.slice(role === "planning" ? 1 : 2).some((command) => command.modelSelection.instanceId === burned)).toBe(false);
+  });
+  it("preserves the two-instance planning-failure pre-check: no doomed replacement", async () => {
+    const { state, transport } = await run([{ text: "", errorText: "", dispatched: true, environmentBlocked: true, turnsRemaining: 3, writeTurnsRemaining: 1 }], {
+      catalog: catalog.slice(0, 2), allowedInstances: ["codex", "claude"],
+    });
+    expect(transport.calls).toHaveLength(1);
+    expect(state.stopReason).toContain("two harnesses that can run");
+  });
+  it("stops before writing when a failed review leaves no independent auditor", async () => {
+    const failed = { text: "", errorText: "authentication failed", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 };
+    const { state, transport } = await run([planReply, failed], {
+      allowedInstances: ["codex", "claude"], writeAuthorization: { ...writeAuthorization, instances: ["codex"] },
+    });
+    expect(transport.calls).toHaveLength(2);
+    expect(state.authorizedWriteTurnsLeft).toBe(1);
+    expect(state.verdict).toBe("failed");
+  });
+  it("reselects a failed auditor without reusing executor or burned auditor", async () => {
+    const events: CoordinateSessionEvent[] = [];
+    const { state, transport } = await run([
+      planReply, reviewReply, executeReply,
+      { text: "Partial audit", errorText: "", environmentBlocked: true, environmentDetail: "helper failure", dispatched: true, turnsRemaining: 1, writeTurnsRemaining: 0 },
+      auditReply,
+    ], {}, (event) => events.push(event));
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual(["codex", "claude", "codex", "claude", "grok"]);
+    expect(state.environmentBlocked?.role).toBe("audit");
+    expect(state.verdict).toBe("verified");
+    expect(state.roundEvents.map((event) => `${event.kind}:${event.role}`)).toEqual(["failed:audit", "continued:audit"]);
+    expect(events.at(-2)).toMatchObject({ kind: "continued", role: "audit", instanceId: "grok" });
+    expect(transport.calls[4]?.initialMessage.text).toContain(executeReply.text);
+  });
+  it.each([true, false, null, undefined])("never retries any write failure, even known-not-sent: dispatch %s", async (dispatched) => {
+    const { state, transport } = await run([planReply, reviewReply, {
+      text: "Partial file changes", errorText: "", environmentBlocked: true, environmentDetail: "tool failed", dispatched,
+      turnsRemaining: 1, writeTurnsRemaining: 0,
+    }]);
+    expect(transport.calls).toHaveLength(3);
+    expect(state.executionText).toBe("Partial file changes");
+    expect(state.auditText).toBeNull();
+    expect(state.verdict).toBe("failed");
+    expect(state.environmentBlocked?.role).toBe("execution");
+    expect(state.roundEvents.map((event) => `${event.kind}:${event.role}`)).toEqual(["failed:execution"]);
+    expect(state.stopReason).toContain("not retried");
+    expect(state.authorizedTurnsLeft).toBe(1);
+    expect(state.authorizedWriteTurnsLeft).toBe(0);
+  });
+  it.each(["scope-revoked", "scope-exhausted"] as const)("keeps partial write text on terminal %s", async (stopCode) => {
+    const { state, transport } = await run([planReply, reviewReply, {
+      text: "Partial changes before stop", errorText: "Scope stopped", stopCode, dispatched: null,
+      turnsRemaining: null, writeTurnsRemaining: null,
+    }]);
+    expect(transport.calls).toHaveLength(3);
+    expect(state.executionText).toBe("Partial changes before stop");
+    expect(state.auditText).toBeNull();
+    expect(state.authorizedTurnsLeft).toBeNull();
+    expect(state.authorizedWriteTurnsLeft).toBeNull();
+  });
+  it("converts rejected write transport to terminal unknown without replay or audit", async () => {
+    let launches = 0;
+    const state = await runCoordinateSession(input, { sendAuthorized: true }, {
+      async launch() {
+        launches += 1;
+        if (launches === 1) return planReply;
+        if (launches === 2) return reviewReply;
+        throw new Error("transport died");
+      },
+    });
+    expect(launches).toBe(3);
+    expect(state.verdict).toBe("failed");
+    expect(state.auditText).toBeNull();
+    expect(state.stopReason).toContain("dispatch is unknown");
+    expect(state.authorizedWriteTurnsLeft).toBeNull();
+  });
+  it.each(["synchronous", "rejected"])("preserves executor evidence when audit transport is %s unknown", async (mode) => {
+    let launches = 0;
+    const state = await runCoordinateSession(input, { sendAuthorized: true }, {
+      launch() {
+        launches += 1;
+        const reply = [planReply, reviewReply, executeReply][launches - 1];
+        if (reply) return Promise.resolve(reply);
+        if (mode === "synchronous") throw new Error("IPC died before returning a promise");
+        return Promise.reject(new Error("IPC died mid-turn"));
+      },
+    });
+    expect(launches).toBe(4);
+    expect(state.executionText).toBe(executeReply.text);
+    expect(state.verdict).toBe("failed");
+    expect(state.messageDispatched).toBe(true);
+    expect(state.stopReason).toContain("audit transport did not return a result");
+    expect(state.roundEvents.map((event) => event.kind)).toEqual(["failed"]);
+  });
+  it.each(["no-text", "not-finished", "not-installed"] as const)("never recovers a write completion failure %s", async (stopCode) => {
+    const { state, transport } = await run([planReply, reviewReply, {
+      text: "Partial execution report", errorText: "", dispatched: false, stopCode,
+      turnsRemaining: 1, writeTurnsRemaining: 1,
+    }]);
+    expect(transport.calls).toHaveLength(3);
+    expect(state.executionText).toBe("Partial execution report");
+    expect(state.verdict).toBe("failed");
+    expect(state.auditText).toBeNull();
+    expect(state.roundEvents.map((event) => event.kind)).toEqual(["failed"]);
+  });
+  it("does not assign a burned write-only member to execution during review recovery", async () => {
+    const { state, transport } = await run([
+      planReply,
+      { text: "", errorText: "authentication failed", dispatched: false, turnsRemaining: 3, writeTurnsRemaining: 1 },
+    ], { writeAuthorization: { ...writeAuthorization, instances: ["claude"] } });
+    expect(transport.calls).toHaveLength(2);
+    expect(state.authorizedWriteTurnsLeft).toBe(1);
+    expect(state.executionText).toBeNull();
+  });
+  it("revoked scopes terminate before the writer without recovery", async () => {
+    const { state, transport } = await run([planReply, {
+      text: "Partial review", errorText: "Scope was revoked", dispatched: false, stopCode: "scope-revoked", turnsRemaining: null, writeTurnsRemaining: null,
+    }]);
+    expect(transport.calls).toHaveLength(2);
+    expect(state.executionText).toBeNull();
+    expect(state.verdict).toBe("failed");
+    expect(state.authorizedWriteTurnsLeft).toBeNull();
+  });
+  it.each(["VERDICT: revise", "VERDICT: stop"])("uses the audit-specific terminal line for %s", async (text) => {
+    const { state, transport } = await run([planReply, reviewReply, executeReply, ok(text, 0, 0)]);
+    expect(transport.calls).toHaveLength(4);
+    expect(state.stopReason).toContain("independent verification");
+    expect(state.verdict).toBe(text.endsWith("revise") ? "revise" : "stopped");
+  });
+  it.each([null, undefined])("never recovers unknown read dispatch (%s) in a write-enabled round", async (dispatched) => {
+    const { state, transport } = await run([{ text: "", errorText: "authentication failed", dispatched, turnsRemaining: 3, writeTurnsRemaining: 1 }]);
+    expect(transport.calls).toHaveLength(1);
+    expect(state.messageDispatched).toBeNull();
+    expect(state.verdict).toBe("failed");
+    expect(state.executionText).toBeNull();
+  });
+  it("propagates four-role request fields and refuses a new write after replacement without erasing executed evidence", async () => {
+    const transport = recordingTransport([planReply, reviewReply, executeReply, auditReply]);
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: input.sendKey, allowedInstances, writeAuthorization },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null }, transport,
+    );
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("verified");
+    expect(view.executionText).toBe(executeReply.text);
+    expect(view.auditText).toBe(auditReply.text);
+    expect(view.executionHarness).toBe("Codex");
+    expect(view.auditHarness).toBe("Claude");
+    expect(view.authorizedWriteTurnsLeft).toBe(0);
+
+    const replacedTransport = recordingTransport([planReply, reviewReply, executeReply]);
+    const replaced = await requestCoordination(
+      { goal, workspacePath, sendKey: input.sendKey, allowedInstances, writeAuthorization },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null }, replacedTransport,
+      () => replacedTransport.calls.length < 3,
+    );
+    expect(replacedTransport.calls).toHaveLength(3);
+    expect(replaced.executionText).toBe(executeReply.text);
+    expect(replaced.messageDispatched).toBe(true);
+    expect(replaced.verdict).toBe("failed");
+    expect(replaced.stopReason).toContain("replaced");
+  });
+  it("without write consent still stops at checked and omits all new optional result fields", async () => {
+    const { writeAuthorization: _write, ...readInput } = input;
+    const transport = recordingTransport([planReply, reviewReply]);
+    const state = await runCoordinateSession(readInput, { sendAuthorized: true, allowedInstances }, transport);
+    expect(transport.calls).toHaveLength(2);
+    expect(state.verdict).toBe("checked");
+    expect(state.stopReason).toBe("The independent check finished, so this stopped.");
+    for (const field of ["executionText", "auditText", "executionHarness", "auditHarness", "authorizedWriteTurnsLeft"]) expect(state).not.toHaveProperty(field);
+  });
+});

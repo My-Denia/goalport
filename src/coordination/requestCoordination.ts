@@ -1,5 +1,5 @@
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
-import { coordinateGoal } from "./coordinateGoal";
+import { coordinateGoal, type CoordinationWriteAuthorization } from "./coordinateGoal";
 import {
   runCoordinateSession,
   type CoordinateSessionEvent,
@@ -15,6 +15,11 @@ export interface CoordinationView {
   reviewHarness: string | null;
   planText: string | null;
   reviewText: string | null;
+  executionText?: string | null;
+  auditText?: string | null;
+  executionHarness?: string | null;
+  auditHarness?: string | null;
+  readonly authorizedWriteTurnsLeft?: number | null;
   result: string | null;
   verdict: CoordinationVerdict | null;
   stopReason: string;
@@ -81,6 +86,8 @@ export async function requestCoordination(
     readonly avoidInstances?: readonly string[];
     /** Scoped round membership: present means recovery is authorized. */
     readonly allowedInstances?: readonly string[];
+    /** Explicit M6 scope.write snapshot after separate user consent. */
+    readonly writeAuthorization?: CoordinationWriteAuthorization;
     /** Synchronous round events (started is transient; failed/continued persist). */
     readonly onEvent?: (event: CoordinateSessionEvent) => void;
   },
@@ -101,9 +108,10 @@ export async function requestCoordination(
     priorReview: input.priorReview,
     avoidInstances: input.avoidInstances,
     allowedInstances: input.allowedInstances,
+    writeAuthorization: input.writeAuthorization,
   };
   const planned = coordinateGoal(goalInput);
-  if (planned.commands.length !== 2) {
+  if (planned.roles.length === 0) {
     return viewFrom({
       planningHarness: planned.planningHarness,
       reviewHarness: planned.reviewHarness,
@@ -149,7 +157,12 @@ export async function requestCoordination(
       },
     },
   );
-  if (sent.stopReason.toLowerCase().includes("replaced")) return unavailable(REPLACED);
+  // A cancellation after a writer ran must not erase its partial result or
+  // make the round look unsent/retryable. Legacy read replacement stays exact.
+  if (sent.stopReason.toLowerCase().includes("replaced") &&
+      !(input.writeAuthorization && sent.commands.some((command) => command.sandboxPolicy.type === "workspaceWrite"))) {
+    return unavailable(REPLACED);
+  }
   return viewFrom({
     planningHarness: sent.planningHarness,
     reviewHarness: sent.reviewHarness,
@@ -163,6 +176,11 @@ export async function requestCoordination(
     messageDispatched: sent.messageDispatched,
     environmentBlocked: sent.environmentBlocked ?? null,
     roundEvents: sent.roundEvents,
+    ...(input.writeAuthorization ? {
+      executionText: sent.executionText, auditText: sent.auditText,
+      executionHarness: sent.executionHarness, auditHarness: sent.auditHarness,
+      authorizedWriteTurnsLeft: sent.authorizedWriteTurnsLeft,
+    } : {}),
     authorizedTurnsLeft: sent.authorizedTurnsLeft,
     scopeExhausted: sent.scopeExhausted,
   });

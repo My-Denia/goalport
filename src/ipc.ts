@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 
-type CoordinationRecord = Omit<SavedPlan, "roundEvents"> & {
+export type CoordinationRecord = Omit<SavedPlan, "roundEvents" | "authorizedTurnsLeft" | "authorizedWriteTurnsLeft" | "scopeExhausted"> & {
   /** Optional for records saved before completed recovery events existed. */
   readonly roundEvents?: readonly RoundEvent[];
 };

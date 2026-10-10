@@ -7,7 +7,7 @@ import type { CoordinationView } from "./requestCoordination";
  */
 export interface RoundEvent {
   readonly kind: "failed" | "continued";
-  readonly role: "planning" | "review";
+  readonly role: "planning" | "review" | "execution" | "audit";
   readonly instanceId: string;
   readonly harness: string | null;
   readonly sentence: string;

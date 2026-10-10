@@ -1,5 +1,6 @@
 import {
   coordinateGoal,
+  evidenceCommand,
   eligibleInstances,
   replacementCommand,
   type CoordinateGoalInput,
@@ -8,7 +9,7 @@ import {
 } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
 import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
-import { verdictFromReview, type CoordinationVerdict } from "./verdict";
+import { verdictFromAudit, verdictFromReview, type CoordinationVerdict } from "./verdict";
 import type { RoundEvent } from "./savedPlan";
 
 /**
@@ -43,17 +44,19 @@ export interface CoordinateLaunchResult {
   readonly stopCode?: CoordinationStopCode | null;
   /** Authorized scope budget left after this launch, when a scope is active. */
   readonly turnsRemaining?: number | null;
+  /** Independent WRITE counter from M6; turnsRemaining always means READ. */
+  readonly writeTurnsRemaining?: number | null;
   readonly scopeExhausted?: boolean;
 }
 
 export interface EnvironmentBlockedInfo {
-  readonly role: "planning" | "review";
+  readonly role: CoordinationRole;
   readonly instanceId: string;
   readonly harness: string | null;
   readonly detail: string | null;
 }
 
-export type CoordinationRole = "planning" | "review";
+export type CoordinationRole = "planning" | "review" | "execution" | "audit";
 
 /**
  * Synchronous round events. "started" fires before each launch and is never
@@ -84,6 +87,11 @@ export interface CoordinateSessionOptions {
 export interface CoordinateSessionState extends CoordinateGoalState {
   readonly planText: string | null;
   readonly reviewText: string | null;
+  readonly executionText?: string | null;
+  readonly auditText?: string | null;
+  readonly executionHarness?: string | null;
+  readonly auditHarness?: string | null;
+  readonly authorizedWriteTurnsLeft?: number | null;
   readonly verdict: CoordinationVerdict | null;
   readonly messageDispatched: boolean | null;
   readonly environmentBlocked?: EnvironmentBlockedInfo | null;
@@ -131,7 +139,7 @@ function reportFromPlan(
  */
 function environmentFromLaunch(
   launch: CoordinateLaunchResult,
-  role: "planning" | "review",
+  role: CoordinationRole,
   instanceId: string,
   harness: string | null,
 ): EnvironmentBlockedInfo | null {
@@ -152,6 +160,7 @@ function checkStopReason(verdict: CoordinationVerdict): string {
       return "The independent check says the plan needs revision, so this stopped.";
     case "stopped":
       return "The independent check says to stop, so this stopped.";
+    case "verified":
     case "failed":
     case "unconfirmed":
       return "The independent check did not confirm the plan, so this stopped.";
@@ -262,7 +271,7 @@ function harnessOf(instance: SyntheticCatalogInstance): string {
 }
 
 function roleLabel(role: CoordinationRole): string {
-  return role === "planning" ? "planning" : "checking";
+  return { planning: "planning", review: "checking", execution: "making changes", audit: "verifying" }[role];
 }
 
 function boundedDetail(text: string | null): string | null {
@@ -408,7 +417,7 @@ function failureFromLaunch(
  * turn re-selects a replacement instance; the chain-completeness pre-check
  * runs before every replacement launch so a pool that cannot staff the rest
  * of the chain stops without spending another turn. Bounded by construction:
- * two roles, each instance at most once.
+ * each read-role/instance at most once; every write failure is terminal.
  */
 async function runRecoveryRound(
   input: CoordinateGoalInput,
@@ -416,28 +425,30 @@ async function runRecoveryRound(
   transport: CoordinateTransport,
   plan: CoordinateGoalState,
 ): Promise<CoordinateSessionState> {
-  const allowed = options.allowedInstances;
+  const write = input.writeAuthorization;
+  const roles: readonly CoordinationRole[] = write ? ["planning", "review", "execution", "audit"] : ROLES;
   const emitEvent = options.onEvent;
-  const failed = new Set<string>();
+  const failed = new Set<string>(); // Instance-global: a burned harness never returns in any role.
   const used = new Set<string>();
+  const usedKey = (role: CoordinationRole, id: string) => write ? `${role}:${id}` : id;
   const roundEvents: RoundEvent[] = [];
   const launched: CoordinateTurnCommand[] = [];
-  const assignments: { planning?: SyntheticCatalogInstance; review?: SyntheticCatalogInstance } = {};
-  const commands: { planning?: CoordinateTurnCommand; review?: CoordinateTurnCommand } = {
-    planning: plan.commands[0],
-    review: plan.commands[1],
+  const assignments: Partial<Record<CoordinationRole, SyntheticCatalogInstance>> = {};
+  const commands: Partial<Record<CoordinationRole, CoordinateTurnCommand>> = {
+    planning: plan.commands[0], review: plan.commands[1],
   };
-  const instanceFor = (command: CoordinateTurnCommand | undefined) =>
-    command
-      ? input.catalog.find((item) => item.instanceId === command.modelSelection.instanceId)
-      : undefined;
-  assignments.planning = instanceFor(commands.planning);
-  assignments.review = instanceFor(commands.review);
+  for (const role of ROLES) {
+    assignments[role] = input.catalog.find((item) => item.instanceId === commands[role]?.modelSelection.instanceId);
+  }
   let planText: string | null = null;
   let reviewText: string | null = null;
+  let executionText: string | null = null;
+  let auditText: string | null = null;
+  let executionFacts: string | undefined;
   let environmentBlocked: EnvironmentBlockedInfo | null = null;
   let lastFailure: Failure | null = null;
   let turnsRemaining: number | null | undefined;
+  let writeTurnsRemaining: number | null | undefined = write?.remaining;
   let dispatchState: "unsent" | "sent" | "unknown" = "unsent";
 
   const mergeDispatch = (value: boolean | null | undefined) => {
@@ -446,18 +457,34 @@ async function runRecoveryRound(
     else if (dispatchState === "unsent") dispatchState = "unknown";
   };
   const messageDispatched = () => (dispatchState === "sent" ? true : dispatchState === "unknown" ? null : false);
-  const remainingPool = (exclude: Iterable<string>) =>
-    eligibleInstances(input.catalog, {
-      avoidInstances: input.avoidInstances,
-      allowedInstances: allowed,
-      exclude: [...exclude],
+  const poolFor = (role: CoordinationRole) => eligibleInstances(input.catalog, {
+    avoidInstances: input.avoidInstances,
+    allowedInstances: role === "execution" ? write?.instances : input.allowedInstances,
+    exclude: [...failed],
+  }).filter((item) => !used.has(usedKey(role, item.instanceId)));
+  const counterpart = (role: CoordinationRole): CoordinationRole | null =>
+    role === "review" ? "planning" : role === "audit" ? "execution" : null;
+  // Assignment feasibility, not all-read-roles-distinct. The legacy two-role
+  // pre-check still requires two survivors before replacing a failed planner.
+  const canStaff = (index: number, chosen: Partial<Record<CoordinationRole, SyntheticCatalogInstance>>): boolean => {
+    if (index >= roles.length) return true;
+    const role = roles[index] as CoordinationRole;
+    const other = counterpart(role);
+    return poolFor(role).some((candidate) => {
+      if (other && chosen[other]?.instanceId === candidate.instanceId) return false;
+      return canStaff(index + 1, { ...chosen, [role]: candidate });
     });
+  };
+  const candidatesFor = (index: number) => {
+    const role = roles[index] as CoordinationRole;
+    const other = counterpart(role);
+    return poolFor(role).filter((candidate) =>
+      (!other || assignments[other]?.instanceId !== candidate.instanceId) &&
+      canStaff(index + 1, { ...assignments, [role]: candidate }));
+  };
 
   const finish = (fields: {
-    stopReason: string;
-    verdict: CoordinationVerdict;
-    result?: string | null;
-    scopeExhausted?: boolean;
+    stopReason: string; verdict: CoordinationVerdict; result?: string | null; scopeExhausted?: boolean;
   }): CoordinateSessionState => {
     const planning = assignments.planning ?? null;
     const review = assignments.review ?? null;
@@ -468,137 +495,159 @@ async function runRecoveryRound(
       stopReason: fields.stopReason,
       planningQuota: planning ? plan.quotaLabels[planning.instanceId] ?? null : null,
       reviewQuota: review ? plan.quotaLabels[review.instanceId] ?? null : null,
-      roles: planning && review ? (["planning", "review"] as const) : ([] as const),
-      commands: launched,
-      quotaLabels: plan.quotaLabels,
-      planText,
-      reviewText,
-      verdict: fields.verdict,
-      messageDispatched: messageDispatched(),
-      environmentBlocked,
-      roundEvents,
+      roles: planning && review ? plan.roles : [],
+      commands: launched, quotaLabels: plan.quotaLabels, planText, reviewText,
+      verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
+      ...(write ? {
+        executionText, auditText,
+        executionHarness: assignments.execution ? harnessOf(assignments.execution) : null,
+        auditHarness: assignments.audit ? harnessOf(assignments.audit) : null,
+        authorizedWriteTurnsLeft: writeTurnsRemaining ?? null,
+      } : {}),
       ...(turnsRemaining === undefined ? {} : { authorizedTurnsLeft: turnsRemaining }),
       ...(fields.scopeExhausted === undefined ? {} : { scopeExhausted: fields.scopeExhausted }),
     };
   };
+  const saveText = (role: CoordinationRole, text: string) => {
+    if (!text) return;
+    if (role === "planning") planText = text;
+    if (role === "review") reviewText = text;
+    if (role === "execution") executionText = text;
+    if (role === "audit") auditText = text;
+  };
 
-  for (let roleIndex = 0; roleIndex < ROLES.length; roleIndex += 1) {
-    const role = ROLES[roleIndex] as CoordinationRole;
+  for (let roleIndex = 0; roleIndex < roles.length; roleIndex += 1) {
+    const role = roles[roleIndex] as CoordinationRole;
     let instance = assignments[role];
     let command = commands[role];
-    // A takeover may have promoted this role's instance to an earlier role
-    // (or failed it); re-select before launching so independence and
-    // per-instance-once hold.
-    if (instance && (failed.has(instance.instanceId) || used.has(instance.instanceId))) {
-      instance = undefined;
-      command = undefined;
+    const other = counterpart(role);
+    if (instance && (failed.has(instance.instanceId) || used.has(usedKey(role, instance.instanceId)) ||
+        (other && assignments[other]?.instanceId === instance.instanceId))) {
+      instance = undefined; command = undefined;
     }
     let recovering = false;
     do {
       recovering = false;
       let replacementEvent: RoundEvent | null = null;
       if (!instance || !command) {
-        // Chain-completeness pre-check, before every replacement launch: the
-        // remaining pool must still staff this role and every remaining role
-        // with distinct instances. If it cannot, stop without launching.
-        const candidates = remainingPool([...failed, ...used]);
-        const remainingRoles = ROLES.length - roleIndex;
-        if (candidates.length < remainingRoles) {
+        const replacement = candidatesFor(roleIndex)[0];
+        if (!replacement) {
           return finish({
             stopReason: lastFailure?.environment
               ? `Stopped. ${lastFailure.harness} cannot run on this machine right now, and an independent check needs two harnesses that can run.`
-              : lastFailure?.stopReason
-                ?? "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
+              : lastFailure?.stopReason ?? "Stopped. An independent verification needs another eligible harness, so no further role was sent.",
             verdict: "failed",
           });
         }
-        const replacement = candidates[0] as SyntheticCatalogInstance;
         instance = replacement;
-        command = replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
-        commands[role] = command;
         assignments[role] = replacement;
-        const harness = harnessOf(replacement);
-        const sentence = `${harness} is ${roleLabel(role)} instead.`;
-        replacementEvent = { kind: "continued", role, instanceId: replacement.instanceId, harness, sentence };
-        emitEvent?.({ ...replacementEvent });
+        command = role === "execution" || role === "audit"
+          ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
+              planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
+            })
+          : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+        commands[role] = command;
+        // Initial lazy execution/audit assignment is not a takeover.
+        if (role === "planning" || role === "review" || lastFailure?.role === role) {
+          const harness = harnessOf(replacement);
+          replacementEvent = { kind: "continued", role, instanceId: replacement.instanceId, harness,
+            sentence: `${harness} is ${roleLabel(role)} instead.` };
+          emitEvent?.({ ...replacementEvent });
+        }
+      }
+      if (role === "execution") {
+        // Immediately before the first write, after checked review: both known
+        // budgets and an independent eligible reader are necessary. No upfront
+        // >=3 gate: a read budget of 2 still runs the plan and check.
+        const executorId = instance.instanceId;
+        if (!poolFor("audit").some((reader) => reader.instanceId !== executorId)) {
+          return finish({ verdict: "stopped", stopReason: "An independent verification needs another eligible harness, so no workspace changes were sent." });
+        }
+        if (typeof turnsRemaining !== "number" || !Number.isFinite(turnsRemaining) || turnsRemaining < 1) {
+          return finish({ verdict: "stopped", stopReason: "Verification needs one more authorized read turn, so no workspace changes were sent." });
+        }
+        if (typeof writeTurnsRemaining !== "number" || !Number.isFinite(writeTurnsRemaining) || writeTurnsRemaining < 1) {
+          return finish({ verdict: "stopped", stopReason: "Workspace changes need an available authorized write turn, so no workspace changes were sent." });
+        }
       }
       const harness = harnessOf(instance);
       emitEvent?.({ kind: "started", role, instanceId: instance.instanceId, harness });
       const launchCommand = role === "review" && planText !== null ? withPlanText(command, planText) : command;
       launched.push(launchCommand);
-      const result = await transport.launch(launchCommand);
+      let result: CoordinateLaunchResult;
+      if (write) {
+        try {
+          result = await transport.launch(launchCommand);
+        } catch {
+          // A rejected IPC transport is not proof that nothing was sent.
+          // After a writer, preserve accumulated evidence rather than letting
+          // a caller replace it with an empty unsent failure.
+          result = {
+            text: "", errorText: `The ${role} transport did not return a result, so its dispatch is unknown.`, dispatched: null,
+          };
+        }
+      } else {
+        result = await transport.launch(launchCommand);
+      }
       mergeDispatch(result.dispatched);
       turnsRemaining = result.turnsRemaining ?? null;
-
-      // Budget and revocation stops never auto-continue; the scope layer has
-      // the authority here, not the harness classification.
+      if (write) writeTurnsRemaining = result.writeTurnsRemaining ?? null;
+      // Partial execution/audit text is retained even on scope terminal stops.
+      if (role === "execution" || role === "audit") saveText(role, result.text.trim());
+      if (role === "execution") executionFacts = JSON.stringify({
+        commandId: launchCommand.commandId, instanceId: instance.instanceId,
+        workspace: input.workspacePath, sandbox: launchCommand.sandboxPolicy.type,
+        dispatched: result.dispatched ?? null, stopCode: result.stopCode ?? null,
+        turnsRemaining: result.turnsRemaining ?? null, writeTurnsRemaining: result.writeTurnsRemaining ?? null,
+      });
       if (result.scopeExhausted === true || result.stopCode === "scope-exhausted") {
-        return finish({
-          stopReason: "All authorized model turns were used, so this stopped.",
-          verdict: "failed",
-          scopeExhausted: true,
-        });
+        return finish({ stopReason: role === "execution"
+          ? "All authorized workspace-change turns were used, so this stopped. Inspect any partial changes before sending again."
+          : "All authorized model turns were used, so this stopped.", verdict: "failed", scopeExhausted: true });
       }
       if (result.stopCode === "scope-revoked") {
-        return finish({
-          stopReason: result.errorText.trim() || "The authorized harness scope was revoked, so this stopped.",
-          verdict: "failed",
-        });
+        return finish({ stopReason: result.errorText.trim() || "The authorized harness scope was revoked, so this stopped.", verdict: "failed" });
       }
-      // A takeover becomes a persistent fact only once the replacement launch
-      // returns as a completed turn result. A budget/revocation refusal above
-      // is transient and must not claim that the round actually continued.
       if (replacementEvent !== null) roundEvents.push(replacementEvent);
-
       const failure = failureFromLaunch(result, role, instance);
       if (failure === null) {
-        const text = result.text.trim();
-        if (role === "planning") {
-          planText = text;
-          used.add(instance.instanceId);
-        } else {
-          reviewText = text;
-        }
+        saveText(role, result.text.trim());
+        used.add(usedKey(role, instance.instanceId));
         break;
       }
       failed.add(instance.instanceId);
       lastFailure = failure;
       if (failure.environment !== null) environmentBlocked = failure.environment;
-      if (result.text.trim().length > 0) {
-        if (role === "planning" && planText === null) planText = result.text.trim();
-        if (role === "review") reviewText = result.text.trim();
-      }
+      if (role !== "planning" || planText === null) saveText(role, result.text.trim());
       const failedEvent: RoundEvent = {
-        kind: "failed",
-        role,
-        instanceId: failure.instanceId,
-        harness: failure.harness,
-        sentence: failure.sentence,
-        ...(failure.detail === null ? {} : { detail: failure.detail }),
+        kind: "failed", role, instanceId: failure.instanceId, harness: failure.harness,
+        sentence: failure.sentence, ...(failure.detail === null ? {} : { detail: failure.detail }),
       };
       roundEvents.push(failedEvent);
       emitEvent?.({ ...failedEvent });
-      // The dispatch tri-state gates the takeover: a known-sent classified
-      // failure or a proven-not-sent one may continue; unknown (null/absent)
-      // never does — the turn may have reached the provider.
-      if (failure.continuable && (result.dispatched === true || result.dispatched === false)) {
-        // Never retry this instance or its command id. Leave the failed
-        // assignment available for the report, but force the next iteration
-        // through the replacement pool before another launch.
-        instance = undefined;
-        command = undefined;
-        recovering = true;
+      // Write failures NEVER recover, even proven-not-sent ones. Unknown read
+      // dispatch is also terminal; neither command nor instance is replayed.
+      if (role !== "execution" && failure.continuable && (result.dispatched === true || result.dispatched === false)) {
+        instance = undefined; command = undefined; recovering = true;
         continue;
       }
-      return finish({ stopReason: failure.stopReason, verdict: "failed" });
+      return finish({ stopReason: role === "execution"
+        ? `${failure.stopReason} Workspace changes were not retried; inspect any partial changes before sending again.`
+        : failure.stopReason, verdict: "failed" });
     } while (recovering);
+    if (role === "review") {
+      const verdict = verdictFromReview(reviewText ?? "");
+      if (!write || verdict !== "checked") return finish({
+        stopReason: checkStopReason(verdict), verdict, result: reviewText,
+      });
+    }
   }
-
-  const verdict = verdictFromReview(reviewText ?? "");
-  return finish({
-    stopReason: checkStopReason(verdict),
-    verdict,
-    result: reviewText !== null && reviewText.length > 0 ? reviewText : null,
+  const verdict = verdictFromAudit(auditText ?? "");
+  return finish({ verdict, result: auditText,
+    stopReason: verdict === "verified" ? "The independent harness verified the changes, so this stopped."
+      : verdict === "revise" ? "The independent verification says the changes need revision, so this stopped."
+      : verdict === "stopped" ? "The independent verification says to stop, so this stopped."
+      : "The independent verification did not confirm the changes, so this stopped.",
   });
 }
 
@@ -635,7 +684,7 @@ export async function runCoordinateSession(
       stopReason: "Planning and review are assigned to two different harnesses. No model turn was sent, because this session is not authorized to spend subscription quota.",
     });
   }
-  if (options.allowedInstances !== undefined) {
+  if (plannedInput.writeAuthorization !== undefined || options.allowedInstances !== undefined) {
     return runRecoveryRound(plannedInput, options, transport, plan);
   }
   return runLegacyRound(input, transport, plan, planning, review);
