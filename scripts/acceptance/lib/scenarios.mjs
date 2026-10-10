@@ -30,6 +30,70 @@ export function validateScenario(config) {
 const readJson = filename => JSON.parse(fs.readFileSync(filename, 'utf8'));
 const fileEvidence = filename => ({ path: filename, bytes: fs.statSync(filename).size, sha256: crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex') });
 
+// ---- R2 (independent execution audit r1): the Harness access panel renders
+// the workspace-changes decision as a SECOND list. Two discovered harnesses now
+// produce four checkboxes (two read members plus two default-OFF write members)
+// and one harness produces two rows. Track A may only count and select READ
+// members: read controls are the ones labelled `Select <name>` and read rows
+// are the rows that carry data-instance (the write list's rows carry none).
+// Write controls are observed only to prove the write dimension stays OFF —
+// never clicked to satisfy an old all-checked predicate.
+export const AUTHORIZATION = Object.freeze({
+  panel: '.authorization-panel',
+  readControl: '.authorization-panel input[aria-label^="Select "]',
+  writeControl: '.authorization-panel input[aria-label^="Allow changes through "]',
+  readRow: '.authorization-row[data-instance]',
+  writeSection: '.authorization-write-section',
+  noWriteSentence: 'No file changes are allowed unless you check a harness here and press Send.',
+});
+export const readSelectLabel = name => `Select ${name}`;
+
+// One renderer read that keeps read members, write members and the budget
+// input apart. `closest('.authorization-row')` ties every read control to the
+// row that owns it, so a read member can never be counted from the write list.
+export function authorizationFactsExpression() {
+  return `(() => {
+    const panel = document.querySelector(${JSON.stringify(AUTHORIZATION.panel)});
+    const read = Array.from(document.querySelectorAll(${JSON.stringify(AUTHORIZATION.readControl)}));
+    const write = Array.from(document.querySelectorAll(${JSON.stringify(AUTHORIZATION.writeControl)}));
+    const rows = Array.from(document.querySelectorAll(${JSON.stringify(AUTHORIZATION.readRow)}));
+    return {
+      readSelects: read.map(e => ({ label: e.getAttribute('aria-label'), instance: e.closest('.authorization-row')?.dataset.instance ?? null, checked: e.checked === true })),
+      writeSelects: write.map(e => ({ label: e.getAttribute('aria-label'), checked: e.checked === true })),
+      readRows: rows.map(e => ({ instance: e.dataset.instance, state: e.className })),
+      readTurnsValue: panel?.querySelector('#authorization-turns')?.value ?? null,
+      writeSectionPresent: !!panel?.querySelector(${JSON.stringify(AUTHORIZATION.writeSection)}),
+      noWriteSentenceShown: (panel?.querySelector(${JSON.stringify(AUTHORIZATION.writeSection)})?.textContent ?? '').includes(${JSON.stringify(AUTHORIZATION.noWriteSentence)}),
+    };
+  })()`;
+}
+
+// The write dimension is off only when every write member exists, matches the
+// discovered read membership one-for-one, is unchecked, and the panel still
+// states that no file changes are allowed.
+export function writeConsentOff(facts) {
+  const read = Array.isArray(facts?.readSelects) ? facts.readSelects : [];
+  const write = Array.isArray(facts?.writeSelects) ? facts.writeSelects : [];
+  return write.length > 0 && write.length === read.length && facts?.writeSectionPresent === true && facts?.noWriteSentenceShown === true
+    && write.every(member => member.checked === false && typeof member.label === 'string' && member.label.startsWith('Allow changes through '));
+}
+
+// Read-member truth for one draft panel. `names` are the displayed harness
+// names; `budget` is the allowed read turns. Write consent must stay OFF in
+// every Track A case, so it is asserted, never clicked into place.
+export function readAuthorizationAssertions(facts, { names, budget }) {
+  const read = Array.isArray(facts?.readSelects) ? facts.readSelects : [];
+  const rows = Array.isArray(facts?.readRows) ? facts.readRows : [];
+  const labels = names.map(readSelectLabel);
+  return {
+    readControlMembers: read.length === names.length && labels.every(label => read.some(member => member.label === label)),
+    readMemberRows: rows.length === names.length && names.every(name => rows.some(row => row.instance === name.toLowerCase())),
+    readMembersChecked: read.length === names.length && read.every(member => member.checked === true),
+    writeConsentStaysOff: writeConsentOff(facts),
+    readTurnsBudget: facts?.readTurnsValue === String(budget),
+  };
+}
+
 export function collectArtifacts(caseRoot) {
   const state = path.join(caseRoot, 'harness-state');
   const ledgerFile = path.join(state, 'sent-turns.json');
@@ -63,6 +127,10 @@ export function artifactAssertions(artifacts) {
     sentinelAndQueueAccepted: artifacts.invocations.every(i => !['sentinel-refused','turn-queue-exhausted'].includes(i.behaviorId)),
     twoClaimsAndConsumedGrants: artifacts.claims.length === 2 && ledger.every(([id]) => artifacts.claims.includes(`claim-${id}`)) && artifacts.unconsumedGrants.length === 0,
     noBlockedHealth: artifacts.health === null || Object.keys(artifacts.health).length === 0,
+    // R2: with write consent left OFF the round may only issue read roles and
+    // the saved record may carry no execution/audit facts (no write launch).
+    readRolesOnly: ledger.length === 2 && ledger.every(([id]) => id.startsWith('coordinate-plan-') || id.startsWith('coordinate-review-')),
+    noWriteFactsInRecord: records.length === 1 && !record?.executionText && !record?.auditText && !record?.executionHarness && !record?.auditHarness,
     actualCheckedRecord: records.length === 1 && record?.verdict === 'checked' && record?.planText === 'Bounded plan.' && record?.reviewText?.endsWith('VERDICT: carry-out'),
     independentHarnesses: !!record?.planningHarness && !!record?.reviewHarness && record.planningHarness !== record.reviewHarness,
   };
@@ -80,29 +148,37 @@ export async function runA1(app, caseRoot, result) {
   result.coreSnapshot = { connection: snapshot.connection, protocolVersion: snapshot.protocolVersion, buildId: snapshot.buildId };
   check('coreConnected', snapshot.connection === 'connected' && snapshot.protocolVersion === 'goalport.ipc.v2');
   await app.click('button[aria-label="New goal"]');
-  await app.until('document.querySelectorAll(".authorization-panel input[type=checkbox]").length === 2');
-  result.discoveryRows = await app.evaluate(`Array.from(document.querySelectorAll('.authorization-row')).map(e => ({instance:e.dataset.instance,text:e.innerText,state:e.className}))`);
+  // R2: wait for the two READ controls only. This same panel also renders the
+  // separate workspace-changes list (two default-OFF write boxes here), so an
+  // all-checkbox wait would never settle.
+  await app.until(`document.querySelectorAll(${JSON.stringify(AUTHORIZATION.readControl)}).length === 2`);
+  result.authorization = await app.evaluate(authorizationFactsExpression(), true);
+  result.discoveryRows = result.authorization.readRows;
   check('twoSelectableHarnesses', result.discoveryRows.length === 2 && result.discoveryRows.every(r => r.state.includes('selectable')));
   await app.input('#draft-workspace', SYNTHETIC);
   await app.input('#draft-message', SCENARIOS.a1.goal);
   for (const name of ['Codex', 'Claude']) {
-    const selector = `input[aria-label="Select ${name}"]`;
+    const selector = `input[aria-label="${readSelectLabel(name)}"]`;
     if (!await app.evaluate(`document.querySelector(${JSON.stringify(selector)}).checked`)) await app.click(selector);
   }
   await app.input('#authorization-turns', '4');
-  check('domSelectionsAndBudget', await app.evaluate(`document.querySelector('#authorization-turns').value === '4' && Array.from(document.querySelectorAll('.authorization-panel input[type=checkbox]')).every(e => e.checked)`));
+  result.authorization = await app.evaluate(authorizationFactsExpression(), true);
+  result.discoveryRows = result.authorization.readRows;
+  for (const [id, value] of Object.entries(readAuthorizationAssertions(result.authorization, { names: ['Codex', 'Claude'], budget: 4 }))) check(id, value);
   for (const width of SCENARIOS.a1.widths) result.screenshots.push(await app.screenshot(caseRoot, 'authorization', width));
-  result.walkthrough.push('New goal: two real discovered subscription-backed stub harness rows; checked boxes plus budget four explicitly permit plan/check turns. Nothing has been sent.');
+  result.walkthrough.push('New goal: two read-member rows show the real discovered subscription-backed stub harnesses; their boxes plus budget four explicitly permit plan/check turns. The separate workspace-changes list stays unchecked, so no file change is allowed. Nothing has been sent.');
   await app.resize(1020);
   await app.click('button[aria-label="Send message"]');
   await app.until("document.body.innerText.includes('Claude is checking')", 15000);
   result.screenshots.push(await app.screenshot(caseRoot, 'progress', 1020));
   result.progressScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
-  result.walkthrough.push('Send: Codex produced the plan; Claude is visibly checking it while the bounded offline delay holds its reply.');
+  check('progressScopeHasNoWriteDimension', !!result.progressScope && result.progressScope.write === undefined);
+  result.walkthrough.push('Send: Codex produced the plan; Claude is visibly checking it while the bounded offline delay holds its reply. The live scope carries read turns only — no write dimension was authorized.');
   await app.until("document.body.innerText.includes('Can be carried out')", 20000);
   await app.until("document.body.innerText.includes('2 of 4 authorized model turns left')");
   result.scopeBeforeRevoke = await app.evaluate('window.goalportCore.coordinationScope()', true);
   check('scopeBudgetTwoOfFour', result.scopeBeforeRevoke?.remaining === 2 && result.scopeBeforeRevoke?.maxTurns === 4);
+  check('authorizedScopeHasNoWriteDimension', !!result.scopeBeforeRevoke && result.scopeBeforeRevoke.write === undefined);
   for (const width of SCENARIOS.a1.widths) result.screenshots.push(await app.screenshot(caseRoot, 'terminal', width));
   check('allShotsNontrivial', result.screenshots.length === 7 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === s.requested.width));
   check('shotMarkers', result.screenshots.every(s => s.geometry.text.includes(s.state === 'authorization' ? 'Nothing is sent until you press Send' : s.state === 'progress' ? 'Claude is checking' : 'Can be carried out')));
@@ -149,16 +225,21 @@ async function m3OpenDraft(app, result, scenario, names, check) {
   result.coreSnapshot = { connection: snapshot.connection, protocolVersion: snapshot.protocolVersion };
   check('coreConnectedV2', snapshot.connection === 'connected' && snapshot.protocolVersion === 'goalport.ipc.v2');
   await app.click('button[aria-label="New goal"]');
-  await app.until('!!document.querySelector(\'.authorization-panel .authorization-row\')');
-  result.discoveryRows = await app.evaluate(`Array.from(document.querySelectorAll('.authorization-row')).map(e => ({ instance: e.dataset.instance, state: e.className }))`);
+  // R2: read-list boundary only — the panel's second (workspace-changes) list
+  // reuses the row class, so a bare `.authorization-row` count sees write rows.
+  await app.until(`!!document.querySelector(${JSON.stringify(AUTHORIZATION.readRow)})`);
+  result.authorization = await app.evaluate(authorizationFactsExpression(), true);
+  result.discoveryRows = result.authorization.readRows;
   await app.input('#draft-workspace', SYNTHETIC);
   await app.input('#draft-message', scenario.goal);
   for (const name of names) {
-    const selector = `input[aria-label="Select ${name}"]`;
+    const selector = `input[aria-label="${readSelectLabel(name)}"]`;
     if (!await app.evaluate(`document.querySelector(${JSON.stringify(selector)})?.checked === true`)) await app.click(selector);
   }
   await app.input('#authorization-turns', String(scenario.budget));
-  check('selectionsAndBudget', await app.evaluate(`Array.from(document.querySelectorAll('.authorization-panel input[type=checkbox]')).filter(e => e.checked).length === ${names.length} && document.querySelector('#authorization-turns').value === '${scenario.budget}'`));
+  result.authorization = await app.evaluate(authorizationFactsExpression(), true);
+  result.discoveryRows = result.authorization.readRows;
+  for (const [id, value] of Object.entries(readAuthorizationAssertions(result.authorization, { names, budget: scenario.budget }))) check(id, value);
 }
 
 async function m3TerminalDom(app) {
@@ -264,7 +345,7 @@ export async function runA3(app, caseRoot, result) {
   const check = m3Check('a3', result);
   await m3OpenDraft(app, result, scenario, ['Codex'], check);
   check('exactlyOneSelectableProvider', result.discoveryRows.length === 1 && result.discoveryRows[0].instance === 'codex' && result.discoveryRows[0].state.includes('selectable'));
-  result.walkthrough.push('New goal: only Codex is selectable. Claude answered its sign-in probe as logged out through its own stub response, so GoalPort shows one harness and cannot offer an independent check.');
+  result.walkthrough.push('New goal: the read-member list shows only Codex as selectable. Claude answered its sign-in probe as logged out through its own stub response, so GoalPort shows one harness (and its separate workspace-changes row) and cannot offer an independent check. No file-change consent is checked.');
   await app.click('button[aria-label="Send message"]');
   await app.until(`document.body.innerText.includes(${JSON.stringify(M3_SEND_REFUSAL)})`, 15000);
   result.scopeAfterRefusal = await app.evaluate('window.goalportCore.coordinationScope()', true);
@@ -366,14 +447,17 @@ export async function runA5Relaunch(app, caseRoot, result) {
   check('relaunch.failedRoundSurvivedClose', true);
   await app.click('button[aria-label="New goal"]');
   await app.until('!!document.querySelector(\'.authorization-row[data-instance="codex"]\')');
-  const panel = await app.evaluate(`({
-    rows: Array.from(document.querySelectorAll('.authorization-row')).map(e => ({ instance: e.dataset.instance, state: e.className })),
+  // R2: rows and write members come from the shared read-list expression, so a
+  // remembered blocked row can never be counted from the write list.
+  const panelFacts = await app.evaluate(authorizationFactsExpression(), true);
+  const panel = { rows: panelFacts.readRows, ...await app.evaluate(`({
     blockedText: document.body.innerText.includes('Blocked on this machine since') && document.body.innerText.includes('its tools could not run'),
     rowDetails: !!document.querySelector('.authorization-row[data-instance="codex"] details.technical-details'),
     rowUseAgain: !!document.querySelector('.authorization-row[data-instance="codex"] button[aria-label="Use again Codex"]'),
-  })`);
+  })`) };
   check('relaunch.blockedRowShownBeforeSend', panel.rows.some(r => r.instance === 'codex' && r.state.includes('authorization-row-blocked')) && panel.blockedText && panel.rowDetails && panel.rowUseAgain);
   check('relaunch.claudeStillSelectable', panel.rows.some(r => r.instance === 'claude' && r.state.includes('authorization-row-selectable')));
+  check('relaunch.writeConsentStaysOff', panelFacts.readSelects.length === 2 && writeConsentOff(panelFacts));
   result.screenshots.push(await app.screenshot(caseRoot, 'blocked-panel', 1020));
   result.walkthrough.push('Relaunch: before anything is sent, the panel already says Codex is blocked on this machine since the earlier failure, with the technical detail folded away and a Use again control. The memory survived the close.');
   await app.click('.authorization-row[data-instance="codex"] button[aria-label="Use again Codex"]');
