@@ -387,9 +387,19 @@ function App() {
       if (cancelled || !discovery || !discovery.connected) return;
       discoveredProvidersRef.current = discovery.providers;
       setPanelProviders(discovery.providers);
+      // A scope member the current catalog can no longer staff (a paid-api
+      // login, a since-blocked harness nobody re-authorized for) never lands
+      // in the checked set: rows show reality, and the checked set stays a
+      // subset of what can actually take a role. Scope members that are
+      // selectable-but-currently-blocked (blocked after the authorize) stay
+      // checked — the authorization really does include them.
+      const selectable = new Set(selectableDefaults(discovery.providers));
       setSelectedInstances(scope && scope.instances.length > 0
-        ? scope.instances
-        : selectableDefaults(discovery.providers));
+        ? scope.instances.filter((instanceId) => {
+          const catalog = catalogFromProviderSnapshots(discovery.providers).find((item) => item.instanceId === instanceId);
+          return catalog ? catalog.billing !== "paid-api" : false;
+        })
+        : [...selectable]);
     })();
     return () => { cancelled = true; };
   }, [runtimeLessDraftKey, scopeBridgeReady]);

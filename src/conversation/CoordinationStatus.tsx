@@ -217,7 +217,8 @@ export function CoordinationStatus({
       </dl>
       {scopeExhausted ? (
         <div className="coordination-budget" role="status">
-          <p>All authorized model turns were used, so this stopped.</p>
+          {/* The Stop reason above already says the sentence; this block only
+              carries the action — copy says it once (AGENTS.md §4). */}
           {onAllowMoreTurns ? (
             <button
               type="button"
