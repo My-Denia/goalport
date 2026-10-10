@@ -1634,6 +1634,121 @@ describe("leaving a draft during coordination", () => {
   });
 });
 
+/**
+ * Mirrors electron/coordination-record.cjs normalize: only whitelisted fields
+ * survive a save. In particular the transient overlay fields
+ * (authorizedTurnsLeft, scopeExhausted) are DROPPED, and malformed
+ * roundEvents entries are discarded without rejecting the record.
+ */
+const RECORD_VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed"]);
+const RECORD_QUOTAS = new Set(["unknown", "available", "exhausted"]);
+
+function nullableText(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text.length > 0 ? text : null;
+}
+
+function normalizeEnvironmentBlockedForTest(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null) return null;
+  const input = value as Record<string, unknown>;
+  const role = input.role === "planning" || input.role === "review" ? input.role : null;
+  const instanceId = typeof input.instanceId === "string" && input.instanceId.trim() ? input.instanceId.trim() : null;
+  if (!role || !instanceId) return null;
+  return {
+    role,
+    instanceId,
+    harness: nullableText(input.harness) ?? null,
+    detail: nullableText(input.detail) ?? null,
+  };
+}
+
+function normalizeRoundEventForTest(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null) return null;
+  const input = value as Record<string, unknown>;
+  const kind = input.kind === "failed" || input.kind === "continued" ? input.kind : null;
+  const role = input.role === "planning" || input.role === "review" ? input.role : null;
+  const instanceId = typeof input.instanceId === "string" && input.instanceId.trim() ? input.instanceId.trim() : null;
+  const harness = nullableText(input.harness);
+  const sentence = nullableText(input.sentence);
+  if (!kind || !role || !instanceId || harness === undefined || !sentence) return null;
+  const event: Record<string, unknown> = { kind, role, instanceId, harness, sentence };
+  if (input.detail !== undefined) {
+    const detail = nullableText(input.detail);
+    if (detail === undefined) return null;
+    event.detail = detail;
+  }
+  return event;
+}
+
+function normalizeCoordinationRecordForTest(input: Record<string, unknown>): Record<string, unknown> | null {
+  const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
+  const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : "";
+  const goal = typeof input.goal === "string" ? input.goal.trim() : "";
+  const stopReason = typeof input.stopReason === "string" ? input.stopReason.trim() : "";
+  const verdict = input.verdict;
+  if (!requestId || !workspacePath || !goal || !stopReason || !RECORD_VERDICTS.has(String(verdict))) return null;
+  if (stopReason.toLowerCase().includes("replaced")) return null;
+  const planningHarness = nullableText(input.planningHarness);
+  const reviewHarness = nullableText(input.reviewHarness);
+  const planText = nullableText(input.planText);
+  const reviewText = nullableText(input.reviewText);
+  const result = nullableText(input.result);
+  const planningQuota = input.planningQuota === null
+    ? null
+    : (RECORD_QUOTAS.has(String(input.planningQuota)) ? input.planningQuota : undefined);
+  const reviewQuota = input.reviewQuota === null
+    ? null
+    : (RECORD_QUOTAS.has(String(input.reviewQuota)) ? input.reviewQuota : undefined);
+  if (
+    planningHarness === undefined
+    || reviewHarness === undefined
+    || planText === undefined
+    || reviewText === undefined
+    || result === undefined
+    || planningQuota === undefined
+    || reviewQuota === undefined
+  ) return null;
+  const roundEvents = Array.isArray(input.roundEvents)
+    ? input.roundEvents.flatMap((item) => {
+      const event = normalizeRoundEventForTest(item);
+      return event ? [event] : [];
+    })
+    : undefined;
+  return {
+    requestId,
+    workspacePath,
+    goal,
+    planningHarness,
+    reviewHarness,
+    planText,
+    reviewText,
+    result,
+    verdict,
+    stopReason,
+    planningQuota,
+    reviewQuota,
+    messageDispatched: input.messageDispatched === true ? true : input.messageDispatched === false ? false : null,
+    environmentBlocked: normalizeEnvironmentBlockedForTest(input.environmentBlocked),
+    ...(roundEvents === undefined ? {} : { roundEvents }),
+    savedAt: typeof input.savedAt === "string" && !Number.isNaN(Date.parse(input.savedAt)) ? input.savedAt : null,
+  };
+}
+
+function saveCoordinationRecordForTest(
+  saved: Array<Record<string, unknown>>,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const record = normalizeCoordinationRecordForTest(input);
+  if (!record) throw new Error("The plan could not be saved.");
+  const stamped: Record<string, unknown> = { ...record, savedAt: new Date().toISOString() };
+  const index = saved.findIndex((item) => item.requestId === stamped.requestId);
+  if (index >= 0) saved[index] = stamped;
+  else saved.unshift(stamped);
+  return stamped;
+}
+
 describe("environment-blocked harness", () => {
   function providerBridge(options: {
     providers: Array<{ instanceId: string; displayName: string }>;
@@ -1642,7 +1757,7 @@ describe("environment-blocked harness", () => {
   }) {
     let calls = 0;
     const launched: Array<{ commandId: string; instanceId: string }> = [];
-    const saved: Array<{ requestId?: string; verdict?: string; environmentBlocked?: unknown }> = [];
+    const saved: Array<Record<string, unknown>> = [];
     window.__GOALPORT_ELECTRON__ = true;
     window.goalportCore = {
       snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
@@ -1677,13 +1792,10 @@ describe("environment-blocked harness", () => {
         launched.push({ commandId: command.commandId, instanceId: command.modelSelection.instanceId });
         return options.launch(command, calls);
       },
-      coordinationSave: async (record: { requestId?: string; verdict?: string; environmentBlocked?: unknown }) => {
-        const index = saved.findIndex((item) => item.requestId === record.requestId);
-        if (index >= 0) saved[index] = record;
-        else saved.unshift(record);
-        return record;
-      },
+      coordinationSave: async (record: Record<string, unknown>) => saveCoordinationRecordForTest(saved, record),
       coordinationRecords: options.records ?? (async () => saved),
+      coordinationScope: async () => null,
+      coordinationUnblock: async () => ({ ok: true }),
     } as never;
     return { launched, saved, launchCount: () => calls };
   }
@@ -1763,6 +1875,387 @@ describe("environment-blocked harness", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(bridge.launchCount()).toBe(3));
     expect(bridge.launched.slice(1).map((item) => item.instanceId)).toEqual(["claude", "grok"]);
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+  });
+});
+
+describe("harness access panel and scoped rounds", () => {
+  function usableHarness(instanceId: string, displayName: string): Record<string, unknown> {
+    return {
+      instanceId,
+      displayName,
+      enabled: true,
+      installed: true,
+      availability: "available",
+      status: "ready",
+      auth: { status: "authenticated", type: "subscription" },
+      models: [{ slug: `${instanceId}-model`, name: `${instanceId}-model`, isDefault: true }],
+      usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+    };
+  }
+
+  const PLAN_TEXT = "Bounded plan.";
+  const CHECK_TEXT = "The plan can be carried out.\nVERDICT: carry-out";
+
+  function planOrReview(command: { commandId: string }): { text: string; errorText: string } {
+    return command.commandId.includes("plan")
+      ? { text: PLAN_TEXT, errorText: "" }
+      : { text: CHECK_TEXT, errorText: "" };
+  }
+
+  function scopedBridge(options: {
+    providers: Array<Record<string, unknown>>;
+    scope?: Record<string, unknown> | null;
+    onUnblock?: (instanceId: string) => void;
+    authorize?: (payload: { instances: string[]; maxTurns: number }) => Promise<unknown>;
+    launch: (command: { commandId: string; modelSelection: { instanceId: string } }, call: number) => Promise<Record<string, unknown>>;
+    records?: Array<Record<string, unknown>> | (() => Promise<Array<Record<string, unknown>>>);
+  }) {
+    const order: string[] = [];
+    const saved: Array<Record<string, unknown>> = [];
+    const launched: Array<{ commandId: string; instanceId: string }> = [];
+    const launchArgs: unknown[][] = [];
+    let currentProviders = options.providers;
+    let calls = 0;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      coordinateDiscover: async () => {
+        order.push("discover");
+        return { connected: true, sendAuthorized: true, stopReason: null, providers: currentProviders };
+      },
+      coordinateLaunch: async (...args: unknown[]) => {
+        order.push("launch");
+        calls += 1;
+        const command = args[0] as { commandId: string; modelSelection: { instanceId: string } };
+        launched.push({ commandId: command.commandId, instanceId: command.modelSelection.instanceId });
+        launchArgs.push(args);
+        return options.launch(command, calls);
+      },
+      coordinationAuthorize: async (payload: { instances: string[]; maxTurns: number }) => {
+        order.push("authorize");
+        return options.authorize ? options.authorize(payload) : { ok: true, generation: 1, remaining: payload.maxTurns };
+      },
+      coordinationScope: async () => options.scope ?? null,
+      coordinationRevoke: async () => ({ ok: true }),
+      coordinationUnblock: async (instanceId: string) => {
+        order.push(`unblock:${instanceId}`);
+        options.onUnblock?.(instanceId);
+        return { ok: true };
+      },
+      coordinationSave: async (record: Record<string, unknown>) => saveCoordinationRecordForTest(saved, record),
+      coordinationRecords: async () => (typeof options.records === "function" ? options.records() : (options.records ?? saved)),
+    } as never;
+    return {
+      order,
+      saved,
+      launched,
+      launchArgs,
+      launchCount: () => calls,
+      setProviders: (providers: Array<Record<string, unknown>>) => { currentProviders = providers; },
+    };
+  }
+
+  async function openDraftWithPanel() {
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const lead = await screen.findByText(/Nothing is sent until you press Send\./);
+    expect(lead).toBeTruthy();
+    return lead;
+  }
+
+  function typeMessage(message: string) {
+    fireEvent.change(screen.getByRole("textbox", { name: "Message composer" }), {
+      target: { value: message },
+    });
+  }
+
+  function sendMessage() {
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  }
+
+  it("renders the three panel row states: usable, blocked with Use again, and paid-api", async () => {
+    scopedBridge({
+      providers: [
+        usableHarness("codex", "Codex"),
+        {
+          ...usableHarness("claude", "Claude"),
+          environmentHealth: { since: "2026-10-01T09:30:00.000Z", detail: "windows sandbox failed: helper missing" },
+        },
+        { ...usableHarness("grok", "Grok"), auth: { status: "authenticated", type: "apiKey" } },
+      ],
+      launch: async () => ({ text: "", errorText: "" }),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    // Usable row: a selectable checkbox; only Codex is selected by default.
+    expect(screen.getByText("GoalPort may use Codex for plan and check turns. Nothing is sent until you press Send.")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Select Codex" })).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "Select Claude" })).toBeNull();
+    // Blocked row: since-line, Use again, collapsed Technical details.
+    expect(screen.getByText(/Blocked on this machine since/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Use again Claude" })).toBeTruthy();
+    const details = screen.getByText("Technical details").closest("details") as HTMLDetailsElement;
+    expect(details.hasAttribute("open")).toBe(false);
+    fireEvent.click(screen.getByText("Technical details"));
+    expect(details.hasAttribute("open")).toBe(true);
+    // Paid-api row: unselectable, one-line reason, no checkbox.
+    expect(screen.getByText(/bills through its own API key, so it cannot be selected\./)).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "Select Grok" })).toBeNull();
+    // Turn-count input defaults to 4 within [2, 32].
+    const turns = screen.getByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement;
+    expect(turns.value).toBe("4");
+    expect(turns.min).toBe("2");
+    expect(turns.max).toBe("32");
+  });
+
+  it("intercepts a send with fewer than two selected harnesses and authorizes nothing", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async () => ({ text: "", errorText: "" }),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText(/An independent check needs two harnesses that can run, so select at least two\./)).toBeTruthy();
+    expect(bridge.order).not.toContain("authorize");
+    expect(bridge.order.filter((item) => item === "launch")).toHaveLength(0);
+  });
+
+  it("authorizes before the first discover and launch on the first send", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    await waitFor(() => expect(bridge.launchCount()).toBe(2));
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+    const order = bridge.order;
+    expect(order.indexOf("authorize")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("authorize")).toBeLessThan(order.lastIndexOf("discover"));
+    expect(order.lastIndexOf("discover")).toBeLessThan(order.indexOf("launch"));
+    // Every launch carries the command, the request generation, and the scope generation.
+    expect(bridge.launchArgs[0]).toHaveLength(3);
+    expect(bridge.launchArgs[0]?.[2]).toBe(1);
+  });
+
+  it("Use again clears the harness on this machine and then re-discovers", async () => {
+    const bridge = scopedBridge({
+      providers: [
+        usableHarness("codex", "Codex"),
+        {
+          ...usableHarness("claude", "Claude"),
+          environmentHealth: { since: "2026-10-01T09:30:00.000Z", detail: "helper crashed" },
+        },
+      ],
+      onUnblock: () => bridge.setProviders([usableHarness("codex", "Codex"), usableHarness("claude", "Claude")]),
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Use again Claude" }));
+    await waitFor(() => expect(bridge.order).toContain("unblock:claude"));
+    // Unblock ran before the re-discovery, and the row became selectable.
+    const unblockIndex = bridge.order.indexOf("unblock:claude");
+    expect(bridge.order.slice(unblockIndex + 1)).toContain("discover");
+    expect(await screen.findByRole("checkbox", { name: "Select Claude" })).toBeTruthy();
+    expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy();
+  });
+
+  it("runs an environment failure through a takeover to the terminal view", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude"), usableHarness("grok", "Grok")],
+      launch: async (command, call) => {
+        if (call === 1) {
+          return {
+            text: "",
+            errorText: "This harness cannot run its tools on this machine, so this stopped.",
+            dispatched: true,
+            environmentBlocked: true,
+            environmentDetail: "helper exploded",
+          };
+        }
+        return planOrReview(command);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    // Codex failed, Claude took over the plan, Grok checked.
+    await waitFor(() => expect(bridge.launchCount()).toBe(3));
+    expect(bridge.launched.map((item) => item.instanceId)).toEqual(["codex", "claude", "grok"]);
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+    // Each round event is one card: the failure and the takeover.
+    expect(screen.getByText(/Codex could not run its tools on this machine, so this stopped for it\./)).toBeTruthy();
+    expect(screen.getByText(/Claude is planning instead\./)).toBeTruthy();
+    // The top line names the harnesses that finished the round.
+    expect(screen.getByText(/Claude planned and Grok checked — the harnesses you authorized that can run\./)).toBeTruthy();
+    // The environment card offers Use again for the blocked harness.
+    expect(screen.getByRole("button", { name: "Use again Codex" })).toBeTruthy();
+    expect(screen.getByText(/It stays unused until you choose Use again\./)).toBeTruthy();
+  });
+
+  it("shows the remaining authorized turns following each launch", async () => {
+    let releaseFirst: (value?: unknown) => void = () => {};
+    let releaseSecond: (value?: unknown) => void = () => {};
+    const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise((resolve) => { releaseSecond = resolve; });
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (command, call) => {
+        if (call === 1) {
+          await firstGate;
+          return { text: PLAN_TEXT, errorText: "", turnsRemaining: 3 };
+        }
+        await secondGate;
+        return { text: CHECK_TEXT, errorText: "", turnsRemaining: 2 };
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    releaseFirst();
+    // The in-flight line followed the first launch's return, while the check
+    // turn is still waiting behind its own gate.
+    await waitFor(() => expect(screen.getByText("3 of 4 authorized model turns left.")).toBeTruthy());
+    releaseSecond();
+    // …and the terminal line shows the last launch's count.
+    await waitFor(() => expect(screen.getByText("2 of 4 authorized model turns left.")).toBeTruthy());
+    expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
+  });
+
+  it("shows the exhaustion stop sentence and Allow more turns when the scope runs out", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (command, call) => {
+        if (call === 1) return { text: PLAN_TEXT, errorText: "", turnsRemaining: 1 };
+        return { text: "", errorText: "", stopCode: "scope-exhausted", scopeExhausted: true, turnsRemaining: 0 };
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Allow more turns" })).toBeTruthy();
+  });
+
+  it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (_command, call) => {
+        if (call === 1) return { text: PLAN_TEXT, errorText: "", turnsRemaining: 1 };
+        return { text: "", errorText: "", stopCode: "scope-exhausted", scopeExhausted: true, turnsRemaining: 0 };
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    // The normalizer dropped the transient fields from the persisted record…
+    await waitFor(() => expect(bridge.saved.length).toBeGreaterThan(0));
+    const record = bridge.saved[0];
+    expect(record).toBeTruthy();
+    expect("scopeExhausted" in record).toBe(false);
+    expect("authorizedTurnsLeft" in record).toBe(false);
+    // …yet the current round still shows its overlay after save + auto-select.
+    expect(screen.getByRole("button", { name: "Allow more turns" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Change" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop allowing" })).toBeTruthy();
+  });
+
+  it("shows no authorization controls on a reloaded historical record", async () => {
+    const historical = {
+      ...normalizeCoordinationRecordForTest({
+        requestId: "round-1",
+        workspacePath: "/work/goal",
+        goal: "Ship the preview.",
+        planningHarness: "Claude",
+        reviewHarness: "Grok",
+        planText: PLAN_TEXT,
+        reviewText: null,
+        result: null,
+        verdict: "failed",
+        stopReason: "All authorized model turns were used, so this stopped.",
+        planningQuota: "available",
+        reviewQuota: "available",
+        messageDispatched: true,
+        environmentBlocked: null,
+        roundEvents: [
+          {
+            kind: "failed",
+            role: "planning",
+            instanceId: "codex",
+            harness: "Codex",
+            sentence: "Codex could not run its tools on this machine, so this stopped for it.",
+            detail: "helper exploded",
+          },
+        ],
+      }),
+      savedAt: "2026-10-09T10:00:00.000Z",
+    };
+    scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (command) => planOrReview(command),
+      records: [historical],
+    });
+    render(<App />);
+    // The reloaded record auto-selects and renders its persistent facts…
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(/Codex could not run its tools on this machine, so this stopped for it\./)).toBeTruthy();
+    // …without any transient authorization state.
+    expect(screen.queryByRole("button", { name: "Allow more turns" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
+    expect(screen.queryByText(/authorized model turns left/)).toBeNull();
+  });
+
+  it("keeps Send again without working alongside the panel", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude"), usableHarness("grok", "Grok")],
+      launch: async (command, call) => {
+        const id = command.modelSelection.instanceId;
+        const envFailure = {
+          text: "",
+          errorText: "This harness cannot run its tools on this machine, so this stopped.",
+          dispatched: true,
+          environmentBlocked: true,
+          environmentDetail: "helper exploded",
+        };
+        if ((id === "codex" && call === 1) || (id === "claude" && call === 2)) return envFailure;
+        return planOrReview(command);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    // Both planners failed; the round stops without a third launch.
+    await waitFor(() => expect(bridge.launchCount()).toBe(2));
+    expect(await screen.findByText(/an independent check needs two harnesses that can run\./)).toBeTruthy();
+    const again = await screen.findByRole("button", { name: /send again without claude/i });
+    fireEvent.click(again);
+    expect(await screen.findByText(/This send will not use Claude/)).toBeTruthy();
+    sendMessage();
+    await waitFor(() => expect(bridge.launchCount()).toBe(4));
+    expect(bridge.launched.slice(2).map((item) => item.instanceId)).toEqual(["codex", "grok"]);
     expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
   });
 });

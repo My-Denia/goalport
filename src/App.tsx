@@ -20,7 +20,8 @@ import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
-import { CoordinationStatus } from "./conversation/CoordinationStatus";
+import { CoordinationStatus, CoordinationProgress } from "./conversation/CoordinationStatus";
+import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
 import { usableInstanceIds } from "./coordination/coordinateGoal";
@@ -108,6 +109,26 @@ export function coordinationGeneration(scope: string, request: number): string {
   return `${scope}-${request}`;
 }
 
+/** The panel's turn budget input: default 4, clamped to [2, 32]. */
+function clampTurns(raw: string): number {
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return 4;
+  return Math.min(32, Math.max(2, parsed));
+}
+
+/** Selectable-by-default rows: usable, not blocked on this machine, not paid-api. */
+function selectableDefaults(providers: readonly ProviderSnapshot[]): string[] {
+  return catalogFromProviderSnapshots(providers).flatMap((instance) => {
+    if (instance.billing === "paid-api") return [];
+    if (instance.environmentAvoided) return [];
+    if (instance.enabled === false || instance.installed === false
+      || instance.authenticated === false || instance.launchable === false) return [];
+    if (typeof instance.quota === "string" && instance.quota.toLowerCase() === "exhausted") return [];
+    if (!instance.models || instance.models.length === 0) return [];
+    return [instance.instanceId];
+  });
+}
+
 /** A new-goal draft: local only, one stable request id for the first Send. */
 interface GoalDraft extends GoalDraftValue {
   requestId: string;
@@ -134,6 +155,36 @@ function App() {
   const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
   const [coordination, setCoordination] = useState<CoordinationView | null>(null);
+  // Harness-access panel state for a runtime-less draft (M4): one discovery
+  // per draft open, the user's selection, and a mirror of the authorized
+  // scope. All of it is window-local and never touches the draft text.
+  const [panelProviders, setPanelProviders] = useState<readonly ProviderSnapshot[] | null>(null);
+  const [panelRequestId, setPanelRequestId] = useState<string | null>(null);
+  const [selectedInstances, setSelectedInstances] = useState<readonly string[]>([]);
+  const [allowedTurns, setAllowedTurns] = useState(4);
+  const [scopeMirror, setScopeMirror] = useState<{
+    instances: readonly string[];
+    maxTurns: number;
+    remaining: number;
+    generation: number;
+  } | null>(null);
+  const [panelChangeMode, setPanelChangeMode] = useState(false);
+  // Transient state of the CURRENT round, keyed by its request id: never
+  // persisted, re-attached to the selected plan only while the request ids
+  // match. Historical or reloaded records never receive these controls.
+  const [liveRound, setLiveRound] = useState<{
+    requestId: string;
+    scoped: boolean;
+    turnsLeft: number | null;
+    maxTurns: number | null;
+    exhausted: boolean;
+  } | null>(null);
+  // In-flight round progress from this window's onEvent stream.
+  const [roundProgress, setRoundProgress] = useState<{
+    requestId: string;
+    failures: string[];
+    activity: string | null;
+  } | null>(null);
   // The most recent coordination discovery, so an environment failure can say
   // honestly whether another usable harness exists. Null until this window
   // has discovered at least once.
@@ -154,6 +205,14 @@ function App() {
   const coordinationAvailable = client.mode === "electron"
     && appInfo?.coordinationConfigured === true
     && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
+  // The full harness-access surface (panel, scoped sends, Use again) needs the
+  // whole scope bridge. A build with only the legacy discover/launch pair
+  // keeps the pre-panel behavior untouched.
+  const scopeBridgeReady = coordinationAvailable
+    && Boolean(window.goalportCore?.coordinationAuthorize)
+    && Boolean(window.goalportCore?.coordinationScope)
+    && Boolean(window.goalportCore?.coordinationRevoke)
+    && Boolean(window.goalportCore?.coordinationUnblock);
   const [closeChoiceOpen, setCloseChoiceOpen] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(() => typeof window !== "undefined" && window.innerWidth <= 860);
@@ -206,6 +265,9 @@ function App() {
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
   draftGoalRef.current = draftGoal;
+  // Set when a handler opens a fresh draft whose panel must start in change
+  // mode; the draft-open effect consumes it exactly once.
+  const openPanelInChangeMode = useRef(false);
   const historyRequest = useRef(0);
 
   useEffect(() => {
@@ -283,6 +345,54 @@ function App() {
     const newest = plans[0];
     if (newest) setSelectedPlanId(newest.requestId);
   }, [booted, draftGoal, selectedPlanId, snapshot.activeCampaignId, plans]);
+
+  // One discovery per runtime-less draft open powers the harness-access panel.
+  // This writes only panel state: a discovery that resolves while the user is
+  // typing never overwrites the message and never closes or opens anything.
+  const runtimeLessDraftKey = draftGoal && draftGoal.provider.trim() === "" ? draftGoal.requestId : null;
+  useEffect(() => {
+    if (!runtimeLessDraftKey || !scopeBridgeReady) return undefined;
+    const bridge = window.goalportCore;
+    const discover = bridge?.coordinateDiscover;
+    const readScope = bridge?.coordinationScope;
+    if (!discover || !readScope) return undefined;
+    let cancelled = false;
+    setPanelProviders(null);
+    setPanelRequestId(runtimeLessDraftKey);
+    setPanelChangeMode(openPanelInChangeMode.current);
+    openPanelInChangeMode.current = false;
+    void (async () => {
+      let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number } | null = null;
+      try {
+        scope = await readScope();
+      } catch {
+        scope = null;
+      }
+      if (cancelled) return;
+      if (scope) {
+        setScopeMirror(scope);
+        setAllowedTurns(scope.maxTurns);
+      }
+      let discovery: {
+        connected: boolean;
+        sendAuthorized: boolean;
+        providers: readonly ProviderSnapshot[];
+        stopReason: string | null;
+      } | null = null;
+      try {
+        discovery = await discover();
+      } catch {
+        discovery = null;
+      }
+      if (cancelled || !discovery || !discovery.connected) return;
+      discoveredProvidersRef.current = discovery.providers;
+      setPanelProviders(discovery.providers);
+      setSelectedInstances(scope && scope.instances.length > 0
+        ? scope.instances
+        : selectableDefaults(discovery.providers));
+    })();
+    return () => { cancelled = true; };
+  }, [runtimeLessDraftKey, scopeBridgeReady]);
   const activeSendIntent = sendIntents[draftCampaignId];
   const activeRetryLabel = retryLabel(activeSendIntent);
   const draftRetryLabel = retryLabel(draftGoal?.intent);
@@ -519,6 +629,15 @@ function App() {
         setSelectedPlanId(remembered.requestId);
         return;
       }
+      // The harness-access panel decides who may work when its discovery for
+      // this draft is in. Fewer than two selected harnesses cannot run an
+      // independent check, so nothing is authorized and nothing is sent.
+      const panelForDraft = panelRequestId === draftGoal.requestId ? panelProviders : null;
+      const scopedSend = scopeBridgeReady && panelForDraft !== null;
+      if (scopedSend && selectedInstances.length < 2) {
+        setDraftError({ sentence: "An independent check needs two harnesses that can run, so select at least two." });
+        return;
+      }
       setDraftError(null);
       const request = ++coordinationRequest.current;
       const generation = coordinationGeneration(coordinationScope.current, request);
@@ -526,6 +645,22 @@ function App() {
       let sendRecorded = false;
       setDraftBusy(true);
       try {
+        // Authorize before anything else: a failed authorization shows its
+        // sentence and sends nothing at all.
+        let scopeGeneration: number | undefined;
+        if (scopedSend) {
+          setCoordination(null);
+          setRoundProgress({ requestId: draftGoal.requestId, failures: [], activity: null });
+          const chosen = [...selectedInstances];
+          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns });
+          if (!stillCurrent()) return;
+          if (!authorized || authorized.ok !== true) {
+            setDraftError({ sentence: authorized?.errorText?.trim() || "Harness access could not be authorized, so nothing was sent." });
+            return;
+          }
+          scopeGeneration = authorized.generation;
+          setScopeMirror({ instances: chosen, maxTurns: allowedTurns, remaining: authorized.remaining, generation: authorized.generation });
+        }
         // Each recorded send gets its own command identity, so a second send
         // of the same words is a new round, not a replay of the first round's
         // stored result. The count must be the records on disk right now —
@@ -562,6 +697,21 @@ function App() {
             priorPlan: draftGoal.revision?.planText ?? null,
             priorReview: draftGoal.revision?.reviewText ?? null,
             avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
+            allowedInstances: scopedSend ? [...selectedInstances] : undefined,
+            onEvent: scopedSend
+              ? (event) => {
+                if (!stillCurrent()) return;
+                setRoundProgress((current) => {
+                  const base = current ?? { requestId: draftGoal.requestId, failures: [], activity: null };
+                  if (event.kind === "started") {
+                    const harness = event.harness?.trim() || event.instanceId;
+                    return { ...base, activity: `${harness} is ${event.role === "planning" ? "planning" : "checking"}…` };
+                  }
+                  if (event.kind === "continued") return { ...base, activity: event.sentence };
+                  return { ...base, failures: [...base.failures, event.sentence], activity: null };
+                });
+              }
+              : undefined,
           },
           discovery,
           {
@@ -597,13 +747,27 @@ function App() {
                   setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
                 }
               }
-              return launch(command, generation);
+              const result = await launch(command, generation, scopeGeneration);
+              // Each launch reports the authorized budget it spent from; the
+              // mirror (and the in-flight progress line) follow it live.
+              if (stillCurrent() && result && typeof result.turnsRemaining === "number") {
+                const turnsRemaining = result.turnsRemaining;
+                setScopeMirror((current) => (current ? { ...current, remaining: turnsRemaining } : current));
+              }
+              return result;
             },
           },
           stillCurrent,
         );
         if (coordinationRequest.current !== request) return;
         setCoordination(report);
+        setLiveRound({
+          requestId: draftGoal.requestId,
+          scoped: scopedSend,
+          turnsLeft: report.authorizedTurnsLeft ?? null,
+          maxTurns: scopedSend ? allowedTurns : null,
+          exhausted: report.scopeExhausted === true,
+        });
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, report);
         if (coordinationRequest.current !== request) return;
         if (saved?.recorded) {
@@ -630,7 +794,10 @@ function App() {
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, failed);
         if (saved?.recorded) setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]);
       } finally {
-        if (coordinationRequest.current === request) setDraftBusy(false);
+        if (coordinationRequest.current === request) {
+          setDraftBusy(false);
+          setRoundProgress(null);
+        }
       }
       return;
     }
@@ -689,6 +856,7 @@ function App() {
       void window.goalportCore?.coordinateCancel?.(coordinationGeneration(coordinationScope.current, previous));
     }
     setCoordination(null);
+    setRoundProgress(null);
     // A selected Runtime send owns the busy flag until it settles. Clearing it
     // here re-enables Send while that send is still in flight, and the click
     // is then dropped.
@@ -753,6 +921,115 @@ function App() {
         startedAt: plan.savedAt ?? null,
       },
     });
+  }
+
+  // Forget that this machine could not run the harness's tools, then discover
+  // again: the panel row becomes selectable when the health memory is gone.
+  async function handleUseAgain(instanceId: string) {
+    const bridge = window.goalportCore;
+    if (!bridge?.coordinationUnblock) return;
+    try {
+      await bridge.coordinationUnblock(instanceId);
+    } catch {
+      setActiveNotice({ sentence: "GoalPort could not forget that this harness was blocked. Try again in a moment." });
+      return;
+    }
+    if (!bridge.coordinateDiscover) return;
+    try {
+      const discovery = await bridge.coordinateDiscover();
+      if (!discovery.connected) return;
+      discoveredProvidersRef.current = discovery.providers;
+      const forDraft = draftGoalRef.current;
+      if (forDraft && panelRequestId === forDraft.requestId) {
+        setPanelProviders(discovery.providers);
+        const cleared = catalogFromProviderSnapshots(discovery.providers)
+          .find((instance) => instance.instanceId === instanceId);
+        if (cleared && !cleared.environmentAvoided && cleared.billing !== "paid-api") {
+          setSelectedInstances((current) => (current.includes(instanceId) ? current : [...current, instanceId]));
+        }
+      }
+    } catch {
+      // The row stays as it was; the next draft open discovers again.
+    }
+  }
+
+  // Revoking ends the authorization: a round already in flight finishes
+  // settling, and any new send needs a fresh authorization first.
+  async function handleStopAllowing() {
+    const bridge = window.goalportCore;
+    if (!bridge?.coordinationRevoke) return;
+    try {
+      await bridge.coordinationRevoke();
+    } catch {
+      setActiveNotice({ sentence: "Harness access could not be stopped. Try again in a moment." });
+      return;
+    }
+    setScopeMirror(null);
+    setPanelChangeMode(false);
+    // The finished round stays on screen, but its budget state belonged to
+    // the revoked authorization: no authorization controls remain on it.
+    setLiveRound(null);
+  }
+
+  // Change / Allow more turns land in the same place: the panel opens in
+  // change mode on a draft of this goal. Saving there re-authorizes (a new
+  // generation) and rotates the draft's request id, so the next Send is
+  // explicitly a NEW round — nothing is sent automatically.
+  function handleChangeHarnessAccess(source: { workspacePath: string; goal: string } | null) {
+    if (draftGoal) {
+      setPanelChangeMode(true);
+      return;
+    }
+    const plan = source ?? selectedPlan;
+    if (!plan) return;
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    closeDraft(false);
+    setSelectedPlanId(null);
+    openPanelInChangeMode.current = true;
+    setDraftGoal({
+      requestId: freshRequestId(),
+      baselineCampaignId: snapshot.activeCampaignId,
+      workspace: plan.workspacePath,
+      provider: "",
+      message: plan.goal,
+    });
+  }
+
+  async function handleConfirmAccessChange() {
+    const bridge = window.goalportCore;
+    if (!bridge?.coordinationAuthorize) return;
+    if (selectedInstances.length < 2) {
+      setDraftError({ sentence: "An independent check needs two harnesses that can run, so select at least two." });
+      return;
+    }
+    let authorized: { ok: boolean; generation: number; remaining: number; errorText?: string };
+    try {
+      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns });
+    } catch (error) {
+      setDraftError({
+        sentence: "Harness access could not be updated.",
+        technical: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+    if (authorized.ok !== true) {
+      setDraftError({ sentence: authorized.errorText?.trim() || "Harness access could not be updated, so nothing changed." });
+      return;
+    }
+    setDraftError(null);
+    setScopeMirror({
+      instances: [...selectedInstances],
+      maxTurns: allowedTurns,
+      remaining: authorized.remaining,
+      generation: authorized.generation
+    });
+    setLiveRound((current) => (current
+      ? { ...current, turnsLeft: authorized.remaining, maxTurns: allowedTurns, exhausted: false }
+      : current));
+    setPanelChangeMode(false);
+    // The saved change makes the next Send a new round, never a replay of the
+    // round whose record already carries this draft's old request id.
+    setDraftGoal((current) => (current ? { ...current, requestId: freshRequestId(), intent: undefined } : current));
   }
 
   function handleNewGoal() {
@@ -1270,6 +1547,21 @@ function App() {
   const heldNow = heldPanel?.writeResponsibility === "held";
   const taskState = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const title = conversationTitle(snapshot);
+  // The live overlay exists only for the round that just ran in this window
+  // and only while its request id is the one selected. A reloaded or
+  // historical record never matches, so it renders without any of it.
+  const selectedPlanOverlay = liveRound !== null && selectedPlan !== null
+    && selectedPlan.requestId === liveRound.requestId && liveRound.scoped
+    ? liveRound
+    : null;
+  const draftOverlay = liveRound !== null && liveRound.scoped && liveRound.requestId === draftGoal?.requestId
+    ? liveRound
+    : null;
+  const roundSummaryLine = (planning: string | null, review: string | null, plan: string | null, check: string | null): string | null =>
+    planning && review && plan && check
+      ? `${planning} planned and ${review} checked — the harnesses you authorized that can run.`
+      : null;
+  const unblockAvailable = Boolean(window.goalportCore?.coordinationUnblock);
 
   if (bootstrap && bootstrap.phase !== "done" && bootstrap.phase !== "checking") {
     return <BootstrapScreen state={bootstrap} />;
@@ -1360,6 +1652,20 @@ function App() {
                 environmentBlocked={selectedPlan.environmentBlocked ?? null}
                 environmentAlternatives={environmentAlternatives(selectedPlan.environmentBlocked)}
                 onSendAgainWithout={selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
+                roundEvents={selectedPlan.roundEvents ?? []}
+                onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
+                  ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId); }
+                  : undefined}
+                roundSummary={selectedPlanOverlay
+                  ? roundSummaryLine(selectedPlan.planningHarness, selectedPlan.reviewHarness, selectedPlan.planText, selectedPlan.reviewText)
+                  : null}
+                budget={selectedPlanOverlay && selectedPlanOverlay.turnsLeft !== null && selectedPlanOverlay.maxTurns !== null
+                  ? { remaining: selectedPlanOverlay.turnsLeft, maxTurns: selectedPlanOverlay.maxTurns }
+                  : null}
+                scopeExhausted={selectedPlanOverlay?.exhausted === true}
+                onAllowMoreTurns={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan) : undefined}
+                onChangeAccess={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan) : undefined}
+                onStopAllowing={selectedPlanOverlay ? () => { void handleStopAllowing(); } : undefined}
               />
             </div>
           ) : draftActive ? (
@@ -1384,6 +1690,20 @@ function App() {
                     ...coordination,
                     savedAt: null,
                   })}
+                  roundEvents={coordination.roundEvents ?? []}
+                  onUseAgain={coordination.environmentBlocked && unblockAvailable
+                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId); }
+                    : undefined}
+                  roundSummary={draftOverlay
+                    ? roundSummaryLine(coordination.planningHarness, coordination.reviewHarness, coordination.planText, coordination.reviewText)
+                    : null}
+                  budget={draftOverlay && draftOverlay.turnsLeft !== null && draftOverlay.maxTurns !== null
+                    ? { remaining: draftOverlay.turnsLeft, maxTurns: draftOverlay.maxTurns }
+                    : null}
+                  scopeExhausted={draftOverlay?.exhausted === true}
+                  onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null) : undefined}
+                  onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null) : undefined}
+                  onStopAllowing={draftOverlay ? () => { void handleStopAllowing(); } : undefined}
                 />
               ) : null}
               {draftGoal?.revision ? (
@@ -1399,38 +1719,68 @@ function App() {
                   Nothing is sent until you press Send.
                 </p>
               ) : null}
-              <DraftGoalComposer
-                draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
-                runtimes={snapshot.runtimes}
-                connected={snapshot.connection === "connected"}
-                busy={draftBusy}
-                blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
-                retryLabel={draftRetryLabel}
-                error={draftError}
-                canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
-                coordinationAvailable={coordinationAvailable}
-                workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
-                onBrowse={() => { void chooseWorkspace(); }}
-                onChange={(value) => {
-                  const current = draftGoal;
-                  if (!current) {
-                    setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
-                    return;
-                  }
-                  const changed = current.workspace !== value.workspace
-                    || current.provider !== value.provider
-                    || current.message !== value.message;
-                  if (changed) abandonCoordination();
-                  const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
-                  setDraftGoal({
-                    ...current,
-                    ...value,
-                    ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
-                  });
-                }}
-                onSubmit={handleDraftSend}
-                onDiscard={handleDiscardDraft}
-              />
+              {roundProgress !== null && roundProgress.requestId === draftGoal?.requestId ? (
+                <CoordinationProgress
+                  failures={roundProgress.failures}
+                  activity={roundProgress.activity}
+                  remaining={scopeMirror?.remaining ?? null}
+                  maxTurns={scopeMirror?.maxTurns ?? null}
+                />
+              ) : (
+                <>
+                  {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
+                    <AuthorizationPanel
+                      providers={panelProviders}
+                      selected={selectedInstances}
+                      onToggle={(instanceId, selected) => {
+                        setSelectedInstances((current) => selected
+                          ? (current.includes(instanceId) ? current : [...current, instanceId])
+                          : current.filter((id) => id !== instanceId));
+                      }}
+                      maxTurns={allowedTurns}
+                      onMaxTurnsChange={(raw) => setAllowedTurns(clampTurns(raw))}
+                      scope={scopeMirror ? { remaining: scopeMirror.remaining, maxTurns: scopeMirror.maxTurns } : null}
+                      changeMode={panelChangeMode}
+                      onEnterChangeMode={() => setPanelChangeMode(true)}
+                      onStopAllowing={() => { void handleStopAllowing(); }}
+                      onConfirmChange={() => { void handleConfirmAccessChange(); }}
+                      onUseAgain={(instanceId) => { void handleUseAgain(instanceId); }}
+                    />
+                  ) : null}
+                  <DraftGoalComposer
+                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
+                    runtimes={snapshot.runtimes}
+                    connected={snapshot.connection === "connected"}
+                    busy={draftBusy}
+                    blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    retryLabel={draftRetryLabel}
+                    error={draftError}
+                    canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
+                    coordinationAvailable={coordinationAvailable}
+                    workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
+                    onBrowse={() => { void chooseWorkspace(); }}
+                    onChange={(value) => {
+                      const current = draftGoal;
+                      if (!current) {
+                        setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
+                        return;
+                      }
+                      const changed = current.workspace !== value.workspace
+                        || current.provider !== value.provider
+                        || current.message !== value.message;
+                      if (changed) abandonCoordination();
+                      const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
+                      setDraftGoal({
+                        ...current,
+                        ...value,
+                        ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
+                      });
+                    }}
+                    onSubmit={handleDraftSend}
+                    onDiscard={handleDiscardDraft}
+                  />
+                </>
+              )}
             </div>
           ) : !hasGoal ? null : product === null ? (
             <div className="compatibility-notice" role="status">
