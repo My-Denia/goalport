@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // Offline acceptance CLI used only behind the generated codex/claude wrappers.
 // Corpus provenance is pinned to electron/cli-coordinate.test.cjs fixtures.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { appendExecutionOperationEvidence, normalizeExecutionFixture, runExecutionFixtureOperation } from "./lib/execution-fixture.mjs";
 
 const IDENTITIES = Object.freeze(["codex", "claude"]);
 const LOG_FILE = "invocations.jsonl";
@@ -93,6 +95,14 @@ export const STUB_BEHAVIORS = Object.freeze({
     stderr: "ERROR windows sandbox failed: helper_unknown_error",
   }),
   "claude-usage-limit": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "usage limit reached" }),
+  // Closed operation IDs are source-labeled offline fixture behavior, not
+  // general command/script requests. The operation implementation and paths
+  // are pinned in lib/execution-fixture.mjs.
+  "codex-fixture-plan": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "plan" }),
+  "codex-fixture-no-write": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "no-write" }),
+  "codex-fixture-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer" }),
+  "codex-fixture-partial-writer": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "", fixtureOperation: "partial-writer" }),
+  "claude-fixture-auditor": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "auditor" }),
 });
 
 function isProbe(identity, argv) {
@@ -117,7 +127,11 @@ function normalizeBehavior(input) {
     }
     turns[identity] = [...queue];
   }
-  return { probes, turns };
+  return {
+    probes,
+    turns,
+    ...(input.executionFixture === undefined ? {} : { executionFixture: normalizeExecutionFixture(input.executionFixture) }),
+  };
 }
 
 function readBehavior(stubDir) {
@@ -168,6 +182,33 @@ function appendInvocation(stubDir, entry) {
   fs.appendFileSync(path.join(stubDir, LOG_FILE), `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
+function outputHash(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function invocationResult(exitCode, stdout, stderr) {
+  return {
+    exitCode,
+    stdout: safeLogText(stdout),
+    stderr: safeLogText(stderr),
+    stdoutSha256: outputHash(stdout),
+    stderrSha256: outputHash(stderr),
+  };
+}
+
+function fixtureProviderResponse(identity, result) {
+  if (identity === "claude") {
+    return {
+      stdout: `${JSON.stringify({ type: "result", result: result.report, is_error: result.exitCode !== 0 })}\n`,
+      stderr: "",
+    };
+  }
+  return {
+    stdout: `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: result.report } })}\n`,
+    stderr: "",
+  };
+}
+
 async function main(argv = process.argv.slice(2)) {
   const [identity, ...cliArgv] = argv;
   if (!IDENTITIES.includes(identity)) {
@@ -184,16 +225,19 @@ async function main(argv = process.argv.slice(2)) {
   let config;
   try {
     config = readBehavior(stubDir);
-  } catch {
-    process.stderr.write("GoalPort acceptance stub refused invocation: behavior file is missing or invalid.\n");
+  } catch (error) {
+    const detail = error instanceof Error ? ` (${error.message.slice(0, 120)})` : "";
+    process.stderr.write(`GoalPort acceptance stub refused invocation: behavior file is missing or invalid${detail}.\n`);
     process.exitCode = 42;
     return;
   }
   const invocationType = isProbe(identity, cliArgv) ? "probe" : "turn";
   const hasSentinel = typeof process.env[SENTINEL_ENV] === "string" && process.env[SENTINEL_ENV] === config.sentinel;
   if (!hasSentinel) {
+    const stderr = "GoalPort acceptance stub refused invocation: sentinel missing or mismatched.\n";
     appendInvocation(stubDir, {
       ts: new Date().toISOString(),
+      sourceLabel: "synthetic-offline-stub",
       identity,
       invocationType,
       argv: safeArgv(cliArgv, invocationType),
@@ -202,8 +246,9 @@ async function main(argv = process.argv.slice(2)) {
       queueEpoch: invocationType === "turn" ? config.queueEpoch : null,
       queueIndex: null,
       consumesQueue: false,
+      ...invocationResult(42, "", stderr),
     });
-    process.stderr.write("GoalPort acceptance stub refused invocation: sentinel missing or mismatched.\n");
+    process.stderr.write(stderr);
     process.exitCode = 42;
     return;
   }
@@ -212,8 +257,10 @@ async function main(argv = process.argv.slice(2)) {
   const behaviorId = invocationType === "probe" ? config.probes[identity] : config.turns[identity][index];
   const behavior = STUB_BEHAVIORS[behaviorId];
   if (!behavior) {
+    const stderr = `GoalPort acceptance stub has no ${identity} ${invocationType} behavior queued.\n`;
     appendInvocation(stubDir, {
       ts: new Date().toISOString(),
+      sourceLabel: "synthetic-offline-stub",
       identity,
       invocationType,
       argv: safeArgv(cliArgv, invocationType),
@@ -222,14 +269,16 @@ async function main(argv = process.argv.slice(2)) {
       queueEpoch: invocationType === "turn" ? config.queueEpoch : null,
       queueIndex: index,
       consumesQueue: false,
+      ...invocationResult(43, "", stderr),
     });
-    process.stderr.write(`GoalPort acceptance stub has no ${identity} ${invocationType} behavior queued.\n`);
+    process.stderr.write(stderr);
     process.exitCode = 43;
     return;
   }
 
-  appendInvocation(stubDir, {
+  const invocation = {
     ts: new Date().toISOString(),
+    sourceLabel: "synthetic-offline-stub",
     identity,
     invocationType,
     argv: safeArgv(cliArgv, invocationType),
@@ -238,6 +287,59 @@ async function main(argv = process.argv.slice(2)) {
     queueEpoch: invocationType === "turn" ? config.queueEpoch : null,
     queueIndex: index,
     consumesQueue: invocationType === "turn",
+  };
+  if (behavior.fixtureOperation) {
+    const result = runExecutionFixtureOperation({
+      operation: behavior.fixtureOperation,
+      config: config.executionFixture,
+      identity,
+      argv: cliArgv,
+      cwd: process.cwd(),
+      stubDir,
+      parentPid: process.pid,
+    });
+    const response = fixtureProviderResponse(identity, result);
+    const cliResult = invocationResult(result.exitCode, response.stdout, response.stderr);
+    const evidence = {
+      schemaVersion: 1,
+      sourceLabel: "synthetic-offline-fixture",
+      operation: result.operation,
+      role: result.role,
+      preset: result.preset,
+      status: result.status,
+      verified: result.verified,
+      exitCode: result.exitCode,
+      report: result.report,
+      evidence: result.evidence,
+      cli: {
+        executable: identity,
+        argv: safeArgv(cliArgv, invocationType),
+        cwd: safeLogText(process.cwd()),
+        ...cliResult,
+      },
+      operationOutputSha256: outputHash(result.report),
+    };
+    const operationEvidencePath = appendExecutionOperationEvidence(stubDir, evidence);
+    appendInvocation(stubDir, {
+      ...invocation,
+      ...cliResult,
+      fixtureOperation: result.operation,
+      fixtureRole: result.role,
+      fixtureStatus: result.status,
+      fixtureVerified: result.verified,
+      operationEvidence: path.basename(operationEvidencePath),
+      operationOutputSha256: outputHash(result.report),
+      fixtureSourceSha256: result.evidence?.edit?.afterSha256 ?? result.evidence?.sourceSha256 ?? result.evidence?.sourceReadSha256 ?? null,
+      fixtureTestSha256: result.evidence?.testSha256 ?? result.evidence?.checks?.testSha256 ?? null,
+    });
+    if (response.stdout) process.stdout.write(response.stdout);
+    if (response.stderr) process.stderr.write(response.stderr);
+    process.exitCode = result.exitCode;
+    return;
+  }
+  appendInvocation(stubDir, {
+    ...invocation,
+    ...invocationResult(behavior.exitCode, behavior.stdout, behavior.stderr),
   });
   // A fixed, bounded offline delay makes real-window progress observable.
   if (behavior.delayMs) await new Promise(resolve => setTimeout(resolve, behavior.delayMs));

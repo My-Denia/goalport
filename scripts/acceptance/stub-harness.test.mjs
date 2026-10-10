@@ -99,6 +99,24 @@ function assertStubResolution(harness) {
   }
 }
 
+function spawnStubProcess(harness, identity, args, cwd = harness.worktree) {
+  assert.ok(IDENTITIES.has(identity), `only a pinned stub identity may run: ${identity}`);
+  const launch = process.platform === "win32"
+    ? { file: process.execPath, args: [STUB_PROGRAM.pathname, identity, ...args] }
+    : { file: path.join(harness.stubDir, identity), args };
+  return spawnSync(launch.file, launch.args, {
+    cwd,
+    env: harness.env,
+    encoding: "utf8",
+    timeout: 15000,
+    maxBuffer: 200000,
+    shell: false,
+    windowsHide: true,
+  });
+}
+
+const IDENTITIES = new Set(["codex", "claude"]);
+
 function commandFor(harness, instanceId) {
   harness.nextId += 1;
   return {
@@ -116,9 +134,40 @@ function commandFor(harness, instanceId) {
 async function runTurn(harness, instanceId) {
   const command = commandFor(harness, instanceId);
   assert.equal(writeGrant(harness.stateDir, command.commandId), true);
-  // Do not inject spawnTurn: runCliTurn must resolve PATH and spawn the real
-  // per-provider wrapper/Node process, exactly as the product does.
-  return runCliTurn(command, { stateDir: harness.stateDir, env: harness.env });
+  // Spawn only the generated wrapper by absolute path. This still exercises
+  // runCliTurn's real argv/normalization path, but cannot fall through to a
+  // host vendor CLI if bare-command resolution ignores this invocation PATH.
+  const spawnTurn = (spec) => {
+    const child = spawnStubProcess(harness, instanceId, spec.args, spec.cwd);
+    return {
+      code: child.status,
+      stdout: child.stdout ?? "",
+      stderr: child.stderr ?? "",
+      ...(child.error ? { spawnError: true } : {}),
+    };
+  };
+  return runCliTurn(command, { stateDir: harness.stateDir, env: harness.env, spawnTurn });
+}
+
+async function discoverProviders(harness) {
+  return discoverCliProviders({
+    home: harness.home,
+    stateDir: harness.stateDir,
+    env: harness.env,
+    timeoutMs: 5000,
+    execFile(file, args) {
+      assert.ok(IDENTITIES.has(file), `only a pinned stub identity may be probed: ${file}`);
+      const child = spawnStubProcess(harness, file, args, harness.worktree);
+      if (child.error) throw child.error;
+      if (child.status !== 0) {
+        const error = new Error(`synthetic ${file} probe exited ${child.status}`);
+        error.stdout = child.stdout ?? "";
+        error.stderr = child.stderr ?? "";
+        throw error;
+      }
+      return { stdout: child.stdout ?? "", stderr: child.stderr ?? "", code: child.status };
+    },
+  });
 }
 
 async function providerErrorClassifier() {
@@ -161,7 +210,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
     turns: { codex: ["codex-success", "codex-not-finished"], claude: [] },
   }));
 
-  const firstDiscovery = await discoverCliProviders({ home: harness.home, stateDir: harness.stateDir, env: harness.env, timeoutMs: 5000 });
+  const firstDiscovery = await discoverProviders(harness);
   assert.deepEqual(firstDiscovery.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
   assert.equal(firstDiscovery.providers[0].auth.type, "chatgpt");
   assert.equal(firstDiscovery.providers[1].auth.type, "subscription");
@@ -171,7 +220,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
   assert.equal(firstTurn.text, "Bounded plan.");
 
   // Probes run between turn queue entries but cannot consume a queued turn.
-  const secondDiscovery = await discoverCliProviders({ home: harness.home, stateDir: harness.stateDir, env: harness.env, timeoutMs: 5000 });
+  const secondDiscovery = await discoverProviders(harness);
   assert.deepEqual(secondDiscovery.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
   const secondTurn = await runTurn(harness, "codex");
   assert.equal(secondTurn.ok, false);
@@ -182,7 +231,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
     probes: { codex: "codex-probe-authenticated", claude: "claude-probe-unavailable" },
     turns: { codex: ["codex-no-text"], claude: [] },
   }));
-  const unavailable = await discoverCliProviders({ home: harness.home, stateDir: harness.stateDir, env: harness.env, timeoutMs: 5000 });
+  const unavailable = await discoverProviders(harness);
   assert.deepEqual(unavailable.providers.map((provider) => provider.instanceId), ["codex"]);
   const thirdTurn = await runTurn(harness, "codex");
   assert.equal(thirdTurn.ok, false);
@@ -212,7 +261,7 @@ test("all failure and success classes flow through actual spawned wrappers and p
     },
   }));
   const classifyProviderError = await providerErrorClassifier();
-  const discovered = await discoverCliProviders({ home: harness.home, stateDir: harness.stateDir, env: harness.env, timeoutMs: 5000 });
+  const discovered = await discoverProviders(harness);
   assert.deepEqual(discovered.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
 
   const codexSuccess = await runTurn(harness, "codex");

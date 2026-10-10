@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { STUB_BEHAVIORS } from "../stub-harness.mjs";
+import { normalizeExecutionFixture } from "./execution-fixture.mjs";
 
 const IDENTITIES = Object.freeze(["codex", "claude"]);
 const DEFAULT_BEHAVIOR = Object.freeze({
@@ -29,7 +30,11 @@ function normalizeBehavior(input) {
     }
     turns[identity] = [...queue];
   }
-  return { probes, turns };
+  return {
+    probes,
+    turns,
+    ...(input.executionFixture === undefined ? {} : { executionFixture: normalizeExecutionFixture(input.executionFixture) }),
+  };
 }
 
 function writeJsonAtomically(filename, value) {
@@ -92,14 +97,15 @@ function configPath(stubDir) {
   return path.join(stubDir, BEHAVIOR_FILE);
 }
 
-function writeConfig(stubDir, sentinel, input) {
-  const normalized = normalizeBehavior(input);
+function writeConfig(stubDir, sentinel, input, executionFixture = undefined) {
+  const normalized = normalizeBehavior({ ...input, ...(executionFixture === undefined ? {} : { executionFixture }) });
   const config = {
     schemaVersion: 1,
     sentinel,
     queueEpoch: crypto.randomUUID(),
     probes: normalized.probes,
     turns: normalized.turns,
+    ...(normalized.executionFixture === undefined ? {} : { executionFixture: normalized.executionFixture }),
   };
   writeJsonAtomically(configPath(stubDir), config);
   return config;
@@ -121,7 +127,7 @@ export function materializeStubBin(stubDir, options = {}) {
   const sentinel = options.sentinel ?? crypto.randomBytes(32).toString("hex");
   if (typeof sentinel !== "string" || sentinel.length < 16 || /[\r\n]/u.test(sentinel)) throw new TypeError("stub sentinel must be a non-empty opaque token");
   const initialBehavior = options.behavior ?? DEFAULT_BEHAVIOR;
-  writeConfig(stubDir, sentinel, initialBehavior);
+  writeConfig(stubDir, sentinel, initialBehavior, options.executionFixture);
 
   const wrappers = {};
   for (const identity of IDENTITIES) {
@@ -149,7 +155,7 @@ export function writeStubBehavior(stubDir, behavior) {
   if (existing?.schemaVersion !== 1 || typeof existing.sentinel !== "string" || !existing.sentinel) {
     throw new Error("cannot update stub behavior before materializeStubBin has created the sentinel");
   }
-  writeConfig(stubDir, existing.sentinel, behavior);
+  writeConfig(stubDir, existing.sentinel, behavior, existing.executionFixture);
 }
 
 /** Pure wrapper renderer exports make the Windows quoting contract testable on non-Windows hosts. */
