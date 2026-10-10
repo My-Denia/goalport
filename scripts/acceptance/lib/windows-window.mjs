@@ -93,12 +93,12 @@ export function serializeResizeRequest(input) {
 }
 
 /** Build argv separately so paths containing spaces remain single, literal arguments. */
-export function buildPowerShellInvocation(requestPath, responsePath, helperPath = HELPER_PATH) {
+export function buildPowerShellInvocation(requestPath, responsePath, helperPath = HELPER_PATH, pwshPath = 'pwsh') {
   for (const [label, value] of [['requestPath', requestPath], ['responsePath', responsePath], ['helperPath', helperPath]]) {
     if (typeof value !== 'string' || value.length === 0) throw new TypeError(`${label} must be a non-empty path`);
   }
   return {
-    command: 'pwsh',
+    command: pwshPath,
     args: ['-NoProfile', '-NonInteractive', '-File', helperPath, '-RequestPath', requestPath, '-ResponsePath', responsePath],
   };
 }
@@ -226,7 +226,7 @@ export function validateNativeWindowResponse(response, rawRequest) {
  * Synchronously resize the one verified GoalPort HWND to the requested CSS viewport's native client size.
  * The caller must read back innerWidth/innerHeight via CDP; native bounds alone do not prove CSS viewport acceptance.
  */
-export function resizeOwnedWindowsWindow(input) {
+export function resizeOwnedWindowsWindow(input, { pwshPath } = {}) {
   const request = validateResizeRequest(input);
   // This check deliberately precedes temp-file creation and any spawn; WSL/Linux never invokes pwsh.
   if (process.platform !== 'win32') throw new Error('owned Windows native sizing is available only on win32; no helper was invoked');
@@ -236,7 +236,7 @@ export function resizeOwnedWindowsWindow(input) {
   const responsePath = path.join(tempDir, 'response.json');
   try {
     fs.writeFileSync(requestPath, serializeResizeRequest(request), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    const invocation = buildPowerShellInvocation(requestPath, responsePath);
+    const invocation = buildPowerShellInvocation(requestPath, responsePath, HELPER_PATH, pwshPath);
     const child = spawnSync(invocation.command, invocation.args, {
       encoding: 'utf8',
       timeout: 20000,

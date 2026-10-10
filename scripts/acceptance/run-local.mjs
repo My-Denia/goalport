@@ -37,9 +37,9 @@ export async function withCaseDeadline(work, label, timeoutMs) {
   }
 }
 
-export function persistValidatedReport(report, persist) {
+export function persistValidatedReport(report, persist, validate = report.kind === TRACK_A_KIND ? validateTrackAReport : validateReport) {
   try {
-    if (report.kind === TRACK_A_KIND) validateTrackAReport(report); else validateReport(report);
+    validate(report);
   } catch (error) {
     report.status = 'blocked';
     report.validationFailure = error.message;

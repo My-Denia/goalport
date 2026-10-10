@@ -170,7 +170,7 @@ export async function cleanupWindowsCore(expected, host, { remembered = null, wa
 }
 
 /** Runtime injection is for Linux contract tests, never IPC/UI/harness success. */
-export async function launchWindowsApp(env, caseRoot, { packageRoot, runtime = {} } = {}) {
+export async function launchWindowsApp(env, caseRoot, { packageRoot, pwshPath, runtime = {} } = {}) {
   const platform = runtime.platform ?? process.platform, arch = runtime.arch ?? process.arch;
   if (platform !== 'win32' || arch !== 'x64') throw new Error('Windows x64 host required; no WSL/PowerShell interop');
   const layout = layouts.get(env);
@@ -197,7 +197,7 @@ export async function launchWindowsApp(env, caseRoot, { packageRoot, runtime = {
   const fds = [];
   let child, host;
   try {
-    host = runtime.host ?? windowsOwnedHost(env, target.core, startedAt);
+    host = runtime.host ?? windowsOwnedHost(env, target.core, startedAt, { pwshPath });
     const initial = await host.scan(), initialPipe = await host.pipe();
     if (initial?.state !== 'known' || !Array.isArray(initial.rows) || initial.rows.length || initialPipe?.state !== 'absent') throw new Error('preexisting/unknown Core or named pipe; refusing launch');
     for (const dir of dirs) filesystem.mkdirSync(dir, { recursive: true });
@@ -274,6 +274,11 @@ export async function launchWindowsApp(env, caseRoot, { packageRoot, runtime = {
             filesystem.rmSync(env.TEMP, { recursive: true, force: false }); result.ownedTempRemoved = true;
             layout.active = false; layout.reusable = true;
           } catch (error) { result.blockedCleanup = true; result.cleanupError = error.message.slice(0, 300); }
+        }
+        // A deliberately unproved live app is NOT force-killed. Release only
+        // Node's event-loop reference so the blocked owner command can exit.
+        if (result.blockedCleanup && !exit) {
+          child.unref(); result.appUnreferencedForDriverExit = true;
         }
         return result;
       })();

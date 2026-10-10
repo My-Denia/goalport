@@ -18,6 +18,12 @@ export const NOT_VERIFIED = Object.freeze([
 ]);
 
 const SHOT_REQUIREMENTS = Object.freeze({
+  a1: Object.freeze([
+    ...[860, 1020, 1440].map(width => Object.freeze(['authorization', width])),
+    Object.freeze(['progress', 1020]),
+    ...[860, 1020, 1440].map(width => Object.freeze(['terminal', width])),
+    Object.freeze(['revoked', 1020]), Object.freeze(['history', 1020]),
+  ]),
   a2: Object.freeze([Object.freeze(['terminal', 860]), Object.freeze(['terminal', 1020]), Object.freeze(['terminal', 1440]), Object.freeze(['use-again', 1020])]),
   a3: Object.freeze([Object.freeze(['refusal', 1020])]),
   a4: Object.freeze([Object.freeze(['terminal', 860]), Object.freeze(['terminal', 1020]), Object.freeze(['terminal', 1440])]),
@@ -117,8 +123,8 @@ function scenarioReady(result, id) {
   return null;
 }
 
-export function validateTrackAReport(report) {
-  if (!report || report.schemaVersion !== 1 || report.kind !== TRACK_A_KIND) throw new Error('invalid track-a report envelope');
+export function validateTrackAReport(report, { expectedKind = TRACK_A_KIND } = {}) {
+  if (!report || report.schemaVersion !== 1 || report.kind !== expectedKind) throw new Error('invalid track-a report envelope');
   if (typeof report.head !== 'string' || !report.head || report.runSlug !== SLUG || report.cwd !== process.cwd()) throw new Error('invalid track-a report identity');
   if (!report.host || typeof report.host.platform !== 'string' || typeof report.host.release !== 'string' || typeof report.host.distribution !== 'string') throw new Error('host facts missing');
   if (!Array.isArray(report.honestyLabels) || report.honestyLabels.length < 4) throw new Error('honesty labels missing');

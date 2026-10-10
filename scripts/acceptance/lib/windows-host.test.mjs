@@ -166,6 +166,8 @@ function launchFixture({ preexistingPipe = false, exitCode = 0, staysLive = fals
   f.dirs.add(caseRoot.toLowerCase()); f.dirs.add(env.GOALPORT_SYNTHETIC_ROOT.toLowerCase());
   let scans = 0, launched = 0, verifies = 0, pipes = 0;
   const child = new EventEmitter(); child.pid = 987;
+  let unrefs = 0;
+  child.unref = () => { unrefs++; };
   const runtime = {
     platform: 'win32', arch: 'x64', filesystem: f, pathApi: p, closeWaitMs: 10, wait: async () => {},
     guardEnv: async value => ({ ...value, OPENAI_API_KEY: 'must be re-intersected away' }), preflight: () => ({ bothNamesShadowed: true }),
@@ -176,7 +178,7 @@ function launchFixture({ preexistingPipe = false, exitCode = 0, staysLive = fals
   // Tests only the closure calling the official close expression; this is NOT
   // a fake IPC success assertion. Real CDP/GoalPort calls remain owner-only.
   const app = { evaluate: async (expression, awaitPromise) => { assert.equal(expression, 'window.goalportCore.requestClose()'); assert.equal(awaitPromise, true); if (!staysLive) child.emit('exit', exitCode, null); throw new Error('CDP WebSocket closed'); }, close: () => {} };
-  return { env, f, runtime, child, app, launched: () => launched, verifies: () => verifies, scans: () => scans };
+  return { env, f, runtime, child, app, launched: () => launched, verifies: () => verifies, scans: () => scans, unrefs: () => unrefs };
 }
 test('non-Windows/x64 guard fires before any side effect, including PowerShell', async () => {
   if (process.platform === 'win32') return; // Source-only Linux gate.
@@ -205,6 +207,8 @@ test('unknown pipe, nonzero exit or still-live app are blocked without forced ki
     const result = await launch.cleanup(fixture.app);
     assert.equal(result.blockedCleanup, true); assert.equal(result.forcedElectron, false); assert.equal(result.ownedTempRemoved, undefined);
     assert.ok(fixture.f.dirs.has(fixture.env.TEMP.toLowerCase()));
+    assert.equal(fixture.unrefs(), options.staysLive ? 1 : 0, 'only release a still-live app event-loop reference; never kill or call it clean');
+    assert.equal(result.appUnreferencedForDriverExit, options.staysLive ? true : undefined);
   }
 });
 test('preexisting pipe/state/logs and active or nonowned env refuse before app spawn', async () => {

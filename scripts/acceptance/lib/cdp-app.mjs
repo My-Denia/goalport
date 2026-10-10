@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { attachGoalPort, createCdpClient, waitForWebSocketOpen } from '../../connected/v1-cdp.mjs';
 import { sleep } from './launch.mjs';
+import { resizeOwnedWindowsWindow } from './windows-window.mjs';
 
 export function nativeResize(electronPid, width, height, insets = { width: 0, height: 0 }) {
   if (!Number.isInteger(electronPid) || electronPid <= 1 || ![860,1020,1440].includes(width) || height !== 900 || ![insets.width,insets.height].every(n => Number.isInteger(n) && n >= 0 && n <= 32)) throw new Error('invalid owned native resize request');
@@ -14,7 +15,7 @@ export function nativeResize(electronPid, width, height, insets = { width: 0, he
   return { ...JSON.parse(result.stdout), command, exit: result.status };
 }
 
-export async function attachApp(port, { electronPid } = {}) {
+export async function attachApp(port, { electronPid, pwshPath } = {}) {
   const page = await attachGoalPort(port, { requestTimeoutMs: 15000 });
   let browser;
   try {
@@ -74,10 +75,17 @@ export async function attachApp(port, { electronPid } = {}) {
         }
         let viewport = await page.evaluate('({width:innerWidth,height:innerHeight,devicePixelRatio})');
         let method = 'Browser.setWindowBounds';
-        if (primaryError || bounds.width !== width || viewport.width !== width) {
-          if (process.platform !== 'linux' || !electronPid) throw new Error('native ownership required after Browser bounds refusal');
-          const insets = await page.evaluate('({width:outerWidth-innerWidth,height:outerHeight-innerHeight})');
-          native = nativeResize(electronPid, width, height, insets);
+        // Windows always measures the owned HWND/DPI, even when Browser bounds
+        // happen to work. Linux's existing X11 fallback remains unchanged.
+        if (process.platform === 'win32' || primaryError || bounds.width !== width || viewport.width !== width) {
+          if (!electronPid) throw new Error('native ownership required after Browser bounds refusal');
+          if (process.platform === 'win32') {
+            viewport = await page.evaluate('({width:innerWidth,height:innerHeight,devicePixelRatio})');
+            native = resizeOwnedWindowsWindow({ electronPid, width, height, currentViewport: { width: viewport.width, height: viewport.height }, devicePixelRatio: viewport.devicePixelRatio }, { pwshPath });
+          } else if (process.platform === 'linux') {
+            const insets = await page.evaluate('({width:outerWidth-innerWidth,height:outerHeight-innerHeight})');
+            native = nativeResize(electronPid, width, height, insets);
+          } else throw new Error('native ownership required after Browser bounds refusal');
           method = native.method;
           const deadline = Date.now() + 5000;
           while (Date.now() < deadline) {
@@ -90,6 +98,7 @@ export async function attachApp(port, { electronPid } = {}) {
         }
         await sleep(250);
         const layout = await page.evaluate(`({root:document.querySelector('#root').getBoundingClientRect().width, grid:document.querySelector('.workspace-grid').getBoundingClientRect().width, titlebar:document.querySelector('.titlebar-inner').getBoundingClientRect().width})`);
+        if (native?.dpi && Math.abs(viewport.devicePixelRatio - native.dpi.after / 96) > 0.015) throw new Error('post-resize CDP DPI disagrees with native Windows DPI');
         if (Math.abs(layout.root-width) > 1 || layout.grid > width+1 || layout.titlebar > width+1) throw new Error(`native responsive layout clipped: ${JSON.stringify(layout)}`);
         return { requested: { width, height }, bounds, viewport, layout, method, native: native || null, primaryError: primaryError || null };
       },
