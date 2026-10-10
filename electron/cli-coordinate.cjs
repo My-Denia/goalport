@@ -4,7 +4,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { guardCoordinateCommand } = require("./coordinate-guard.cjs");
+const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
 const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
@@ -313,18 +313,24 @@ function turnSpec(command) {
     return { errorText: "The read-only session was not prepared, so nothing was sent." };
   }
   if (creditGated(model)) return { errorText: CREDITS };
+  // The explicitly authorized write branch flips exactly one flag per harness
+  // and keeps every other byte of the argv (and of the read branch) as it was
+  // audited. The flags are chosen from the documented CLI surface only — no
+  // binary was ever launched to verify them; real-flag behavior stays an
+  // owner-gated residual.
+  const writes = command?.sandboxPolicy?.type === "workspaceWrite";
   if (instanceOf(command) === "codex") {
     return {
       file: "codex",
       cwd: worktree,
-      args: ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", worktree, prompt],
+      args: ["exec", "--json", "--ephemeral", "--sandbox", writes ? "workspace-write" : "read-only", "--skip-git-repo-check", "--cd", worktree, prompt],
     };
   }
   if (instanceOf(command) === "claude") {
     return {
       file: "claude",
       cwd: worktree,
-      args: ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", model, prompt],
+      args: ["-p", "--output-format", "json", "--permission-mode", writes ? "acceptEdits" : "plan", "--permission-prompts", "none", "--model", model, prompt],
     };
   }
   return { errorText: NOT_INSTALLED };
@@ -606,7 +612,13 @@ async function runCliTurn(command, options = {}) {
   if (!stateDir || !commandId) return refused;
   if (hasClaim(stateDir, commandId)) return storedResult(stateDir, commandId);
   if (!grantLines(stateDir).includes(commandId)) return refused;
-  const problem = guardCoordinateCommand(command);
+  // The guard follows the id's role: only an execute-role command may carry
+  // the write guard; every other id (plan, review, audit, unknown) keeps the
+  // audited read guard, which refuses workspaceWrite — so a write sandbox can
+  // never ride in under a read role.
+  const problem = roleOfCommandId(commandId) === "execute"
+    ? guardCoordinateWriteCommand(command)
+    : guardCoordinateCommand(command);
   if (problem) return { ok: false, text: "", errorText: problem, messageDispatched: false };
   const spec = turnSpec(command);
   if (spec.errorText) return { ok: false, text: "", errorText: spec.errorText, messageDispatched: false };

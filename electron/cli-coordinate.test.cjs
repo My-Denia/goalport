@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
+const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
@@ -678,4 +679,144 @@ test("failure branches emit their stop codes: no-text, not-finished, not-install
   assert.match(notInstalled.errorText, /not installed/);
   assert.equal(notInstalled.stopCode, "not-installed");
   assert.equal(notInstalled.messageDispatched, false);
+});
+
+// M5 dormant write capability: the explicitly-write twin of the read command,
+// same grant/claim/ledger semantics, guarded by the id's role.
+function writeCommand(instanceId, model, commandId = `coordinate-execute-${instanceId}`) {
+  return {
+    commandId,
+    type: "goalport.coordinateTurn",
+    modelSelection: { instanceId, model },
+    runtimeMode: "approval-required",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "workspaceWrite" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath: "/work/goal" },
+    initialMessage: { text: "Carry out the plan." },
+  };
+}
+
+test("roleOfCommandId classifies the closed prefix set and nothing else", () => {
+  assert.equal(roleOfCommandId("coordinate-plan-abc123"), "plan");
+  assert.equal(roleOfCommandId("coordinate-review-abc123"), "review");
+  assert.equal(roleOfCommandId("coordinate-execute-abc123"), "execute");
+  assert.equal(roleOfCommandId("coordinate-audit-abc123"), "audit");
+  assert.equal(roleOfCommandId("coordinate-other-abc123"), null);
+  assert.equal(roleOfCommandId("coordinate-plan"), null);
+  assert.equal(roleOfCommandId(""), null);
+  assert.equal(roleOfCommandId(42), null);
+});
+
+test("guardCoordinateWriteCommand demands the write literals and an absolute existing worktree", () => {
+  assert.equal(guardCoordinateWriteCommand(writeCommand("codex", "gpt-6.1-sol")), null);
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "C:\\work\\goal" } }), null);
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), type: "message.dispatch" }), "The command is not a coordinate turn.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), runtimeMode: "full-access" }), "runtimeMode must be approval-required.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), approvalPolicy: "on-request" }), "approvalPolicy must be never. approval-required alone asks for every read.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), sandboxPolicy: { type: "readOnly" } }), "sandboxPolicy.type must be workspaceWrite.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), sandboxPolicy: { type: "dangerFullAccess" } }), "sandboxPolicy.type must be workspaceWrite.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "root" } }), "A write turn must run in an existing worktree.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "   " } }), "A write turn must run in an existing worktree.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "work/relative" } }), "A write turn needs an absolute worktree path.");
+});
+
+test("write argv flips exactly one flag per harness; read argv stays byte-identical", () => {
+  const readCodex = turnSpec(command("codex", "gpt-6.1-sol", "coordinate-execute-codex"));
+  const writeCodex = turnSpec(writeCommand("codex", "gpt-6.1-sol"));
+  assert.deepEqual(writeCodex.args, ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."]);
+  assert.deepEqual(readCodex.args, ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Plan only."]);
+  assert.equal(writeCodex.args.length, readCodex.args.length);
+  const codexDiffs = writeCodex.args.filter((arg, index) => arg !== ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."][index]);
+  assert.deepEqual(codexDiffs, ["workspace-write"]);
+  const writeClaude = turnSpec(writeCommand("claude", "opus"));
+  assert.deepEqual(writeClaude.args, ["-p", "--output-format", "json", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."]);
+  const readClaude = turnSpec(command("claude", "opus", "coordinate-execute-claude"));
+  assert.equal(writeClaude.args.length, readClaude.args.length);
+  const claudeDiffs = writeClaude.args.filter((arg, index) => arg !== ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."][index]);
+  assert.deepEqual(claudeDiffs, ["acceptEdits"]);
+});
+
+test("pairing is refused in both directions before any spawn, with the grant left intact", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-pairing-"));
+  let spawns = 0;
+  const spawnTurn = async () => {
+    spawns += 1;
+    return { code: 0, stdout: "" };
+  };
+  try {
+    // An execute-role id carrying the read-only sandbox hits the write guard.
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\ncoordinate-plan-codex\n");
+    const executeReadOnly = await runCliTurn({ ...writeCommand("codex", "gpt-6.1-sol", "coordinate-execute-codex"), sandboxPolicy: { type: "readOnly" } }, { stateDir: directory, spawnTurn });
+    assert.equal(executeReadOnly.ok, false);
+    assert.equal(executeReadOnly.errorText, "sandboxPolicy.type must be workspaceWrite.");
+    assert.equal(executeReadOnly.messageDispatched, false);
+    // A plan-role id carrying the write sandbox hits the read guard.
+    const planWrite = await runCliTurn({ ...command("codex", "gpt-6.1-sol", "coordinate-plan-codex"), sandboxPolicy: { type: "workspaceWrite" } }, { stateDir: directory, spawnTurn });
+    assert.equal(planWrite.ok, false);
+    assert.equal(planWrite.errorText, "sandboxPolicy.type must be readOnly.");
+    assert.equal(planWrite.messageDispatched, false);
+    assert.equal(spawns, 0);
+    // Neither refusal consumed its grant or left a claim behind.
+    const grants = fs.readFileSync(path.join(directory, "send-authorization"), "utf8");
+    assert.equal(grants.includes("coordinate-execute-codex"), true);
+    assert.equal(grants.includes("coordinate-plan-codex"), true);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-codex")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-plan-codex")), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a granted write turn consumes its grant, keeps the claim ledger semantics, and replays", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-write-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\n");
+  const spawned = [];
+  const spawnTurn = async (spec) => {
+    spawned.push(spec);
+    return { code: 0, stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"Carried out."}}\n' };
+  };
+  try {
+    const first = await runCliTurn(writeCommand("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(first.ok, true);
+    assert.equal(first.text, "Carried out.");
+    assert.deepEqual(spawned[0].args, ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."]);
+    assert.equal(spawned[0].cwd, "/work/goal");
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-codex")), true);
+    const second = await runCliTurn(writeCommand("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(second.text, "Carried out.");
+    assert.equal(spawned.length, 1);
+    const ledger = JSON.parse(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"));
+    assert.deepEqual(ledger["coordinate-execute-codex"], { ok: true, text: "Carried out.", errorText: "", messageDispatched: true });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("the write capability stays dormant: no production code mints execute or audit ids", () => {
+  // Grep-level pin: the command generator and every production module keep
+  // the two read roles until M6/M7 wire the write scope and chain. The only
+  // legitimate mentions of the extended prefixes are the classifier regexes
+  // in the guard leaves and the tests themselves.
+  const production = [
+    path.join(__dirname, "..", "src", "coordination", "coordinateGoal.ts"),
+    path.join(__dirname, "..", "src", "coordination", "coordinateSession.ts"),
+    path.join(__dirname, "..", "src", "coordination", "requestCoordination.ts"),
+    path.join(__dirname, "..", "src", "coordination", "coordinateTurn.ts"),
+    path.join(__dirname, "coordinate-guard.cjs"),
+    path.join(__dirname, "cli-coordinate.cjs"),
+    path.join(__dirname, "coordinate-service.cjs"),
+    path.join(__dirname, "coordination-scope.cjs"),
+    path.join(__dirname, "main.cjs"),
+    path.join(__dirname, "preload.cjs"),
+    path.join(__dirname, "..", "src", "ipc.ts"),
+  ];
+  for (const file of production) {
+    const source = fs.readFileSync(file, "utf8");
+    assert.equal(source.includes("coordinate-execute-"), false, `${file} must not mint execute ids`);
+    assert.equal(source.includes("coordinate-audit-"), false, `${file} must not mint audit ids`);
+  }
+  // The generator's own role parameter is still the two read roles.
+  const generator = fs.readFileSync(path.join(__dirname, "..", "src", "coordination", "coordinateGoal.ts"), "utf8");
+  assert.equal(generator.includes('function commandKey(role: "plan" | "review"'), true);
 });
