@@ -328,12 +328,21 @@ declare global {
         environmentBlocked?: boolean | null;
         environmentDetail?: string | null;
         stopCode?: "no-text" | "not-finished" | "not-installed" | "scope-exhausted" | "scope-revoked" | null;
+        // Read turns and explicit workspace-change turns are independent.
         turnsRemaining?: number | null;
+        writeTurnsRemaining?: number | null;
         scopeExhausted?: boolean;
       }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
-      coordinationAuthorize?: (scope: { instances: string[]; maxTurns: number }) => Promise<{ ok: boolean; generation: number; remaining: number; errorText?: string }>;
-      coordinationScope?: () => Promise<{ instances: string[]; maxTurns: number; remaining: number; generation: number } | null>;
+      coordinationAuthorize?: (scope: {
+        instances: string[];
+        maxTurns: number;
+        write?: { instances: string[]; maxTurns: number; workspaceRoot: string };
+      }) => Promise<{ ok: boolean; generation: number; remaining: number; writeTurnsRemaining?: number; errorText?: string }>;
+      coordinationScope?: () => Promise<{
+        instances: string[]; maxTurns: number; remaining: number; generation: number;
+        write?: { instances: string[]; maxTurns: number; remaining: number; workspaceRoot: string };
+      } | null>;
       coordinationRevoke?: () => Promise<{ ok: boolean }>;
       coordinationRecords?: () => Promise<CoordinationRecord[]>;
       coordinationSave?: (record: CoordinationRecord) => Promise<CoordinationRecord>;

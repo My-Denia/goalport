@@ -1,6 +1,7 @@
 "use strict";
 
-const { guardCoordinateCommand } = require("./coordinate-guard.cjs");
+const path = require("node:path");
+const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
 const DISCONNECTED_DISCOVER = "The coordination server is not connected, so no harness was assigned.";
@@ -23,9 +24,12 @@ function scopedLaunch(scopeCtx) {
 
 // Reported after settle, so a refunded reservation shows the budget it actually
 // has left, and a scope revoked mid-run reports null instead of a stale number.
-function remainingAfter(scopeModule) {
+function remainingAfter(scopeModule, hadWrite = false) {
   const snapshot = typeof scopeModule.current === "function" ? scopeModule.current() : null;
-  return snapshot ? snapshot.remaining : null;
+  return {
+    turnsRemaining: snapshot ? snapshot.remaining : null,
+    ...(snapshot?.write || hadWrite ? { writeTurnsRemaining: snapshot?.write?.remaining ?? null } : {}),
+  };
 }
 
 function discoveryFailureText(discovered) {
@@ -74,21 +78,29 @@ async function discoverCoordination(env, runtime, generation) {
 }
 
 async function launchOne(env, runtime, command, generation, scopeCtx) {
-  const problem = guardCoordinateCommand(command);
-  if (problem) return { launched: false, prepared: false, text: "", errorText: problem };
+  const scopeModule = scopedLaunch(scopeCtx);
+  const hadWrite = Boolean(scopeModule?.current?.()?.write);
+  const metadata = () => scopeModule ? remainingAfter(scopeModule, hadWrite) : {};
+  // Read-only pre-reservation refusals keep their historic response shape.
+  const refusalMetadata = () => hadWrite ? metadata() : {};
+  const execute = roleOfCommandId(command?.commandId) === "execute";
+  const problem = execute ? guardCoordinateWriteCommand(command) : guardCoordinateCommand(command);
+  if (problem) return { launched: false, prepared: false, text: "", errorText: problem, ...refusalMetadata() };
+  if (execute && !scopeModule) {
+    return { launched: false, prepared: false, text: "", errorText: "This execution turn needs an explicit workspace-change authorization, so nothing was sent.", dispatched: false };
+  }
   if (!runtimeReady(runtime)) {
-    return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
+    return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH, ...refusalMetadata() };
   }
   if (env.GOALPORT_COORDINATE_SEND !== "1") {
-    return { launched: false, prepared: true, text: "", errorText: UNAUTHORIZED };
+    return { launched: false, prepared: true, text: "", errorText: UNAUTHORIZED, ...refusalMetadata() };
   }
   if (typeof runtime.run !== "function") {
-    return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH };
+    return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH, ...refusalMetadata() };
   }
   // A scoped launch reserves first: the scope module validates in its
   // load-bearing order, writes the JIT grant line and charges one turn BEFORE
   // runtime.run, then settles the reservation against the decision table.
-  const scopeModule = scopedLaunch(scopeCtx);
   let reserved = null;
   let reservation = null;
   if (scopeModule) {
@@ -103,6 +115,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
         ...(reserved.stopCode ? { stopCode: reserved.stopCode } : {}),
         ...(reserved.scopeExhausted ? { scopeExhausted: true } : {}),
         turnsRemaining: typeof reserved.turnsRemaining === "number" ? reserved.turnsRemaining : null,
+        ...(hadWrite ? { writeTurnsRemaining: typeof reserved.writeTurnsRemaining === "number" ? reserved.writeTurnsRemaining : null } : {}),
       };
     }
     reservation = reserved.existing ? null : reserved.reservation;
@@ -135,7 +148,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
       text,
       errorText: "",
       dispatched: true,
-      ...(scopeModule ? { turnsRemaining: remainingAfter(scopeModule) } : {}),
+      ...metadata(),
     };
   }
   // A turn that produced text and then failed keeps that text: the partial
@@ -164,7 +177,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
     environmentBlocked,
     environmentDetail: environmentBlocked && typeof ran?.environmentDetail === "string" ? ran.environmentDetail : null,
     ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
-    ...(scopeModule ? { turnsRemaining: remainingAfter(scopeModule) } : {}),
+    ...metadata(),
   };
 }
 
@@ -174,7 +187,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
 // credential). A discovery that fails at all refuses everything (fail-closed).
 // Returns null when the request is admissible, or the human refusal sentence.
 function authorizeMembershipError(discovered, requested) {
-  const providers = Array.isArray(discovered?.providers) ? discovered.providers : [];
+  const providers = discovered?.ok !== false && Array.isArray(discovered?.providers) ? discovered.providers : [];
   const discoveredById = new Map(providers.map((provider) => [provider.instanceId, provider]));
   for (const instance of requested) {
     const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
@@ -185,4 +198,30 @@ function authorizeMembershipError(discovered, requested) {
   return null;
 }
 
-module.exports = { guardCoordinateCommand, discoverCoordination, launchOne, authorizeMembershipError };
+// One tested bridge owns request validation and the fresh discovery for BOTH
+// lists. The scope remains the only authority for clamping budgets/minting.
+async function authorizeCoordination(payload, scopeModule, discover) {
+  const refusal = (errorText) => ({ ok: false, generation: 0, remaining: 0, errorText });
+  const members = (value) => Array.isArray(value) && value.every((id) => typeof id === "string")
+    ? [...new Set(value.map((id) => id.trim()).filter(Boolean))] : [];
+  const requested = members(payload?.instances);
+  if (!requested.length) return refusal("No harness was chosen, so nothing was authorized.");
+  const write = payload?.write;
+  let writeMembers = [];
+  if (write !== undefined) {
+    writeMembers = members(write?.instances);
+    if (!write || typeof write !== "object" || Array.isArray(write) || !writeMembers.length ||
+        typeof write.maxTurns !== "number" || !Number.isFinite(write.maxTurns) ||
+        typeof write.workspaceRoot !== "string" || !write.workspaceRoot.trim() || !path.isAbsolute(write.workspaceRoot)) {
+      return refusal("The workspace-change authorization is invalid, so nothing was authorized.");
+    }
+  }
+  let discovered = null;
+  try { discovered = await discover(); } catch { /* No fresh membership means no authorization. */ }
+  const membership = authorizeMembershipError(discovered, requested) ||
+    (write !== undefined ? authorizeMembershipError(discovered, writeMembers) : null);
+  if (membership) return refusal(membership);
+  return scopeModule.authorize(requested, payload?.maxTurns, write);
+}
+
+module.exports = { guardCoordinateCommand, discoverCoordination, launchOne, authorizeMembershipError, authorizeCoordination };

@@ -565,3 +565,268 @@ test("authorize membership fails closed when discovery cannot run", () => {
     "Only harnesses signed in with their own subscription can be authorized.",
   );
 });
+
+// M6b: injected discovery and turns only; never execute a vendor CLI.
+const { authorizeCoordination } = require("./coordinate-service.cjs");
+const writeAuthorization = { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" };
+const freshProviders = {
+  ok: true,
+  providers: [
+    { instanceId: "codex", auth: { status: "authenticated", type: "chatgpt" } },
+    { instanceId: "claude", auth: { status: "authenticated", type: "subscription" } },
+  ],
+};
+function writeCommand(id = "coordinate-execute-codex") {
+  return { ...scopedCommand(id), sandboxPolicy: { type: "workspaceWrite" } };
+}
+
+test("bridge uses one fresh discovery for both lists before minting; legacy shape and scope clamps remain", async () => {
+  coordinationScope.revoke();
+  try {
+    let discoveries = 0;
+    const discover = async () => { discoveries += 1; return freshProviders; };
+    const read = await authorizeCoordination({ instances: ["codex", "claude"], maxTurns: 4 }, coordinationScope, discover);
+    assert.deepEqual(read, { ok: true, generation: read.generation, remaining: 4 });
+    assert.deepEqual(coordinationScope.current(), { instances: ["codex", "claude"], maxTurns: 4, remaining: 4, generation: read.generation });
+    const original = coordinationScope.authorize;
+    const injectedScope = { authorize(...args) {
+      assert.equal(discoveries, 2);
+      assert.deepEqual(args, [["codex"], 99, { ...writeAuthorization, maxTurns: 99 }]);
+      return original(...args);
+    } };
+    const both = await authorizeCoordination({ instances: ["codex"], maxTurns: 99, write: { ...writeAuthorization, maxTurns: 99 } }, injectedScope, discover);
+    assert.deepEqual(both, { ok: true, generation: read.generation + 1, remaining: 32, writeTurnsRemaining: 8 });
+    assert.equal(discoveries, 2);
+  } finally { coordinationScope.revoke(); }
+});
+
+test("fresh membership/API-key refusal checks either list and never replaces prior authorization", async () => {
+  coordinationScope.revoke();
+  try {
+    const first = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const before = coordinationScope.current();
+    for (const [read, write, discovered] of [
+      [["codex"], ["missing"], freshProviders],
+      [["missing"], ["codex"], freshProviders],
+      [["codex"], ["claude"], { ...freshProviders, providers: [freshProviders.providers[0], { instanceId: "claude", auth: { type: "apiKey" } }] }],
+      [["claude"], ["codex"], { ...freshProviders, providers: [freshProviders.providers[0], { instanceId: "claude", auth: { type: "apiKey" } }] }],
+      [["codex"], ["codex"], { ...freshProviders, ok: false }],
+      [["codex"], ["codex"], null],
+    ]) {
+      let discoveries = 0;
+      const result = await authorizeCoordination({ instances: read, maxTurns: 4, write: { ...writeAuthorization, instances: write } }, coordinationScope, async () => { discoveries += 1; return discovered; });
+      assert.equal(discoveries, 1);
+      assert.deepEqual(result, { ok: false, generation: 0, remaining: 0, errorText: "Only harnesses signed in with their own subscription can be authorized." });
+      assert.deepEqual(coordinationScope.current(), before);
+    }
+    const thrown = await authorizeCoordination({ instances: ["codex"], maxTurns: 4, write: writeAuthorization }, coordinationScope, async () => { throw new Error("discovery unavailable"); });
+    assert.equal(thrown.ok, false);
+    assert.deepEqual(coordinationScope.current(), before);
+    const next = await authorizeCoordination({ instances: ["codex"], maxTurns: 4, write: writeAuthorization }, coordinationScope, async () => freshProviders);
+    assert.equal(next.generation, first.generation + 1);
+  } finally { coordinationScope.revoke(); }
+});
+
+test("malformed read/write shapes refuse before discovery and mint no generation", async () => {
+  coordinationScope.revoke();
+  try {
+    const first = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const before = coordinationScope.current();
+    let discoveries = 0;
+    for (const write of [null, [], {}, { ...writeAuthorization, instances: [] }, { ...writeAuthorization, instances: [1] }, { ...writeAuthorization, maxTurns: NaN }, { ...writeAuthorization, maxTurns: Infinity }, { ...writeAuthorization, maxTurns: "2" }, { ...writeAuthorization, workspaceRoot: "" }, { ...writeAuthorization, workspaceRoot: "   " }, { ...writeAuthorization, workspaceRoot: "relative" }]) {
+      const result = await authorizeCoordination({ instances: ["codex"], maxTurns: 4, write }, coordinationScope, async () => { discoveries += 1; return freshProviders; });
+      assert.equal(result.ok, false);
+      assert.match(result.errorText, /workspace-change authorization is invalid/);
+      assert.deepEqual(coordinationScope.current(), before);
+    }
+    for (const instances of [undefined, [], [1], [" "]]) {
+      assert.equal((await authorizeCoordination({ instances, maxTurns: 4 }, coordinationScope, async () => { discoveries += 1; return freshProviders; })).ok, false);
+      assert.deepEqual(coordinationScope.current(), before);
+    }
+    assert.equal(discoveries, 0);
+    assert.equal(coordinationScope.authorize(["codex"], 4).generation, first.generation + 1);
+  } finally { coordinationScope.revoke(); }
+});
+
+test("execute cannot use legacy hand-written grants or malformed scoped contexts", async () => {
+  const directory = scopeTempDir();
+  try {
+    coordinationScope.revoke();
+    const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const before = coordinationScope.current();
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\n");
+    let runs = 0;
+    const runtime = scopedRuntime(directory, () => { runs += 1; return { ok: true, text: "never" }; });
+    for (const ctx of [undefined, {}, { scopeGeneration: granted.generation }, { scope: {}, scopeGeneration: granted.generation }]) {
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", ctx);
+      assert.match(result.errorText, /explicit workspace-change authorization/);
+      assert.equal(result.dispatched, false);
+    }
+    assert.equal(runs, 0);
+    assert.deepEqual(coordinationScope.current(), before);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-execute-codex\n");
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-codex")), false);
+  } finally { scopeCleanup(directory); }
+});
+
+test("scoped execute rejects read-only scope, root drift, wrong member, stale generation and guard pairing before run/charge", async () => {
+  const directory = scopeTempDir();
+  try {
+    coordinationScope.revoke();
+    let runs = 0;
+    const runtime = scopedRuntime(directory, async () => { runs += 1; return { ok: true, text: "never" }; });
+    const read = coordinationScope.authorize(["codex"], 4);
+    const deniedRead = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", { scope: coordinationScope, scopeGeneration: read.generation });
+    assert.match(deniedRead.errorText, /explicit workspace-change authorization/);
+    assert.equal(deniedRead.turnsRemaining, 4);
+    assert.equal("writeTurnsRemaining" in deniedRead, false);
+    const both = coordinationScope.authorize(["codex", "claude"], 4, writeAuthorization);
+    const ctx = { scope: coordinationScope, scopeGeneration: both.generation };
+    const before = coordinationScope.current();
+    for (const [cmd, error] of [
+      [{ ...writeCommand(), workspaceStrategy: { type: "existing_worktree", worktreePath: "/other" } }, /authorized workspace/],
+      [{ ...writeCommand(), modelSelection: { instanceId: "claude" } }, /not in the authorized scope/],
+      [{ ...writeCommand(), sandboxPolicy: { type: "readOnly" } }, /workspaceWrite/],
+      [{ ...writeCommand(), workspaceStrategy: { type: "existing_worktree", worktreePath: "relative" } }, /absolute/],
+      [{ ...scopedCommand("coordinate-audit-codex"), sandboxPolicy: { type: "workspaceWrite" } }, /readOnly/],
+    ]) {
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, cmd, "g", ctx);
+      assert.match(result.errorText, error);
+      assert.equal(result.turnsRemaining, 4);
+      assert.equal(result.writeTurnsRemaining, 2);
+      assert.deepEqual(coordinationScope.current(), before);
+    }
+    const stale = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", { ...ctx, scopeGeneration: read.generation });
+    assert.equal(stale.stopCode, "scope-revoked");
+    assert.equal(runs, 0);
+    assert.deepEqual(fs.readdirSync(directory), []);
+  } finally { scopeCleanup(directory); }
+});
+
+test("scoped execute uses actual CLI write shape, charges only write, and claim replay is free at exhaustion", async () => {
+  const directory = scopeTempDir();
+  try {
+    coordinationScope.revoke();
+    const granted = coordinationScope.authorize(["codex"], 4, { ...writeAuthorization, maxTurns: 1 });
+    const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
+    let spawns = 0;
+    const runtime = scopedRuntime(directory, (received) => runCliTurn(received, { stateDir: directory, spawnTurn: async (spec) => {
+      spawns += 1;
+      assert.equal(coordinationScope.current().remaining, 4);
+      assert.equal(coordinationScope.current().write.remaining, 0);
+      assert.equal(spec.cwd, "/work/goal");
+      assert.deepEqual(spec.args, ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Plan only."]);
+      return { code: 0, stdout: CODEX_REPLY };
+    } }));
+    for (let i = 0; i < 2; i += 1) {
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", ctx);
+      assert.equal(result.launched, true);
+      assert.equal(result.turnsRemaining, 4);
+      assert.equal(result.writeTurnsRemaining, 0);
+    }
+    assert.equal(spawns, 1);
+    const denied = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand("coordinate-execute-next"), "g", ctx);
+    assert.equal(denied.scopeExhausted, true);
+    assert.equal(denied.turnsRemaining, 4);
+    assert.equal(denied.writeTurnsRemaining, 0);
+  } finally { scopeCleanup(directory); }
+});
+
+test("write settle preserves literal tri-state and synchronous-throw versus rejected-promise refunds", async () => {
+  const directory = scopeTempDir();
+  try {
+    for (const [dispatch, expected] of [[true, true], [false, false], [null, null], [undefined, null], [0, null], ["false", null]]) {
+      const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: false, text: "Partial changes.", errorText: "Stopped.", messageDispatched: dispatch })), writeCommand(), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+      assert.equal(result.dispatched, expected);
+      assert.equal(result.text, "Partial changes.");
+      assert.equal(result.turnsRemaining, 4);
+      assert.equal(result.writeTurnsRemaining, dispatch === false ? 2 : 1);
+      assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+    }
+    for (const [run, remaining] of [[() => { throw new Error("before promise"); }, 2], [async () => { throw new Error("mid-promise"); }, 1]]) {
+      const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, run), writeCommand(), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+      assert.equal(result.dispatched, null);
+      assert.equal(result.turnsRemaining, 4);
+      assert.equal(result.writeTurnsRemaining, remaining);
+    }
+  } finally { scopeCleanup(directory); }
+});
+
+test("write spawn proven-false refunds write only and retains an owner's grant", async () => {
+  const directory = scopeTempDir();
+  try {
+    const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\n");
+    const runtime = scopedRuntime(directory, (received) => runCliTurn(received, { stateDir: directory, spawnTurn: async () => ({ spawnError: true }) }));
+    const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(result.dispatched, false);
+    assert.equal(result.turnsRemaining, 4);
+    assert.equal(result.writeTurnsRemaining, 2);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-execute-codex\n");
+  } finally { scopeCleanup(directory); }
+});
+
+test("read and write metadata stay independent after settle; revoke in-flight clears both", async () => {
+  const directory = scopeTempDir();
+  try {
+    const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
+    const runtime = scopedRuntime(directory, async () => ({ ok: true, text: "Done.", errorText: "" }));
+    const read = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-audit-codex"), "g", ctx);
+    assert.equal(read.turnsRemaining, 3);
+    assert.equal(read.writeTurnsRemaining, 2);
+    const write = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", ctx);
+    assert.equal(write.turnsRemaining, 3);
+    assert.equal(write.writeTurnsRemaining, 1);
+    for (const ok of [true, false]) {
+      const next = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+      let release;
+      const pending = launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, () => new Promise((resolve) => { release = resolve; })), writeCommand(), "g", { scope: coordinationScope, scopeGeneration: next.generation });
+      coordinationScope.revoke();
+      release({ ok, text: "Real output.", errorText: ok ? "" : "Stopped.", messageDispatched: false });
+      const result = await pending;
+      assert.equal(result.turnsRemaining, null);
+      assert.equal(result.writeTurnsRemaining, null);
+      assert.equal(coordinationScope.current(), null);
+    }
+  } finally { scopeCleanup(directory); }
+});
+
+test("write launch retains the original literal env gate and runtime-readiness checks without charge", async () => {
+  const directory = scopeTempDir();
+  try {
+    const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
+    let runs = 0;
+    const runtime = scopedRuntime(directory, () => { runs += 1; });
+    for (const value of [undefined, "true", "0", 1]) {
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: value }, runtime, writeCommand(), "g", ctx);
+      assert.match(result.errorText, /not authorized/);
+      assert.equal(result.turnsRemaining, 4);
+      assert.equal(result.writeTurnsRemaining, 2);
+    }
+    for (const unavailable of [null, { ...runtime, discover: undefined }, { ...runtime, prepare: undefined }, { ...runtime, run: undefined }]) {
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, unavailable, writeCommand(), "g", ctx);
+      assert.match(result.errorText, /not connected/);
+      assert.equal(result.writeTurnsRemaining, 2);
+    }
+    assert.equal(runs, 0);
+    assert.deepEqual(fs.readdirSync(directory), []);
+  } finally { scopeCleanup(directory); }
+});
+
+test("read-only scoped pre-reservation refusals retain the legacy exact field shape", async () => {
+  const directory = scopeTempDir();
+  try {
+    const granted = coordinationScope.authorize(["codex"], 4);
+    const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
+    const result = await launchOne({}, scopedRuntime(directory, () => assert.fail("no run")), scopedCommand("coordinate-plan-codex"), "g", ctx);
+    assert.deepEqual(result, {
+      launched: false, prepared: true, text: "",
+      errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.",
+    });
+    assert.equal(coordinationScope.current().remaining, 4);
+  } finally { scopeCleanup(directory); }
+});

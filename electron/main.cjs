@@ -12,7 +12,7 @@ const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileSt
 const { ProfileManager } = require("./profile-manager.cjs");
 const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
-const { discoverCoordination, launchOne, authorizeMembershipError } = require("./coordinate-service.cjs");
+const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
@@ -1340,23 +1340,13 @@ app.whenReady().then(() => {
     coordinationRuntime().cancel(generation);
     return { ok: true };
   });
-  handleTrusted("goalport:coordination-authorize", async (_event, payload) => {
-    const requested = Array.isArray(payload?.instances) ? payload.instances : [];
-    // Authorize-time membership check against a FRESH zero-quota discovery;
-    // the predicate lives in coordinate-service (tested there) and fails
-    // closed when discovery cannot run at all.
-    let discovered = null;
-    try {
-      discovered = await discoverCliProviders({ stateDir: coordinationRuntime().stateDir });
-    } catch {
-      discovered = { ok: false, providers: [] };
-    }
-    const membership = authorizeMembershipError(discovered, requested);
-    if (membership) {
-      return { ok: false, generation: 0, remaining: 0, errorText: membership };
-    }
-    return coordinationScope.authorize(requested, payload?.maxTurns);
-  });
+  handleTrusted("goalport:coordination-authorize", (_event, payload) => authorizeCoordination(
+    payload,
+    coordinationScope,
+    // BOTH member lists use this same fresh zero-quota discovery. Validation
+    // and subscription/API-key refusals run before the scope can be minted.
+    () => discoverCliProviders({ stateDir: coordinationRuntime().stateDir })
+  ));
   handleTrusted("goalport:coordination-scope", () => coordinationScope.current());
   handleTrusted("goalport:coordination-revoke", () => {
     coordinationScope.revoke();

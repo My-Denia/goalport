@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld("goalportCore", {
   coordinateDiscover: (generation) => ipcRenderer.invoke("goalport:coordinate-discover", generation),
   coordinateLaunch: (command, generation, scopeGeneration) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration),
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
+  // Optional write: { instances: string[], maxTurns: number, workspaceRoot: string }.
+  // Forward unchanged; only the trusted main-process scope grants consent.
   coordinationAuthorize: (scope) => ipcRenderer.invoke("goalport:coordination-authorize", scope),
   coordinationScope: () => ipcRenderer.invoke("goalport:coordination-scope"),
   coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),
