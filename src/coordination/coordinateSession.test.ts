@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import { coordinateGoal } from "./coordinateGoal";
 import { runCoordinateSession, type CoordinateLaunchResult, type CoordinateTransport, type CoordinateSessionEvent } from "./coordinateSession";
@@ -878,4 +882,37 @@ describe("explicitly authorized execution and independent audit", () => {
     expect(state.stopReason).toBe("The independent check finished, so this stopped.");
     for (const field of ["executionText", "auditText", "executionHarness", "auditHarness", "authorizedWriteTurnsLeft"]) expect(state).not.toHaveProperty(field);
   });
+});
+
+it("a complete authorized engine result round-trips through the actual record store", async () => {
+  // Injected transport fixtures only, not real independent model judgment.
+  const transport = recordingTransport([
+    { text: "Bounded plan.", errorText: "", dispatched: true, turnsRemaining: 5, writeTurnsRemaining: 2 },
+    { text: "Checked.\nVERDICT: carry-out", errorText: "", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 2 },
+    { text: "Changed fixture and checked it.", errorText: "", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 1 },
+    { text: "Inspected fixture.\nVERDICT: verified", errorText: "", dispatched: true, turnsRemaining: 3, writeTurnsRemaining: 1 },
+  ]);
+  const view = await requestCoordination({
+    goal, workspacePath, sendKey: "combined-record-integration",
+    allowedInstances: ["codex", "claude"],
+    writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 2 },
+  }, { connected: true, sendAuthorized: true, providers, stopReason: null }, transport);
+  expect(view.verdict).toBe("verified");
+  expect(transport.calls).toHaveLength(4);
+  const directory = mkdtempSync(join(tmpdir(), "goalport-engine-record-"));
+  const { saveRecord, readRecords } = createRequire(import.meta.url)("../../electron/coordination-record.cjs");
+  try {
+    saveRecord(directory, { ...view, requestId: "combined-record", goal, workspacePath });
+    const [record] = readRecords(directory);
+    expect(record.verdict).toBe("verified");
+    expect(record.executionText).toBe("Changed fixture and checked it.");
+    expect(record.auditText).toBe("Inspected fixture.\nVERDICT: verified");
+    expect(record.executionHarness).toBe("Codex");
+    expect(record.auditHarness).toBe("Claude");
+    expect(record.messageDispatched).toBe(true);
+    expect(record).not.toHaveProperty("authorizedTurnsLeft");
+    expect(record).not.toHaveProperty("authorizedWriteTurnsLeft");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

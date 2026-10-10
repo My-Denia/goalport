@@ -793,30 +793,27 @@ test("a granted write turn consumes its grant, keeps the claim ledger semantics,
   }
 });
 
-test("the write capability stays dormant: no production code mints execute or audit ids", () => {
-  // Grep-level pin: the command generator and every production module keep
-  // the two read roles until M6/M7 wire the write scope and chain. The only
-  // legitimate mentions of the extended prefixes are the classifier regexes
-  // in the guard leaves and the tests themselves.
-  const production = [
-    path.join(__dirname, "..", "src", "coordination", "coordinateGoal.ts"),
-    path.join(__dirname, "..", "src", "coordination", "coordinateSession.ts"),
-    path.join(__dirname, "..", "src", "coordination", "requestCoordination.ts"),
-    path.join(__dirname, "..", "src", "coordination", "coordinateTurn.ts"),
-    path.join(__dirname, "coordinate-guard.cjs"),
-    path.join(__dirname, "cli-coordinate.cjs"),
-    path.join(__dirname, "coordinate-service.cjs"),
-    path.join(__dirname, "coordination-scope.cjs"),
-    path.join(__dirname, "main.cjs"),
-    path.join(__dirname, "preload.cjs"),
-    path.join(__dirname, "..", "src", "ipc.ts"),
-  ];
-  for (const file of production) {
-    const source = fs.readFileSync(file, "utf8");
-    assert.equal(source.includes("coordinate-execute-"), false, `${file} must not mint execute ids`);
-    assert.equal(source.includes("coordinate-audit-"), false, `${file} must not mint audit ids`);
+test("extended role ids cannot substitute for per-turn authorization grants", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-no-write-grant-"));
+  let spawns = 0;
+  try {
+    for (const role of ["execute", "audit"]) {
+      const commandId = `coordinate-${role}-codex`;
+      const input = role === "execute"
+        ? writeCommand("codex", "gpt-6.1-sol", commandId)
+        : command("codex", "gpt-6.1-sol", commandId);
+      const result = await runCliTurn(input, { stateDir: directory, spawnTurn: async () => {
+        spawns += 1;
+        return { code: 0, stdout: "" };
+      } });
+      assert.equal(result.ok, false);
+      assert.equal(result.messageDispatched, false);
+      assert.equal(fs.existsSync(path.join(directory, `claim-${commandId}`)), false);
+    }
+    assert.equal(spawns, 0);
+    // Live scoped write consent is separately enforced by coordinate-service.
+    // M7 may now mint these ids; the obsolete M5 grep-only dormant pin is gone.
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
-  // The generator's own role parameter is still the two read roles.
-  const generator = fs.readFileSync(path.join(__dirname, "..", "src", "coordination", "coordinateGoal.ts"), "utf8");
-  assert.equal(generator.includes('function commandKey(role: "plan" | "review"'), true);
 });
