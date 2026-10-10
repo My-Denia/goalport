@@ -974,9 +974,12 @@ function App() {
   // Change / Allow more turns land in the same place: the panel opens in
   // change mode on a draft of this goal. Saving there re-authorizes (a new
   // generation) and rotates the draft's request id, so the next Send is
-  // explicitly a NEW round — nothing is sent automatically.
-  function handleChangeHarnessAccess(source: { workspacePath: string; goal: string } | null) {
-    if (draftGoal) {
+  // explicitly a NEW round — nothing is sent automatically. A call from a
+  // result card (fromTerminal) must not route into the panel of a finished
+  // round's remnant draft, where it would be an invisible no-op: it always
+  // takes the fresh change-mode draft path.
+  function handleChangeHarnessAccess(source: { workspacePath: string; goal: string } | null, fromTerminal = false) {
+    if (draftGoal && !fromTerminal) {
       setPanelChangeMode(true);
       return;
     }
@@ -1663,8 +1666,8 @@ function App() {
                   ? { remaining: selectedPlanOverlay.turnsLeft, maxTurns: selectedPlanOverlay.maxTurns }
                   : null}
                 scopeExhausted={selectedPlanOverlay?.exhausted === true}
-                onAllowMoreTurns={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan) : undefined}
-                onChangeAccess={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan) : undefined}
+                onAllowMoreTurns={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
+                onChangeAccess={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
                 onStopAllowing={selectedPlanOverlay ? () => { void handleStopAllowing(); } : undefined}
               />
             </div>
@@ -1701,8 +1704,8 @@ function App() {
                     ? { remaining: draftOverlay.turnsLeft, maxTurns: draftOverlay.maxTurns }
                     : null}
                   scopeExhausted={draftOverlay?.exhausted === true}
-                  onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null) : undefined}
-                  onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null) : undefined}
+                  onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
+                  onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
                   onStopAllowing={draftOverlay ? () => { void handleStopAllowing(); } : undefined}
                 />
               ) : null}

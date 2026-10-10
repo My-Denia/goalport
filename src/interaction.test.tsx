@@ -2156,6 +2156,30 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.getByRole("button", { name: "Allow more turns" })).toBeTruthy();
   });
 
+  it("Allow more turns on a just-finished round opens the change-mode draft instead of a hidden no-op", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (_command, call) => {
+        if (call === 1) return { text: PLAN_TEXT, errorText: "", turnsRemaining: 1 };
+        return { text: "", errorText: "", stopCode: "scope-exhausted", scopeExhausted: true, turnsRemaining: 0 };
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    // The finished round's remnant draft is still mounted; clicking Allow more
+    // turns on the terminal card must open the panel in change mode on a fresh
+    // draft of the same goal — not silently flip a hidden panel.
+    fireEvent.click(screen.getByRole("button", { name: "Allow more turns" }));
+    expect(await screen.findByRole("button", { name: "Save harness access" })).toBeTruthy();
+    expect((screen.getByLabelText("Message composer") as HTMLTextAreaElement).value).toBe("plan the helper");
+    // Nothing was re-authorized or sent by opening change mode.
+    expect(bridge.order.filter((step) => step === "authorize").length).toBe(1);
+    expect(bridge.launched.length).toBe(2);
+  });
+
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
     const bridge = scopedBridge({
       providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
