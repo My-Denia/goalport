@@ -195,3 +195,139 @@ test("malformed round-event entries are dropped without rejecting a record", () 
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+test("verified execution and audit records round-trip their text, harnesses, and completed events", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-verified-"));
+  const roundEvents = [
+    {
+      kind: "continued",
+      role: "execution",
+      instanceId: "codex",
+      harness: "Codex",
+      sentence: "Codex finished the authorized changes.",
+    },
+    {
+      kind: "continued",
+      role: "audit",
+      instanceId: "claude",
+      harness: "Claude",
+      sentence: "Claude independently verified the changes.",
+    },
+  ];
+  try {
+    const saved = saveRecord(directory, record({
+      verdict: "verified",
+      stopReason: "The independent audit verified the changes.",
+      executionText: "Updated the requested file and ran its check.",
+      auditText: "Reviewed the diff and check output; VERDICT: verified",
+      executionHarness: "Codex",
+      auditHarness: "Claude",
+      roundEvents,
+    }));
+    assert.equal(saved.verdict, "verified");
+    assert.equal(saved.executionText, "Updated the requested file and ran its check.");
+    assert.equal(saved.auditText, "Reviewed the diff and check output; VERDICT: verified");
+    assert.equal(saved.executionHarness, "Codex");
+    assert.equal(saved.auditHarness, "Claude");
+    assert.deepEqual(saved.roundEvents, roundEvents);
+    assert.deepEqual(readRecords(directory)[0], saved);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("execution and audit failures keep partial execution text and accept both new blocked roles", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-role-failures-"));
+  try {
+    const executionFailure = saveRecord(directory, record({
+      requestId: "execution-failure",
+      verdict: "failed",
+      stopReason: "The execution turn failed after making partial changes.",
+      executionText: "Changed the first file before the command failed.",
+      executionHarness: "Codex",
+      environmentBlocked: { role: "execution", instanceId: "codex", harness: "Codex", detail: "transport closed" },
+    }));
+    assert.equal(executionFailure.executionText, "Changed the first file before the command failed.");
+    assert.equal(executionFailure.executionHarness, "Codex");
+    assert.equal(executionFailure.auditText, null);
+    assert.equal(executionFailure.auditHarness, null);
+    assert.equal(executionFailure.environmentBlocked.role, "execution");
+
+    const auditFailure = saveRecord(directory, record({
+      requestId: "audit-failure",
+      verdict: "failed",
+      stopReason: "The audit turn failed after execution completed.",
+      executionText: "The execution report is retained.",
+      executionHarness: "Codex",
+      auditHarness: "Claude",
+      environmentBlocked: { role: "audit", instanceId: "claude", harness: "Claude", detail: "transport closed" },
+    }));
+    assert.equal(auditFailure.executionText, "The execution report is retained.");
+    assert.equal(auditFailure.auditHarness, "Claude");
+    assert.equal(auditFailure.auditText, null);
+    assert.equal(auditFailure.environmentBlocked.role, "audit");
+    assert.deepEqual(readRecords(directory).map((item) => item.environmentBlocked.role), ["audit", "execution"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("malformed new fields degrade to null and malformed or transient new-role events are dropped", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-new-fields-bad-"));
+  const validExecutionEvent = {
+    kind: "continued",
+    role: "execution",
+    instanceId: "codex",
+    harness: "Codex",
+    sentence: "The completed execution turn returned.",
+  };
+  const validAuditEvent = {
+    kind: "failed",
+    role: "audit",
+    instanceId: "claude",
+    harness: null,
+    sentence: "The audit turn failed.",
+  };
+  try {
+    const saved = saveRecord(directory, record({
+      executionText: 42,
+      auditText: {},
+      executionHarness: false,
+      auditHarness: ["Claude"],
+      environmentBlocked: { role: "auditing", instanceId: "claude", harness: "Claude" },
+      roundEvents: [
+        validExecutionEvent,
+        validAuditEvent,
+        { ...validAuditEvent, kind: "started" },
+        { ...validExecutionEvent, role: "planner" },
+      ],
+    }));
+    assert.equal(saved.executionText, null);
+    assert.equal(saved.auditText, null);
+    assert.equal(saved.executionHarness, null);
+    assert.equal(saved.auditHarness, null);
+    assert.equal(saved.environmentBlocked, null);
+    assert.deepEqual(saved.roundEvents, [validExecutionEvent, validAuditEvent]);
+    assert.deepEqual(readRecords(directory)[0].roundEvents, [validExecutionEvent, validAuditEvent]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("pre-M7 records remain readable with null execution and audit fields", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-old-record-"));
+  const oldRecord = record({ messageDispatched: true });
+  try {
+    fs.writeFileSync(path.join(directory, "coordination-records.json"), JSON.stringify([oldRecord]));
+    const [loaded] = readRecords(directory);
+    assert.equal(loaded.requestId, oldRecord.requestId);
+    assert.equal(loaded.verdict, "revise");
+    assert.equal(loaded.messageDispatched, true);
+    assert.equal(loaded.executionText, null);
+    assert.equal(loaded.auditText, null);
+    assert.equal(loaded.executionHarness, null);
+    assert.equal(loaded.auditHarness, null);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});

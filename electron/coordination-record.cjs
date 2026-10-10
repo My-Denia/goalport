@@ -3,7 +3,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed"]);
+const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified"]);
+const ROLES = new Set(["planning", "review", "execution", "audit"]);
 const QUOTAS = new Set(["unknown", "available", "exhausted"]);
 
 function recordFile(directory) {
@@ -43,7 +44,7 @@ function savedAtOf(value) {
 // this field predates the format or arrives corrupted.
 function environmentBlockedOf(value) {
   if (typeof value !== "object" || value === null) return null;
-  const role = value.role === "planning" || value.role === "review" ? value.role : null;
+  const role = ROLES.has(value.role) ? value.role : null;
   const instanceId = typeof value.instanceId === "string" && value.instanceId.trim() ? value.instanceId.trim() : null;
   if (!role || !instanceId) return null;
   return {
@@ -57,7 +58,7 @@ function environmentBlockedOf(value) {
 function roundEventOf(value) {
   if (typeof value !== "object" || value === null) return null;
   const kind = value.kind === "failed" || value.kind === "continued" ? value.kind : null;
-  const role = value.role === "planning" || value.role === "review" ? value.role : null;
+  const role = ROLES.has(value.role) ? value.role : null;
   const instanceId = typeof value.instanceId === "string" && value.instanceId.trim() ? value.instanceId.trim() : null;
   const harness = nullableText(value.harness);
   const sentence = nullableText(value.sentence);
@@ -97,6 +98,10 @@ function normalize(input) {
   const planText = nullableText(input.planText);
   const reviewText = nullableText(input.reviewText);
   const result = nullableText(input.result);
+  const executionText = nullableText(input.executionText) ?? null;
+  const auditText = nullableText(input.auditText) ?? null;
+  const executionHarness = nullableText(input.executionHarness) ?? null;
+  const auditHarness = nullableText(input.auditHarness) ?? null;
   const planningQuota = quota(input.planningQuota);
   const reviewQuota = quota(input.reviewQuota);
   if (
@@ -125,6 +130,10 @@ function normalize(input) {
     planText,
     reviewText,
     result,
+    executionText,
+    auditText,
+    executionHarness,
+    auditHarness,
     verdict,
     stopReason,
     planningQuota,
