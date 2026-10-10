@@ -330,3 +330,25 @@ test("generated Windows wrappers and launchSpec keep absolute paths and argv quo
   assert.ok(launch.args[3].includes("^&"), "prompt metacharacters stay inert through cmd.exe");
   assert.ok(launch.args[3].includes("^("), "prompt parentheses stay inert through cmd.exe");
 });
+
+test("M2 carry-out, Claude no-text and fixed bounded delay use actual spawned stubs", async (t) => {
+  const harness = fixture(t, behaviorConfig({ turns: { codex: [], claude: ['claude-carry-out', 'claude-no-text', 'claude-carry-out-delayed'] } }));
+  const sessionFixture = fs.readFileSync(new URL('../../src/coordination/coordinateSession.test.ts', import.meta.url), 'utf8');
+  const expected = 'The plan can be carried out.\nVERDICT: carry-out';
+  assert.ok(sessionFixture.includes(JSON.stringify(expected)));
+  assert.deepEqual(claudeReply(STUB_BEHAVIORS['claude-carry-out'].stdout), {text:expected, failed:false});
+  assert.equal(STUB_BEHAVIORS['claude-carry-out-delayed'].stdout, STUB_BEHAVIORS['claude-carry-out'].stdout);
+  const success = await runTurn(harness, 'claude');
+  assert.equal(success.ok, true);
+  assert.equal(success.text, expected);
+  const empty = await runTurn(harness, 'claude');
+  assert.equal(empty.stopCode, 'no-text');
+  assert.equal(empty.messageDispatched, true);
+  const start = Date.now();
+  const delayed = await runTurn(harness, 'claude');
+  assert.ok(Date.now() - start >= 5900);
+  assert.equal(STUB_BEHAVIORS['claude-carry-out-delayed'].delayMs, 6000);
+  assert.equal(delayed.ok, true);
+  assert.equal(delayed.text, expected);
+  assert.equal(harness.log().filter(e => e.invocationType === 'turn').length, 3);
+});

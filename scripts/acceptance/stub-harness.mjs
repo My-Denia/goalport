@@ -54,6 +54,15 @@ export const STUB_BEHAVIORS = Object.freeze({
     stdout: '{"type":"result","result":"Needs a smaller step.\\nVERDICT: revise","is_error":false}',
     stderr: "",
   }),
+  "claude-carry-out": Object.freeze({
+    kind: "turn", exitCode: 0,
+    stdout: '{"type":"result","result":"The plan can be carried out.\\nVERDICT: carry-out","is_error":false}', stderr: "",
+  }),
+  "claude-carry-out-delayed": Object.freeze({
+    kind: "turn", exitCode: 0, delayMs: 6000,
+    stdout: '{"type":"result","result":"The plan can be carried out.\\nVERDICT: carry-out","is_error":false}', stderr: "",
+  }),
+  "claude-no-text": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "" }),
   "codex-tool-success": Object.freeze({
     kind: "turn",
     exitCode: 0,
@@ -159,7 +168,7 @@ function appendInvocation(stubDir, entry) {
   fs.appendFileSync(path.join(stubDir, LOG_FILE), `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-function main(argv = process.argv.slice(2)) {
+async function main(argv = process.argv.slice(2)) {
   const [identity, ...cliArgv] = argv;
   if (!IDENTITIES.includes(identity)) {
     process.stderr.write("GoalPort acceptance stub refused invocation: wrapper identity is invalid.\n");
@@ -230,12 +239,14 @@ function main(argv = process.argv.slice(2)) {
     queueIndex: index,
     consumesQueue: invocationType === "turn",
   });
+  // A fixed, bounded offline delay makes real-window progress observable.
+  if (behavior.delayMs) await new Promise(resolve => setTimeout(resolve, behavior.delayMs));
   if (behavior.stdout) process.stdout.write(behavior.stdout);
   if (behavior.stderr) process.stderr.write(behavior.stderr);
   process.exitCode = behavior.exitCode;
 }
 
 const entryPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
-if (entryPath === import.meta.url) main();
+if (entryPath === import.meta.url) await main();
 
 export { normalizeBehavior, DIAGNOSTIC_STDOUT };
