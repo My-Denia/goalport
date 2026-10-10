@@ -9,9 +9,9 @@ GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start 
 ![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 
-![GoalPort showing the New goal form and Runtime picker](docs/assets/screenshots/campaign-conversation.png)
+![GoalPort showing separate read and workspace-change consent before Send](docs/assets/screenshots/campaign-conversation.png)
 
-<sub>Current source in synthetic browser preview. No Core or Runtime is connected.</sub>
+<sub>Current built UI in a real WSL/Linux Electron window with Core and offline sentinel stubs, on a disposable fixture. No real vendor CLI or model call; not Windows packaged acceptance. Read consent and workspace changes are separate decisions. See [coordination limits](docs/limitations.md#coordination-execution-evidence).</sub>
 
 ## Why GoalPort
 

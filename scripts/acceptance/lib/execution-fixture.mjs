@@ -462,8 +462,8 @@ function runAuditor({ config, cwd, stubDir, parentPid }) {
   try { auditor = JSON.parse(command.stdout); } catch { auditor = null; }
   const verified = command.exitCode === 0 && auditor?.verified === true && auditor?.role === "read-only-auditor";
   const report = verified
-    ? "VERIFIED by a separate read-only Node auditor process: it read the changed source and the unchanged pinned node --test checks passed (2/2). No independent model judgment is claimed."
-    : `Auditor could not verify the observed fixture checks; revise or stop. ${auditor?.reason ?? "The actual auditor process did not report passing pinned tests."} No success is claimed.`;
+    ? "VERIFIED by a separate read-only Node auditor process: it read the changed source and the unchanged pinned node --test checks passed (2/2). No independent model judgment is claimed.\nVERDICT: verified"
+    : `Auditor could not verify the observed fixture checks; revise or stop. ${auditor?.reason ?? "The actual auditor process did not report passing pinned tests."} No success is claimed.\nVERDICT: revise`;
   return {
     operation: "auditor",
     role: "read-only-auditor",

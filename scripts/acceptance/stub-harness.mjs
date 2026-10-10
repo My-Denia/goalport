@@ -103,6 +103,11 @@ export const STUB_BEHAVIORS = Object.freeze({
   "codex-fixture-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer" }),
   "codex-fixture-partial-writer": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "", fixtureOperation: "partial-writer" }),
   "claude-fixture-auditor": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "auditor" }),
+  // Native integration holds only the reply, not a fabricated progress state.
+  // These fixed offline delays keep the real writer/auditor launches observable.
+  "codex-fixture-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer", delayMs: 18000 }),
+  "codex-fixture-partial-writer-delayed": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "", fixtureOperation: "partial-writer", delayMs: 18000 }),
+  "claude-fixture-auditor-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "auditor", delayMs: 18000 }),
 });
 
 function isProbe(identity, argv) {
@@ -332,6 +337,7 @@ async function main(argv = process.argv.slice(2)) {
       fixtureSourceSha256: result.evidence?.edit?.afterSha256 ?? result.evidence?.sourceSha256 ?? result.evidence?.sourceReadSha256 ?? null,
       fixtureTestSha256: result.evidence?.testSha256 ?? result.evidence?.checks?.testSha256 ?? null,
     });
+    if (behavior.delayMs) await new Promise(resolve => setTimeout(resolve, behavior.delayMs));
     if (response.stdout) process.stdout.write(response.stdout);
     if (response.stderr) process.stderr.write(response.stderr);
     process.exitCode = result.exitCode;
