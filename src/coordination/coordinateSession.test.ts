@@ -666,6 +666,76 @@ describe("explicitly authorized execution and independent audit", () => {
     expect(audit.initialMessage.text).toContain('"writeTurnsRemaining":0');
     expect(audit.initialMessage.text).toContain(workspacePath);
   });
+  const dispatchProbes = [
+    { name: "true", dispatched: true },
+    { name: "false", dispatched: false },
+    { name: "null", dispatched: null },
+    { name: "absent", dispatched: undefined },
+  ] as const;
+  const writePhases = [
+    { role: "planning", index: 0, text: "Partial planning response" },
+    { role: "review", index: 1, text: "Partial review evidence\nVERDICT: carry-out" },
+    { role: "execution", index: 2, text: "Partial execution report" },
+    { role: "audit", index: 3, text: "Partial verification report\nVERDICT: verified" },
+  ] as const;
+  const phaseBudgets = [
+    { turnsRemaining: 2, writeTurnsRemaining: 1 },
+    { turnsRemaining: 1, writeTurnsRemaining: 1 },
+    { turnsRemaining: 1, writeTurnsRemaining: 0 },
+    { turnsRemaining: 0, writeTurnsRemaining: 0 },
+  ] as const;
+  it.each(writePhases.flatMap((phase) => dispatchProbes.map((probe) => ({ ...phase, ...probe }))))(
+    "requires literal dispatch=true for $role output when metadata is $name",
+    async ({ role, index, text, dispatched }) => {
+      const phaseResults: CoordinateLaunchResult[] = [planReply, reviewReply, executeReply, auditReply];
+      const budget = phaseBudgets[index]!;
+      const partial: CoordinateLaunchResult = {
+        text, errorText: "", ...budget,
+        ...(dispatched === undefined ? {} : { dispatched }),
+      };
+      phaseResults[index] = partial;
+      const { state, transport } = await run(phaseResults);
+
+      const successfulChain = dispatched === true;
+      expect(transport.calls.map((command) => command.commandId.split("-")[1])).toEqual(
+        (successfulChain ? ["plan", "review", "execute", "audit"] : ["plan", "review", "execute", "audit"].slice(0, index + 1)),
+      );
+      expect(state.planText).toBe(index === 0 ? text : planReply.text);
+      expect(state.reviewText).toBe(index === 1 ? text : index > 1 || successfulChain ? reviewReply.text : null);
+      expect(state.executionText).toBe(index === 2 ? text : index > 2 || successfulChain ? executeReply.text : null);
+      expect(state.auditText).toBe(index === 3 ? text : successfulChain ? auditReply.text : null);
+      const finalBudget = successfulChain ? phaseBudgets[3]! : budget;
+      expect(state.authorizedTurnsLeft).toBe(finalBudget.turnsRemaining);
+      expect(state.authorizedWriteTurnsLeft).toBe(finalBudget.writeTurnsRemaining);
+      expect(state.messageDispatched).toBe(successfulChain || index > 0 ? true : dispatched === false ? false : null);
+
+      if (successfulChain) {
+        expect(transport.calls).toHaveLength(4);
+        expect(state.verdict).toBe("verified");
+        expect(state.roundEvents).toEqual([]);
+        return;
+      }
+      expect(transport.calls).toHaveLength(index + 1);
+      expect(state.verdict).toBe("failed");
+      expect(state.result).toBeNull();
+      expect(state.roundEvents.map((event) => `${event.kind}:${event.role}`)).toEqual([`failed:${role}`]);
+      expect(state.stopReason).toContain(dispatched === false ? "marked not sent" : "is unknown");
+    },
+  );
+  it("leaves legacy read-only completion behavior unchanged for unknown dispatch metadata", async () => {
+    const transport = recordingTransport([
+      { text: "Bounded plan.", errorText: "", dispatched: null },
+      { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" },
+    ]);
+    const state = await runCoordinateSession(
+      { catalog, goal, workspacePath, sendKey: "legacy-read" },
+      { sendAuthorized: true },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(2);
+    expect(state.verdict).toBe("checked");
+    expect(state.messageDispatched).toBe(true);
+  });
   it.each(["VERDICT: revise", "VERDICT: stop", "VERDICT: verified", "Looks fine."])("does not write without a checked review: %s", async (text) => {
     const { state, transport } = await run([planReply, ok(text)]);
     expect(transport.calls).toHaveLength(2);

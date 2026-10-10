@@ -298,12 +298,15 @@ interface Failure {
  * first, a structured stopCode second, the errorText class last. A generic
  * provider error — including an is_error reply with no stopCode, an
  * empty-text failure, a REPLACED/cancelled round, and guard or scope
- * refusals — never lands in a continuable class. Returns null for a success.
+ * refusals — never lands in a continuable class. For a write-enabled round,
+ * even a positive response is successful only with literal dispatched=true.
+ * Returns null for a success.
  */
 function failureFromLaunch(
   launch: CoordinateLaunchResult,
   role: CoordinationRole,
   instance: SyntheticCatalogInstance,
+  requireConfirmedDispatch = false,
 ): Failure | null {
   const harness = harnessOf(instance);
   const errorText = launch.errorText.trim();
@@ -312,7 +315,23 @@ function failureFromLaunch(
     && launch.stopCode == null
     && errorText.length === 0
     && launch.text.trim().length > 0
-  ) return null;
+  ) {
+    if (!requireConfirmedDispatch || launch.dispatched === true) return null;
+
+    const notSent = launch.dispatched === false;
+    return {
+      role,
+      instanceId: instance.instanceId,
+      harness,
+      sentence: `${harness} returned text without confirmed dispatch, so this stopped for it.`,
+      stopReason: notSent
+        ? `The ${role} response returned text but was marked not sent, so this stopped before another role could rely on it.`
+        : `The ${role} response returned text, but whether it was sent is unknown, so this stopped before another role could rely on it.`,
+      detail: null,
+      environment: null,
+      continuable: false,
+    };
+  }
 
   // Classification order is load-bearing: the typed environment fact wins,
   // then an explicit completion stopCode, and only then stderr/provider text.
@@ -609,7 +628,7 @@ async function runRecoveryRound(
         return finish({ stopReason: result.errorText.trim() || "The authorized harness scope was revoked, so this stopped.", verdict: "failed" });
       }
       if (replacementEvent !== null) roundEvents.push(replacementEvent);
-      const failure = failureFromLaunch(result, role, instance);
+      const failure = failureFromLaunch(result, role, instance, write !== undefined);
       if (failure === null) {
         saveText(role, result.text.trim());
         used.add(usedKey(role, instance.instanceId));
