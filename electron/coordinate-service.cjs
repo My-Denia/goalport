@@ -83,7 +83,8 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
   const metadata = () => scopeModule ? remainingAfter(scopeModule, hadWrite) : {};
   // Read-only pre-reservation refusals keep their historic response shape.
   const refusalMetadata = () => hadWrite ? metadata() : {};
-  const execute = roleOfCommandId(command?.commandId) === "execute";
+  const role = roleOfCommandId(command?.commandId);
+  const execute = role === "execute";
   const problem = execute ? guardCoordinateWriteCommand(command) : guardCoordinateCommand(command);
   if (problem) return { launched: false, prepared: false, text: "", errorText: problem, ...refusalMetadata() };
   if (execute && !scopeModule) {
@@ -141,6 +142,38 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
   }
   const text = typeof ran?.text === "string" ? ran.text.trim() : "";
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
+    // R1: on the new write chain — a scope with an explicit write dimension,
+    // or the new execute/audit roles — a positive reply alone is not proof
+    // the turn was sent. The literal runtime messageDispatched gates the
+    // success boundary there: true completes the turn; false stays a literal
+    // not-sent and refunds; null or absent stays unknown and keeps its
+    // charge. The reply text is retained as evidence in both non-true cases,
+    // and settle/refund follows the actual dispatch — never the inferred
+    // output. Legacy read-only/no-write rounds keep the pre-existing
+    // positive-success behavior (a separate followup, unchanged here).
+    if (hadWrite || execute || role === "audit") {
+      const dispatched = ran.messageDispatched === true
+        ? true
+        : ran.messageDispatched === false
+          ? false
+          : null;
+      if (dispatched !== true) {
+        if (scopeModule) scopeModule.settle(reservation, { dispatched }, runtime.stateDir);
+        return {
+          launched: false,
+          prepared: true,
+          text,
+          errorText: dispatched === false
+            ? "The harness replied, but reported that the model turn was not sent, so this did not complete."
+            : "The harness replied, but whether the model turn was actually sent could not be confirmed, so this completion stayed unconfirmed.",
+          dispatched,
+          environmentBlocked: false,
+          environmentDetail: null,
+          ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+          ...metadata(),
+        };
+      }
+    }
     if (scopeModule) scopeModule.settle(reservation, { dispatched: true }, runtime.stateDir);
     return {
       launched: true,

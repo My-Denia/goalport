@@ -773,11 +773,17 @@ test("read and write metadata stay independent after settle; revoke in-flight cl
   try {
     const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
     const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
-    const runtime = scopedRuntime(directory, async () => ({ ok: true, text: "Done.", errorText: "" }));
+    // R1: on the write chain the literal dispatched flag completes the turn;
+    // the positive text alone no longer counts as a successful settle.
+    const runtime = scopedRuntime(directory, async () => ({ ok: true, text: "Done.", errorText: "", messageDispatched: true }));
     const read = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-audit-codex"), "g", ctx);
+    assert.equal(read.launched, true);
+    assert.equal(read.dispatched, true);
     assert.equal(read.turnsRemaining, 3);
     assert.equal(read.writeTurnsRemaining, 2);
     const write = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", ctx);
+    assert.equal(write.launched, true);
+    assert.equal(write.dispatched, true);
     assert.equal(write.turnsRemaining, 3);
     assert.equal(write.writeTurnsRemaining, 1);
     for (const ok of [true, false]) {
@@ -787,6 +793,11 @@ test("read and write metadata stay independent after settle; revoke in-flight cl
       coordinationScope.revoke();
       release({ ok, text: "Real output.", errorText: ok ? "" : "Stopped.", messageDispatched: false });
       const result = await pending;
+      // A positive reply with a literal false never becomes a success, even
+      // when the scope was revoked mid-run.
+      assert.equal(result.launched, false);
+      assert.equal(result.dispatched, false);
+      assert.equal(result.text, "Real output.");
       assert.equal(result.turnsRemaining, null);
       assert.equal(result.writeTurnsRemaining, null);
       assert.equal(coordinationScope.current(), null);
@@ -828,5 +839,142 @@ test("read-only scoped pre-reservation refusals retain the legacy exact field sh
       errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.",
     });
     assert.equal(coordinationScope.current().remaining, 4);
+  } finally { scopeCleanup(directory); }
+});
+
+// --- R1: literal dispatch gates the success boundary on the new write chain ---
+
+test("a write-scope positive reply is only a success with a literal dispatched true (read roles)", async () => {
+  const directory = scopeTempDir();
+  try {
+    for (const [flag, expected] of [[true, true], [false, false], [null, null], [undefined, null], [0, null], ["false", null]]) {
+      for (const commandId of ["coordinate-plan-codex", "coordinate-review-codex", "coordinate-audit-codex"]) {
+        coordinationScope.revoke();
+        const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+        const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "The plan looks workable.", errorText: "", messageDispatched: flag })), scopedCommand(commandId), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+        assert.equal(result.launched, flag === true, `${commandId} ${String(flag)} launched`);
+        assert.equal(result.dispatched, expected, `${commandId} ${String(flag)} dispatched`);
+        assert.equal(result.text, "The plan looks workable.", `${commandId} ${String(flag)} text`);
+        assert.equal(result.writeTurnsRemaining, 2, `${commandId} ${String(flag)} write budget`);
+        if (flag === true) {
+          assert.equal(result.errorText, "", `${commandId} ${String(flag)} errorText`);
+          assert.equal(result.turnsRemaining, 3, `${commandId} ${String(flag)} read charge`);
+        } else {
+          // The useful reply text survives as evidence; the completion itself
+          // stays a non-success with a friendly, honest error sentence.
+          assert.notEqual(result.errorText, "", `${commandId} ${String(flag)} errorText`);
+          assert.equal(result.environmentBlocked, false, `${commandId} ${String(flag)} environmentBlocked`);
+          assert.equal(result.environmentDetail, null, `${commandId} ${String(flag)} environmentDetail`);
+          if (flag === false) assert.match(result.errorText, /was not sent/, `${commandId} ${String(flag)} literal sentence`);
+          else assert.doesNotMatch(result.errorText, /was not sent/, `${commandId} ${String(flag)} unknown never claims not-sent`);
+          // A literal false refunds the read dimension; unknown keeps its
+          // charge; the write dimension never moves for a read role.
+          assert.equal(result.turnsRemaining, flag === false ? 4 : 3, `${commandId} ${String(flag)} read settle`);
+        }
+      }
+    }
+  } finally { scopeCleanup(directory); }
+});
+
+test("a write-scope execute reply follows the same literal truth and settles the write dimension", async () => {
+  const directory = scopeTempDir();
+  try {
+    for (const [flag, expectedWrite] of [[true, 1], [false, 2], [null, 1], [undefined, 1], [0, 1], ["false", 1]]) {
+      coordinationScope.revoke();
+      const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Applied the fix.", errorText: "", messageDispatched: flag })), writeCommand(), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+      assert.equal(result.launched, flag === true, String(flag));
+      assert.equal(result.dispatched, flag === true ? true : flag === false ? false : null, String(flag));
+      assert.equal(result.turnsRemaining, 4, `${String(flag)} read budget untouched`);
+      assert.equal(result.writeTurnsRemaining, expectedWrite, `${String(flag)} write settle`);
+      if (flag !== true) {
+        assert.equal(result.text, "Applied the fix.", String(flag));
+        assert.notEqual(result.errorText, "", String(flag));
+      }
+    }
+  } finally { scopeCleanup(directory); }
+});
+
+test("the non-true positive-reply outcomes follow the actual settlement table", async () => {
+  const directory = scopeTempDir();
+  try {
+    // A literal false refunds and removes only the scope-inserted line.
+    coordinationScope.revoke();
+    let granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Half done.", errorText: "", messageDispatched: false })), writeCommand("coordinate-execute-refunded"), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(coordinationScope.current().write.remaining, 2);
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+
+    // An owner's hand-written line survives the refund while the budget
+    // still refunds (the historic rows 3+6 pairing).
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-manual\n");
+    granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Half done.", errorText: "", messageDispatched: false })), writeCommand("coordinate-execute-manual"), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(coordinationScope.current().write.remaining, 2);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-execute-manual\n");
+
+    // A claim that appears during the run keeps the charge whatever the
+    // reply says (row 1): the turn reached its claim, so it stands.
+    granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => {
+      fs.writeFileSync(path.join(directory, "claim-coordinate-execute-claimed"), "");
+      return { ok: true, text: "Applied the fix.", errorText: "", messageDispatched: false };
+    }), writeCommand("coordinate-execute-claimed"), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(coordinationScope.current().write.remaining, 1);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-claimed")), true);
+    assert.match(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), /coordinate-execute-claimed/);
+  } finally { scopeCleanup(directory); }
+});
+
+test("the true four-role happy chain still completes every role on the write scope", async () => {
+  const directory = scopeTempDir();
+  try {
+    coordinationScope.revoke();
+    const granted = coordinationScope.authorize(["codex"], 4, writeAuthorization);
+    const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
+    const runtime = scopedRuntime(directory, async () => ({ ok: true, text: "Role output.", errorText: "", messageDispatched: true }));
+    const plan = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-plan-codex"), "g", ctx);
+    const review = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-review-codex"), "g", ctx);
+    const execute = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, writeCommand(), "g", ctx);
+    const audit = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-audit-codex"), "g", ctx);
+    for (const [role, result] of [["plan", plan], ["review", review], ["execute", execute], ["audit", audit]]) {
+      assert.equal(result.launched, true, role);
+      assert.equal(result.dispatched, true, role);
+      assert.equal(result.text, "Role output.", role);
+      assert.equal(result.errorText, "", role);
+    }
+    // Three read turns and one write turn: the dual counters agree.
+    assert.equal(coordinationScope.current().remaining, 1);
+    assert.equal(coordinationScope.current().write.remaining, 1);
+    assert.equal(audit.turnsRemaining, 1);
+    assert.equal(audit.writeTurnsRemaining, 1);
+  } finally { scopeCleanup(directory); }
+});
+
+test("legacy read-only and no-write positive replies keep the pre-existing success behavior", async () => {
+  const directory = scopeTempDir();
+  try {
+    // No scope at all: the historic positive coercion is unchanged.
+    const legacy = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Bounded plan.", errorText: "" })), command);
+    assert.equal(legacy.launched, true);
+    assert.equal(legacy.dispatched, true);
+    assert.equal("turnsRemaining" in legacy, false);
+
+    // A read-only scope's plan turn keeps the same positive behavior.
+    coordinationScope.revoke();
+    const granted = coordinationScope.authorize(["codex"], 4);
+    const readOnly = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Bounded plan.", errorText: "" })), scopedCommand("coordinate-plan-codex"), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(readOnly.launched, true);
+    assert.equal(readOnly.dispatched, true);
+    assert.equal(readOnly.turnsRemaining, 3);
+    assert.equal("writeTurnsRemaining" in readOnly, false);
+
+    // The new audit role is never promoted without a literal true, even on
+    // a read-only scope: unknown stays unknown and the charge stands.
+    const audit = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, scopedRuntime(directory, async () => ({ ok: true, text: "Audit notes.", errorText: "" })), scopedCommand("coordinate-audit-codex"), "g", { scope: coordinationScope, scopeGeneration: granted.generation });
+    assert.equal(audit.launched, false);
+    assert.equal(audit.dispatched, null);
+    assert.equal(audit.text, "Audit notes.");
+    assert.equal(audit.turnsRemaining, 2);
   } finally { scopeCleanup(directory); }
 });
