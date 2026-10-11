@@ -108,8 +108,9 @@ test("a stop winning the admission race never launches and settles a releasable 
   assert.equal(r.launches.length, 0);
   // The refusal is clean, not a storage failure: the run settles an honest
   // terminal outcome and releases the slot instead of retaining an
-  // unconfirmed admission forever.
-  assert.equal(r.result.storageFailed, false);
+  // unconfirmed admission forever. (On the success-path return the field is
+  // simply absent; the pre-fix code set it to true.)
+  assert.ok(!r.result.storageFailed);
   assert.equal(r.status.revoked, true);
   assert.equal(r.status.pendingCommand, null);
   assert.ok(["stopped", "failed"].includes(r.status.state));
