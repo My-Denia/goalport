@@ -788,6 +788,106 @@ describe("new goal during a selected-runtime send", () => {
   });
 });
 
+// The competing-background guard: main refuses the one native send while an
+// unrevoked background goal owns the profile. The renderer shows the guard's
+// own sentence, keeps the draft, and settles intent honestly.
+describe("competing background send refusal", () => {
+  const GUARD_SENTENCE =
+    "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
+  function guardEnvelope(request: CoreCommand): Record<string, unknown> {
+    return {
+      goalportRejected: true,
+      requestId: request.requestId,
+      error: GUARD_SENTENCE,
+      rejection: {
+        code: "background-job-outstanding",
+        message: GUARD_SENTENCE,
+        deliveryState: "FAILED",
+        nativeDispatchState: "NOT_STARTED",
+        retryMode: "NEW_REQUEST",
+        reservation: null,
+      },
+    };
+  }
+  async function selectRuntimeAndType(message: string) {
+    const composer = await screen.findByRole("textbox", { name: "Message composer" });
+    fireEvent.change(composer, { target: { value: message } });
+    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    const claude = await screen.findByRole("option", { name: /Claude Code/ });
+    await waitFor(() => expect(document.activeElement).toBe(claude));
+    fireEvent.keyDown(claude, { key: "ArrowDown" });
+    const codex = screen.getByRole("option", { name: /Codex/ });
+    await waitFor(() => expect(document.activeElement).toBe(codex));
+    fireEvent.keyDown(codex, { key: "Enter" });
+    return composer as HTMLTextAreaElement;
+  }
+
+  it("a typed guard refusal shows its sentence, keeps the draft, and retries as a fresh request", async () => {
+    const startIds: string[] = [];
+    mountElectron(EMPTY_PREVIEW_SNAPSHOT, async (request: CoreCommand) => {
+      if (request.messageType !== "start_conversation") {
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: EMPTY_PREVIEW_SNAPSHOT };
+      }
+      startIds.push(request.requestId);
+      return guardEnvelope(request);
+    });
+    const composer = await selectRuntimeAndType("competing goal");
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    // The guard's own sentence is the refusal message, not just folded detail.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(GUARD_SENTENCE);
+    expect(composer.value).toBe("competing goal");
+    // The sending intent cleared: the button is plain Send again, not Check result.
+    const send = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    expect(send.textContent).not.toContain("Check result");
+    fireEvent.change(composer, { target: { value: "competing goal, corrected" } });
+    fireEvent.click(send);
+    await waitFor(() => expect(startIds).toHaveLength(2));
+    expect(startIds[1]).not.toBe(startIds[0]);
+  });
+
+  it("an uncoded refusal keeps the request identity and shows the reconciliation path", async () => {
+    const startIds: string[] = [];
+    mountElectron(EMPTY_PREVIEW_SNAPSHOT, async (request: CoreCommand) => {
+      if (request.messageType !== "start_conversation") {
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: EMPTY_PREVIEW_SNAPSHOT };
+      }
+      startIds.push(request.requestId);
+      return { goalportRejected: true, requestId: request.requestId, error: "runtime start refused", snapshot: EMPTY_PREVIEW_SNAPSHOT };
+    });
+    await selectRuntimeAndType("uncoded refusal");
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(await screen.findByText("GoalPort could not complete that action.")).toBeTruthy();
+    // Reconcile state, same request identity: the retry is a non-dispatching check.
+    fireEvent.click(screen.getByRole("button", { name: /Check result/ }));
+    await waitFor(() => expect(startIds).toHaveLength(2));
+    expect(startIds[1]).toBe(startIds[0]);
+  });
+
+  it("a late guard refusal leaves a replacement draft untouched", async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    mountElectron(EMPTY_PREVIEW_SNAPSHOT, async (request: CoreCommand) => {
+      if (request.messageType !== "start_conversation") {
+        return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: EMPTY_PREVIEW_SNAPSHOT };
+      }
+      await gate;
+      return guardEnvelope(request);
+    });
+    await selectRuntimeAndType("late refusal");
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).textContent).toContain("Starting…"));
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    const replacement = screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
+    expect(replacement.value).toBe("");
+    release(undefined);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).textContent).not.toContain("Starting…"));
+    expect(screen.queryAllByText(GUARD_SENTENCE)).toHaveLength(0);
+    expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("");
+  });
+});
+
 describe("send without a Runtime", () => {
   function mountCoordination(configured: boolean) {
     let discoverCalls = 0;
@@ -909,7 +1009,7 @@ describe("send without a Runtime", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
     const composer = await screen.findByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
     expect(composer.value).toBe("Explain the failure.");
-    expect(screen.getByText(/Nothing is sent until you press Send/)).toBeTruthy();
+    expect(screen.getByText(/Revising a saved plan\. The earlier plan stays in Plans\./)).toBeTruthy();
     expect(screen.getByText(/The check said:/)).toBeTruthy();
     expect(screen.getByRole("button", { name: /Explain the failure/ })).toBeTruthy();
     expect(discoverCalls).toBe(0);
@@ -1785,8 +1885,7 @@ describe("environment-blocked harness", () => {
     expect(bridge.launchCount()).toBe(1);
     fireEvent.click(again);
     // The new draft says up front who it will not use, and nothing was sent.
-    expect(await screen.findByText(/This send will not use Codex/)).toBeTruthy();
-    expect(screen.getByText(/Nothing is sent until you press Send/)).toBeTruthy();
+    expect(screen.getByText(/This send will not use Codex/)).toBeTruthy();
     expect(bridge.launchCount()).toBe(1);
     // Sending the draft starts a new round whose planner is not codex.
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
@@ -2630,8 +2729,101 @@ describe("one in-window repair", () => {
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
     expect(await screen.findByText(/Continuing from a completed execution round/)).toBeTruthy();
     expect(screen.getByText(/The independent audit said:/)).toBeTruthy();
-    expect(screen.getByText(/file changes need separate consent again/)).toBeTruthy();
+    expect(screen.getByText(/The earlier plan, changes and independent audit are below\./)).toBeTruthy();
     expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("a background Send of that revision carries the exact execution feedback and null plain priors", async () => {
+    const record = normalizeCoordinationRecordForTest({
+      requestId: "budget-stopped", workspacePath: "/work/goal", goal: "Fix the helper.",
+      planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: CHECK_TEXT,
+      executionHarness: "Codex", auditHarness: "Claude", executionText: FIRST_EXECUTION, auditText: CRITIQUE,
+      result: CRITIQUE, verdict: "revise",
+      stopReason: "The independent verification says the changes need revision, so this stopped. There is not enough access left for one more checked repair, which needs three model turns and one write turn. GoalPort did not add turns.",
+      planningQuota: "available", reviewQuota: "available", messageDispatched: true,
+    });
+    const bridge = scopedBridge({ providers: repairProviders(), launch: async (command) => planOrReview(command), records: [record!] });
+    const started: Array<Record<string, unknown>> = [];
+    const admittedJob = {
+      jobId: "revise-job", requestId: "placeholder", goal: "Fix the helper.", state: "running" as const,
+      live: true, active: true, revoked: false, workerPid: 9, readMaxTurns: 4, writeMaxTurns: null,
+      counters: null, pendingCommand: null, completedCommands: [], progress: null, outcome: null,
+    };
+    const start = vi.fn(async (input: import("./coordination/backgroundJob").BackgroundJobStartInput) => {
+      started.push(input as unknown as Record<string, unknown>);
+      return { ...admittedJob, requestId: input.requestId };
+    });
+    window.goalportCore!.backgroundStart = start;
+    window.goalportCore!.backgroundStatus = async () => (started.length
+      ? { ...admittedJob, requestId: (started[0] as unknown as { requestId: string }).requestId }
+      : null);
+    render(<App />);
+    expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    await screen.findByText(/Continuing from a completed execution round/);
+    // The revise never pre-selects background or write consent.
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(false);
+    typeMessage("Fold the audit findings in.");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    sendMessage();
+    expect(await screen.findByRole("region", { name: "Background goal" })).toBeTruthy();
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({
+      executionFeedback: {
+        previousPlan: PLAN_TEXT,
+        previousPlanReview: CHECK_TEXT,
+        previousExecutionReport: FIRST_EXECUTION,
+        previousExecutionAudit: CRITIQUE,
+        previousCommandIds: [],
+      },
+      priorPlan: null,
+      priorReview: null,
+    });
+    expect(started[0]?.write).toBeUndefined();
+    // No window authorization, no renderer launch, no ordinary record write.
+    expect(bridge.authorizations).toHaveLength(0);
+    expect(bridge.launchCount()).toBe(0);
+    expect(bridge.saved).toHaveLength(0);
+  });
+
+  it("a background Send of a plain plan-revision still uses prior plan/review context", async () => {
+    const reviewSaysRevise = "The plan needs a negative-value case.\nVERDICT: revise";
+    const record = normalizeCoordinationRecordForTest({
+      requestId: "plan-revise-only", workspacePath: "/work/goal", goal: "Fix the helper.",
+      planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: reviewSaysRevise,
+      result: reviewSaysRevise, verdict: "revise",
+      stopReason: "The independent check says the plan needs revision, so this stopped. There is not enough access left for one more checked repair, which needs three model turns and one write turn. GoalPort did not add turns.",
+      planningQuota: "available", reviewQuota: "available", messageDispatched: true,
+    });
+    const bridge = scopedBridge({ providers: repairProviders(), launch: async (command) => planOrReview(command), records: [record!] });
+    const started: Array<Record<string, unknown>> = [];
+    const admittedJob = {
+      jobId: "plan-revise-job", requestId: "placeholder", goal: "Fix the helper.", state: "running" as const,
+      live: true, active: true, revoked: false, workerPid: 9, readMaxTurns: 4, writeMaxTurns: null,
+      counters: null, pendingCommand: null, completedCommands: [], progress: null, outcome: null,
+    };
+    const start = vi.fn(async (input: import("./coordination/backgroundJob").BackgroundJobStartInput) => {
+      started.push(input as unknown as Record<string, unknown>);
+      return { ...admittedJob, requestId: input.requestId };
+    });
+    window.goalportCore!.backgroundStart = start;
+    window.goalportCore!.backgroundStatus = async () => (started.length
+      ? { ...admittedJob, requestId: (started[0] as unknown as { requestId: string }).requestId }
+      : null);
+    render(<App />);
+    expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    await screen.findByText(/Continuing from a completed execution round|Nothing is sent until you press Send/);
+    typeMessage("Tighten the plan.");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    sendMessage();
+    expect(await screen.findByRole("region", { name: "Background goal" })).toBeTruthy();
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ priorPlan: PLAN_TEXT, priorReview: reviewSaysRevise });
+    expect("executionFeedback" in (started[0] as object)).toBe(false);
+    expect(bridge.authorizations).toHaveLength(0);
+    expect(bridge.launchCount()).toBe(0);
   });
   describe("C4 one pre-write plan revision", () => {
     const planCritique = "Read-only plan critique: the plan ignores the negative-value case the unchanged tests contain.\nVERDICT: revise";
@@ -2841,13 +3033,97 @@ describe("one in-window repair", () => {
       expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
       expect(start).toHaveBeenCalledTimes(1);
     });
-    it("a lost background Start reply writes no competing ordinary record and is not retryable", async () => {
+    it.each([
+      "background-unavailable",
+      "background-consent-required",
+      "background-start-in-progress",
+      "background-scope-conflict",
+      "background-core-refused",
+      "background-invalid-admission",
+      "background-preflight-failed",
+      "background-job-conflict",
+    ])("a definite %s refusal releases the draft for a corrected send", async (code) => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
-      window.goalportCore!.backgroundStart = async () => { throw new Error("Background admission could not be confirmed."); };
+      const sentence = "The one human sentence this host gate refuses with.";
+      const marker = { backgroundStartRefused: true, code, message: sentence };
+      const start = vi.fn(async () => marker as unknown as import("./coordination/backgroundStatus").BackgroundStatus);
+      window.goalportCore!.backgroundStart = start;
+      window.goalportCore!.backgroundStatus = async () => null;
+      render(<App />); await openDraftWithPanel(); typeMessage("Correct me and resend");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" })); sendMessage();
+      expect(await screen.findByText((content, element) =>
+        element?.tagName.toLowerCase() !== "script"
+        && typeof content === "string"
+        && content.includes(sentence)
+        && content.includes("Nothing was started")
+      )).toBeTruthy();
+      // Draft usable again: content retained, Send enabled, background consent reset.
+      expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("Correct me and resend");
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+      expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(false);
+      expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0); expect(bridge.saved).toHaveLength(0);
+      // A corrected resend is one more explicit opt-in away, and it starts once.
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      sendMessage();
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    });
+    it("an unknown-admission code keeps the draft blocked and one probe reattaches the same request's job", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      const marker = { backgroundStartRefused: true, code: "background-admission-unknown", message: "Admission outcome unknown." };
+      const start = vi.fn(async (_input: import("./coordination/backgroundJob").BackgroundJobStartInput) =>
+        marker as unknown as import("./coordination/backgroundStatus").BackgroundStatus);
+      window.goalportCore!.backgroundStart = start;
+      window.goalportCore!.backgroundStatus = async () => {
+        const input = start.mock.calls[0]?.[0];
+        return input ? { ...liveJob, requestId: input.requestId } : null;
+      };
+      render(<App />); await openDraftWithPanel(); typeMessage("One Send only");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" })); sendMessage();
+      // The single read-only probe attached this request's job; no second Start.
+      expect(await screen.findByRole("region", { name: "Background goal" })).toBeTruthy();
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(bridge.launchCount()).toBe(0);
+      // Leaving the job view returns to the draft: the exact no-resend sentence, Send blocked.
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      expect(await screen.findByText("GoalPort could not confirm this background start. Do not resend this goal; return to its job status.")).toBeTruthy();
+      const send = screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement;
+      expect(send.disabled).toBe(true);
+      fireEvent.click(send);
+      expect(start).toHaveBeenCalledTimes(1);
+    });
+    it("a start settling after the draft was replaced changes nothing for the replacement", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const marker = { backgroundStartRefused: true, code: "background-unavailable", message: "Late refusal sentence." };
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStart = async () => {
+        await gate;
+        return marker as unknown as import("./coordination/backgroundStatus").BackgroundStatus;
+      };
+      window.goalportCore!.backgroundStatus = async () => null;
+      render(<App />); await openDraftWithPanel(); typeMessage("first draft");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" })); sendMessage();
+      // Replace the draft while Start is still in flight.
+      fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+      await screen.findByRole("checkbox", { name: "Keep working after closing" });
+      typeMessage("replacement draft");
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // The late refusal touches neither the replacement's text, consent, error surface, nor Send.
+      expect(screen.queryAllByText("Late refusal sentence.")).toHaveLength(0);
+      expect(screen.queryAllByText("GoalPort could not confirm this background start.")).toHaveLength(0);
+      expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("replacement draft");
+      expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(false);
+    });
+    it("an unknown background outcome shows the exact no-resend sentence and stays blocked", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStart = async () => { throw new Error("the reply never arrived"); };
       window.goalportCore!.backgroundStatus = async () => null;
       render(<App />); await openDraftWithPanel(); typeMessage("One Send only");
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" })); sendMessage();
-      await screen.findByText("Background admission could not be confirmed.");
+      await screen.findByText("GoalPort could not confirm this background start. Do not resend this goal; return to its job status.");
+      // The underlying cause is folded into Technical details, not shown in its place.
+      expect(screen.getByText("the reply never arrived")).toBeTruthy();
       expect(bridge.saved).toHaveLength(0); expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     });
@@ -2869,15 +3145,35 @@ describe("one in-window repair", () => {
       expect(await screen.findByRole("region", { name: "Background goal" })).toBeTruthy();
       expect(start).not.toHaveBeenCalled(); expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
     });
-    it("unreachable control is unconfirmed and offers no historical Stop allowing or resend", async () => {
+    it("an active unconfirmed job offers Stop allowing; revoking hides it but keeps the uncertainty wording", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
-      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: false, state: "unconfirmed" });
+      let job = { ...liveJob, live: false, state: "unconfirmed" as const };
+      const revoke = vi.fn(async () => { job = { ...job, revoked: true }; return job; });
+      window.goalportCore!.backgroundStatus = async () => job;
+      window.goalportCore!.backgroundRevoke = revoke;
       render(<App />);
       await screen.findByText(/Progress unavailable or interrupted/);
+      // Reachable even while control is unavailable, with the honest caption.
+      expect(screen.getByRole("button", { name: "Stop allowing" })).toBeTruthy();
+      expect(screen.getByText(/Stopping ends the authorization for further turns/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Stop allowing" }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull());
+      expect(revoke).toHaveBeenCalledWith("same-job");
+      expect(await screen.findByText(/Progress unavailable or interrupted/)).toBeTruthy();
       expect(screen.queryByText(/The harnesses you allowed are working on it now/)).toBeNull();
-      expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
       expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
+    });
+    it.each([
+      ["an inactive finished job", { ...liveJob, active: false, live: false, state: "completed" as const }, /This background job finished/],
+      ["an active but already revoked job", { ...liveJob, live: false, state: "unconfirmed" as const, revoked: true }, /Progress unavailable or interrupted/],
+    ])("%s offers no Stop allowing", async (_name, job, sentence) => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => job;
+      render(<App />);
+      expect(await screen.findByText(sentence)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
     });
     it("Stop allowing uses the acknowledged job connection only and retains current evidence", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });

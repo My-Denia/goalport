@@ -1,4 +1,10 @@
 import type { BackgroundStatus } from "./coordination/backgroundStatus";
+import {
+  BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE,
+  backgroundStartOutcome,
+  isDefiniteBackgroundStartRefusal,
+  type BackgroundStartOutcome,
+} from "./coordination/backgroundJob";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   getCoreClient,
@@ -70,10 +76,22 @@ const MESSAGE_TYPE_LABEL: Record<string, string> = {
   rename_conversation: "rename the goal"
 };
 
+/** Fallback for the one main-process competing-job sentence; the rejection envelope normally carries it. */
+const BACKGROUND_JOB_OUTSTANDING_SENTENCE =
+  "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
+
 function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice | null {
   const outcome = next.commandOutcome;
   if (outcome?.messageType === messageType) {
     if (outcome.kind === "accepted") return null;
+    // The one known competing-job guard is a definite pre-dispatch refusal:
+    // its own human sentence is the message, not a generic Core failure.
+    if (outcome.kind === "refused" && outcome.rejection?.code === "background-job-outstanding") {
+      return {
+        sentence: outcome.error ?? BACKGROUND_JOB_OUTSTANDING_SENTENCE,
+        technical: outcome.rejection.message || outcome.error || "background-job-outstanding"
+      };
+    }
     return {
       sentence: outcome.kind === "refused"
         ? "GoalPort could not complete that action."
@@ -701,6 +719,21 @@ function App() {
       const stillCurrent = () => coordinationRequest.current === request;
       let sendRecorded = false;
       let completedReport: CoordinationView | null = null;
+      // A manual Revise of a terminal execution-audit revision carries the
+      // completed reports as execution feedback; the plain plan-revision
+      // inputs stay for a plan check revision. Built ONCE here, before the
+      // background/window choice, so both send modes share the same object.
+      // Nothing is sent until the user presses Send.
+      const revisionFeedback: ExecutionFeedback | null =
+        draftGoal.revision && (draftGoal.revision.previousExecutionReport || draftGoal.revision.previousExecutionAudit)
+          ? {
+              previousPlan: draftGoal.revision.planText,
+              previousPlanReview: draftGoal.revision.reviewText,
+              previousExecutionReport: draftGoal.revision.previousExecutionReport ?? null,
+              previousExecutionAudit: draftGoal.revision.previousExecutionAudit ?? null,
+              previousCommandIds: [],
+            }
+          : null;
       setDraftBusy(true);
       try {
         if (backgroundConsent) {
@@ -710,19 +743,66 @@ function App() {
           // an ordinary main-process record write. Even a lost Start reply
           // cannot authorize another owner or a window-only resend.
           setDraftBlocked(true);
-          let job: BackgroundStatus;
+          const submittedRequestId = draftGoal.requestId;
+          // One honest unknown-outcome settlement: the draft stays blocked,
+          // and a single read-only probe may reattach this request's job.
+          // Nothing here restarts a job, authorizes the window path, or
+          // writes an ordinary coordination record.
+          const admissionUnconfirmed = async (technical: string) => {
+            if (!stillCurrent() || draftGoalRef.current?.requestId !== submittedRequestId) return;
+            setBackgroundConsent(false);
+            setDraftError({ sentence: BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE, technical });
+            const probe = window.goalportCore?.backgroundStatus;
+            if (!probe) return;
+            try {
+              const job = await probe();
+              if (!stillCurrent() || draftGoalRef.current?.requestId !== submittedRequestId) return;
+              if (job && job.requestId === submittedRequestId) {
+                setBackgroundJob(job); backgroundAttached.current = true; setBackgroundView(true);
+              }
+            } catch {
+              // A failed status read proves nothing; the draft stays blocked.
+            }
+          };
+          let outcome: BackgroundStartOutcome;
+          let settledValue: unknown = null;
           try {
-            job = await start({ requestId: draftGoal.requestId, goal: message, workspaceRoot: workspace,
+            settledValue = await start({ requestId: draftGoal.requestId, goal: message, workspaceRoot: workspace,
               readInstances: [...selectedInstances], readMaxTurns: allowedTurns,
               ...(writeInstances.length ? { write: { instances: [...writeInstances], workspaceRoot: workspace, maxTurns: writeTurns } } : {}),
-              priorPlan: draftGoal.revision?.planText, priorReview: draftGoal.revision?.reviewText,
+              ...(revisionFeedback
+                ? { executionFeedback: revisionFeedback, priorPlan: null, priorReview: null }
+                : { priorPlan: draftGoal.revision?.planText, priorReview: draftGoal.revision?.reviewText }),
               ...(draftGoal.avoid ? { avoidInstances: [draftGoal.avoid.instanceId] } : {}), backgroundConsent: true });
+            outcome = backgroundStartOutcome(settledValue);
           } catch (error) {
-            setBackgroundConsent(false);
-            setDraftError({ sentence: error instanceof Error ? error.message : "Background admission could not be confirmed. Do not resend this goal; return to its job status." });
+            await admissionUnconfirmed(error instanceof Error && error.message ? error.message : "The reply about this background start never arrived.");
             return;
           }
-          setBackgroundJob(job); backgroundAttached.current = true; setBackgroundView(true);
+          if (!stillCurrent()) return;
+          if (outcome.kind === "refused") {
+            setBackgroundConsent(false);
+            if (isDefiniteBackgroundStartRefusal(outcome)) {
+              // Definite refusal: nothing was admitted, so the draft becomes
+              // usable again; a corrected send re-opts into background.
+              setDraftBlocked(false);
+              const lead = outcome.message.trim() || "Background Send was refused.";
+              setDraftError({ sentence: `${lead} Nothing was started, so this draft is still yours to change and send.`, technical: outcome.code });
+            } else {
+              await admissionUnconfirmed(outcome.message || outcome.code);
+            }
+            return;
+          }
+          if (outcome.kind === "unknown") {
+            const rawMessage = settledValue && typeof settledValue === "object"
+              ? (settledValue as { message?: unknown }).message
+              : null;
+            await admissionUnconfirmed(typeof rawMessage === "string" && rawMessage.trim()
+              ? rawMessage
+              : "The reply about this background start was not a recognizable result.");
+            return;
+          }
+          setBackgroundJob(outcome.status); backgroundAttached.current = true; setBackgroundView(true);
           setBackgroundConsent(false);
           return;
         }
@@ -833,20 +913,6 @@ function App() {
           if (!Number.isInteger(liveWrite.remaining) || (liveWrite.remaining ?? 0) < 1) return null;
           return scope;
         };
-        // A manual Revise of a terminal execution-audit revision carries the
-        // completed reports as execution feedback; the plain plan-revision
-        // inputs stay for a plan check revision. Both sends are fresh Sends
-        // with their own consent; nothing is sent until the user presses Send.
-        const revisionFeedback: ExecutionFeedback | null =
-          draftGoal.revision && (draftGoal.revision.previousExecutionReport || draftGoal.revision.previousExecutionAudit)
-            ? {
-                previousPlan: draftGoal.revision.planText,
-                previousPlanReview: draftGoal.revision.reviewText,
-                previousExecutionReport: draftGoal.revision.previousExecutionReport ?? null,
-                previousExecutionAudit: draftGoal.revision.previousExecutionAudit ?? null,
-                previousCommandIds: [],
-              }
-            : null;
         const report = await requestCoordination(
           {
             workspacePath: workspace,
@@ -1065,6 +1131,26 @@ function App() {
         return;
       }
       closeDraft(false);
+    } catch (error) {
+      // A client that genuinely rejects instead of returning a snapshot is
+      // definite ONLY for the known competing-background guard. Every other
+      // throw stays ambiguous: the same request identity returns for a
+      // non-dispatching reconciliation, and nothing is claimed as delivered.
+      if (epoch !== draftEpoch.current) return;
+      const coded = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (coded === "background-job-outstanding") {
+        setDraftError({ sentence: detail.trim() ? detail : BACKGROUND_JOB_OUTSTANDING_SENTENCE, technical: detail });
+        setDraftBlocked(false);
+        setDraftGoal((current) => current ? { ...current, requestId: freshRequestId(), intent: undefined } : current);
+      } else {
+        setDraftError({ sentence: "GoalPort did not confirm it could start the conversation.", technical: detail });
+        const retained = settleSendIntent(intent, undefined);
+        setDraftGoal((current) => current ? {
+          ...current,
+          ...(retained ? { requestId: retained.requestId, intent: retained } : { requestId: freshRequestId(), intent: undefined }),
+        } : current);
+      }
     } finally {
       draftInFlight.current = false;
       setDraftBusy(false);
@@ -1986,8 +2072,8 @@ function App() {
               {draftGoal?.revision ? (
                 <p className="revision-note">
                   {draftGoal.revision.previousExecutionAudit || draftGoal.revision.previousExecutionReport
-                    ? "Continuing from a completed execution round. The earlier plan, changes and independent audit are below. Nothing is sent until you press Send, and file changes need separate consent again."
-                    : "Revising a saved plan. The earlier plan stays in Plans. Nothing is sent until you press Send."}
+                    ? "Continuing from a completed execution round. The earlier plan, changes and independent audit are below."
+                    : "Revising a saved plan. The earlier plan stays in Plans."}
                   {draftGoal.revision.previousExecutionAudit
                     ? `\n\nThe independent audit said:\n${draftGoal.revision.previousExecutionAudit}`
                     : draftGoal.revision.reviewText
@@ -1999,7 +2085,6 @@ function App() {
                 <p className="revision-note">
                   This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
                   {draftGoal.avoid.startedAt ? ` in the round started ${formatTimestamp(draftGoal.avoid.startedAt)}` : ""}.
-                  Nothing is sent until you press Send.
                 </p>
               ) : null}
               {roundProgress !== null && roundProgress.requestId === draftGoal?.requestId ? (

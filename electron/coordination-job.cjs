@@ -8,7 +8,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
-const { coreConnectEndpoint } = require("./launch-config.cjs");
+const { coreConnectEndpoint, endpointSocketLeafName } = require("./launch-config.cjs");
 
 const STORE_DIRECTORY = "coordination-jobs";
 const JOBS_DIRECTORY = "jobs";
@@ -85,6 +85,22 @@ function integerCap(value, min, max, name) {
   return value;
 }
 
+function normalizeExecutionFeedback(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) throw refusal("invalid-admission", "executionFeedback must be an object.");
+  const previousCommandIds = value.previousCommandIds;
+  if (!Array.isArray(previousCommandIds) || previousCommandIds.length > 256 || !previousCommandIds.every(isCommandId)) {
+    throw refusal("invalid-admission", "executionFeedback.previousCommandIds must contain at most 256 valid command ids.");
+  }
+  return {
+    previousPlan: optionalText(value.previousPlan, "executionFeedback.previousPlan"),
+    previousPlanReview: optionalText(value.previousPlanReview, "executionFeedback.previousPlanReview"),
+    previousExecutionReport: optionalText(value.previousExecutionReport, "executionFeedback.previousExecutionReport"),
+    previousExecutionAudit: optionalText(value.previousExecutionAudit, "executionFeedback.previousExecutionAudit"),
+    previousCommandIds: [...previousCommandIds],
+  };
+}
+
 // This whitelist is the immutable caller-provided admission. It is not a live
 // scope and is never reconstructed from coordination-records.json or history.
 function normalizeAdmissionInput(input) {
@@ -118,7 +134,7 @@ function normalizeAdmissionInput(input) {
     const writeMaxTurns = integerCap(write.maxTurns, 1, 8, "writeAuthorization.maxTurns");
     writeAuthorization = { instances, workspaceRoot, maxTurns: writeMaxTurns };
   }
-  return {
+  const normalized = {
     requestId,
     goal,
     workspacePath,
@@ -130,6 +146,9 @@ function normalizeAdmissionInput(input) {
     writeAuthorization,
     backgroundConsent: true,
   };
+  const executionFeedback = normalizeExecutionFeedback(input.executionFeedback);
+  if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
+  return normalized;
 }
 
 function stableJson(value) {
@@ -176,7 +195,13 @@ function checkCounters(value) {
 function controlEndpointFor(profileEndpoint, { platform = process.platform, env = process.env } = {}) {
   const endpoint = typeof profileEndpoint === "string" ? profileEndpoint.trim() : "";
   if (!endpoint) throw refusal("invalid-endpoint", "The profile control endpoint is unavailable.");
-  return coreConnectEndpoint(platform, `${endpoint}-coordination-job-control`, env);
+  const candidate = `${endpoint}-coordination-job-control`;
+  if (platform === "linux" && path.posix.isAbsolute(candidate) && Buffer.byteLength(candidate, "utf8") > 107) {
+    const parent = path.posix.dirname(candidate);
+    const leaf = endpointSocketLeafName(candidate, parent);
+    return coreConnectEndpoint(platform, path.posix.join(parent, leaf), env);
+  }
+  return coreConnectEndpoint(platform, candidate, env);
 }
 
 function createCoordinationJobStore(profileDirectory, {
@@ -887,6 +912,7 @@ function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
 
 module.exports = {
   createCoordinationJobStore,
+  normalizeAdmissionInput,
   controlEndpointFor,
   requestControl,
   controlAcknowledgement,

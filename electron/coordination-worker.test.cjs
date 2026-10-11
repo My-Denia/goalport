@@ -12,6 +12,7 @@ const providers = [
   { instanceId: "claude", displayName: "Claude", driver: "claudeAgent", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "claude-opus-5-5", isDefault: true }] },
 ];
 async function scenario(t, options = {}) {
+  if (process.platform !== "linux") t.skip("worker control endpoint binds a real Linux Unix socket");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   delete require.cache[require.resolve("./coordination-scope.cjs")];
@@ -19,7 +20,7 @@ async function scenario(t, options = {}) {
   let authorizations = 0;
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), backgroundConsent: true });
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
   const launches = [];
   const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers }), prepare: async () => ({}), close() {}, run: async command => {
     launches.push(command);
@@ -35,12 +36,17 @@ async function scenario(t, options = {}) {
     options.store = { ...store, completeCommand: (...args) => { if (launches.length === 1) throw Error("disk full"); return complete(...args); } };
   }
   if (options.preLaunchFailure) options.store = { ...store, updateProgress: (...args) => { if (store.getStatus(start.jobId).pendingCommand) throw Error("pre-launch disk full"); return store.updateProgress(...args); } };
-  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint: path.join(directory, "control.sock") }, { store: options.store ?? store, engine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
+  let backgroundEngineInputValue;
+  const workerEngine = options.captureExecutionFeedback ? {
+    ...engine,
+    backgroundEngineInput: input => { backgroundEngineInputValue = input; return engine.backgroundEngineInput(input); },
+  } : engine;
+  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint: path.join(directory, "control.sock") }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
     invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
   }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
-  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId };
+  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
 }
 test("same engine completes two chains with one authorization, dual budgets and first pass", async t => {
   const r = await scenario(t);
@@ -131,4 +137,18 @@ test("worker refuses the revision when fresh Core coverage is held and retains t
   assert.equal(r.records[0].reviewText.includes("VERDICT: revise"), true);
   assert.match(r.records[0].stopReason, /background job.*automatic plan revision/);
   assert.equal(r.records[0].messageDispatched, true);
+});
+
+test("worker reconstruction passes all five historical feedback fields to backgroundEngineInput", async t => {
+  const feedback = {
+    previousPlan: "prior plan",
+    previousPlanReview: "prior plan review",
+    previousExecutionReport: "prior execution report",
+    previousExecutionAudit: "prior execution audit",
+    previousCommandIds: ["historical-command-1", "historical-command-2"],
+  };
+  const r = await scenario(t, { executionFeedback: feedback, captureExecutionFeedback: true });
+  assert.deepEqual(r.backgroundEngineInputValue.executionFeedback, feedback);
+  assert.deepEqual(Object.keys(r.backgroundEngineInputValue.executionFeedback), Object.keys(feedback));
+  assert.equal(r.launches.some(command => feedback.previousCommandIds.includes(command.commandId)), false);
 });

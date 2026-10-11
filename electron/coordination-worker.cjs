@@ -36,7 +36,8 @@ async function runWorker(config, deps = {}) {
   const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
     ...(admitted.writeAuthorization ? { write: admitted.writeAuthorization } : {}), priorPlan: admitted.priorPlan,
-    priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances, backgroundConsent: true };
+    priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
+    ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true };
   const owner = claim.ownerToken;
   let control, storageFailed = false, liveResult = null;
   const counters = () => { const s = scope.current(); return { readTurnsRemaining: s?.remaining ?? null, writeTurnsRemaining: s?.write?.remaining ?? null }; };

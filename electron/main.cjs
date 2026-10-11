@@ -14,7 +14,7 @@ const { createCoreConnection, acknowledgedStopSnapshot, createPendingDecisionNot
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
-const { createBackgroundHost } = require("./coordination-background.cjs");
+const { createBackgroundHost, backgroundStartReply } = require("./coordination-background.cjs");
 const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
@@ -675,7 +675,35 @@ const backgroundHost = createBackgroundHost({
   }),
 });
 function refuseCompetingCoordination() {
-  if (backgroundHost.outstanding()) throw new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
+  if (backgroundHost.outstanding()) {
+    const error = new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
+    error.code = "background-job-outstanding";
+    throw error;
+  }
+}
+function guardedCoreCommand(request) {
+  if (["create_campaign", "create_campaign_with_task", "select_runtime", "start_conversation", "conversation_send", "send_message", "handoff", "resume_native_session", "request_owner_action", "queue_override", "continue_in_isolated_workspace"].includes(request?.messageType)) {
+    let busy;
+    try { busy = backgroundHost.outstanding(); }
+    catch (error) { throw error; }
+    if (busy === true) {
+      const message = "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
+      return {
+        goalportRejected: true,
+        requestId: request.requestId,
+        error: message,
+        rejection: {
+          code: "background-job-outstanding",
+          message,
+          deliveryState: "FAILED",
+          nativeDispatchState: "NOT_STARTED",
+          retryMode: "NEW_REQUEST",
+          reservation: null,
+        },
+      };
+    }
+  }
+  return invokeCore(request);
 }
 function closeHarnessRuntime() {
   if (!harnessRuntime) return;
@@ -1189,11 +1217,8 @@ app.whenReady().then(() => {
     return choice.canceled ? null : choice.filePaths[0] || null;
   });
   handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
-  handleTrusted("goalport:core-command", (_, request) => {
-    if (["create_campaign", "create_campaign_with_task", "select_runtime", "start_conversation", "conversation_send", "send_message", "handoff", "resume_native_session", "request_owner_action", "queue_override", "continue_in_isolated_workspace"].includes(request?.messageType)) refuseCompetingCoordination();
-    return invokeCore(request);
-  });
-  handleTrusted("goalport:background-start", (_, input) => backgroundHost.start(input));
+  handleTrusted("goalport:core-command", (_, request) => guardedCoreCommand(request));
+  handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });

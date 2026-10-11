@@ -1,4 +1,5 @@
-import type { CoordinationWriteAuthorization } from "./coordinateGoal";
+import type { CoordinationWriteAuthorization, ExecutionFeedback } from "./coordinateGoal";
+import type { BackgroundStatus } from "./backgroundStatus";
 
 /**
  * C2 background job contract: the typed admission input for the ONE
@@ -72,6 +73,13 @@ export interface BackgroundJobStartInput {
   readonly priorReview?: string | null;
   /** Harnesses this send must avoid (e.g. a draft "Send again without X"). */
   readonly avoidInstances?: readonly string[];
+  /**
+   * Completed execution context for revising checked work: the previous plan,
+   * its review, the execution report and audit, and the historical command
+   * ids they referenced. References only — never commands to relaunch.
+   * Absent or null means this send revises nothing that already executed.
+   */
+  readonly executionFeedback?: ExecutionFeedback | null;
   /**
    * Literal `true`: the type forces call sites to write the consent out, and
    * the runtime gate re-checks it because IPC data carries no types. This is
@@ -192,6 +200,8 @@ export interface BackgroundEngineInput {
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
   readonly avoidInstances?: readonly string[];
+  /** Completed execution context, forwarded to the SAME engine a window Send uses. */
+  readonly executionFeedback?: ExecutionFeedback;
   readonly repairRefusalSentence: string;
   /** Distinct background wording for the one plan-revision refusal. */
   readonly planRevisionRefusalSentence: string;
@@ -222,9 +232,119 @@ export function backgroundEngineInput(start: BackgroundJobStartInput): Backgroun
     ...(start.priorPlan === undefined ? {} : { priorPlan: start.priorPlan }),
     ...(start.priorReview === undefined ? {} : { priorReview: start.priorReview }),
     ...(start.avoidInstances === undefined ? {} : { avoidInstances: [...start.avoidInstances] }),
+    // A fresh, closed copy with exactly the five contract fields; the copied
+    // command-ID list stays historical references, never relaunchable commands.
+    ...(start.executionFeedback
+      ? {
+          executionFeedback: {
+            previousPlan: start.executionFeedback.previousPlan,
+            previousPlanReview: start.executionFeedback.previousPlanReview,
+            previousExecutionReport: start.executionFeedback.previousExecutionReport,
+            previousExecutionAudit: start.executionFeedback.previousExecutionAudit,
+            previousCommandIds: [...start.executionFeedback.previousCommandIds],
+          },
+        }
+      : {}),
     repairRefusalSentence: BACKGROUND_REPAIR_REFUSAL_SENTENCE,
     planRevisionRefusalSentence: BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   };
+}
+
+/** The one honest sentence when an admission outcome cannot be confirmed; never a resend authorization. */
+export const BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE =
+  "GoalPort could not confirm this background start. Do not resend this goal; return to its job status.";
+
+/**
+ * Host-classified refusal codes. Each one means the refusal was decided
+ * BEFORE the durable admission step, so nothing was admitted and the draft
+ * may be released. `background-admission-unknown` is deliberately NOT here:
+ * it marks an outcome nobody can confirm, and it must never unblock a draft.
+ */
+export type BackgroundStartRefusalCode =
+  | "background-unavailable"
+  | "background-consent-required"
+  | "background-start-in-progress"
+  | "background-scope-conflict"
+  | "background-core-refused"
+  | "background-invalid-admission"
+  | "background-preflight-failed"
+  | "background-job-conflict";
+
+const DEFINITE_BACKGROUND_START_REFUSAL_CODES: readonly BackgroundStartRefusalCode[] = [
+  "background-unavailable",
+  "background-consent-required",
+  "background-start-in-progress",
+  "background-scope-conflict",
+  "background-core-refused",
+  "background-invalid-admission",
+  "background-preflight-failed",
+  "background-job-conflict",
+];
+
+/**
+ * One decoded host refusal. It crosses the bridge as a PLAIN resolved object
+ * (`{ backgroundStartRefused: true, code, message }`); it never throws, and
+ * no Error `.code` survives an IPC bridge reliably — so the renderer reads
+ * this shape instead.
+ */
+export interface BackgroundStartRefusal {
+  readonly refused: true;
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * What a resolved `backgroundStart` value turned out to be: a job status, a
+ * decoded refusal, or something unrecognizable — which is unknown, and
+ * unknown is never permission to resend.
+ */
+export type BackgroundStartOutcome =
+  | { readonly kind: "status"; readonly status: BackgroundStatus }
+  | ({ readonly kind: "refused" } & BackgroundStartRefusal)
+  | { readonly kind: "unknown" };
+
+/**
+ * Decode one resolved `backgroundStart` value after the await. A well-formed
+ * refusal marker decodes as refused; a status projection decodes as status;
+ * everything else — malformed markers, foreign shapes, nothing — is unknown.
+ */
+export function backgroundStartOutcome(value: unknown): BackgroundStartOutcome {
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record.backgroundStartRefused === true) {
+      if (typeof record.code === "string" && record.code.length > 0) {
+        return {
+          kind: "refused",
+          refused: true,
+          code: record.code,
+          message: typeof record.message === "string" ? record.message : "",
+        };
+      }
+      return { kind: "unknown" };
+    }
+    if (typeof record.jobId === "string" && typeof record.requestId === "string"
+      && typeof record.state === "string" && typeof record.active === "boolean"
+      && typeof record.live === "boolean" && typeof record.revoked === "boolean") {
+      return { kind: "status", status: value as BackgroundStatus };
+    }
+  }
+  return { kind: "unknown" };
+}
+
+/**
+ * True only for the exact string codes the host assigns to refusals decided
+ * before the durable admission step, so "nothing was admitted" is provable.
+ * Accepts the decoded refusal object (production shape) or a coded Error
+ * (tests). Message text, Error identity and numeric codes never count.
+ */
+export function isDefiniteBackgroundStartRefusal(value: unknown): boolean {
+  let code: unknown = null;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record.refused === true || value instanceof Error) code = record.code;
+  }
+  return typeof code === "string"
+    && (DEFINITE_BACKGROUND_START_REFUSAL_CODES as readonly string[]).includes(code);
 }
 
 /**

@@ -6,9 +6,11 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { endpointSocketLeafName } = require("./launch-config.cjs");
 const {
   createCoordinationJobStore,
   controlEndpointFor,
+  normalizeAdmissionInput,
   requestControl,
   ADMISSION_SCHEMA,
 } = require("./coordination-job.cjs");
@@ -343,7 +345,7 @@ test("a malformed immutable admission blocks worker start and replacement withou
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), true);
 });
 
-test("the local authenticated endpoint permits only status/revoke and missing control never clears claims", async (t) => {
+test("the local authenticated endpoint permits only status/revoke and missing control never clears claims", { skip: process.platform !== "linux" }, async (t) => {
   const { profile, store } = fixture(t);
   const admitted = start(store);
   store.claimWorker(admitted.jobId);
@@ -378,7 +380,7 @@ test("the local authenticated endpoint permits only status/revoke and missing co
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), true);
 });
 
-test("an accepted long goal and retained report still fit in the live control acknowledgement", async (t) => {
+test("an accepted long goal and retained report still fit in the live control acknowledgement", { skip: process.platform !== "linux" }, async (t) => {
   const { profile, store } = fixture(t);
   const goal = "g".repeat(9000);
   const admitted = start(store, { goal });
@@ -396,4 +398,119 @@ test("an accepted long goal and retained report still fit in the live control ac
   assert.equal(ack.progress, undefined);
   assert.equal(store.getStatus(admitted.jobId).admission.goal, goal);
   await server.close();
+});
+
+const executionFeedback = {
+  previousPlan: "previous plan",
+  previousPlanReview: null,
+  previousExecutionReport: "execution report",
+  previousExecutionAudit: "execution audit",
+  previousCommandIds: ["coord-plan-1", "coord-audit-2"],
+};
+
+test("execution feedback is closed, durable, and round-trips through reopened status", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store, { executionFeedback: { ...executionFeedback, ignored: "not durable" } });
+  const persisted = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "admission.json"), "utf8"));
+  assert.deepEqual(persisted.input.executionFeedback, executionFeedback);
+  const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
+  assert.deepEqual(reopened.getStatus(admitted.jobId).admission.executionFeedback, executionFeedback);
+});
+
+test("legacy admissions preserve their exact canonical shape and remain readable/claimable", (t) => {
+  const { profile, store } = fixture(t);
+  const legacy = normalizeAdmissionInput(admission());
+  assert.deepEqual(Object.keys(legacy), ["requestId", "goal", "workspacePath", "priorPlan", "priorReview", "avoidInstances", "allowedInstances", "maxTurns", "writeAuthorization", "backgroundConsent"]);
+  assert.equal(Object.hasOwn(legacy, "executionFeedback"), false);
+  const admitted = start(store);
+  const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
+  const status = reopened.getStatus(admitted.jobId);
+  assert.deepEqual(status.admission, legacy);
+  assert.equal(Object.hasOwn(status.admission, "executionFeedback"), false);
+  assert.equal(reopened.claimWorker(admitted.jobId).status.jobId, admitted.jobId);
+  assert.equal(reopened.startAdmission(admission()).jobId, admitted.jobId);
+});
+
+test("feedback omission and explicit null are canonical-equivalent; equal duplicate is idempotent and changed feedback conflicts", (t) => {
+  const { store } = fixture(t);
+  assert.deepEqual(normalizeAdmissionInput(admission()), normalizeAdmissionInput(admission({ executionFeedback: null })));
+  const first = start(store, { executionFeedback });
+  const duplicate = start(store, { executionFeedback: { ...executionFeedback, ignored: true } });
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.created, false);
+  assert.equal(duplicate.jobId, first.jobId);
+  const conflict = start(store, { executionFeedback: { ...executionFeedback, previousExecutionAudit: "different" } });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.reason, "request-conflict");
+});
+
+test("malformed feedback refuses admission using the existing invalid-admission code", (t) => {
+  const { store } = fixture(t);
+  const invalid = [
+    "not an object",
+    { ...executionFeedback, previousPlan: 4 },
+    { ...executionFeedback, previousExecutionAudit: "x".repeat(100_001) },
+    { ...executionFeedback, previousCommandIds: Array(257).fill("id") },
+    { ...executionFeedback, previousCommandIds: ["bad id"] },
+    { ...executionFeedback, previousCommandIds: ["x".repeat(257)] },
+    { ...executionFeedback, previousCommandIds: null },
+  ];
+  for (const value of invalid) assert.throws(() => store.startAdmission(admission({ executionFeedback: value })), { code: "invalid-admission" });
+});
+
+test("Linux endpoint overflow uses a deterministic same-directory hashed absolute path", { skip: process.platform !== "linux" }, () => {
+  const parent = path.posix.join("/tmp", `goalport-${"p".repeat(15)}`);
+  const firstProfile = path.posix.join(parent, `endpoint-${"a".repeat(90)}`);
+  const secondProfile = path.posix.join(parent, `endpoint-${"a".repeat(89)}b`);
+  const firstCandidate = `${firstProfile}-coordination-job-control`;
+  const first = controlEndpointFor(firstProfile, { platform: "linux", env: { HOME: "/tmp" } });
+  const second = controlEndpointFor(secondProfile, { platform: "linux", env: { HOME: "/tmp" } });
+  assert.equal(path.posix.isAbsolute(first), true);
+  assert.equal(path.posix.dirname(first), parent);
+  assert.equal(Buffer.byteLength(first, "utf8") <= 107, true);
+  assert.equal(first, controlEndpointFor(firstProfile, { platform: "linux", env: { HOME: "/other-home" } }));
+  assert.notEqual(first, second);
+  assert.equal(path.posix.basename(first), endpointSocketLeafName(firstCandidate, parent));
+});
+
+test("Linux endpoint byte counting supports multibyte parent directories and keeps short paths unchanged", { skip: process.platform !== "linux" }, () => {
+  const parent = path.posix.join("/tmp", `p-${"λ".repeat(20)}`);
+  const profileEndpoint = path.posix.join(parent, `e-${"x".repeat(80)}`);
+  const endpoint = controlEndpointFor(profileEndpoint, { platform: "linux", env: { HOME: "/tmp" } });
+  assert.equal(Buffer.byteLength(endpoint, "utf8") <= 107, true);
+  assert.equal(path.posix.dirname(endpoint), parent);
+  const shortProfileEndpoint = "/tmp/goalport-short-profile";
+  assert.equal(controlEndpointFor(shortProfileEndpoint, { platform: "linux", env: { HOME: "/tmp" } }), `${shortProfileEndpoint}-coordination-job-control`);
+});
+
+test("Linux endpoint refuses when even the hashed leaf cannot fit in its original directory", { skip: process.platform !== "linux" }, () => {
+  const profileEndpoint = `/${"d".repeat(100)}/control`;
+  assert.throws(() => controlEndpointFor(profileEndpoint, { platform: "linux", env: { HOME: "/tmp" } }), /sun_path capacity/);
+});
+
+test("Windows control endpoint naming remains unchanged", () => {
+  const profileEndpoint = "/tmp/goalport-windows-profile";
+  assert.equal(controlEndpointFor(profileEndpoint, { platform: "win32", env: { HOME: "/tmp" } }), `\\\\.\\pipe\\${profileEndpoint}-coordination-job-control`);
+});
+
+test("a real control server round-trips on the derived long Linux socket path", { skip: process.platform !== "linux" }, async (t) => {
+  const longParent = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "goalport-long-socket-")), `p-${"x".repeat(20)}`);
+  fs.mkdirSync(longParent);
+  t.after(() => fs.rmSync(path.dirname(longParent), { recursive: true, force: true }));
+  const store = createCoordinationJobStore(longParent, { bootstrapReady: true, idFactory: () => FIXED_JOB_ID, tokenFactory: () => FIXED_TOKEN });
+  const admitted = store.startAdmission(admission({ workspacePath: longParent }));
+  store.claimWorker(admitted.jobId);
+  const profileEndpoint = path.join(longParent, `endpoint-${"x".repeat(90)}`);
+  const endpoint = controlEndpointFor(profileEndpoint, { platform: "linux", env: { HOME: "/tmp" } });
+  assert.equal(Buffer.byteLength(endpoint, "utf8") <= 107, true);
+  assert.equal(path.dirname(endpoint), longParent);
+  const server = await store.startControlServer({ jobId: admitted.jobId, endpoint });
+  t.after(() => server.close());
+  const token = store.readControlCredential(admitted.jobId);
+  const ack = await requestControl(endpoint, token, "status");
+  assert.equal(ack.jobId, admitted.jobId);
+  assert.equal(ack.requestId, admitted.status.requestId);
+  const revoked = await requestControl(endpoint, token, "revoke");
+  assert.equal(revoked.revoked, true);
+  assert.equal(revoked.active, true);
 });

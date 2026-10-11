@@ -7,12 +7,15 @@ import type { RepairCheckpoint } from "./requestCoordination";
 import type { PlanRevisionCheckpoint } from "./requestCoordination";
 import { requestCoordination as requestCoordinationFromWorkerEntry } from "./workerEntry";
 import {
+  BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE,
   BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   BACKGROUND_REPAIR_REFUSAL_SENTENCE,
   backgroundEngineInput,
   backgroundJobKey,
   backgroundJobSentence,
+  backgroundStartOutcome,
   backgroundStartRefusal,
+  isDefiniteBackgroundStartRefusal,
   type BackgroundJobPhase,
   type BackgroundJobProjection,
   type BackgroundJobStartInput,
@@ -231,6 +234,140 @@ describe("background job contract", () => {
     expect(engineInput.priorPlan).toBe("Old plan.");
     expect(engineInput.priorReview).toBe("Old check.");
     expect(engineInput.avoidInstances).toEqual(["grok"]);
+  });
+
+  describe("execution feedback mapping", () => {
+    const feedback = {
+      previousPlan: "Old plan.",
+      previousPlanReview: "Old check.",
+      previousExecutionReport: "Old execution report.",
+      previousExecutionAudit: "Old independent audit.",
+      previousCommandIds: ["coordinate-plan-1", "coordinate-execute-2"],
+    };
+
+    it("carries all five feedback fields into the engine input", () => {
+      const engineInput = backgroundEngineInput({ ...readOnlyStart, executionFeedback: feedback });
+      expect(engineInput.executionFeedback).toEqual(feedback);
+    });
+
+    it("copies the command-ID list into a fresh, closed five-field object", () => {
+      const engineInput = backgroundEngineInput({ ...readOnlyStart, executionFeedback: feedback });
+      const forwarded = engineInput.executionFeedback!;
+      expect(forwarded.previousCommandIds).not.toBe(feedback.previousCommandIds);
+      expect(forwarded.previousCommandIds).toEqual(["coordinate-plan-1", "coordinate-execute-2"]);
+      expect(Object.keys(forwarded).sort()).toEqual([
+        "previousCommandIds",
+        "previousExecutionAudit",
+        "previousExecutionReport",
+        "previousPlan",
+        "previousPlanReview",
+      ]);
+    });
+
+    it("omits absent and explicit-null feedback instead of forwarding an empty shell", () => {
+      expect("executionFeedback" in backgroundEngineInput(readOnlyStart)).toBe(false);
+      expect("executionFeedback" in backgroundEngineInput({ ...readOnlyStart, executionFeedback: null })).toBe(false);
+    });
+
+    it("an ordinary plan revision still carries prior plan/review with no feedback", () => {
+      const engineInput = backgroundEngineInput({
+        ...readOnlyStart,
+        priorPlan: "Plan-only revision.",
+        priorReview: "Plan-only review.",
+      });
+      expect(engineInput.priorPlan).toBe("Plan-only revision.");
+      expect(engineInput.priorReview).toBe("Plan-only review.");
+      expect("executionFeedback" in engineInput).toBe(false);
+    });
+  });
+
+  describe("background start outcome decode", () => {
+    const admittedStatus = {
+      jobId: "job-1",
+      requestId: readOnlyStart.requestId,
+      goal,
+      state: "running" as const,
+      active: true,
+      live: true,
+      revoked: false,
+      workerPid: 7,
+      readMaxTurns: 4,
+      writeMaxTurns: null,
+      counters: null,
+      pendingCommand: null,
+      completedCommands: [],
+      progress: null,
+      outcome: null,
+    };
+
+    it("decodes a resolved status projection as a status, not a refusal", () => {
+      const outcome = backgroundStartOutcome(admittedStatus);
+      expect(outcome.kind).toBe("status");
+      if (outcome.kind === "status") {
+        expect(outcome.status.jobId).toBe("job-1");
+        expect(outcome.status.requestId).toBe(readOnlyStart.requestId);
+      }
+    });
+
+    it("decodes the plain refusal marker the bridge resolves with (no thrown Error involved)", () => {
+      const outcome = backgroundStartOutcome({
+        backgroundStartRefused: true,
+        code: "background-consent-required",
+        message: "The background request needs the explicit consent, so nothing was admitted.",
+      });
+      expect(outcome).toEqual({
+        kind: "refused",
+        refused: true,
+        code: "background-consent-required",
+        message: "The background request needs the explicit consent, so nothing was admitted.",
+      });
+    });
+
+    it("treats a malformed marker, a foreign shape and empty values as unknown", () => {
+      expect(backgroundStartOutcome({ backgroundStartRefused: true }).kind).toBe("unknown");
+      expect(backgroundStartOutcome({ backgroundStartRefused: true, code: 7, message: "x" }).kind).toBe("unknown");
+      expect(backgroundStartOutcome({ error: "boom" }).kind).toBe("unknown");
+      expect(backgroundStartOutcome(admittedStatus).kind).toBe("status");
+      expect(backgroundStartOutcome("nope").kind).toBe("unknown");
+      expect(backgroundStartOutcome(undefined).kind).toBe("unknown");
+      expect(backgroundStartOutcome(null).kind).toBe("unknown");
+    });
+  });
+
+  describe("definite background start refusals", () => {
+    it.each([
+      "background-unavailable",
+      "background-consent-required",
+      "background-start-in-progress",
+      "background-scope-conflict",
+      "background-core-refused",
+      "background-invalid-admission",
+      "background-preflight-failed",
+      "background-job-conflict",
+    ])("treats the host-classified code %s as a definite nothing-admitted refusal", (code) => {
+      expect(isDefiniteBackgroundStartRefusal({ refused: true, code, message: "any sentence" })).toBe(true);
+      const coded = new Error("any sentence") as Error & { code?: string };
+      coded.code = code;
+      expect(isDefiniteBackgroundStartRefusal(coded)).toBe(true);
+    });
+
+    it("never treats the unknown-admission code, lookalikes or uncoded values as definite", () => {
+      expect(isDefiniteBackgroundStartRefusal({ refused: true, code: "background-admission-unknown", message: "x" })).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal({ refused: true, code: "background-job-conflict-ish", message: "x" })).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal({ code: "background-unavailable" })).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal(new Error("background-unavailable"))).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal({ refused: true, message: "background-unavailable" })).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal({ refused: true, code: 7 })).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal(undefined)).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal(null)).toBe(false);
+      expect(isDefiniteBackgroundStartRefusal("background-unavailable")).toBe(false);
+    });
+
+    it("keeps the one unknown-admission sentence honest about not resending", () => {
+      expect(BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE).toBe(
+        "GoalPort could not confirm this background start. Do not resend this goal; return to its job status."
+      );
+    });
   });
 
   it("leaves progress callbacks and liveness to the worker, never the admission record", () => {

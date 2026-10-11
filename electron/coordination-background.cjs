@@ -2,8 +2,31 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createCoordinationJobStore, requestControl } = require("./coordination-job.cjs");
+const { createCoordinationJobStore, requestControl, normalizeAdmissionInput } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
+
+const HOST_REFUSAL_CODES = new Set([
+  "background-unavailable",
+  "background-consent-required",
+  "background-start-in-progress",
+  "background-scope-conflict",
+  "background-core-refused",
+  "background-preflight-failed",
+  "background-invalid-admission",
+  "background-job-conflict",
+  "background-admission-unknown",
+]);
+const PREFLIGHT_MESSAGE = "Background Send could not be prepared, so nothing was admitted.";
+const UNKNOWN_MESSAGE = "GoalPort could not confirm this background start.";
+
+function codedRefusal(code, message, cause) {
+  const error = new Error(message, cause ? { cause } : undefined);
+  error.code = code;
+  return error;
+}
+function preflightRefusal(cause) {
+  return codedRefusal("background-preflight-failed", PREFLIGHT_MESSAGE, cause);
+}
 function projection(status, live = false) {
   if (!status) return null;
   const confirmedTerminal = ["completed", "failed", "stopped"].includes(status.state);
@@ -15,7 +38,7 @@ function projection(status, live = false) {
     workerPid: status.startupClaim?.pid ?? null };
 }
 function createBackgroundHost(options) {
-  const store = () => createCoordinationJobStore(options.directory(), { bootstrapReady: options.ready() });
+  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready() });
   let starting = false;
   let lastJobId = null;
   function jobIds() {
@@ -32,7 +55,7 @@ function createBackgroundHost(options) {
     // admission; only confirmed terminal facts permit normal competition.
     return jobIds().some(id => { const facts = s.getStatus(id); return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand; });
   }
-  async function status(jobId) {
+  async function status(jobId, controlEndpoint) {
     const s = store();
     let facts = jobId ? s.getStatus(jobId) : s.getActiveStatus();
     if (!facts && lastJobId) facts = s.getStatus(lastJobId);
@@ -44,37 +67,89 @@ function createBackgroundHost(options) {
     if (!facts) return null;
     lastJobId = facts.jobId;
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
+    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
   async function start(input) {
-    if (!options.ready() || options.env.GOALPORT_COORDINATE_SEND !== "1" || options.env.GOALPORT_HARNESS_CHECKOUT || options.env.GOALPORT_HARNESS_SERVER_CWD) throw new Error("Background Send is unavailable until bootstrap and the local CLI admission are ready.");
-    if (input?.backgroundConsent !== true) throw new Error("Keep working after closing must be explicitly selected.");
-    if (starting) throw new Error("A background admission is already in progress.");
+    let ready;
+    try { ready = options.ready(); }
+    catch (error) { throw preflightRefusal(error); }
+    if (!ready || options.env.GOALPORT_COORDINATE_SEND !== "1" || options.env.GOALPORT_HARNESS_CHECKOUT || options.env.GOALPORT_HARNESS_SERVER_CWD) {
+      throw codedRefusal("background-unavailable", "Background Send is not ready in this GoalPort window yet.");
+    }
+    if (input?.backgroundConsent !== true) throw codedRefusal("background-consent-required", "Keep working after closing must be explicitly selected.");
+    if (starting) throw codedRefusal("background-start-in-progress", "A background start is already in progress. Try again in a moment.");
     starting = true;
     try {
-      if (options.ordinaryScope()) throw new Error("Stop current window access before starting an independent job.");
-      const problem = coreRefusal(await options.snapshot());
-      if (problem) throw new Error(problem);
-      const s = store();
-      const admitted = s.startAdmission({ requestId: input.requestId, goal: input.goal, workspacePath: input.workspaceRoot,
-        allowedInstances: input.readInstances, maxTurns: input.readMaxTurns, writeAuthorization: input.write ?? null,
-        priorPlan: input.priorPlan, priorReview: input.priorReview, avoidInstances: input.avoidInstances, backgroundConsent: input.backgroundConsent });
-      if (!admitted.ok) throw new Error("Another background job governs this profile; no replacement was started.");
-      lastJobId = admitted.jobId;
-      if (admitted.created) {
-        const config = { ...options.config(), jobId: admitted.jobId, directory: options.directory(), controlEndpoint: options.endpoint() };
-        const child = (options.spawn ?? spawn)(process.execPath, [options.workerPath, JSON.stringify(config)], { env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore", windowsHide: true });
-        child.on("error", () => {}); // The immutable admission remains unconfirmed; never respawn.
-        child.unref();
+      try {
+        if (options.ordinaryScope()) throw codedRefusal("background-scope-conflict", "Stop this window's harness access before starting a goal that keeps working after closing.");
+        const problem = coreRefusal(await options.snapshot());
+        if (problem) throw codedRefusal("background-core-refused", problem);
+      } catch (error) {
+        if (error?.code === "background-scope-conflict" || error?.code === "background-core-refused") throw error;
+        throw preflightRefusal(error);
       }
-      const deadline = Date.now() + (options.startTimeoutMs ?? 15000);
-      do {
-        const result = await status(admitted.jobId);
-        if (result.live || !result.active) return result;
-        await new Promise(resolve => setTimeout(resolve, 50));
-      } while (Date.now() < deadline);
-      return status(admitted.jobId); // honest unconfirmed projection, not independently running
+
+      let profileDirectory;
+      let s;
+      let admissionInput;
+      let controlEndpoint;
+      let workerConfigBase;
+      try {
+        const durableInput = {
+          requestId: input.requestId,
+          goal: input.goal,
+          workspacePath: input.workspaceRoot,
+          allowedInstances: input.readInstances,
+          maxTurns: input.readMaxTurns,
+          writeAuthorization: input.write ?? null,
+          priorPlan: input.priorPlan,
+          priorReview: input.priorReview,
+          avoidInstances: input.avoidInstances,
+          backgroundConsent: input.backgroundConsent,
+          executionFeedback: input.executionFeedback,
+        };
+        try { admissionInput = normalizeAdmissionInput(durableInput); }
+        catch (error) {
+          if (error?.code === "invalid-admission") throw codedRefusal("background-invalid-admission", error.message, error);
+          throw error;
+        }
+        profileDirectory = options.directory();
+        s = store(profileDirectory);
+        controlEndpoint = options.endpoint();
+        if (typeof controlEndpoint !== "string" || controlEndpoint.length === 0) throw new Error("The background control endpoint is unavailable.");
+        workerConfigBase = options.config();
+        const preflightConfig = { ...workerConfigBase, jobId: "preflight-job-id", directory: profileDirectory, controlEndpoint };
+        const serialized = JSON.stringify(preflightConfig);
+        if (typeof serialized !== "string") throw new Error("The background worker configuration is not serializable.");
+      } catch (error) {
+        if (error?.code === "background-invalid-admission") throw error;
+        throw preflightRefusal(error);
+      }
+
+      let admitted;
+      try { admitted = s.startAdmission(admissionInput); }
+      catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+      if (!admitted.ok) throw codedRefusal("background-job-conflict", "A background goal is already running. Return to it or stop allowing its access; nothing new was started.");
+
+      try {
+        lastJobId = admitted.jobId;
+        if (admitted.created) {
+          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint };
+          const child = (options.spawn ?? spawn)(process.execPath, [options.workerPath, JSON.stringify(config)], { env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore", windowsHide: true });
+          child.on("error", () => {}); // The immutable admission remains unconfirmed; never respawn.
+          child.unref();
+        }
+        const deadline = Date.now() + (options.startTimeoutMs ?? 15000);
+        do {
+          const result = await status(admitted.jobId, controlEndpoint);
+          if (result.live || !result.active) return result;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        } while (Date.now() < deadline);
+        return status(admitted.jobId, controlEndpoint); // honest unconfirmed projection, not independently running
+      } catch (error) {
+        throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error);
+      }
     } finally { starting = false; }
   }
   async function revoke(jobId) {
@@ -110,5 +185,16 @@ function withControlAck(facts, ack) {
     startupClaim: ack.claimed ? { ...(facts.startupClaim ?? {}), pid: ack.workerPid ?? facts.startupClaim?.pid ?? null } : facts.startupClaim,
   };
 }
+async function backgroundStartReply(host, input) {
+  try { return await host.start(input); }
+  catch (error) {
+    let reportedCode;
+    let message = UNKNOWN_MESSAGE;
+    try { reportedCode = error?.code; } catch { /* malformed thrown values are unknown */ }
+    try { if (typeof error?.message === "string") message = error.message; } catch { /* retain the safe fallback */ }
+    const code = HOST_REFUSAL_CODES.has(reportedCode) ? reportedCode : "background-admission-unknown";
+    return { backgroundStartRefused: true, code, message };
+  }
+}
 
-module.exports = { createBackgroundHost, projection, withControlAck };
+module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply };

@@ -60,6 +60,10 @@ export interface CoordinationStatusProps {
   onStopAllowing?: () => void;
 }
 
+/** The one Stop-allowing caption: what stopping ends, and what it honestly does not claim. */
+const STOP_ALLOWING_CAPTION =
+  "Stopping ends the authorization for further turns. It does not undo any edit and does not prove a turn already in flight stopped.";
+
 function savedLabel(savedAt: string | null | undefined): string | null {
   if (!savedAt) return null;
   const parsed = Date.parse(savedAt);
@@ -404,7 +408,7 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
           >
             Stop allowing
           </button>
-          <span className="coordination-access-caption">Stopping ends the authorization for further turns. It does not undo any edit and does not prove a turn already in flight stopped.</span>
+          <span className="coordination-access-caption">{STOP_ALLOWING_CAPTION}</span>
         </div>
       ) : null}
     </section>
@@ -421,7 +425,13 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing }: { job: Bac
     : "This background job finished. Its result is retained below.";
   return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>
     <h2>{job.goal}</h2><p role="status">{sentence}</p>
-    {job.live && job.active && !job.revoked ? <button type="button" className="button button-outline" onClick={onStopAllowing}>Stop allowing</button> : null}
+    {/* Stop allowing stays reachable while the admission is active and not
+        revoked, even when control is unreachable: revocation itself persists.
+        The progress block below stays honestly live-gated. */}
+    {job.active && !job.revoked ? <div className="coordination-access">
+      <button type="button" className="button button-outline" onClick={onStopAllowing}>Stop allowing</button>
+      {job.state === "unconfirmed" ? <span className="coordination-access-caption">{STOP_ALLOWING_CAPTION}</span> : null}
+    </div> : null}
     {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
       repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={job.counters?.readTurnsLeft ?? null} maxTurns={job.readMaxTurns}
       writeRemaining={job.counters?.writeTurnsLeft ?? null} maxWriteTurns={job.writeMaxTurns} /> : <p>Observed remaining access: {job.counters?.readTurnsLeft ?? "Unknown"} model turns{job.writeMaxTurns !== null ? `; ${job.counters?.writeTurnsLeft ?? "Unknown"} write turns` : ""}.</p>}
