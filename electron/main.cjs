@@ -10,7 +10,7 @@ const { pathToFileURL } = require("node:url");
 const { createTrustedIpcHandler, protectRenderer, isAppDocument } = require("./security-policy.cjs");
 const { launchArguments, relaunchArguments, resolveProfilePaths, assertProfileStorageBoundary, validateProfileIdentity, assertCoreIdentity, childEnvironment, assertPipePeer, pipePeerBusy, windowsPipeName, coreServePipe, coreConnectEndpoint } = require("./launch-config.cjs");
 const { ProfileManager } = require("./profile-manager.cjs");
-const { invokeCoreRequest, acknowledgedStopSnapshot, verifyCoreServer, createCoreGate, createPendingDecisionNotifier } = require("./core-client.cjs");
+const { createCoreConnection, acknowledgedStopSnapshot, createPendingDecisionNotifier } = require("./core-client.cjs");
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
@@ -238,7 +238,6 @@ function identityProfile() {
   if (!profile || process.platform !== "linux") return profile;
   return { ...profile, pipe: coreConnectPath() };
 }
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 let mainWindow;
 const appDocumentUrl = pathToFileURL(path.join(appRoot, "dist", "index.html")).href;
 const handleTrusted = createTrustedIpcHandler(ipcMain, () => mainWindow, appDocumentUrl);
@@ -391,11 +390,11 @@ async function ensureCore() {
   if (profileManager && !profileReady) {
     throw new Error("GoalPort is still preparing this data profile; Core start is gated");
   }
-  if (await pipeAvailable()) return coreGate.verify();
+  if (await pipeAvailable()) return coreConnection.verify();
   if (coreLaunchPromise) return coreLaunchPromise;
   if (lastLaunchNonce) {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      if (await pipeAvailable()) return coreGate.verify();
+      if (await pipeAvailable()) return coreConnection.verify();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error("Lifecycle-independent Core pipe disappeared; refusing to spawn a second Core");
@@ -438,7 +437,7 @@ async function ensureCore() {
     // expose the pipe instead of turning a slow first run into a false crash.
     for (let attempt = 0; attempt < 100; attempt += 1) {
       if (spawnError) throw new Error(`Core launcher could not start: ${spawnError.message}`);
-      if (await pipeAvailable()) return coreGate.verify();
+      if (await pipeAvailable()) return coreConnection.verify();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     let detail = "";
@@ -460,30 +459,6 @@ function runPipePeer() {
     execFile(binary, ["pipe-peer", "--pipe", coreServePipe(process.platform, configuredPipeName)], { timeout: 5000, windowsHide: true }, (error, stdout) => {
       resolve({ code: error ? (typeof error.code === "number" ? error.code : null) : 0, stdout: String(stdout ?? "") });
     });
-  });
-}
-
-// ONE full verification of the Core connection (profile mode only).
-async function verifyCoreConnection() {
-  if (!profile) return;
-  return verifyCoreServer({
-    runPeer: runPipePeer,
-    isBusy: pipePeerBusy,
-    now: () => Date.now(),
-    delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    requestReceipt: async (timeoutMs) => {
-      const requestId = `identity-${randomUUID()}`;
-      const response = await exchange({
-        protocolVersion: "goalport.ipc.v2", requestId,
-        entityVersion: 0, messageType: "get_startup_receipt", payload: {}
-      }, { timeoutMs });
-      if (!response || response.requestId !== requestId || response.ok === false) throw new Error("Core startup identity is unavailable; attachment refused");
-      return response.payload?.receipt;
-    },
-    assertPeer: (peerStdout, receipt) => {
-      assertPipePeer(peerStdout, receipt);
-      assertCoreIdentity(receipt, identityProfile());
-    }
   });
 }
 
@@ -911,48 +886,30 @@ async function coordinationFromOutcome(outcome) {
   }
 }
 
-const coreGate = createCoreGate({ verify: verifyCoreConnection });
-
-// Every request to Core goes through this gate (see createCoreGate).
-function exchangeVerified(request) {
-  return coreGate.send(request, exchange);
-}
-
-function exchange(request, { timeoutMs = 120000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(coreConnectPath());
-    const chunks = [];
-    let expected = null;
-    let settled = false;
-    const timeout = setTimeout(() => fail(new Error(`Core IPC response timed out after ${Math.max(1, Math.round(timeoutMs / 1000))} seconds`)), timeoutMs);
-    const fail = (error) => { if (!settled) { settled = true; clearTimeout(timeout); socket.destroy(); reject(error); } };
-    socket.on("error", fail);
-    socket.on("end", () => { if (!settled) fail(new Error("Core closed the connection before acknowledging the request")); });
-    socket.on("close", () => { if (!settled) fail(new Error("Core connection closed before acknowledgement")); });
-    socket.on("data", (chunk) => {
-      chunks.push(chunk);
-      const bytes = Buffer.concat(chunks);
-      if (expected == null && bytes.length >= 4) expected = bytes.readUInt32LE(0);
-      if (expected != null && expected > MAX_FRAME_BYTES) return fail(new Error("Core response frame exceeds limit"));
-      if (expected != null && bytes.length >= expected + 4) {
-        settled = true;
-        clearTimeout(timeout);
-        socket.end();
-        try { resolve(JSON.parse(bytes.subarray(4, expected + 4).toString("utf8"))); }
-        catch (error) { reject(error); }
-      }
-    });
-    const payload = Buffer.from(JSON.stringify(request));
-    if (payload.length > MAX_FRAME_BYTES) {
-      return fail(new Error("Core request frame exceeds limit"));
-    }
-    const frame = Buffer.allocUnsafe(4 + payload.length);
-    frame.writeUInt32LE(payload.length, 0);
-    payload.copy(frame, 4);
-    // Do not half-close a Windows Named Pipe before a slow native response.
-    socket.on("connect", () => socket.write(frame));
-  });
-}
+// The verified Core connection. The frame exchange, startup verification
+// composition and single request gate live in core-client.cjs and are shared
+// verbatim with any other host of the same mechanics; THIS process still owns
+// every identity decision (selected Core binary, resolved pipe endpoint, the
+// profile identity asserted against the startup receipt), the attachment and
+// process lifetime (ensureCore — the only place a Core may be spawned), and
+// which commands are issued at all. The legacy profile-less isolated runs
+// keep their historical contract: no profile identity exists, so the startup
+// verification is skipped instead of asserted against nothing.
+const coreConnection = createCoreConnection({
+  connectPath: coreConnectPath,
+  connect: (target) => net.createConnection(target),
+  runPeer: runPipePeer,
+  isBusy: pipePeerBusy,
+  assertPeer: (peerStdout, receipt) => {
+    assertPipePeer(peerStdout, receipt);
+    assertCoreIdentity(receipt, identityProfile());
+  },
+  verificationSkipped: () => !profile,
+  ensureCore,
+  onResult: (snapshot, request) => { cacheAttempt(snapshot); maybeNotify(request, snapshot); }
+});
+// Every request to Core goes through the connection's gate (see createCoreGate).
+const { exchangeVerified, invoke: invokeCore } = coreConnection;
 
 function closeAttemptTarget(active, selectedId, held, heldId) {
   return active && selectedId ? selectedId : held ? heldId : selectedId;
@@ -1027,13 +984,6 @@ async function quitAfterCloseChoice() {
     mainWindow.destroy();
   }
   app.quit();
-}
-
-async function invokeCore(request) {
-  return invokeCoreRequest(request, {
-    exchange: exchangeVerified, ensureCore, delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    onResult: (snapshot) => { cacheAttempt(snapshot); maybeNotify(request, snapshot); }
-  });
 }
 
 const notifyPendingDecisions = createPendingDecisionNotifier(showToast);
