@@ -24,7 +24,7 @@ import { CoordinationStatus, CoordinationProgress } from "./conversation/Coordin
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
-import { usableInstanceIds, type CoordinationWriteAuthorization } from "./coordination/coordinateGoal";
+import { usableInstanceIds, type CoordinationWriteAuthorization, type ExecutionFeedback } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
@@ -135,7 +135,8 @@ interface GoalDraft extends GoalDraftValue {
   baselineCampaignId: string;
   acceptNextCampaign?: boolean;
   intent?: SendIntent;
-  revision?: { planText: string | null; reviewText: string | null };
+  revision?: { planText: string | null; reviewText: string | null } & Partial<Pick<ExecutionFeedback,
+    "previousExecutionReport" | "previousExecutionAudit">>;
   /**
    * Set when this draft continues a round whose harness proved it cannot run
    * its tools on this machine: that harness receives no role on this send.
@@ -189,6 +190,8 @@ function App() {
     requestId: string;
     failures: string[];
     activity: string | null;
+    /** True while the one in-window corrective pass is running. */
+    repair?: boolean;
   } | null>(null);
   // The most recent coordination discovery, so an environment failure can say
   // honestly whether another usable harness exists. Null until this window
@@ -740,16 +743,87 @@ function App() {
         const discovery = await discover(generation);
         if (!stillCurrent()) return;
         if (discovery.connected) discoveredProvidersRef.current = discovery.providers;
+        // A manual Revise of a terminal execution-audit revision carries the
+        // completed reports as execution feedback; the plain plan-revision
+        // inputs stay for a plan check revision. Both sends are fresh Sends
+        // with their own consent; nothing is sent until the user presses Send.
+        const revisionFeedback: ExecutionFeedback | null =
+          draftGoal.revision && (draftGoal.revision.previousExecutionReport || draftGoal.revision.previousExecutionAudit)
+            ? {
+                previousPlan: draftGoal.revision.planText,
+                previousPlanReview: draftGoal.revision.reviewText,
+                previousExecutionReport: draftGoal.revision.previousExecutionReport ?? null,
+                previousExecutionAudit: draftGoal.revision.previousExecutionAudit ?? null,
+                previousCommandIds: [],
+              }
+            : null;
         const report = await requestCoordination(
           {
             workspacePath: workspace,
             goal: message,
             sendKey,
-            priorPlan: draftGoal.revision?.planText ?? null,
-            priorReview: draftGoal.revision?.reviewText ?? null,
+            priorPlan: revisionFeedback ? null : draftGoal.revision?.planText ?? null,
+            priorReview: revisionFeedback ? null : draftGoal.revision?.reviewText ?? null,
+            executionFeedback: revisionFeedback ?? undefined,
             avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
             allowedInstances: scopedSend ? [...selectedInstances] : undefined,
             writeAuthorization,
+            // The one in-window corrective pass needs this gate: only a
+            // scoped, explicitly write-consented send with record persistence
+            // available gets one, and the gate must have re-confirmed liveness
+            // and checkpointed the first round before any corrective turn.
+            beforeRepair: scopedSend && writeAuthorization
+              && typeof window.goalportCore?.coordinationSave === "function"
+              && typeof window.goalportCore?.coordinationScope === "function"
+              ? async (checkpoint) => {
+                if (!stillCurrent()) return false;
+                const currentDraft = draftGoalRef.current;
+                if (!currentDraft || currentDraft.requestId !== draftGoal.requestId
+                  || currentDraft.workspace.trim() !== workspace) return false;
+                // The same new-work capacity and governing-held checks as a
+                // first send: a coordination verdict never releases or
+                // bypasses native Core state.
+                const liveSnapshot = snapshotRef.current;
+                if (liveSnapshot.bounds?.projectionUnavailable) return false;
+                if (liveSnapshot.stopResponsibility?.writeResponsibility === "held"
+                  && liveSnapshot.stopResponsibility.blocksCurrentWorkspace !== false) return false;
+                // Same captured scope generation, unchanged memberships and
+                // root, and enough remaining counters — never a second
+                // authorization and never borrowed access.
+                let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number;
+                  write?: { instances: string[]; maxTurns: number; remaining: number | null; workspaceRoot: string } } | null = null;
+                try {
+                  scope = await window.goalportCore!.coordinationScope!();
+                } catch {
+                  return false;
+                }
+                if (!stillCurrent()) return false;
+                if (!scope || scope.generation !== scopeGeneration) return false;
+                if (scope.instances.length !== selectedInstances.length
+                  || !scope.instances.every((id) => selectedInstances.includes(id))) return false;
+                const liveWrite = scope.write;
+                if (!liveWrite || liveWrite.workspaceRoot !== workspace
+                  || liveWrite.instances.length !== writeAuthorization!.instances.length
+                  || !liveWrite.instances.every((id) => writeAuthorization!.instances.includes(id))) return false;
+                if (!Number.isInteger(scope.remaining) || scope.remaining < (checkpoint.remainingReadTurns ?? 0)) return false;
+                if (!Number.isInteger(liveWrite.remaining) || (liveWrite.remaining ?? 0) < 1) return false;
+                // Checkpoint the completed first round with an honest
+                // unconfirmed repair intent BEFORE the first corrective
+                // launch; a failed recording sends no corrective turn.
+                const checkpointView: CoordinationView = {
+                  ...checkpoint.firstRound,
+                  stopReason: `${checkpoint.firstRound.stopReason} One checked repair is being organized with the remaining access; its outcome is not confirmed yet.`,
+                };
+                const remembered = await rememberPlan(draftGoal.requestId, workspace, message, checkpointView);
+                if (!stillCurrent()) return false;
+                if (!remembered || !remembered.recorded) return false;
+                setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
+                setRoundProgress((current) => current && current.requestId === draftGoal.requestId
+                  ? { ...current, repair: true }
+                  : current);
+                return true;
+              }
+              : undefined,
             onEvent: scopedSend
               ? (event) => {
                 if (!stillCurrent()) return;
@@ -961,13 +1035,25 @@ function App() {
     if (window.innerWidth <= 860) setNavCollapsed(true);
     closeDraft(false);
     setSelectedPlanId(null);
+    // A terminal execution-audit revision carries its completed execution
+    // report and audit into the fresh draft as execution feedback; a plan-check
+    // revision keeps the plan-revision inputs. Either way nothing is sent
+    // until the user presses Send, and write consent starts OFF.
+    const executionRevision = Boolean(plan.executionText || plan.auditText);
     setDraftGoal({
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
       workspace: plan.workspacePath,
       provider: "",
       message: plan.goal,
-      revision: { planText: plan.planText, reviewText: plan.reviewText },
+      revision: {
+        planText: plan.planText,
+        reviewText: plan.reviewText,
+        ...(executionRevision ? {
+          previousExecutionReport: plan.executionText ?? null,
+          previousExecutionAudit: plan.auditText ?? null,
+        } : {}),
+      },
     });
   }
 
@@ -1738,6 +1824,7 @@ function App() {
                 environmentAlternatives={environmentAlternatives(selectedPlan.environmentBlocked)}
                 onSendAgainWithout={selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
                 roundEvents={selectedPlan.roundEvents ?? []}
+                feedbackHistory={selectedPlan.feedbackHistory ?? []}
                 onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
                   ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId); }
                   : undefined}
@@ -1782,6 +1869,7 @@ function App() {
                     savedAt: null,
                   })}
                   roundEvents={coordination.roundEvents ?? []}
+                  feedbackHistory={coordination.feedbackHistory ?? []}
                   onUseAgain={coordination.environmentBlocked && unblockAvailable
                     ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId); }
                     : undefined}
@@ -1801,8 +1889,14 @@ function App() {
               ) : null}
               {draftGoal?.revision ? (
                 <p className="revision-note">
-                  Revising a saved plan. The earlier plan stays in Plans. Nothing is sent until you press Send.
-                  {draftGoal.revision.reviewText ? `\n\nThe check said:\n${draftGoal.revision.reviewText}` : ""}
+                  {draftGoal.revision.previousExecutionAudit || draftGoal.revision.previousExecutionReport
+                    ? "Continuing from a completed execution round. The earlier plan, changes and independent audit are below. Nothing is sent until you press Send, and file changes need separate consent again."
+                    : "Revising a saved plan. The earlier plan stays in Plans. Nothing is sent until you press Send."}
+                  {draftGoal.revision.previousExecutionAudit
+                    ? `\n\nThe independent audit said:\n${draftGoal.revision.previousExecutionAudit}`
+                    : draftGoal.revision.reviewText
+                      ? `\n\nThe check said:\n${draftGoal.revision.reviewText}`
+                      : ""}
                 </p>
               ) : null}
               {draftGoal?.avoid ? (
@@ -1816,10 +1910,12 @@ function App() {
                 <CoordinationProgress
                   failures={roundProgress.failures}
                   activity={roundProgress.activity}
+                  repair={roundProgress.repair === true}
                   remaining={scopeMirror?.remaining ?? null}
                   maxTurns={scopeMirror?.maxTurns ?? null}
                   writeRemaining={scopeMirror?.write?.remaining ?? null}
                   maxWriteTurns={scopeMirror?.write?.maxTurns ?? null}
+                  onStopAllowing={scopeBridgeReady ? () => { void handleStopAllowing(); } : undefined}
                 />
               ) : (
                 <>

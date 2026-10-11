@@ -2412,4 +2412,223 @@ describe("harness access panel and scoped rounds", () => {
     await waitFor(() => expect(bridge.authorizations).toHaveLength(2));
     expect(bridge.authorizations[1]).toEqual({ instances: ["codex", "claude"], maxTurns: 4 });
   });
+
+// The one in-window corrective pass (C1): one authorization and one Send may
+// run a second four-role chain after a completed revise; refusal, revocation,
+// cancellation and save failures keep the first round honest.
+describe("one in-window repair", () => {
+  const repairProviders = () => [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")];
+  const FIRST_EXECUTION = "First executor: incomplete edit; the unchanged checks fail.";
+  const CRITIQUE = "Read-only critique: the unchanged checks still fail.\nVERDICT: revise";
+  const REPAIR_EXECUTION = "Corrective executor: repaired helper.ts; the unchanged checks pass.";
+  const REPAIR_AUDIT = "Checked the repaired helper independently.\nVERDICT: verified";
+  function repairRound(command: { commandId: string }, call: number): Record<string, unknown> {
+    const corrective = call >= 5;
+    const text = command.commandId.includes("-execute-")
+      ? corrective ? REPAIR_EXECUTION : FIRST_EXECUTION
+      : command.commandId.includes("-audit-")
+        ? corrective ? REPAIR_AUDIT : CRITIQUE
+        : command.commandId.includes("-plan-")
+          ? corrective ? "Corrective plan for the observed failure." : PLAN_TEXT
+          : CHECK_TEXT;
+    // Six read turns and two write turns fund both chains exactly.
+    return {
+      text, errorText: "", dispatched: true,
+      turnsRemaining: [5, 4, 4, 3, 2, 1, 1, 0][call - 1] ?? 0,
+      writeTurnsRemaining: [2, 2, 1, 1, 1, 1, 0, 0][call - 1] ?? 0,
+    };
+  }
+  function consentToRepairChanges() {
+    fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/goal" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow changes through Codex" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow changes through Claude" }));
+    typeMessage("Fix the helper and check the changes.");
+  }
+
+  it("runs both four-role chains from one authorization and one Send, retaining first-round facts", async () => {
+    const saves: Array<{ record: Record<string, unknown>; atLaunches: number }> = [];
+    const bridge = scopedBridge({
+      providers: repairProviders(),
+      launch: async (command, call) => repairRound(command, call),
+      save: (record) => {
+        saves.push({ record, atLaunches: bridge.launchCount() });
+        return saveCoordinationRecordForTest(bridge.saved, record);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "6" } });
+    consentToRepairChanges();
+    sendMessage();
+    expect(await screen.findByText("Changes verified", { selector: "dd" })).toBeTruthy();
+    // Exactly one authorization, exactly one Send, eight distinct turns.
+    expect(bridge.authorizations).toHaveLength(1);
+    expect(bridge.launchCount()).toBe(8);
+    expect(bridge.launched.map((item) => item.commandId.split("-")[1])).toEqual([
+      "plan", "review", "execute", "audit", "plan", "review", "execute", "audit",
+    ]);
+    expect(new Set(bridge.launched.map((item) => item.commandId)).size).toBe(8);
+    // The first round was checkpointed with an honest unconfirmed repair intent
+    // BEFORE the first corrective launch; the final save replaces it.
+    expect(saves).toHaveLength(3);
+    expect(saves[1]?.atLaunches).toBe(4);
+    expect(saves[1]?.record).toMatchObject({ verdict: "revise", messageDispatched: true });
+    expect(String(saves[1]?.record.stopReason)).toContain("being organized");
+    expect(saves[2]?.atLaunches).toBe(8);
+    expect(saves[2]?.record).toMatchObject({ verdict: "verified", messageDispatched: true });
+    expect((saves[2]?.record.feedbackHistory as Array<Record<string, unknown>> | undefined)?.[0]).toMatchObject({ verdict: "revise" });
+    // Both passes stay readable: the newest result once, the first pass folded.
+    expect(screen.getByText(/organized one checked repair with the remaining access/)).toBeTruthy();
+    expect(screen.getByText(REPAIR_EXECUTION)).toBeTruthy();
+    const retained = screen.getByText("Before automatic repair").closest("details") as HTMLDetailsElement;
+    expect(retained.hasAttribute("open")).toBe(false);
+    fireEvent.click(screen.getByText("Before automatic repair"));
+    expect(retained.hasAttribute("open")).toBe(true);
+    expect(screen.getByText(FIRST_EXECUTION)).toBeTruthy();
+    expect(screen.getByText(/Read-only critique: the unchanged checks still fail\./)).toBeTruthy();
+    expect(screen.getByText("0 of 6 authorized model turns left.")).toBeTruthy();
+    expect(screen.getByText("0 of 2 write turns left.")).toBeTruthy();
+  });
+
+  it("a failed checkpoint sends no corrective turn and keeps the round non-retryable", async () => {
+    const bridge = scopedBridge({
+      providers: repairProviders(),
+      launch: async (command, call) => repairRound(command, call),
+      save: (record) => {
+        if (String(record.stopReason).includes("being organized")) throw new Error("disk full");
+        return saveCoordinationRecordForTest(bridge.saved, record);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "6" } });
+    consentToRepairChanges();
+    sendMessage();
+    await waitFor(() => expect(bridge.launchCount()).toBe(4));
+    expect(await screen.findByText(/could not be saved/)).toBeTruthy();
+    expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(/could not confirm this window for the automatic repair/)).toBeTruthy();
+    expect(screen.queryByText("Before automatic repair")).toBeNull();
+    expect(bridge.saved.at(-1)).toMatchObject({ verdict: "revise", messageDispatched: true });
+    // The completed-and-saved round replaces the draft: there is no send surface to retry from.
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+  });
+
+  it("a scope that ended between the passes keeps the completed round and sends no repair", async () => {
+    const bridge = scopedBridge({
+      providers: repairProviders(),
+      launch: async (command, call) => repairRound(command, call),
+      readScope: (scope, call) => (call >= 3 ? null : scope),
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "6" } });
+    consentToRepairChanges();
+    sendMessage();
+    await waitFor(() => expect(bridge.launchCount()).toBe(4));
+    expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(/could not confirm this window for the automatic repair/)).toBeTruthy();
+    expect(screen.getByText(/Read-only critique: the unchanged checks still fail\./)).toBeTruthy();
+    expect(bridge.saved.at(-1)).toMatchObject({ verdict: "revise", messageDispatched: true });
+  });
+
+  it("leaving the draft during the repair keeps the checkpointed first round and sends no corrective writer", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const bridge = scopedBridge({
+      providers: repairProviders(),
+      launch: async (command, call) => {
+        if (call === 5) await gate;
+        return repairRound(command, call);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "6" } });
+    consentToRepairChanges();
+    sendMessage();
+    // The checkpoint (verdict revise + repair intent) is on disk before the
+    // first corrective launch; leaving the draft then cancels the repair.
+    await waitFor(() => expect(bridge.saved.some((record) => String(record.stopReason).includes("being organized"))).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+    release();
+    await waitFor(() => expect(bridge.launchCount()).toBe(5));
+    // The replaced corrective outcome is not recorded; the checkpoint record
+    // is the goal-level record and stays non-retryable.
+    await waitFor(() => expect(bridge.saved.filter((record) => record.verdict !== "unconfirmed")).toHaveLength(1));
+    expect(bridge.saved.at(-1)).toMatchObject({ verdict: "revise", messageDispatched: true });
+    expect(screen.queryByText("Changes verified")).toBeNull();
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("a final-save failure keeps both passes visible and the goal non-retryable", async () => {
+    const bridge = scopedBridge({
+      providers: repairProviders(),
+      launch: async (command, call) => repairRound(command, call),
+      save: (record) => {
+        if (record.verdict === "verified") throw new Error("disk full");
+        return saveCoordinationRecordForTest(bridge.saved, record);
+      },
+    });
+    render(<App />);
+    await openDraftWithPanel();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "6" } });
+    consentToRepairChanges();
+    sendMessage();
+    expect(await screen.findByText(/could not be saved for the next time/)).toBeTruthy();
+    expect(screen.getByText("Changes verified", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(REPAIR_EXECUTION)).toBeTruthy();
+    expect(screen.getByText("Before automatic repair")).toBeTruthy();
+    expect(bridge.launchCount()).toBe(8);
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("reloads a repaired record as facts only: retained first pass, no live controls, write consent off", async () => {
+    const record = normalizeCoordinationRecordForTest({
+      requestId: "historic-repair", workspacePath: "/work/goal", goal: "Fix the helper.",
+      planningHarness: "Codex", reviewHarness: "Claude", planText: "Corrective plan.", reviewText: CHECK_TEXT,
+      executionHarness: "Codex", auditHarness: "Claude", executionText: REPAIR_EXECUTION, auditText: REPAIR_AUDIT,
+      result: REPAIR_AUDIT, verdict: "verified", stopReason: "The independent harness verified the changes, so this stopped.",
+      planningQuota: "available", reviewQuota: "available", messageDispatched: true,
+      feedbackHistory: [{
+        planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: CHECK_TEXT,
+        executionText: FIRST_EXECUTION, auditText: CRITIQUE, executionHarness: "Codex", auditHarness: "Claude",
+        result: CRITIQUE, verdict: "revise", stopReason: "The independent verification says the changes need revision, so this stopped.",
+        messageDispatched: true, roundEvents: [], commandIds: ["coordinate-plan-a", "coordinate-review-b", "coordinate-execute-c", "coordinate-audit-d"],
+      }],
+    });
+    scopedBridge({ providers: repairProviders(), launch: async () => ({ text: "", errorText: "" }), records: [record!] });
+    render(<App />);
+    expect(await screen.findByText("Changes verified", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(/organized one checked repair with the remaining access/)).toBeTruthy();
+    expect(screen.getByText("Before automatic repair")).toBeTruthy();
+    for (const name of ["Change", "Stop allowing", "Allow more turns"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+    await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement).value).toBe("4");
+  });
+
+  it("carries a terminal execution-audit revision into a fresh draft without sending or write consent", async () => {
+    // The completed C2-style record: revise verdict from the execution audit
+    // with no repair (budget), so Revise must carry execution feedback.
+    const record = normalizeCoordinationRecordForTest({
+      requestId: "budget-stopped", workspacePath: "/work/goal", goal: "Fix the helper.",
+      planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: CHECK_TEXT,
+      executionHarness: "Codex", auditHarness: "Claude", executionText: FIRST_EXECUTION, auditText: CRITIQUE,
+      result: CRITIQUE, verdict: "revise",
+      stopReason: "The independent verification says the changes need revision, so this stopped. There is not enough access left for one more checked repair, which needs three model turns and one write turn. GoalPort did not add turns.",
+      planningQuota: "available", reviewQuota: "available", messageDispatched: true,
+    });
+    scopedBridge({ providers: repairProviders(), launch: async (command) => planOrReview(command), records: [record!] });
+    render(<App />);
+    expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+    expect(screen.getByText(/not enough access left for one more checked repair/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Revise" }));
+    expect(await screen.findByText(/Continuing from a completed execution round/)).toBeTruthy();
+    expect(screen.getByText(/The independent audit said:/)).toBeTruthy();
+    expect(screen.getByText(/file changes need separate consent again/)).toBeTruthy();
+    expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+  });
+});
 });
