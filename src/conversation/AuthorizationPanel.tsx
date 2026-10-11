@@ -103,6 +103,10 @@ export function AuthorizationPanel({
           ? `GoalPort may use ${joinNames(selectedNames)} for plan and check turns. Nothing is sent until you press Send.`
           : "Choose the harnesses GoalPort may use for plan and check turns. Nothing is sent until you press Send."}
       </p>
+      <p>
+        If independent verification then finds unfinished work, GoalPort may organize one further
+        checked repair inside the budgets you choose here — keep this window open for it.
+      </p>
       <ul className="authorization-provider-list">
         {catalog.map((instance) => {
           const { state, reason } = rowState(instance);

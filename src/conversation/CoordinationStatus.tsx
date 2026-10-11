@@ -1,6 +1,6 @@
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
 import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
-import type { RoundEvent } from "../coordination/savedPlan";
+import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
 
@@ -31,6 +31,11 @@ export interface CoordinationStatusProps {
   onSendAgainWithout?: () => void;
   /** Completed recovery facts for this round: one card per failure or takeover. */
   roundEvents?: readonly RoundEvent[];
+  /**
+   * Retained first-pass facts when the one automatic repair ran in this Send.
+   * Facts only: history never carries live controls or restores permissions.
+   */
+  feedbackHistory?: readonly CoordinationRoundFact[];
   /** Forgets that this machine could not run the blocked harness's tools. */
   onUseAgain?: () => void;
   /**
@@ -148,6 +153,31 @@ function EnvironmentBlockedCard({
   );
 }
 
+/** The retained first pass, folded away: reports stay readable as facts. */
+function RetainedRoundSection({ round }: { round: CoordinationRoundFact }) {
+  return (
+    <details className="coordination-retained-round">
+      <summary>Before automatic repair</summary>
+      <dl>
+        <dt>Outcome</dt><dd>{outcomeLabel(round.verdict)}</dd>
+        <dt>Planning harness</dt><dd>{fact(round.planningHarness)}</dd>
+        <dt>Review harness</dt><dd>{fact(round.reviewHarness)}</dd>
+        <dt>Plan</dt><dd>{fact(round.planText)}</dd>
+        <dt>Check</dt><dd>{fact(round.reviewText)}</dd>
+        <dt>Changes{round.executionHarness ? ` — ${round.executionHarness}` : ""}</dt><dd>{fact(round.executionText)}</dd>
+        <dt>Independent verification{round.auditHarness ? ` — ${round.auditHarness}` : ""}</dt><dd>{fact(round.auditText)}</dd>
+        <dt>Stop reason</dt><dd>{fact(round.stopReason)}</dd>
+      </dl>
+      {round.commandIds.length > 0 ? (
+        <details className="technical-details">
+          <summary>Completed command IDs</summary>
+          <pre className="technical-details-pre">{round.commandIds.join("\n")}</pre>
+        </details>
+      ) : null}
+    </details>
+  );
+}
+
 export function CoordinationStatus({
   goal,
   planningHarness,
@@ -168,6 +198,7 @@ export function CoordinationStatus({
   environmentAlternatives,
   onSendAgainWithout,
   roundEvents,
+  feedbackHistory,
   onUseAgain,
   roundSummary,
   budget,
@@ -188,6 +219,12 @@ export function CoordinationStatus({
         <dt>Outcome</dt><dd>{outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
       </dl>
+      {feedbackHistory && feedbackHistory.length > 0 ? (
+        <p className="coordination-repair-note">
+          The independent check found unfinished work, so GoalPort organized one checked repair
+          with the remaining access you allowed. The result above is the repaired pass.
+        </p>
+      ) : null}
       {verdict === "checked" && !executionHarness && !executionText ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
       {executionEvidence ? (
         <article className="coordination-result" aria-label="Workspace changes result">
@@ -203,6 +240,9 @@ export function CoordinationStatus({
           <p>{fact(auditText ?? null)}</p>
         </article>
       ) : null}
+      {feedbackHistory && feedbackHistory.length > 0
+        ? feedbackHistory.map((round, index) => <RetainedRoundSection key={`${round.verdict ?? "none"}-${index}`} round={round} />)
+        : null}
       {roundSummary ? <p className="coordination-summary">{roundSummary}</p> : null}
       {environmentBlocked ? (
         <EnvironmentBlockedCard
@@ -296,10 +336,14 @@ export interface CoordinationProgressProps {
   readonly failures: readonly string[];
   /** What is happening right now: "{Harness} is planning…" or a takeover line. */
   readonly activity: string | null;
+  /** True while the one in-window corrective pass is running. */
+  readonly repair?: boolean;
   readonly remaining: number | null;
   readonly maxTurns: number | null;
   readonly writeRemaining?: number | null;
   readonly maxWriteTurns?: number | null;
+  /** Ends the authorization for further turns; never a claim about edits. */
+  readonly onStopAllowing?: () => void;
 }
 
 /**
@@ -307,10 +351,15 @@ export interface CoordinationProgressProps {
  * user sees which harness is working, which failed, who took over, and how
  * many authorized model turns are left.
  */
-export function CoordinationProgress({ failures, activity, remaining, maxTurns, writeRemaining, maxWriteTurns }: CoordinationProgressProps) {
+export function CoordinationProgress({ failures, activity, repair, remaining, maxTurns, writeRemaining, maxWriteTurns, onStopAllowing }: CoordinationProgressProps) {
   return (
     <section className="coordination-status coordination-progress" aria-label="Round in progress" aria-live="polite">
       <p>You sent a goal without picking a runtime. The harnesses you allowed are working on it now.</p>
+      {repair ? (
+        <p className="coordination-progress-repair">
+          The first check found unfinished work, so one checked repair is now running with the remaining allowed turns.
+        </p>
+      ) : null}
       {failures.map((sentence, index) => (
         <p key={index} className="coordination-progress-failure">{sentence}</p>
       ))}
@@ -319,6 +368,19 @@ export function CoordinationProgress({ failures, activity, remaining, maxTurns, 
         <p>{remaining} of {maxTurns} authorized model turns left.</p>
       ) : null}
       {maxWriteTurns != null ? <p>{writeRemaining ?? "Unknown"} of {maxWriteTurns} write turns left.</p> : null}
+      {onStopAllowing ? (
+        <div className="coordination-access">
+          <button
+            type="button"
+            className="button button-small button-outline"
+            aria-label="Stop allowing"
+            onClick={onStopAllowing}
+          >
+            Stop allowing
+          </button>
+          <span className="coordination-access-caption">Stopping ends the authorization for further turns. It does not undo any edit and does not prove a turn already in flight stopped.</span>
+        </div>
+      ) : null}
     </section>
   );
 }

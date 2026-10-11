@@ -334,8 +334,14 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   border-top: 1px solid var(--line);
 }
 .coordination-access-label { color: var(--ink-muted); font-size: 12px; font-weight: 700; margin-right: auto; }
+.coordination-access-caption { color: var(--ink-muted); font-size: 12px; line-height: 1.45; }
 .coordination-progress-failure { color: var(--red) !important; }
 .coordination-progress-activity { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-progress-repair { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-repair-note { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-retained-round { margin: 10px 0 0; padding-top: 10px; border-top: 1px dashed var(--line); }
+.coordination-retained-round > summary { color: var(--ink-muted); font-size: 12px; font-weight: 700; cursor: pointer; }
+.coordination-retained-round dl { margin-top: 8px; }
 .authorization-panel {
   margin: 12px 22px 0;
   padding: 12px 14px;
