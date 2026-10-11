@@ -6,7 +6,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { materializeStubBin, stubWrapperSource, writeStubBehavior } from "./lib/stubbin.mjs";
-import { DIAGNOSTIC_STDOUT, STUB_BEHAVIORS } from "./stub-harness.mjs";
+import { createExecutionFixture, EXECUTION_FIXTURE_INCOMPLETE_SOURCE, EXECUTION_OPERATION_PRESETS, EXECUTION_PRESETS } from "./lib/execution-fixture.mjs";
+import { DIAGNOSTIC_STDOUT, normalizeBehavior, STUB_BEHAVIORS } from "./stub-harness.mjs";
 
 const require = createRequire(import.meta.url);
 const {
@@ -99,14 +100,14 @@ function assertStubResolution(harness) {
   }
 }
 
-function spawnStubProcess(harness, identity, args, cwd = harness.worktree) {
+function spawnStubProcess(harness, identity, args, cwd = harness.worktree, env = harness.env) {
   assert.ok(IDENTITIES.has(identity), `only a pinned stub identity may run: ${identity}`);
   const launch = process.platform === "win32"
     ? { file: process.execPath, args: [STUB_PROGRAM.pathname, identity, ...args] }
     : { file: path.join(harness.stubDir, identity), args };
   return spawnSync(launch.file, launch.args, {
     cwd,
-    env: harness.env,
+    env,
     encoding: "utf8",
     timeout: 15000,
     maxBuffer: 200000,
@@ -117,7 +118,7 @@ function spawnStubProcess(harness, identity, args, cwd = harness.worktree) {
 
 const IDENTITIES = new Set(["codex", "claude"]);
 
-function commandFor(harness, instanceId) {
+function commandFor(harness, instanceId, { writes = false, worktree = harness.worktree } = {}) {
   harness.nextId += 1;
   return {
     commandId: `coordinate-plan-${instanceId}-m1-${harness.nextId}`,
@@ -125,14 +126,14 @@ function commandFor(harness, instanceId) {
     modelSelection: { instanceId, model: instanceId === "codex" ? "gpt-6.1-sol" : "opus" },
     runtimeMode: "approval-required",
     approvalPolicy: "never",
-    sandboxPolicy: { type: "readOnly" },
-    workspaceStrategy: { type: "existing_worktree", worktreePath: harness.worktree },
+    sandboxPolicy: { type: writes ? "workspaceWrite" : "readOnly" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath: worktree },
     initialMessage: { text: `Offline acceptance prompt containing ${SECRET_PROMPT_MARKER}; never put this prompt in invocation logs.` },
   };
 }
 
-async function runTurn(harness, instanceId) {
-  const command = commandFor(harness, instanceId);
+async function runTurn(harness, instanceId, { writes = false, worktree = harness.worktree } = {}) {
+  const command = commandFor(harness, instanceId, { writes, worktree });
   assert.equal(writeGrant(harness.stateDir, command.commandId), true);
   // Spawn only the generated wrapper by absolute path. This still exercises
   // runCliTurn's real argv/normalization path, but cannot fall through to a
@@ -400,4 +401,105 @@ test("M2 carry-out, Claude no-text and fixed bounded delay use actual spawned st
   assert.equal(delayed.ok, true);
   assert.equal(delayed.text, expected);
   assert.equal(harness.log().filter(e => e.invocationType === 'turn').length, 3);
+});
+
+test("continuation fixture operations stay closed to their preset and pin the b1-b3 queues", () => {
+  const continuation = {
+    "codex-fixture-incomplete-writer": "incomplete-writer",
+    "codex-fixture-corrective-plan": "corrective-plan",
+    "codex-fixture-corrective-writer": "corrective-writer",
+    "claude-fixture-critique-checker": "critique-checker",
+  };
+  for (const [behaviorId, operation] of Object.entries(continuation)) {
+    const behavior = STUB_BEHAVIORS[behaviorId];
+    assert.equal(behavior?.kind, "turn", `${behaviorId} is a closed turn behavior`);
+    assert.equal(behavior.fixtureOperation, operation);
+    assert.equal(behavior.stdout, "", "fixture operations build provider output from their own evidence, not canned text");
+    assert.deepEqual(EXECUTION_OPERATION_PRESETS[operation], ["c1-feedback-repair"]);
+    assert.equal(behavior.exitCode, 0, `${behaviorId} declares a completed CLI turn`);
+  }
+  assert.deepEqual(EXECUTION_PRESETS["c1-feedback-repair"].codex, ["codex-fixture-plan", "codex-fixture-incomplete-writer", "codex-fixture-corrective-plan", "codex-fixture-corrective-writer"]);
+  assert.deepEqual(EXECUTION_PRESETS["c1-feedback-repair"].claude, ["claude-fixture-critique-checker", "claude-fixture-auditor"]);
+  // b1/b2/b3 keep their exact closed queues and the partial writer keeps its
+  // terminal failed turn.
+  assert.deepEqual(EXECUTION_PRESETS["b1-full-chain"].codex, ["codex-fixture-plan", "codex-fixture-writer"]);
+  assert.deepEqual(EXECUTION_PRESETS["b1-full-chain"].claude, ["claude-fixture-auditor"]);
+  assert.deepEqual(EXECUTION_PRESETS["b2-no-write"].codex, ["codex-fixture-plan", "codex-fixture-no-write"]);
+  assert.deepEqual(EXECUTION_PRESETS["b3-partial-failure"].codex, ["codex-fixture-plan", "codex-fixture-partial-writer"]);
+  assert.equal(STUB_BEHAVIORS["codex-fixture-partial-writer"].exitCode, 1, "the b3 partial writer stays a failed CLI turn");
+  assert.deepEqual(EXECUTION_OPERATION_PRESETS["partial-writer"], ["b3-partial-failure"]);
+  const knownOperations = new Set(Object.keys(EXECUTION_OPERATION_PRESETS));
+  for (const [behaviorId, behavior] of Object.entries(STUB_BEHAVIORS)) {
+    if (behavior.fixtureOperation === undefined) continue;
+    assert.ok(knownOperations.has(behavior.fixtureOperation), `${behaviorId} names an operation in the closed matrix`);
+  }
+  assert.throws(() => normalizeBehavior(behaviorConfig({ turns: { codex: ["codex-fixture-arbitrary-command"], claude: [] } })), /known turn responses/u);
+});
+
+test("a completed failed-check turn stays distinct from the terminal b3 failed turn at the spawned boundary", async (t) => {
+  const continuation = createExecutionFixture("c1-feedback-repair");
+  const partial = createExecutionFixture("b3-partial-failure");
+  t.after(() => { continuation.dispose(); partial.dispose(); });
+  const c1 = fixture(t, behaviorConfig({
+    turns: { codex: ["codex-fixture-incomplete-writer"], claude: ["claude-fixture-critique-checker"] },
+  }), { executionFixture: continuation.config });
+  const b3 = fixture(t, behaviorConfig({ turns: { codex: ["codex-fixture-partial-writer"], claude: [] } }), { executionFixture: partial.config });
+  // The stub validates that the driver-bound fixture root really lives under
+  // the OS temp directory; this helper's own TMPDIR is the harness root, so
+  // these spawns keep the real temp directory the fixture was created under.
+  const c1Env = { ...c1.env, TMPDIR: path.dirname(continuation.root), TEMP: path.dirname(continuation.root), TMP: path.dirname(continuation.root) };
+  const b3Env = { ...b3.env, TMPDIR: path.dirname(partial.root), TEMP: path.dirname(partial.root), TMP: path.dirname(partial.root) };
+
+  const firstWriter = spawnStubProcess(c1, "codex", ["exec", "--sandbox", "workspace-write", "--cd", continuation.root, "prompt"], continuation.root, c1Env);
+  assert.equal(firstWriter.status, 0, "failed checks are feedback reported by a completed CLI turn");
+  const firstMessage = JSON.parse(firstWriter.stdout);
+  assert.match(firstMessage.item.text, /still fail \(1 passed, 1 failed\)/u);
+  assert.equal(codexReply(firstWriter.stdout), firstMessage.item.text.trim());
+  assert.equal(fs.readFileSync(continuation.sourcePath, "utf8"), EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
+
+  const critique = spawnStubProcess(c1, "claude", ["--permission-mode", "plan", "prompt"], continuation.root, c1Env);
+  assert.equal(critique.status, 0, "the critique turn completes while its own check command exits 1");
+  const critiqueMessage = JSON.parse(critique.stdout);
+  assert.equal(critiqueMessage.is_error, false);
+  assert.match(critiqueMessage.result, /VERDICT: revise$/u);
+  assert.deepEqual(claudeReply(critique.stdout), { text: critiqueMessage.result.trim(), failed: false });
+
+  const partialTurn = spawnStubProcess(b3, "codex", ["exec", "--sandbox", "workspace-write", "--cd", partial.root, "prompt"], partial.root, b3Env);
+  assert.equal(partialTurn.status, 1, "a failed CLI turn stays terminal");
+  const partialMessage = JSON.parse(partialTurn.stdout);
+  assert.match(partialMessage.item.text, /Partial edit retained/u);
+  assert.doesNotMatch(partialMessage.item.text, /VERDICT: revise/u);
+  assert.equal(codexReply(partialTurn.stdout), partialMessage.item.text.trim());
+
+  const operations = fs.readFileSync(path.join(c1.stubDir, "execution-operations.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.deepEqual(operations.map(({ operation }) => operation), ["incomplete-writer", "critique-checker"]);
+  assert.equal(operations[0].exitCode, 0);
+  assert.equal(operations[0].evidence.checks.command.exitCode, 1, "the writer's own check command really failed");
+  assert.equal(operations[1].status, "completed");
+  assert.equal(operations[1].verdict, "revise");
+  assert.equal(operations[1].evidence.observedFailure, true);
+  assert.equal(operations[1].evidence.checker.testCommand.exitCode, 1, "the checker's own check command really failed");
+  assert.equal(operations[1].evidence.checker.pid === operations[1].evidence.parentPid, false, "the checker is its own process");
+  assert.equal(operations[1].evidence.checker.testCommand.pid === operations[1].evidence.checker.pid, false, "the checker's check runner is another process");
+
+  const turnLog = c1.log().filter((entry) => entry.invocationType === "turn");
+  assert.deepEqual(turnLog.map((entry) => [entry.behaviorId, entry.exitCode, entry.fixtureStatus, entry.fixtureVerdict]), [
+    ["codex-fixture-incomplete-writer", 0, "completed", null],
+    ["claude-fixture-critique-checker", 0, "completed", "revise"],
+  ]);
+  assert.equal(JSON.stringify(c1.log()).includes(SECRET_PROMPT_MARKER), false);
+  assert.equal(JSON.stringify(c1.log()).includes(c1.sentinel), false);
+  assert.equal(JSON.stringify(operations).includes(c1.sentinel), false);
+
+  // Rewriting behavior.json keeps the driver-bound fixture config, so the
+  // corrective plan still reads the actual intermediate workspace bytes.
+  c1.writeBehavior(behaviorConfig({ turns: { codex: ["codex-fixture-corrective-plan"], claude: [] } }));
+  const correctivePlan = spawnStubProcess(c1, "codex", ["exec", "--sandbox", "read-only", "--cd", continuation.root, "prompt"], continuation.root, c1Env);
+  assert.equal(correctivePlan.status, 0);
+  const planMessage = JSON.parse(correctivePlan.stdout);
+  assert.match(planMessage.item.text, /current intermediate src\/add\.mjs/u);
+  assert.match(planMessage.item.text, /VERDICT: carry-out$/u);
+  const planEvidence = JSON.parse(fs.readFileSync(path.join(c1.stubDir, "execution-operations.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).at(-1));
+  assert.equal(planEvidence.operation, "corrective-plan");
+  assert.equal(planEvidence.evidence.sourceText, EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
 });

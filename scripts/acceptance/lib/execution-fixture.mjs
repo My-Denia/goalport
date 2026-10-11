@@ -9,7 +9,33 @@ export const EXECUTION_PRESETS = Object.freeze({
   "b1-full-chain": Object.freeze({ codex: Object.freeze(["codex-fixture-plan", "codex-fixture-writer"]), claude: Object.freeze(["claude-fixture-auditor"]) }),
   "b2-no-write": Object.freeze({ codex: Object.freeze(["codex-fixture-plan", "codex-fixture-no-write"]), claude: Object.freeze([]) }),
   "b3-partial-failure": Object.freeze({ codex: Object.freeze(["codex-fixture-plan", "codex-fixture-partial-writer"]), claude: Object.freeze([]) }),
+  // Closed continuation preset: one initial planner turn, then the fixed
+  // continuation story (incomplete writer -> read-only critique -> corrective
+  // plan -> corrective writer) plus two separate read-only checker processes.
+  "c1-feedback-repair": Object.freeze({
+    codex: Object.freeze(["codex-fixture-plan", "codex-fixture-incomplete-writer", "codex-fixture-corrective-plan", "codex-fixture-corrective-writer"]),
+    claude: Object.freeze(["claude-fixture-critique-checker", "claude-fixture-auditor"]),
+  }),
 });
+
+/**
+ * Closed operation matrix. Every fixture operation is bound to the presets
+ * that may request it; no preset can reach an operation outside its own row,
+ * and no argument can name a command, target file or patch.
+ */
+export const EXECUTION_OPERATION_PRESETS = Object.freeze({
+  plan: Object.freeze(["b1-full-chain", "b2-no-write", "b3-partial-failure", "c1-feedback-repair"]),
+  "no-write": Object.freeze(["b2-no-write"]),
+  writer: Object.freeze(["b1-full-chain"]),
+  "partial-writer": Object.freeze(["b3-partial-failure"]),
+  "incomplete-writer": Object.freeze(["c1-feedback-repair"]),
+  "corrective-plan": Object.freeze(["c1-feedback-repair"]),
+  "corrective-writer": Object.freeze(["c1-feedback-repair"]),
+  "critique-checker": Object.freeze(["c1-feedback-repair"]),
+  auditor: Object.freeze(["b1-full-chain", "c1-feedback-repair"]),
+});
+
+const CONTINUATION_PRESET = "c1-feedback-repair";
 
 export const EXECUTION_FIXTURE_FILES = Object.freeze({
   marker: ".goalport-offline-fixture.json",
@@ -26,6 +52,11 @@ const HELPER_PATH = fileURLToPath(import.meta.url);
 export const EXECUTION_FIXTURE_SOURCE = "export function add(a, b) { return a - b; }\n";
 export const EXECUTION_FIXTURE_REPAIRED_SOURCE = "export function add(a, b) { return a + b; }\n";
 export const EXECUTION_FIXTURE_PARTIAL_SOURCE = "export function add(a, b) { return a + b + 1; }\n";
+// The continuation preset's first writer leaves this genuinely incomplete
+// edit behind: the positive case is fixed, the negative case still fails, so
+// the unchanged checks really fail (1 passed, 1 failed) while the CLI turn
+// itself completes honestly.
+export const EXECUTION_FIXTURE_INCOMPLETE_SOURCE = "export function add(a, b) { if (a >= 0) return a + b; return a - b; }\n";
 export const EXECUTION_FIXTURE_TEST = [
   'import assert from "node:assert/strict";',
   'import { test } from "node:test";',
@@ -43,6 +74,7 @@ export const EXECUTION_FIXTURE_TEST = [
 
 const REPAIRED_SOURCE_HASH = sha256(EXECUTION_FIXTURE_REPAIRED_SOURCE);
 const PARTIAL_SOURCE_HASH = sha256(EXECUTION_FIXTURE_PARTIAL_SOURCE);
+const INCOMPLETE_SOURCE_HASH = sha256(EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
 const KNOWN_PRESETS = new Set(Object.keys(EXECUTION_PRESETS));
 
 function sha256(value) {
@@ -260,26 +292,40 @@ function fixedPlan(config, sourceBytes) {
   return "Plan: read the pinned src/add.mjs and unchanged test/add.test.mjs, replace the fixture's subtraction with addition, run the original node --test checks, then have a separate read-only auditor read the result and rerun those checks. This is a closed synthetic fixture operation; no model judgment or arbitrary command is involved. VERDICT: carry-out";
 }
 
+const WRITE_OPERATIONS = Object.freeze(["writer", "partial-writer", "incomplete-writer", "corrective-writer"]);
+
+function isWriteOperation(operation) {
+  return WRITE_OPERATIONS.includes(operation);
+}
+
 function expectedOperationRole(operation) {
-  if (operation === "writer" || operation === "partial-writer") return "write";
-  return "read";
+  return isWriteOperation(operation) ? "write" : "read";
+}
+
+// Refusal wording keeps the pre-existing plan/executor/auditor roles; the
+// continuation checker and writer add their own closed labels.
+function operationRole(operation) {
+  if (isWriteOperation(operation)) return "executor";
+  if (operation === "auditor") return "read-only-auditor";
+  if (operation === "critique-checker") return "read-only-checker";
+  return "plan";
+}
+
+function caughtErrorRole(operation) {
+  if (isWriteOperation(operation)) return "executor";
+  if (operation === "auditor") return "read-only-auditor";
+  if (operation === "critique-checker") return "read-only-checker";
+  return "read-only-plan";
 }
 
 function operationAllowed(operation, preset) {
-  const expectedPreset = {
-    plan: ["b1-full-chain", "b2-no-write", "b3-partial-failure"],
-    "no-write": ["b2-no-write"],
-    writer: ["b1-full-chain"],
-    "partial-writer": ["b3-partial-failure"],
-    auditor: ["b1-full-chain"],
-  };
-  return expectedPreset[operation]?.includes(preset) === true;
+  return EXECUTION_OPERATION_PRESETS[operation]?.includes(preset) === true;
 }
 
 function refused(operation, reason, config, cwd) {
   return {
     operation,
-    role: operation === "writer" || operation === "partial-writer" ? "executor" : operation === "auditor" ? "read-only-auditor" : "plan",
+    role: operationRole(operation),
     preset: config?.preset ?? null,
     status: "refused",
     verified: false,
@@ -375,6 +421,109 @@ function runWriter({ operation, config, cwd, parentPid }) {
   };
 }
 
+const CONTINUATION_WRITER_STEPS = Object.freeze({
+  "incomplete-writer": Object.freeze({ nextSource: EXECUTION_FIXTURE_INCOMPLETE_SOURCE, checksMustFail: true }),
+  "corrective-writer": Object.freeze({ nextSource: EXECUTION_FIXTURE_REPAIRED_SOURCE, checksMustFail: false }),
+});
+
+function checkCounts(command) {
+  const passed = /# pass (\d+)/u.exec(command?.stdout ?? "");
+  const failed = /# fail (\d+)/u.exec(command?.stdout ?? "");
+  return { passed: passed ? Number(passed[1]) : null, failed: failed ? Number(failed[1]) : null };
+}
+
+/**
+ * The continuation preset's two writers. Both CLI turns complete (exit 0)
+ * while the spawned node --test command keeps its own exit status: the pinned
+ * check failure is reported as feedback by a completed turn. The b3 partial
+ * writer is untouched and still ends in a failed CLI turn.
+ */
+function runFeedbackWriter({ operation, config, cwd, parentPid }) {
+  const step = CONTINUATION_WRITER_STEPS[operation];
+  const expectedBefore = operation === "corrective-writer" ? INCOMPLETE_SOURCE_HASH : config.sourceSha256;
+  const before = readPinnedFixture(config, { expectedSourceSha256: expectedBefore });
+  const baselineCommand = runNode(["--test", config.testPath], config.root);
+  if (!isAssertionFailure(baselineCommand)) {
+    return refused(operation, "the baseline node --test run did not observe the expected assertion failure", config, cwd);
+  }
+  const sourcePath = path.join(config.root, config.sourcePath);
+  const sourceAfterBaseline = checkedRegularFile(sourcePath, "fixture source");
+  const testAfterBaseline = checkedRegularFile(path.join(config.root, config.testPath), "fixture test");
+  if (sha256(sourceAfterBaseline) !== before.sourceSha256 || sha256(testAfterBaseline) !== config.testSha256) {
+    return refused(operation, "fixture bytes changed before the bounded writer edit", config, cwd);
+  }
+  fs.writeFileSync(sourcePath, step.nextSource, { encoding: "utf8", mode: 0o600 });
+  const changedSource = checkedRegularFile(sourcePath, "fixture source after edit");
+  const unchangedTest = checkedRegularFile(path.join(config.root, config.testPath), "fixture test after edit");
+  const changedHash = sha256(changedSource);
+  const unchangedTestHash = sha256(unchangedTest);
+  const checksCommand = runNode(["--test", config.testPath], config.root);
+  const baseline = {
+    command: baselineCommand,
+    sourceSha256: before.sourceSha256,
+    testSha256: before.testSha256,
+    assertionFailureObserved: true,
+  };
+  const checks = {
+    command: checksCommand,
+    sourceSha256: changedHash,
+    sourceText: changedSource.toString("utf8"),
+    testSha256: unchangedTestHash,
+    testUnchanged: unchangedTestHash === config.testSha256,
+    testsPassed: passingTestOutput(checksCommand),
+    testsFailed: isAssertionFailure(checksCommand),
+  };
+  const counts = checkCounts(checksCommand);
+  const completed = changedHash === sha256(step.nextSource)
+    && checks.testUnchanged
+    && (step.checksMustFail ? checks.testsFailed : checks.testsPassed);
+  const report = completed
+    ? operation === "incomplete-writer"
+      ? `First executor CLI turn completed after an incomplete edit to ${config.sourcePath}. The unchanged pinned node --test checks still fail (${counts.passed} passed, ${counts.failed} failed); the observed command output and both byte hashes are retained as feedback for independent review. This reports failed checks honestly and claims no verification.`
+      : `Corrective executor CLI turn completed; the repaired ${config.sourcePath} passes the unchanged pinned node --test checks (${counts.passed}/${(counts.passed ?? 0) + (counts.failed ?? 0)}) with the original check bytes unchanged. This is an offline fixture result, not a model judgment or independent verification.`
+    : "Executor could not establish the expected continuation fixture result; revise or stop. The observed node --test output and file hashes are retained; no verified result is claimed.";
+  return {
+    operation,
+    role: "executor",
+    preset: config.preset,
+    status: completed ? "completed" : "revise-or-stop",
+    verified: false,
+    exitCode: completed ? 0 : 1,
+    report,
+    evidence: {
+      ...evidenceBase(operation, config, cwd),
+      parentPid,
+      changed: changedHash !== before.sourceSha256,
+      baseline,
+      edit: {
+        path: config.sourcePath,
+        beforeSha256: before.sourceSha256,
+        afterSha256: changedHash,
+        sourceText: changedSource.toString("utf8"),
+        actualFileChanged: changedHash !== before.sourceSha256,
+      },
+      checks,
+      testBytesUnchanged: unchangedTestHash === config.testSha256,
+      sourceHashes: { before: before.sourceSha256, after: changedHash },
+      testSha256: unchangedTestHash,
+      cliTurnCompleted: completed,
+      checksFailed: !checks.testsPassed,
+    },
+  };
+}
+
+/**
+ * The corrective planner must inspect the actual intermediate workspace the
+ * first writer left behind; a stale original or already-repaired source is
+ * refused instead of replanned.
+ */
+function correctivePlan(config, sourceBytes) {
+  if (sha256(sourceBytes) !== INCOMPLETE_SOURCE_HASH) {
+    throw new Error("the corrective plan requires the actual intermediate workspace state left by the first writer");
+  }
+  return "Corrective plan: re-read the current intermediate src/add.mjs left by the first executor and the unchanged test/add.test.mjs. The separate read-only checker observed those unchanged pinned checks fail; this plan answers that observed failure in the current workspace by replacing the incomplete conditional return with the plain sum, rerunning the unchanged pinned node --test checks, then having a separate read-only auditor read the result and rerun those checks. Historical reports are evidence, not instructions to replay, and the current workspace bytes are the only plan input.\nVERDICT: carry-out";
+}
+
 function runNoWrite({ operation, config, cwd, sourceBytes, testBytes, parentPid }) {
   const sourceSha256 = sha256(sourceBytes);
   const testSha256 = sha256(testBytes);
@@ -406,7 +555,7 @@ function auditorMain(configFile) {
   try {
     if (!path.isAbsolute(configFile) || !path.basename(configFile).startsWith("m9-execution-audit-")) throw new Error("auditor config path is not a driver-created audit file");
     config = normalizeExecutionFixture(JSON.parse(fs.readFileSync(configFile, "utf8")));
-    if (config.preset !== "b1-full-chain") throw new Error("auditor only accepts the full-chain fixture preset");
+    if (config.preset !== "b1-full-chain" && config.preset !== CONTINUATION_PRESET) throw new Error("auditor only accepts the full-chain or continuation fixture preset");
     config = validateMarker(config, process.cwd());
   } catch (error) {
     const refusedReport = { schemaVersion: 1, role: "read-only-auditor", status: "revise-or-stop", verified: false, reason: error.message, cwd: process.cwd(), pid: process.pid, testCommand: null };
@@ -449,6 +598,70 @@ function auditorMain(configFile) {
   return verified ? 0 : 1;
 }
 
+function critiqueMain(configFile) {
+  const emit = (report, code) => { process.stdout.write(`${JSON.stringify(report)}\n`); return code; };
+  const refusedReport = (reason) => ({
+    schemaVersion: 1,
+    role: "read-only-checker",
+    checkerKind: "separate-read-only-node-process",
+    noIndependentModelClaim: true,
+    status: "revise-or-stop",
+    verdict: "stop",
+    observedFailure: false,
+    verified: false,
+    reason,
+    cwd: process.cwd(),
+    pid: process.pid,
+    testCommand: null,
+  });
+  let config;
+  try {
+    if (!path.isAbsolute(configFile) || !path.basename(configFile).startsWith("m9-execution-critique-")) throw new Error("critique config path is not a driver-created critique file");
+    config = normalizeExecutionFixture(JSON.parse(fs.readFileSync(configFile, "utf8")));
+    if (config.preset !== CONTINUATION_PRESET) throw new Error("the critique checker only accepts the continuation feedback preset");
+    config = validateMarker(config, process.cwd());
+  } catch (error) {
+    return emit(refusedReport(error.message), 1);
+  }
+
+  let sourceBytes;
+  let testBytes;
+  try {
+    sourceBytes = checkedRegularFile(path.join(config.root, config.sourcePath), "fixture source");
+    testBytes = checkedRegularFile(path.join(config.root, config.testPath), "fixture test");
+  } catch (error) {
+    return emit(refusedReport(error.message), 1);
+  }
+  const sourceSha256 = sha256(sourceBytes);
+  const testSha256 = sha256(testBytes);
+  const pinnedTests = testSha256 === config.testSha256;
+  const intermediateSourceObserved = sourceSha256 === INCOMPLETE_SOURCE_HASH;
+  const testCommand = pinnedTests ? runNode(["--test", config.testPath], config.root) : null;
+  // A verdict is only emitted after this process actually observed the
+  // pinned failing checks on the pinned intermediate edit. The check command's
+  // own nonzero exit is the feedback; this checker process still completes.
+  const checkCommandFailed = Boolean(testCommand) && testCommand.exitCode !== 0 && isAssertionFailure(testCommand);
+  const expected = intermediateSourceObserved && pinnedTests && checkCommandFailed;
+  const report = {
+    schemaVersion: 1,
+    role: "read-only-checker",
+    checkerKind: "separate-read-only-node-process",
+    noIndependentModelClaim: true,
+    status: expected ? "completed" : "revise-or-stop",
+    verdict: expected ? "revise" : "stop",
+    observedFailure: expected,
+    checkCommandFailed,
+    intermediateSourceObserved,
+    cwd: process.cwd(),
+    pid: process.pid,
+    sourceRead: { path: config.sourcePath, sha256: sourceSha256, text: sourceBytes.toString("utf8"), matchesIncompleteEdit: intermediateSourceObserved },
+    originalTests: { path: config.testPath, sha256: testSha256, matchesPinnedBytes: pinnedTests },
+    testCommand,
+    reason: expected ? null : "the checker did not observe the expected failing unchanged checks on the pinned intermediate edit",
+  };
+  return emit(report, expected ? 0 : 1);
+}
+
 function runAuditor({ config, cwd, stubDir, parentPid }) {
   const configPath = path.join(stubDir, `m9-execution-audit-${process.pid}-${crypto.randomUUID()}.json`);
   fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -486,6 +699,49 @@ function runAuditor({ config, cwd, stubDir, parentPid }) {
   };
 }
 
+function runCritiqueCheck({ config, cwd, stubDir, parentPid }) {
+  const configPath = path.join(stubDir, `m9-execution-critique-${process.pid}-${crypto.randomUUID()}.json`);
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  let command;
+  try {
+    command = runNode([HELPER_PATH, "--offline-critique", configPath], cwd);
+  } finally {
+    fs.rmSync(configPath, { force: true });
+  }
+  let checker;
+  try { checker = JSON.parse(command.stdout); } catch { checker = null; }
+  const observed = command.exitCode === 0 && checker?.role === "read-only-checker" && checker?.verdict === "revise" && checker?.observedFailure === true;
+  const counts = checkCounts(checker?.testCommand);
+  const report = observed
+    ? `Completed critique from a separate read-only Node checker process (pid ${checker.pid}): it read the intermediate ${config.sourcePath} and ran the unchanged pinned node --test checks, which really failed (${counts.passed} passed, ${counts.failed} failed). The checker's own check command exited ${checker.testCommand.exitCode}; this critique turn itself completed and claims no verification and no independent model judgment.\nVERDICT: revise`
+    : `Critique checker could not observe the expected failing unchanged checks, so no critique is claimed. ${checker?.reason ?? "The actual checker process did not report the expected failing pinned checks."}\nVERDICT: stop`;
+  return {
+    operation: "critique-checker",
+    role: "read-only-checker",
+    preset: config.preset,
+    status: observed ? "completed" : "revise-or-stop",
+    verdict: observed ? "revise" : "stop",
+    verified: false,
+    exitCode: observed ? 0 : 1,
+    report,
+    evidence: {
+      ...evidenceBase("critique-checker", config, cwd),
+      parentPid,
+      checkerProcess: command,
+      checker,
+      checkerKind: checker?.checkerKind ?? null,
+      sourceReadSha256: checker?.sourceRead?.sha256 ?? null,
+      sourceReadText: checker?.sourceRead?.text ?? null,
+      testSha256: checker?.originalTests?.sha256 ?? null,
+      observedFailure: checker?.observedFailure === true,
+      checkCommandFailed: checker?.checkCommandFailed === true,
+      testCommandExitCode: checker?.testCommand?.exitCode ?? null,
+      cliTurnCompleted: observed,
+      verdict: observed ? "revise" : "stop",
+    },
+  };
+}
+
 /**
  * Execute one fixed fixture behavior selected by a closed STUB_BEHAVIORS ID.
  * `argv` is the actual intercepted CLI argv. No argument can name a command,
@@ -500,8 +756,13 @@ export function runExecutionFixtureOperation({ operation, config: rawConfig, ide
   if (mode !== expectedOperationRole(operation)) return refused(operation, `operation ${operation} requires ${expectedOperationRole(operation)} mode but observed ${mode}`, config, cwd);
 
   try {
-    const before = readPinnedFixture(config, { expectedSourceSha256: operation === "auditor" ? null : config.sourceSha256 });
-    if (operation === "plan") {
+    const expectedSourceSha256 = operation === "auditor" || operation === "critique-checker"
+      ? null
+      : operation === "corrective-plan" || operation === "corrective-writer"
+        ? INCOMPLETE_SOURCE_HASH
+        : config.sourceSha256;
+    const before = readPinnedFixture(config, { expectedSourceSha256 });
+    if (operation === "plan" || operation === "corrective-plan") {
       return {
         operation,
         role: "read-only-plan",
@@ -509,18 +770,20 @@ export function runExecutionFixtureOperation({ operation, config: rawConfig, ide
         status: "completed",
         verified: false,
         exitCode: 0,
-        report: fixedPlan(config, before.sourceBytes),
+        report: operation === "plan" ? fixedPlan(config, before.sourceBytes) : correctivePlan(config, before.sourceBytes),
         evidence: { ...evidenceBase(operation, config, cwd), parentPid, sourceSha256: before.sourceSha256, testSha256: before.testSha256, sourceText: before.sourceBytes.toString("utf8"), changed: false },
       };
     }
     if (operation === "no-write") return runNoWrite({ operation, config, cwd, sourceBytes: before.sourceBytes, testBytes: before.testBytes, parentPid });
     if (operation === "writer" || operation === "partial-writer") return runWriter({ operation, config, cwd, parentPid });
+    if (operation === "incomplete-writer" || operation === "corrective-writer") return runFeedbackWriter({ operation, config, cwd, parentPid });
+    if (operation === "critique-checker") return runCritiqueCheck({ config, cwd, stubDir, parentPid });
     if (operation === "auditor") return runAuditor({ config, cwd, stubDir, parentPid });
     return refused(operation, "operation is not in the closed fixture allowlist", config, cwd);
   } catch (error) {
     return {
       operation,
-      role: operation === "writer" || operation === "partial-writer" ? "executor" : operation === "auditor" ? "read-only-auditor" : "read-only-plan",
+      role: caughtErrorRole(operation),
       preset: config.preset,
       status: "revise-or-stop",
       verified: false,
@@ -537,11 +800,13 @@ export function appendExecutionOperationEvidence(stubDir, record) {
   return evidencePath;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === HELPER_PATH && process.argv[2] === "--offline-audit") {
+if (process.argv[1] && path.resolve(process.argv[1]) === HELPER_PATH && (process.argv[2] === "--offline-audit" || process.argv[2] === "--offline-critique")) {
+  const mode = process.argv[2];
+  const role = mode === "--offline-critique" ? "read-only-checker" : "read-only-auditor";
   if (process.argv.length !== 4) {
-    process.stdout.write(`${JSON.stringify({ schemaVersion: 1, role: "read-only-auditor", status: "revise-or-stop", verified: false, reason: "auditor argv is not the fixed offline form", cwd: process.cwd(), pid: process.pid, testCommand: null })}\n`);
+    process.stdout.write(`${JSON.stringify({ schemaVersion: 1, role, status: "revise-or-stop", verified: false, reason: "offline helper argv is not the fixed form", cwd: process.cwd(), pid: process.pid, testCommand: null })}\n`);
     process.exitCode = 1;
   } else {
-    process.exitCode = auditorMain(process.argv[3]);
+    process.exitCode = mode === "--offline-audit" ? auditorMain(process.argv[3]) : critiqueMain(process.argv[3]);
   }
 }

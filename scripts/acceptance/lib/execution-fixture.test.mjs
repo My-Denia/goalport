@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { materializeStubBin, writeStubBehavior } from "./stubbin.mjs";
 import {
   createExecutionFixture,
+  EXECUTION_FIXTURE_INCOMPLETE_SOURCE,
   EXECUTION_FIXTURE_PARTIAL_SOURCE,
   EXECUTION_FIXTURE_REPAIRED_SOURCE,
 } from "./execution-fixture.mjs";
@@ -232,6 +233,245 @@ test("b3 writer leaves a real partial edit, reports failed unchanged tests, and 
   assert.equal(invocation.exitCode, 1);
   assert.equal(invocation.fixtureVerified, false);
   assert.equal(invocation.stdoutSha256, hash(invocation.stdout));
+});
+
+test("c1 continuation preset: a completed failed-check writer is critiqued, replanned, repaired, and verified", { skip: WINDOWS_INTEROP_OUT_OF_SCOPE }, async (t) => {
+  const harness = setup(t, "c1-feedback-repair");
+  const { fixture } = harness;
+  const initialSource = fs.readFileSync(fixture.sourcePath);
+  const pinnedTests = fs.readFileSync(fixture.testPath);
+  const baseline = runOriginalFixtureTests(fixture.root);
+  assert.equal(baseline.status, 1, "the pinned checks really fail before any continuation edit");
+  assert.match(`${baseline.stdout}\n${baseline.stderr}`, /ERR_ASSERTION|AssertionError/u);
+
+  const plan = await harness.turn({ role: "plan" });
+  assert.equal(plan.ok, true, JSON.stringify(plan));
+  assert.match(plan.text, /VERDICT: carry-out$/u);
+  assert.equal(hash(fs.readFileSync(fixture.sourcePath)), fixture.config.sourceSha256, "the first plan is read-only");
+
+  // 1. First writer: incomplete edit, really failing unchanged checks, and a
+  // completed CLI turn that reports the failure honestly.
+  const firstWriter = await harness.turn({ role: "execute", writes: true });
+  assert.equal(firstWriter.ok, true, "a completed critique path starts from a completed CLI turn, not a failed one");
+  assert.match(firstWriter.text, /still fail \(1 passed, 1 failed\)/u);
+  assert.match(firstWriter.text, /claims no verification/u);
+  assert.doesNotMatch(firstWriter.text, /VERIFIED/u);
+  assert.deepEqual(fs.readFileSync(fixture.sourcePath), Buffer.from(EXECUTION_FIXTURE_INCOMPLETE_SOURCE));
+  assert.deepEqual(fs.readFileSync(fixture.testPath), pinnedTests, "the original checks stay byte-for-byte unchanged");
+  const intermediateBytes = fs.readFileSync(fixture.sourcePath);
+  const intermediateHash = hash(intermediateBytes);
+  assert.notDeepEqual(initialSource, intermediateBytes);
+  const firstEvidence = harness.operations().at(-1);
+  assert.equal(firstEvidence.operation, "incomplete-writer");
+  assert.equal(firstEvidence.role, "executor");
+  assert.equal(firstEvidence.status, "completed");
+  assert.equal(firstEvidence.exitCode, 0, "the CLI turn completes; the failure belongs to the subprocess check command");
+  assert.equal(firstEvidence.evidence.cliTurnCompleted, true);
+  assert.equal(firstEvidence.evidence.checksFailed, true);
+  assert.equal(firstEvidence.evidence.checks.command.exitCode, 1);
+  assert.match(firstEvidence.evidence.checks.command.stdout, /# pass 1/u);
+  assert.match(firstEvidence.evidence.checks.command.stdout, /# fail 1/u);
+  assert.equal(firstEvidence.evidence.checks.testsPassed, false);
+  assert.equal(firstEvidence.evidence.checks.testsFailed, true);
+  assert.equal(firstEvidence.evidence.testBytesUnchanged, true);
+  assert.equal(firstEvidence.evidence.edit.afterSha256, hash(EXECUTION_FIXTURE_INCOMPLETE_SOURCE));
+  assert.equal(firstEvidence.evidence.baseline.command.exitCode, 1);
+  assert.equal(firstEvidence.cli.exitCode, 0);
+  assert.equal(firstEvidence.cli.cwd, fixture.root);
+
+  // 2. Separate read-only checker: it observes the real failure in its own
+  // process and only then completes its turn with a revise verdict.
+  const critique = await harness.turn({ role: "audit", identity: "claude" });
+  assert.equal(critique.ok, true, "a completed critique is not a failed CLI turn");
+  assert.match(critique.text, /VERDICT: revise$/u);
+  assert.match(critique.text, /which really failed \(1 passed, 1 failed\)/u);
+  assert.doesNotMatch(critique.text, /VERIFIED/u);
+  assert.deepEqual(fs.readFileSync(fixture.sourcePath), intermediateBytes, "the read-only checker changes nothing");
+  const critiqueEvidence = harness.operations().at(-1);
+  assert.equal(critiqueEvidence.operation, "critique-checker");
+  assert.equal(critiqueEvidence.role, "read-only-checker");
+  assert.equal(critiqueEvidence.status, "completed");
+  assert.equal(critiqueEvidence.verdict, "revise");
+  assert.equal(critiqueEvidence.verified, false, "a critique is feedback, not verification");
+  assert.equal(critiqueEvidence.exitCode, 0);
+  assert.equal(critiqueEvidence.evidence.observedFailure, true);
+  assert.equal(critiqueEvidence.evidence.checkCommandFailed, true);
+  assert.equal(critiqueEvidence.evidence.testCommandExitCode, 1);
+  assert.equal(critiqueEvidence.evidence.checker.testCommand.exitCode, 1);
+  assert.match(critiqueEvidence.evidence.checker.testCommand.stdout, /# fail 1/u);
+  assert.equal(critiqueEvidence.evidence.sourceReadSha256, intermediateHash);
+  assert.equal(critiqueEvidence.evidence.sourceReadText, EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
+  assert.equal(critiqueEvidence.evidence.checker.sourceRead.matchesIncompleteEdit, true);
+  assert.equal(critiqueEvidence.evidence.testSha256, fixture.config.testSha256);
+  assert.equal(critiqueEvidence.evidence.checker.originalTests.matchesPinnedBytes, true);
+  assert.equal(critiqueEvidence.evidence.checker.noIndependentModelClaim, true);
+  assert.equal(critiqueEvidence.evidence.checker.pid === critiqueEvidence.evidence.parentPid, false, "the critique checker is a distinct spawned Node process");
+  assert.equal(critiqueEvidence.evidence.checker.testCommand.pid === critiqueEvidence.evidence.checker.pid, false, "the checker's check runner is another actual Node process");
+  assert.equal(critiqueEvidence.cli.cwd, fixture.root);
+  assert.equal(critiqueEvidence.cli.exitCode, 0);
+
+  // 3. Corrective planner reads the actual intermediate source, not the
+  // original plan's assumption.
+  const correctivePlan = await harness.turn({ role: "plan" });
+  assert.equal(correctivePlan.ok, true, JSON.stringify(correctivePlan));
+  assert.match(correctivePlan.text, /current intermediate src\/add\.mjs/u);
+  assert.match(correctivePlan.text, /observed those unchanged pinned checks fail/u);
+  assert.match(correctivePlan.text, /VERDICT: carry-out$/u);
+  assert.deepEqual(fs.readFileSync(fixture.sourcePath), intermediateBytes, "the corrective planner only reads");
+  const planEvidence = harness.operations().at(-1);
+  assert.equal(planEvidence.operation, "corrective-plan");
+  assert.equal(planEvidence.role, "read-only-plan");
+  assert.equal(planEvidence.evidence.sourceSha256, intermediateHash);
+  assert.equal(planEvidence.evidence.sourceText, EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
+
+  // 4. Corrective writer repairs the actual intermediate file and reruns the
+  // unchanged checks.
+  const correctiveWriter = await harness.turn({ role: "execute", writes: true });
+  assert.equal(correctiveWriter.ok, true, JSON.stringify(correctiveWriter));
+  assert.match(correctiveWriter.text, /passes the unchanged pinned node --test checks \(2\/2\)/u);
+  assert.deepEqual(fs.readFileSync(fixture.sourcePath), Buffer.from(EXECUTION_FIXTURE_REPAIRED_SOURCE));
+  assert.deepEqual(fs.readFileSync(fixture.testPath), pinnedTests);
+  const writerEvidence = harness.operations().at(-1);
+  assert.equal(writerEvidence.operation, "corrective-writer");
+  assert.equal(writerEvidence.status, "completed");
+  assert.equal(writerEvidence.exitCode, 0);
+  assert.equal(writerEvidence.evidence.cliTurnCompleted, true);
+  assert.equal(writerEvidence.evidence.checksFailed, false);
+  assert.equal(writerEvidence.evidence.checks.command.exitCode, 0);
+  assert.match(writerEvidence.evidence.checks.command.stdout, /# pass 2/u);
+  assert.equal(writerEvidence.evidence.baseline.command.exitCode, 1, "the corrective writer first observed the real intermediate failure");
+  assert.equal(writerEvidence.evidence.edit.beforeSha256, intermediateHash);
+  assert.equal(writerEvidence.evidence.edit.afterSha256, hash(EXECUTION_FIXTURE_REPAIRED_SOURCE));
+  assert.equal(writerEvidence.evidence.testBytesUnchanged, true);
+
+  // 5. Separate read-only checker verifies only after the passing rerun.
+  const secondChecker = await harness.turn({ role: "audit", identity: "claude" });
+  assert.equal(secondChecker.ok, true, secondChecker.errorText);
+  assert.match(secondChecker.text, /^VERIFIED by a separate read-only Node auditor process/u);
+  assert.match(secondChecker.text, /VERDICT: verified$/u);
+  const auditorEvidence = harness.operations().at(-1);
+  assert.equal(auditorEvidence.operation, "auditor");
+  assert.equal(auditorEvidence.verified, true);
+  assert.equal(auditorEvidence.evidence.auditor.testCommand.exitCode, 0);
+  assert.match(auditorEvidence.evidence.auditor.testCommand.stdout, /# pass 2/u);
+  assert.equal(auditorEvidence.evidence.auditor.pid === auditorEvidence.evidence.parentPid, false);
+  assert.equal(auditorEvidence.evidence.auditor.pid === critiqueEvidence.evidence.checker.pid, false, "each read-only checker is its own process");
+  assert.equal(auditorEvidence.evidence.auditor.testCommand.pid === auditorEvidence.evidence.auditor.pid, false);
+  assert.equal(auditorEvidence.evidence.testSha256, fixture.config.testSha256);
+
+  const operations = harness.operations();
+  assert.deepEqual(operations.map(({ operation }) => operation), ["plan", "incomplete-writer", "critique-checker", "corrective-plan", "corrective-writer", "auditor"]);
+  const turnInvocations = harness.invocations().filter((entry) => entry.invocationType === "turn");
+  assert.deepEqual(turnInvocations.map((entry) => entry.behaviorId), [
+    "codex-fixture-plan",
+    "codex-fixture-incomplete-writer",
+    "claude-fixture-critique-checker",
+    "codex-fixture-corrective-plan",
+    "codex-fixture-corrective-writer",
+    "claude-fixture-auditor",
+  ]);
+  assert.deepEqual(turnInvocations.map((entry) => entry.exitCode), [0, 0, 0, 0, 0, 0], "all six CLI turns complete");
+  assert.deepEqual(turnInvocations.map((entry) => entry.cwd), [fixture.root, fixture.root, fixture.root, fixture.root, fixture.root, fixture.root]);
+  for (const entry of [turnInvocations[0], turnInvocations[3], turnInvocations[5]]) {
+    assert.equal(entry.identity === "codex" ? entry.argv[entry.argv.indexOf("--sandbox") + 1] : entry.argv[entry.argv.indexOf("--permission-mode") + 1], entry.identity === "codex" ? "read-only" : "plan");
+  }
+  for (const entry of [turnInvocations[1], turnInvocations[4]]) {
+    assert.equal(entry.argv[entry.argv.indexOf("--sandbox") + 1], "workspace-write");
+    assert.equal(entry.argv[entry.argv.indexOf("--cd") + 1], fixture.root);
+  }
+  assert.equal(turnInvocations[1].fixtureStatus, "completed");
+  assert.equal(turnInvocations[1].fixtureVerdict, null);
+  assert.equal(turnInvocations[2].fixtureStatus, "completed");
+  assert.equal(turnInvocations[2].fixtureVerdict, "revise");
+  assert.match(turnInvocations[2].stdout, /"is_error":false/u);
+  assert.match(turnInvocations[2].stdout, /VERDICT: revise/u);
+  assert.equal(turnInvocations.at(-1).fixtureVerified, true);
+  assert.equal(JSON.stringify(harness.invocations()).includes(SECRET_PROMPT_MARKER), false);
+  assert.equal(JSON.stringify(harness.invocations()).includes(harness.sentinel), false);
+  assert.equal(JSON.stringify(operations).includes(SECRET_PROMPT_MARKER), false);
+  assert.equal(JSON.stringify(operations).includes(harness.sentinel), false);
+});
+
+test("c1 critique checker never claims revise without observing the pinned failure", { skip: WINDOWS_INTEROP_OUT_OF_SCOPE }, async (t) => {
+  {
+    // The checks do fail here, but on the original broken source rather than
+    // the pinned intermediate edit: a verdict must not be invented from that.
+    const harness = setup(t, "c1-feedback-repair");
+    const before = fs.readFileSync(harness.fixture.sourcePath);
+    const result = await harness.turn({ role: "audit", identity: "claude" });
+    assert.equal(result.ok, false, "no completed critique without the observed pinned failure");
+    assert.doesNotMatch(result.text, /VERDICT: revise/u);
+    assert.match(result.text, /VERDICT: stop$/u);
+    const evidence = harness.operations().at(-1);
+    assert.equal(evidence.operation, "critique-checker");
+    assert.equal(evidence.status, "revise-or-stop");
+    assert.equal(evidence.verdict, "stop");
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(evidence.evidence.observedFailure, false);
+    assert.equal(evidence.evidence.checkCommandFailed, true, "the checks failed, but not on the pinned intermediate edit");
+    assert.equal(evidence.evidence.checker.intermediateSourceObserved, false);
+    assert.equal(evidence.evidence.checker.testCommand.exitCode, 1, "the checks failed, but not on the pinned intermediate edit");
+    assert.deepEqual(fs.readFileSync(harness.fixture.sourcePath), before);
+  }
+  {
+    const harness = setup(t, "c1-feedback-repair");
+    fs.writeFileSync(harness.fixture.sourcePath, EXECUTION_FIXTURE_REPAIRED_SOURCE, { encoding: "utf8", mode: 0o600 });
+    const before = fs.readFileSync(harness.fixture.sourcePath);
+    const result = await harness.turn({ role: "audit", identity: "claude" });
+    assert.equal(result.ok, false);
+    assert.doesNotMatch(result.text, /VERDICT: revise/u);
+    const evidence = harness.operations().at(-1);
+    assert.equal(evidence.verdict, "stop");
+    assert.equal(evidence.evidence.observedFailure, false);
+    assert.equal(evidence.evidence.checkCommandFailed, false);
+    assert.equal(evidence.evidence.testCommandExitCode, 0, "passing checks without the intermediate edit are not a critique");
+    assert.deepEqual(fs.readFileSync(harness.fixture.sourcePath), before);
+  }
+  {
+    // A corrective plan cannot be produced from the stale original state.
+    const harness = setup(t, "c1-feedback-repair");
+    const before = fs.readFileSync(harness.fixture.sourcePath);
+    harness.setBehavior({
+      probes: { codex: "codex-probe-authenticated", claude: "claude-probe-authenticated" },
+      turns: { codex: ["codex-fixture-corrective-plan"], claude: [] },
+    });
+    const result = await harness.turn({ role: "plan" });
+    assert.equal(result.ok, false);
+    assert.doesNotMatch(result.text, /VERDICT: carry-out/u);
+    assert.match(result.text, /not the expected state for this operation/u);
+    const evidence = harness.operations().at(-1);
+    assert.equal(evidence.operation, "corrective-plan");
+    assert.equal(evidence.status, "revise-or-stop");
+    assert.deepEqual(fs.readFileSync(harness.fixture.sourcePath), before);
+  }
+});
+
+test("continuation operations and presets stay mutually closed and mode-checked", { skip: WINDOWS_INTEROP_OUT_OF_SCOPE }, async (t) => {
+  const cases = [
+    { preset: "b1-full-chain", behavior: "codex-fixture-incomplete-writer", role: "execute", writes: true, identity: "codex", expected: /operation incomplete-writer is not allowed by preset b1-full-chain/u },
+    { preset: "b1-full-chain", behavior: "codex-fixture-corrective-writer", role: "execute", writes: true, identity: "codex", expected: /operation corrective-writer is not allowed by preset b1-full-chain/u },
+    { preset: "b3-partial-failure", behavior: "claude-fixture-critique-checker", role: "audit", writes: false, identity: "claude", expected: /operation critique-checker is not allowed by preset b3-partial-failure/u },
+    { preset: "c1-feedback-repair", behavior: "codex-fixture-writer", role: "execute", writes: true, identity: "codex", expected: /operation writer is not allowed by preset c1-feedback-repair/u },
+    { preset: "c1-feedback-repair", behavior: "codex-fixture-partial-writer", role: "execute", writes: true, identity: "codex", expected: /operation partial-writer is not allowed by preset c1-feedback-repair/u },
+    { preset: "c1-feedback-repair", behavior: "codex-fixture-incomplete-writer", role: "audit", writes: false, identity: "codex", expected: /requires write mode but observed read/u },
+    { preset: "c1-feedback-repair", behavior: "codex-fixture-corrective-plan", role: "execute", writes: true, identity: "codex", expected: /requires read mode but observed write/u },
+  ];
+  for (const item of cases) {
+    const harness = setup(t, item.preset);
+    const before = fs.readFileSync(harness.fixture.sourcePath);
+    harness.setBehavior({
+      probes: { codex: "codex-probe-authenticated", claude: "claude-probe-authenticated" },
+      turns: { codex: item.identity === "codex" ? [item.behavior] : [], claude: item.identity === "claude" ? [item.behavior] : [] },
+    });
+    const result = await harness.turn({ role: item.role, identity: item.identity, writes: item.writes });
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.match(result.text, item.expected, JSON.stringify(result));
+    assert.deepEqual(fs.readFileSync(harness.fixture.sourcePath), before, "a refused continuation operation never mutates the fixture");
+    const evidence = harness.operations().at(-1);
+    assert.equal(evidence.status, "refused");
+    assert.equal(evidence.exitCode, 42);
+    assert.equal(evidence.evidence.changed, false);
+  }
 });
 
 test("auditor failure reports revise-or-stop and never fabricates verified", { skip: WINDOWS_INTEROP_OUT_OF_SCOPE }, async (t) => {

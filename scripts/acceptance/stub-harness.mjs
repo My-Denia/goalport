@@ -103,6 +103,14 @@ export const STUB_BEHAVIORS = Object.freeze({
   "codex-fixture-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer" }),
   "codex-fixture-partial-writer": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "", fixtureOperation: "partial-writer" }),
   "claude-fixture-auditor": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "auditor" }),
+  // C1 continuation operations. The first writer's CLI turn completes (exit
+  // 0) while its spawned node --test checks really fail; the separate
+  // read-only critique checker returns revise only after observing those
+  // failures, and the corrective writer then repairs the pinned source.
+  "codex-fixture-incomplete-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "incomplete-writer" }),
+  "codex-fixture-corrective-plan": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-plan" }),
+  "codex-fixture-corrective-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-writer" }),
+  "claude-fixture-critique-checker": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "critique-checker" }),
   // Native integration holds only the reply, not a fabricated progress state.
   // These fixed offline delays keep the real writer/auditor launches observable.
   "codex-fixture-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer", delayMs: 18000 }),
@@ -312,6 +320,7 @@ async function main(argv = process.argv.slice(2)) {
       role: result.role,
       preset: result.preset,
       status: result.status,
+      verdict: result.verdict ?? null,
       verified: result.verified,
       exitCode: result.exitCode,
       report: result.report,
@@ -331,6 +340,7 @@ async function main(argv = process.argv.slice(2)) {
       fixtureOperation: result.operation,
       fixtureRole: result.role,
       fixtureStatus: result.status,
+      fixtureVerdict: result.verdict ?? null,
       fixtureVerified: result.verified,
       operationEvidence: path.basename(operationEvidencePath),
       operationOutputSha256: outputHash(result.report),
