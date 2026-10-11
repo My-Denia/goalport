@@ -49,6 +49,8 @@
     "test:linux-client": "python3 -B -m unittest discover -s scripts/connected -p 'test_*.py'",
     "acceptance:execute-native": "node scripts/acceptance/execute-native.mjs",
     "test:acceptance-execution": "node --test scripts/acceptance/execute-native.test.mjs scripts/acceptance/lib/execution-fixture.test.mjs scripts/acceptance/stub-harness.test.mjs scripts/preview/execute-slice.test.mjs",
+    "acceptance:feedback-native": "node scripts/acceptance/feedback-native.mjs",
+    "test:acceptance-feedback": "node --test scripts/acceptance/feedback-native.test.mjs scripts/acceptance/lib/execution-fixture.test.mjs scripts/acceptance/stub-harness.test.mjs",
     "preview:verify-execution": "node scripts/preview/verify-execute-slice.mjs",
     "preview:shot-execution": "node scripts/preview/shot-execute-slice.mjs"
   },

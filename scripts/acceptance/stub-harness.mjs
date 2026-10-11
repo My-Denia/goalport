@@ -116,6 +116,12 @@ export const STUB_BEHAVIORS = Object.freeze({
   "codex-fixture-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer", delayMs: 18000 }),
   "codex-fixture-partial-writer-delayed": Object.freeze({ kind: "turn", exitCode: 1, stdout: "", stderr: "", fixtureOperation: "partial-writer", delayMs: 18000 }),
   "claude-fixture-auditor-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "auditor", delayMs: 18000 }),
+  // C1 continuation progress variants: the same closed operations with a
+  // shorter fixed offline delay so the real first writer, the separate
+  // read-only critique and the corrective planner are observable in flight.
+  "codex-fixture-incomplete-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "incomplete-writer", delayMs: 12000 }),
+  "claude-fixture-critique-checker-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "critique-checker", delayMs: 12000 }),
+  "codex-fixture-corrective-plan-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-plan", delayMs: 12000 }),
 });
 
 function isProbe(identity, argv) {
