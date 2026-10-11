@@ -44,6 +44,23 @@ test('read-only start does not add write admission, and reopening is read-only',
   assert.equal('admission' in first, false); assert.equal('ownerToken' in first, false);
 });
 
+test('a long accepted goal does not hide the live stop control', async t => {
+  const r = setup(t);
+  const goal = 'g'.repeat(9000);
+  const started = await r.host.start({ ...r.input, goal });
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.updateProgress(started.jobId, { display: { activity: 'r'.repeat(20_000), failures: [] } }, claim.ownerToken);
+  const server = await store.startControlServer({ jobId: started.jobId, endpoint: r.options.endpoint() });
+  t.after(() => server.close());
+  const live = await r.host.status(started.jobId);
+  assert.equal(live.live, true);
+  assert.equal(live.state, 'running');
+  assert.equal(live.goal, goal);
+  assert.equal(live.revoked, false);
+  assert.equal('admission' in live, false);
+});
+
 test('a missing admission pointer does not admit competing ordinary or native execution', async t => {
   const r = setup(t); const job = await r.host.start(r.input);
   fs.unlinkSync(path.join(r.directory, 'coordination-jobs/active-admission.json'));

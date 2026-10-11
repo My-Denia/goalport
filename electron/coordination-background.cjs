@@ -44,7 +44,7 @@ function createBackgroundHost(options) {
     if (!facts) return null;
     lastJobId = facts.jobId;
     if (!facts.active) return projection(facts);
-    try { return projection(await requestControl(options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 }), true); }
+    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
   async function start(input) {
@@ -81,7 +81,7 @@ function createBackgroundHost(options) {
     const s = store();
     const facts = s.getStatus(jobId);
     if (!facts.active) return projection(facts);
-    try { return projection(await requestControl(options.endpoint(), s.readControlCredential(jobId), "revoke"), true); }
+    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(jobId), "revoke")), true); }
     catch {
       // Durable revoke denies future admission if the same owner is still
       // alive. Missing control is NOT proof that tools stopped.
@@ -91,4 +91,24 @@ function createBackgroundHost(options) {
   }
   return { start, status, revoke, outstanding };
 }
-module.exports = { createBackgroundHost, projection };
+function withControlAck(facts, ack) {
+  if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {
+    throw Object.assign(new Error("The job control acknowledgement does not match this admission."), { code: "control-identity-mismatch" });
+  }
+  const counters = facts.counters ? { ...facts.counters } : null;
+  if (counters && ack.readTurnsRemaining != null) counters.readTurnsRemaining = ack.readTurnsRemaining;
+  if (counters && ack.writeTurnsRemaining != null) counters.writeTurnsRemaining = ack.writeTurnsRemaining;
+  return {
+    ...facts,
+    state: ack.state,
+    active: ack.active === true,
+    revoked: ack.revoked === true,
+    pendingCommand: ack.pendingCommandId
+      ? { ...(facts.pendingCommand?.commandId === ack.pendingCommandId ? facts.pendingCommand : { state: "unconfirmed" }), commandId: ack.pendingCommandId }
+      : null,
+    counters,
+    startupClaim: ack.claimed ? { ...(facts.startupClaim ?? {}), pid: ack.workerPid ?? facts.startupClaim?.pid ?? null } : facts.startupClaim,
+  };
+}
+
+module.exports = { createBackgroundHost, projection, withControlAck };

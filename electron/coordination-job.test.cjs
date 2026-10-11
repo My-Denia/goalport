@@ -370,9 +370,30 @@ test("the local authenticated endpoint permits only status/revoke and missing co
 
   const revoked = await requestControl(endpoint, token, "revoke");
   assert.equal(revoked.revoked, true);
-  assert.equal(revoked.startupClaim !== null, true);
+  assert.equal(revoked.claimed, true);
+  assert.equal(revoked.goal, undefined);
   await server.close();
   await assert.rejects(requestControl(endpoint, token, "status"), { code: "control-unavailable" });
   assert.equal(fs.existsSync(pathFor(profile, admitted.jobId, "startup-claim.json")), true);
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), true);
+});
+
+test("an accepted long goal and retained report still fit in the live control acknowledgement", async (t) => {
+  const { profile, store } = fixture(t);
+  const goal = "g".repeat(9000);
+  const admitted = start(store, { goal });
+  const claim = store.claimWorker(admitted.jobId);
+  store.updateProgress(admitted.jobId, { display: { activity: "r".repeat(20_000), failures: [] } }, claim.ownerToken);
+  const endpoint = controlEndpointFor("goalport-job-store-large", { platform: "linux", env: { HOME: profile } });
+  const server = await store.startControlServer({ jobId: admitted.jobId, endpoint });
+  const token = store.readControlCredential(admitted.jobId);
+  const ack = await requestControl(endpoint, token, "status");
+  assert.equal(Buffer.byteLength(`${JSON.stringify({ ok: true, status: ack })}\n`) <= 8192, true);
+  assert.equal(ack.jobId, admitted.jobId);
+  assert.equal(ack.active, true);
+  assert.equal(ack.claimed, true);
+  assert.equal(ack.goal, undefined);
+  assert.equal(ack.progress, undefined);
+  assert.equal(store.getStatus(admitted.jobId).admission.goal, goal);
+  await server.close();
 });

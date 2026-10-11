@@ -754,8 +754,10 @@ function createCoordinationJobStore(profileDirectory, {
           return reply({ ok: false, error: "unsupported-operation" });
         }
         try {
-          const status = request.operation === "status" ? statusFor(jobId) : revoke(jobId);
-          reply({ ok: true, status });
+          const full = request.operation === "status" ? statusFor(jobId) : revoke(jobId);
+          // Live identity and revocation must fit even when the accepted goal
+          // or retained reports do not. Never put statusFor() on this socket.
+          reply({ ok: true, status: controlAcknowledgement(full) });
         } catch {
           reply({ ok: false, error: "state-unavailable" });
         }
@@ -825,6 +827,25 @@ function createCoordinationJobStore(profileDirectory, {
   });
 }
 
+function controlAcknowledgement(status) {
+  const ack = {
+    jobId: status.jobId,
+    requestId: status.requestId,
+    state: status.state,
+    active: status.active === true,
+    revoked: status.revoked === true,
+    pendingCommandId: status.pendingCommand?.commandId ?? null,
+    readTurnsRemaining: status.counters?.readTurnsRemaining ?? null,
+    writeTurnsRemaining: status.counters?.writeTurnsRemaining ?? null,
+    workerPid: status.startupClaim?.pid ?? null,
+    claimed: status.startupClaim !== null,
+  };
+  if (Buffer.byteLength(`${JSON.stringify({ ok: true, status: ack })}\n`) > MAX_CONTROL_BYTES) {
+    throw refusal("invalid-control-response", "The job control acknowledgement does not fit; no claim was cleared.");
+  }
+  return ack;
+}
+
 function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
   if (typeof endpoint !== "string" || !endpoint.trim()) return Promise.reject(refusal("invalid-endpoint", "The profile control endpoint is unavailable."));
   if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) return Promise.reject(refusal("invalid-control-token", "The local control credential is unavailable."));
@@ -868,6 +889,7 @@ module.exports = {
   createCoordinationJobStore,
   controlEndpointFor,
   requestControl,
+  controlAcknowledgement,
   ADMISSION_SCHEMA,
   PROGRESS_SCHEMA,
   CONTROL_SCHEMA,
