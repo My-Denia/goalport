@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import { materializeStubBin, stubWrapperSource, writeStubBehavior } from "./lib/stubbin.mjs";
@@ -24,7 +25,7 @@ const { readHealth } = require("../../electron/harness-health.cjs");
 const CLI_FIXTURE_FILE = new URL("../../electron/cli-coordinate.test.cjs", import.meta.url);
 const PROVIDER_ERROR_FIXTURE_FILE = new URL("../../src/coordination/providerError.test.ts", import.meta.url);
 const PROVIDER_ERROR_MODULE = new URL("../../src/coordination/providerError.ts", import.meta.url);
-const STUB_PROGRAM = new URL("./stub-harness.mjs", import.meta.url);
+const STUB_PROGRAM = fileURLToPath(new URL("./stub-harness.mjs", import.meta.url));
 const SECRET_PROMPT_MARKER = "fake-secret-do-not-log-m1";
 
 function behaviorConfig({ probes, turns } = {}) {
@@ -106,7 +107,7 @@ function assertStubResolution(harness) {
 function spawnStubProcess(harness, identity, args, cwd = harness.worktree, env = harness.env) {
   assert.ok(IDENTITIES.has(identity), `only a pinned stub identity may run: ${identity}`);
   const launch = process.platform === "win32"
-    ? { file: process.execPath, args: [STUB_PROGRAM.pathname, identity, ...args] }
+    ? { file: process.execPath, args: [STUB_PROGRAM, identity, ...args] }
     : { file: path.join(harness.stubDir, identity), args };
   return spawnSync(launch.file, launch.args, {
     cwd,
@@ -330,7 +331,7 @@ test("sentinel absence refuses before output or turn accounting", (t) => {
   const harness = fixture(t, behaviorConfig({ turns: { codex: ["codex-success"], claude: [] } }));
   const env = { ...harness.env };
   delete env.GOALPORT_STUB_SENTINEL;
-  const result = spawnSync(process.execPath, [STUB_PROGRAM.pathname, "codex", "login", "status"], {
+  const result = spawnSync(process.execPath, [STUB_PROGRAM, "codex", "login", "status"], {
     cwd: harness.worktree,
     env,
     encoding: "utf8",
