@@ -90,7 +90,9 @@ function assertStubResolution(harness) {
     if (process.platform === "win32") {
       assert.equal(launch.file, harness.env.ComSpec || "cmd.exe");
       assert.equal(launch.verbatim, true);
-      assert.ok(launch.args[3].includes(filename), `${identity} must resolve to its generated .cmd wrapper`);
+      const escaped = filename.replace(/([()\][%!^"`<>&|;, *?])/g, "^$1");
+      assert.equal(typeof launch.args[3], "string", `${identity} must launch through cmd /c`);
+      assert.ok(launch.args[3].includes(escaped), `${identity} must resolve to its generated .cmd wrapper`);
     } else {
       // POSIX spawn searches PATH, so proving the executable wrapper is first
       // prevents accidental fallthrough to any host CLI before discovery.

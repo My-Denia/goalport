@@ -54,7 +54,7 @@ test('native archives immutable before/after bytes and real failing baseline wit
   const before = snapshotFixture(fixture, out, 'before');
   const baseline = baselineChecks(fixture, out);
   assert.equal(baseline.exitCode, 1);
-  assert.match(baseline.stdout, /# fail 2/);
+  assert.match(baseline.stdout, /(?:#|ℹ|info)\s+fail 2\b/u);
   assert.equal(before.files.length, 3);
   assert.throws(() => snapshotFixture(fixture, out, 'before'), /EEXIST/);
   const originalTest = fs.readFileSync(fixture.testPath);

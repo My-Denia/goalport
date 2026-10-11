@@ -143,8 +143,11 @@ test('structured helper response accepts owned native geometry and rejects ident
   for (const response of badResponses) assert.throws(() => validateNativeWindowResponse(response, REQUEST));
 });
 
-test('non-win32 calls fail before temporary-file creation and never invoke pwsh', () => {
-  assert.notEqual(process.platform, 'win32', 'this unit suite is expected to run on Linux/WSL');
+test('non-win32 calls fail before temporary-file creation and never invoke pwsh', (t) => {
+  if (process.platform === 'win32') {
+    t.skip('this refusal is the non-Windows path; the Windows job still pins the PowerShell helper source');
+    return;
+  }
   assert.throws(() => resizeOwnedWindowsWindow(REQUEST), /only on win32; no helper was invoked/);
 });
 

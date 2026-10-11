@@ -298,8 +298,19 @@ function isAssertionFailure(command) {
   return command.exitCode !== 0 && /ERR_ASSERTION|AssertionError|not ok \d+/u.test(output);
 }
 
+function summaryCount(output, label) {
+  const match = String(output ?? "").match(new RegExp(`(?:^|\\n)(?:#|ℹ|info)\\s+${label}\\s+(\\d+)\\b`, "u"));
+  return match ? Number(match[1]) : null;
+}
+
+// Node 22 prints TAP (`# pass 2`). Node 24's default spec reporter prints
+// `ℹ pass 2`. The pinned fixture still requires those exact counts.
+export function nodeTestSummary(output, { pass, fail }) {
+  return summaryCount(output, "pass") === pass && summaryCount(output, "fail") === fail;
+}
+
 function passingTestOutput(command) {
-  return command.exitCode === 0 && /# pass 2\b/u.test(command.stdout) && /# fail 0\b/u.test(command.stdout);
+  return command.exitCode === 0 && nodeTestSummary(command.stdout, { pass: 2, fail: 0 });
 }
 
 function fixedPlan(config, sourceBytes) {

@@ -12,7 +12,15 @@ import {
   EXECUTION_FIXTURE_INCOMPLETE_SOURCE,
   EXECUTION_FIXTURE_PARTIAL_SOURCE,
   EXECUTION_FIXTURE_REPAIRED_SOURCE,
+  nodeTestSummary,
 } from "./execution-fixture.mjs";
+
+test("pinned fixture counts accept Node 22 TAP and Node 24 spec summaries", () => {
+  assert.equal(nodeTestSummary("# pass 2\n# fail 0\n", { pass: 2, fail: 0 }), true);
+  assert.equal(nodeTestSummary("ℹ tests 2\nℹ pass 2\nℹ fail 0\n", { pass: 2, fail: 0 }), true);
+  assert.equal(nodeTestSummary("info pass 2\ninfo fail 1\n", { pass: 2, fail: 0 }), false);
+  assert.equal(nodeTestSummary("# pass 3\n# fail 0\n", { pass: 2, fail: 0 }), false);
+});
 
 const require = createRequire(import.meta.url);
 const { runCliTurn, writeGrant } = require("../../../electron/cli-coordinate.cjs");

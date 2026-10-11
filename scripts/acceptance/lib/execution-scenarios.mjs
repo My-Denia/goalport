@@ -26,7 +26,7 @@ export function snapshotFixture(fixture, caseRoot, name) {
   const out = path.join(caseRoot, `fixture-${name}`);
   fs.mkdirSync(out);
   const files = [fixture.markerPath, fixture.sourcePath, fixture.testPath].map(source => {
-    const relative = path.relative(fixture.root, source);
+    const relative = path.relative(fixture.root, source).split(path.sep).join("/");
     const retained = path.join(out, relative);
     fs.mkdirSync(path.dirname(retained), { recursive: true });
     fs.copyFileSync(source, retained, fs.constants.COPYFILE_EXCL);

@@ -57,6 +57,10 @@ test('allowlisted child env is hermetic and the actual isolation guards reject e
 });
 
 test('both real launchSpec and OS PATH resolution must point at stubs, never execute vendor CLIs', t => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX preflight refuses Windows; scripts/acceptance/lib/windows-host.test.mjs owns the .cmd resolution contract');
+    return;
+  }
   const root = ownedFixture(t);
   const stub = materializeStubBin(path.join(root, 'stub-bin'));
   const env = assembleEnv({caseRoot:root, pipe:socketName('test'), port:1234, stub});
@@ -156,6 +160,7 @@ for request in [(0,860,900),(10,999,900),(10,860,500),(True,860,900)]:
 m.validate_request(10,860,900)
 print('native ownership and bounds policy passed without loading Xlib')
 `;
+  if (process.platform === 'win32') return; // X11 helper is not the Windows ownership path; the argument checks above still run.
   const result = spawnSync('/usr/bin/python3', ['-B','-c',source], {encoding:'utf8'});
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /policy passed/);
