@@ -188,6 +188,14 @@ function App() {
   // per draft open, the user's selection, and a mirror of the authorized
   // scope. All of it is window-local and never touches the draft text.
   const [panelProviders, setPanelProviders] = useState<readonly ProviderSnapshot[] | null>(null);
+  // Harness-access panel load phase for the current runtime-less draft:
+  // "idle" before the draft exists, "loading" while discovery runs,
+  // "ready" once the panel can render, "failed" when discovery cannot
+  // connect. A failed load is retryable and NEVER falls back to an
+  // unscoped send: a panel-capable build holds Send until access is seen.
+  const [panelLoad, setPanelLoad] = useState<"idle" | "loading" | "ready" | "failed">("idle");
+  const [panelFailSentence, setPanelFailSentence] = useState<string | null>(null);
+  const [panelAttempt, setPanelAttempt] = useState(0);
   const [panelRequestId, setPanelRequestId] = useState<string | null>(null);
   const [selectedInstances, setSelectedInstances] = useState<readonly string[]>([]);
   const [allowedTurns, setAllowedTurns] = useState(4);
@@ -462,6 +470,8 @@ function App() {
     if (!discover || !readScope) return undefined;
     let cancelled = false;
     setPanelProviders(null);
+    setPanelLoad("loading");
+    setPanelFailSentence(null);
     setScopeMirror(null);
     // Each fresh draft starts without file-change consent. Never restore it
     // from history or from another draft's live scope.
@@ -494,9 +504,15 @@ function App() {
       } catch {
         discovery = null;
       }
-      if (cancelled || !discovery || !discovery.connected) return;
+      if (cancelled) return;
+      if (!discovery || !discovery.connected) {
+        setPanelLoad("failed");
+        setPanelFailSentence(discovery?.stopReason ?? null);
+        return;
+      }
       discoveredProvidersRef.current = discovery.providers;
       setPanelProviders(discovery.providers);
+      setPanelLoad("ready");
       // A scope member the current catalog can no longer staff (a paid-api
       // login, a since-blocked harness nobody re-authorized for) never lands
       // in the checked set: rows show reality, and the checked set stays a
@@ -512,7 +528,13 @@ function App() {
         : [...selectable]);
     })();
     return () => { cancelled = true; };
-  }, [runtimeLessDraftKey, scopeBridgeReady]);
+  }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt]);
+  // Send admission for a runtime-less draft in a panel-capable build: the
+  // user must see (or retry loading) their harness-access choices before
+  // any model turn can be spent. Legacy builds without the scope bridge
+  // keep the pre-panel behavior untouched.
+  const panelForDraftLive = draftGoal !== null && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId;
+  const panelHoldsSend = scopeBridgeReady && panelForDraftLive && panelLoad !== "ready";
   const activeSendIntent = sendIntents[draftCampaignId];
   const activeRetryLabel = retryLabel(activeSendIntent);
   const draftRetryLabel = retryLabel(draftGoal?.intent);
@@ -754,6 +776,14 @@ function App() {
       // independent check, so nothing is authorized and nothing is sent.
       const panelForDraft = panelRequestId === draftGoal.requestId ? panelProviders : null;
       const scopedSend = scopeBridgeReady && panelForDraft !== null;
+      if (scopeBridgeReady && panelForDraft === null) {
+        // A panel-capable build never silently falls back to the legacy
+        // unscoped path while harness access is unresolved (P1).
+        setDraftError(panelLoad === "failed"
+          ? { sentence: "Your harness-access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
+          : { sentence: "Harness access is still loading, so nothing was sent. Send unlocks once your harness-access choices are ready." });
+        return;
+      }
       if (scopedSend && writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8)) {
         setDraftError({ sentence: "Choose 1 to 8 write turns before allowing workspace changes." });
         return;
@@ -2177,6 +2207,20 @@ function App() {
                       onConfirmChange={() => { void handleConfirmAccessChange(); }}
                       onUseAgain={(instanceId) => { void handleUseAgain(instanceId); }}
                     />
+                  ) : draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelLoad === "failed" ? (
+                    <div className="dialog-note" role="alert">
+                      <span aria-hidden="true">!</span>
+                      <span>
+                        GoalPort could not load your harness-access choices, so nothing can be sent from this draft yet.
+                        <button className="button button-small button-outline" type="button" onClick={() => setPanelAttempt((attempt) => attempt + 1)}>Retry harness access</button>
+                        {panelFailSentence ? (
+                          <details className="technical-details">
+                            <summary>Technical details</summary>
+                            <pre className="technical-details-pre">{panelFailSentence}</pre>
+                          </details>
+                        ) : null}
+                      </span>
+                    </div>
                   ) : null}
                   <DraftGoalComposer
                     draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
@@ -2184,6 +2228,11 @@ function App() {
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
                     blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    waitingOn={panelHoldsSend
+                      ? (panelLoad === "failed"
+                        ? "Send is waiting: your harness-access choices could not be loaded."
+                        : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
+                      : null}
                     retryLabel={draftRetryLabel}
                     error={draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}

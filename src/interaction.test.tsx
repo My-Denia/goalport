@@ -2019,6 +2019,49 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   }
 
+  it("holds Send while harness access is loading and unlocks when the panel lands", async () => {
+    // P1: a fast first Send must not silently spend turns through the
+    // legacy unscoped path while the harness-access panel is still loading.
+    let resolveDiscovery!: (value: { connected: boolean; sendAuthorized: boolean; providers: Array<Record<string, unknown>>; stopReason: string | null }) => void;
+    const pending = new Promise<{ connected: boolean; sendAuthorized: boolean; providers: Array<Record<string, unknown>>; stopReason: string | null }>((resolve) => { resolveDiscovery = resolve; });
+    scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], launch: async command => planOrReview(command) });
+    window.goalportCore!.coordinateDiscover = async () => pending;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
+    expect(await screen.findByText(/Checking which harnesses can work on this goal/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+    // Even a programmatic submit cannot reach the legacy unscoped launch.
+    fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+    expect(await screen.findByText(/Harness access is still loading, so nothing was sent/)).toBeTruthy();
+    resolveDiscovery({ connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null });
+    await screen.findByText(/Nothing is sent until you press Send\./);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+  });
+
+  it("a failed harness-access load keeps Send held with a retryable error, and retry recovers", async () => {
+    let discoverCalls = 0;
+    scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], launch: async command => planOrReview(command) });
+    window.goalportCore!.coordinateDiscover = async () => {
+      discoverCalls += 1;
+      return discoverCalls === 1
+        ? { connected: false, sendAuthorized: false, providers: [], stopReason: "Send is not enabled." }
+        : { connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null };
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
+    expect(await screen.findByText(/could not load your harness-access choices/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Send is not enabled.")).toBeTruthy();
+    fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+    expect(await screen.findByText(/could not be loaded, so nothing was sent/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry harness access" }));
+    await screen.findByText(/Nothing is sent until you press Send\./);
+    expect(discoverCalls).toBe(2);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+  });
+
   it("never lands a paid-api scope member in the checked set when echoing a scope", async () => {
     // An impossible-but-defensive case: a scope that somehow names the
     // apiKey login. The checked set stays a subset of subscription logins;
@@ -3329,7 +3372,7 @@ describe("unsuccessful coordination events", () => {
     expect(screen.getByText("Claude took over the planning step.")).toBeTruthy();
   });
 
-  it("shows a stopped background result without reconstructing stop or send controls", () => {
+  it("shows a stopped background result as settled without reconstructing stop or send controls", () => {
     const start = vi.fn();
     render(<BackgroundCoordinationStatus job={{
       jobId: "same-job", requestId: "one-send", goal: "Repair the fixture.", state: "stopped", active: false, live: false, revoked: true,
@@ -3337,7 +3380,13 @@ describe("unsuccessful coordination events", () => {
       progress: null,
       outcome: { status: "stopped", report: { ...base, roundEvents: [{ kind: "failed", role: "execution", instanceId: "codex", harness: "Codex", sentence: "Access stopped; the current turn may finish, but no further turn was sent." }] } },
     }} onStopAllowing={start} />);
-    expect(screen.getByText(/Access stopped. The current turn may finish/)).toBeTruthy();
+    // P2: a settled stop is TOLD as settled — the job status line must not
+    // claim the current turn "may finish" anymore (that copy is only true
+    // while a revocation is still settling). The historical event sentence
+    // below stays as retained evidence.
+    const statuses = screen.getAllByRole("status").map((element) => element.textContent ?? "");
+    expect(statuses.some((text) => text.includes("This goal was stopped and has settled"))).toBe(true);
+    expect(statuses.filter((text) => text.includes("may finish")).length).toBe(0);
     expect(screen.getByText("Step not completed")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
