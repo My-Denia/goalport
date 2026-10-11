@@ -327,7 +327,11 @@ const failures = [];
 async function capture({ state, width, needles = [], errorNeedles = [], messageNeedle, sendDisabled, stopAllowing, consentChecked, scrollTo = null }) {
   await viewport(width, 900);
   if (scrollTo) {
-    await evaluate(`(() => { const e = document.querySelector(${JSON.stringify(scrollTo)}); if (e) e.scrollIntoView({ block: "center" }); return true; })()`);
+    await evaluate((selector) => {
+      const e = document.querySelector(selector);
+      if (e) e.scrollIntoView({ block: "center" });
+      return true;
+    }, scrollTo);
   }
   await sleep(300);
   const dom = await readDom();
