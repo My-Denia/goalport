@@ -1208,3 +1208,11 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .coordination-status .coordination-outcome { margin-bottom: 14px; }
 .coordination-outcome dd:first-of-type { font-size: 18px; font-weight: 600; }
+
+/* One live job's return surface uses the existing report cards and wrapping. */
+.background-return { padding: 10px 22px 0; }
+.background-job { padding: 14px 22px 24px; min-width: 0; overflow-wrap: anywhere; }
+.background-job h2 { margin: 0 0 12px; font-size: 20px; line-height: 1.35; }
+.background-job > p { font-size: 14px; line-height: 1.5; }
+.background-job .coordination-progress, .background-job .coordination-status { margin-left: 0; margin-right: 0; }
+.background-job .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }

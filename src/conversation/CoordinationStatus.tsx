@@ -1,3 +1,4 @@
+import type { BackgroundStatus } from "../coordination/backgroundStatus";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
 import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
 import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
@@ -383,4 +384,26 @@ export function CoordinationProgress({ failures, activity, repair, remaining, ma
       ) : null}
     </section>
   );
+}
+
+/** The user returns to the SAME live job, not a draft or saved permission. */
+export function BackgroundCoordinationStatus({ job, onStopAllowing }: { job: BackgroundStatus; onStopAllowing: () => void }) {
+  const report = job.outcome?.report ?? job.progress?.firstRound;
+  const sentence = job.state === "unconfirmed"
+    ? "Progress unavailable or interrupted; the outcome is unconfirmed. GoalPort did not restart this job and will not replay it."
+    : job.revoked ? "Access stopped. The current turn may finish; no further turn will start. This does not undo edits or confirm tools stopped."
+    : job.live ? "This goal is running on its own. You can close GoalPort and return to this same job."
+    : "This background job finished. Its result is retained below.";
+  return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>
+    <h2>{job.goal}</h2><p role="status">{sentence}</p>
+    {job.live && job.active && !job.revoked ? <button type="button" className="button button-outline" onClick={onStopAllowing}>Stop allowing</button> : null}
+    {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
+      repair={job.progress?.repair === true} remaining={job.counters?.readTurnsLeft ?? null} maxTurns={job.readMaxTurns}
+      writeRemaining={job.counters?.writeTurnsLeft ?? null} maxWriteTurns={job.writeMaxTurns} /> : <p>Observed remaining access: {job.counters?.readTurnsLeft ?? "Unknown"} model turns{job.writeMaxTurns !== null ? `; ${job.counters?.writeTurnsLeft ?? "Unknown"} write turns` : ""}.</p>}
+    {report ? <CoordinationStatus {...report} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} /> : null}
+    {!report && job.completedCommands.map(command => command.facts.text ? <article className="coordination-result" key={command.commandId}><h3>Completed {command.commandId.startsWith("coordinate-plan-") ? "plan" : command.commandId.startsWith("coordinate-review-") ? "check" : command.commandId.startsWith("coordinate-execute-") ? "changes" : "verification"}</h3><p>{command.facts.text}</p></article> : null)}
+    {job.outcome?.error ? <p>{job.outcome.error}</p> : null}
+    <details className="technical-details"><summary>Technical details</summary><p>Job: {job.jobId}; worker: {job.workerPid ?? "unconfirmed"}</p>
+      {job.pendingCommand ? <p>Unconfirmed command: {job.pendingCommand.commandId}. No replay is allowed.</p> : null}</details>
+  </section>;
 }

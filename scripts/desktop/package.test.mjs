@@ -65,7 +65,7 @@ async function fixture(t) {
   for (const name of COMPONENTS) writeFileSync(resolve(root, "resources", name), `test-only ${name}`);
   writeFileSync(resolve(root, "GoalPort.exe"), "test-only executable");
   writeFileSync(resolve(root, "icudtl.dat"), "test-only runtime data");
-  for (const name of [...STAGED_APP_MODULES, "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
+  for (const name of [...STAGED_APP_MODULES, "dist/index.html", "dist/coordination-engine.cjs"]) writeFileSync(resolve(stage, name), "test-only app content");
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", version: "1.0.0-rc.1", main: "main.cjs" }));
   const files = [{ path: "package.json", sha256: "a".repeat(64) }];
   const source = { revision: "b".repeat(40), dirty: true, files, treeSha256: sha256(files.map(({ path, sha256: hash }) => `${path}\0${hash}\n`).join("")) };
@@ -197,4 +197,13 @@ test("removing any one staged module name turns the offline dependency check red
     const withoutOne = STAGED_APP_MODULES.filter((candidate) => candidate !== name);
     assert.throws(() => stagedDependenciesCoverGraph(withoutOne), new RegExp(name.replace(/[.]/g, "\\.")), name);
   }
+});
+
+test("C2 offline staging includes detached owner and shared engine without Windows packaging", () => {
+  for (const name of ["coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "core-client.cjs"]) assert.ok(STAGED_APP_MODULES.includes(name));
+  assert.ok(stagedDependenciesCoverGraph().includes("coordination-worker.cjs"));
+  const source = readFileSync(resolve(ROOT, "scripts/desktop/package.mjs"), "utf8");
+  assert.ok(source.includes('"--config", "vite.coordination.config.ts", "--outDir", frontend'));
+  const verification = readFileSync(resolve(ROOT, "scripts/desktop/verify-package.mjs"), "utf8");
+  assert.ok(verification.includes('"dist/coordination-engine.cjs"'));
 });

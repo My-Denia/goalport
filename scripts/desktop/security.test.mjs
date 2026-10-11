@@ -22,7 +22,8 @@ test("every real IPC channel uses one fail-closed sender gate", () => {
   const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /ipcMain\.handle\(/);
   const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 20);
+  assert.equal(channels.length, 23);
+  for (const channel of ["goalport:background-start", "goalport:background-status", "goalport:background-revoke"]) assert.ok(channels.includes(channel));
   for (const channel of channels) {
     const f = fixture(); let calls = 0;
     f.handle(channel, () => ++calls);
@@ -130,9 +131,11 @@ test("trusted authorization handler validates optional write through the tested 
   assert.ok(start > 0 && end > start);
   const f = fixture();
   let probes = 0;
+  let outstanding = false;
   vm.runInNewContext(source.slice(start, end), {
     handleTrusted: f.handle,
     authorizeCoordination,
+    refuseCompetingCoordination: () => { if (outstanding) throw new Error("Background job outstanding"); },
     coordinationScope,
     coordinationRuntime: () => ({ stateDir: "/injected/state" }),
     discoverCliProviders: async (options) => {
@@ -164,6 +167,9 @@ test("trusted authorization handler validates optional write through the tested 
     assert.equal(invalid.ok, false);
     assert.equal(probes, 2);
     assert.deepEqual(query(f.event), before);
+    outstanding = true;
+    assert.throws(() => authorize(f.event, payload), /Background job outstanding/);
+    assert.equal(probes, 2);
     assert.equal(revoke(f.event).ok, true);
     assert.equal(query(f.event), null);
   } finally { coordinationScope.revoke(); }

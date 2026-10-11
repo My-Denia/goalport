@@ -1,3 +1,5 @@
+import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
+import type { BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
 import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
@@ -334,6 +336,9 @@ declare global {
         scopeExhausted?: boolean;
       }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
+      backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
+      backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
+      backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {
         instances: string[];
         maxTurns: number;

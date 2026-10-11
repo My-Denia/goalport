@@ -7,7 +7,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.coordination.config.ts",
     "lint": "tsc -b --pretty false",
     "test": "vitest run --dir src App.test.tsx App.reconnect.test.tsx ipc.test.ts ipc.tauri.test.ts StopContinuation.test.tsx interaction.test.tsx review-debt.test.tsx history-page.test.tsx send-intent.test.ts RuntimePickerMenu.test.tsx linux-core.test.tsx turn-results.test.tsx src/ui/GoalLayer.test.tsx src/shell/TitleBar.test.tsx src/panels/SessionDetails.test.tsx src/conversation/useComposerInput.test.tsx src/App.draft-stability.test.tsx ProductInteraction.test.tsx src/coordination/catalogFromProviders.test.ts src/coordination/coordinateGoal.test.ts src/coordination/coordinateSession.test.ts src/coordination/coordinateTurn.test.ts src/coordination/providerError.test.ts src/providerFailureLock.test.ts && vitest run scripts/acceptance/lib/scenarios-readselectors.test.tsx && node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/v1-isolated-env.test.mjs scripts/connected/v1-resume-chain.test.mjs scripts/connected/v1-core-restart.test.mjs scripts/pnpm-test-entry.test.mjs",
     "test:unit": "vitest run --dir src App.test.tsx App.reconnect.test.tsx ipc.test.ts ipc.tauri.test.ts StopContinuation.test.tsx interaction.test.tsx review-debt.test.tsx history-page.test.tsx send-intent.test.ts RuntimePickerMenu.test.tsx linux-core.test.tsx turn-results.test.tsx src/ui/GoalLayer.test.tsx src/shell/TitleBar.test.tsx src/panels/SessionDetails.test.tsx src/conversation/useComposerInput.test.tsx src/App.draft-stability.test.tsx ProductInteraction.test.tsx src/coordination/catalogFromProviders.test.ts src/coordination/coordinateGoal.test.ts src/coordination/coordinateSession.test.ts src/coordination/coordinateTurn.test.ts src/coordination/providerError.test.ts src/providerFailureLock.test.ts && vitest run scripts/acceptance/lib/scenarios-readselectors.test.tsx",
@@ -52,7 +52,9 @@
     "acceptance:feedback-native": "node scripts/acceptance/feedback-native.mjs",
     "test:acceptance-feedback": "node --test scripts/acceptance/feedback-native.test.mjs scripts/acceptance/lib/execution-fixture.test.mjs scripts/acceptance/stub-harness.test.mjs",
     "preview:verify-execution": "node scripts/preview/verify-execute-slice.mjs",
-    "preview:shot-execution": "node scripts/preview/shot-execute-slice.mjs"
+    "preview:shot-execution": "node scripts/preview/shot-execute-slice.mjs",
+    "acceptance:background-native": "node scripts/acceptance/background-native.mjs",
+    "test:acceptance-background": "vite build --config vite.coordination.config.ts && node --test electron/coordination-job.test.cjs electron/coordination-worker.test.cjs electron/coordination-background.test.cjs scripts/acceptance/background-native.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

@@ -1,0 +1,84 @@
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { createCoordinationJobStore } = require("./coordination-job.cjs");
+const { runWorker, coreRefusal } = require("./coordination-worker.cjs");
+const { readRecords } = require("./coordination-record.cjs");
+const engine = require("../dist/coordination-engine.cjs");
+const providers = [
+  { instanceId: "codex", displayName: "Codex", driver: "codex", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "chatgpt" }, models: [{ slug: "gpt-6-astra", isDefault: true }] },
+  { instanceId: "claude", displayName: "Claude", driver: "claudeAgent", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "claude-opus-5-5", isDefault: true }] },
+];
+async function scenario(t, options = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-test-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  delete require.cache[require.resolve("./coordination-scope.cjs")];
+  const scope = require("./coordination-scope.cjs");
+  let authorizations = 0;
+  const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
+  const store = createCoordinationJobStore(directory, { bootstrapReady: true });
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), backgroundConsent: true });
+  const launches = [];
+  const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers }), prepare: async () => ({}), close() {}, run: async command => {
+    launches.push(command);
+    if (options.revokeAt === launches.length) store.revoke(start.jobId);
+    const n = launches.length;
+    const role = command.commandId.split("-")[1];
+    const text = role === "review" ? "Execute this plan.\nVERDICT: carry-out" : role === "audit" ? `Tests checked.\nVERDICT: ${options.secondRevise || n === 4 ? "revise" : "verified"}` : role === "execute" ? "Changed fixture." : "A bounded plan.";
+    return options.resultAt === n ? options.result : { ok: true, text, messageDispatched: true };
+  } };
+  if (options.storageFailure) {
+    const complete = store.completeCommand;
+    // Frozen store adapter: failure after first known turn leaves durable pending.
+    options.store = { ...store, completeCommand: (...args) => { if (launches.length === 1) throw Error("disk full"); return complete(...args); } };
+  }
+  if (options.preLaunchFailure) options.store = { ...store, updateProgress: (...args) => { if (store.getStatus(start.jobId).pendingCommand) throw Error("pre-launch disk full"); return store.updateProgress(...args); } };
+  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint: path.join(directory, "control.sock") }, { store: options.store ?? store, engine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
+    invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
+    exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
+      ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
+  }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
+  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId };
+}
+test("same engine completes two chains with one authorization, dual budgets and first pass", async t => {
+  const r = await scenario(t);
+  assert.equal(r.result.status, "completed"); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1);
+  assert.equal(new Set(r.launches.map(c => c.commandId)).size, 8);
+  assert.deepEqual(r.status.counters, { readTurnsRemaining: 0, writeTurnsRemaining: 0 });
+  assert.equal(r.records[0].verdict, "verified"); assert.equal(r.records[0].feedbackHistory.length, 1);
+  assert.equal(r.status.active, false); assert.equal(r.scope.current(), null);
+  assert.equal("authorizedTurnsLeft" in r.records[0], false);
+});
+test("second revise never runs a third chain", async t => { const r = await scenario(t, { secondRevise: true }); assert.equal(r.launches.length, 8); assert.match(r.result.report.stopReason, /one automatic repair/); });
+test("default four reads do not reconstruct repair budget", async t => { const r = await scenario(t, { reads: 4 }); assert.equal(r.launches.length, 4); assert.equal(r.status.counters.readTurnsRemaining, 1); assert.match(r.result.report.stopReason, /not enough access/); });
+test("read-only consent never admits a writer", async t => { const r = await scenario(t, { readOnly: true }); assert.equal(r.launches.length, 2); assert.ok(r.launches.every(c => c.sandboxPolicy.type === "readOnly")); });
+test("revocation settles current turn but refuses every subsequent launch", async t => { const r = await scenario(t, { revokeAt: 2 }); assert.equal(r.launches.length, 2); assert.equal(r.status.revoked, true); assert.equal(r.status.completedCommands.length, 2); assert.equal(r.records[0].messageDispatched, true); });
+test("literal unknown dispatch retains pending claim and slot, no replay", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "partial writer", errorText: "lost", messageDispatched: null } }); assert.equal(r.launches.length, 3); assert.equal(r.status.state, "unconfirmed"); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.throws(() => r.store.claimWorker(r.jobId)); });
+test("known-not-sent writer stays terminal without repair", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "", errorText: "never sent", messageDispatched: false } }); assert.equal(r.launches.length, 3); assert.equal(r.status.pendingCommand, null); assert.equal(r.records[0].messageDispatched, true); });
+test("post-turn persistence failure retains durable uncertainty and known live result", async t => { const r = await scenario(t, { storageFailure: true }); assert.equal(r.launches.length, 1); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true); });
+test("terminal ordinary record failure does not continue or replenish access", async t => { const r = await scenario(t, { saveFailure: true }); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1); assert.equal(r.scope.current(), null); });
+test("blank selected workspace cannot clear governing hold", async t => { const r = await scenario(t, { snapshot: { bounds: { projectionUnavailable: false }, project: { workspaceRoot: "" }, stopResponsibility: { writeResponsibility: "held" } } }); assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0); });
+test("Core unavailable/active projections refuse", () => { assert.ok(coreRefusal(null)); assert.ok(coreRefusal({ bounds: { projectionUnavailable: true } })); assert.ok(coreRefusal({ bounds: {}, attempt: { state: "ACTIVE" } })); });
+
+test("a held goal outside the blank selected view refuses before first dispatch", async t => {
+  const r = await scenario(t, { snapshot: { bounds: {}, project: { workspaceRoot: "" } }, overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] }, detail: { bounds: {}, activeCampaignId: "elsewhere", project: { workspaceRoot: "/held/workspace" }, stopResponsibility: { writeResponsibility: "held" } } });
+  assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0);
+});
+test("outside-selected native work and truncated inventory cannot become clearance", async t => {
+  for (const overview of [{ truncated: true, pending: [], goals: [] }, { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "running" }] }]) {
+    const r = await scenario(t, { snapshot: { bounds: {}, project: { workspaceRoot: "" } }, overview });
+    assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0);
+  }
+});
+
+test("fresh global coverage refuses repair after the first completed audit without erasing its reports", async t => {
+  const r = await scenario(t, { overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] }, detail: (count, request) => ({ bounds: {}, activeCampaignId: request.payload.campaignId, ...(count >= 4 ? { stopResponsibility: { writeResponsibility: "held" } } : {}) }) });
+  assert.equal(r.launches.length, 4); assert.equal(r.records[0].auditText.includes("VERDICT: revise"), true);
+  assert.match(r.records[0].stopReason, /background job.*repair/); assert.equal(r.records[0].messageDispatched, true);
+});
+
+test("storage failure after reservation but before runtime invocation sends nothing", async t => {
+  const r = await scenario(t, { preLaunchFailure: true }); assert.equal(r.launches.length, 0); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true);
+});

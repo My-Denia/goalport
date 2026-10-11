@@ -8,7 +8,7 @@ import { argsFor, artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, ST
 // dependency that the explicit staging list does not carry. A name missing
 // here produces a packaged app that cannot start, so the check must be red
 // the moment a module is added without its staging entry.
-export function stagedDependenciesCoverGraph(staged = STAGED_APP_MODULES, roots = ["main.cjs", "preload.cjs"], electronDir = resolve(ROOT, "electron")) {
+export function stagedDependenciesCoverGraph(staged = STAGED_APP_MODULES, roots = ["main.cjs", "preload.cjs", "coordination-worker.cjs"], electronDir = resolve(ROOT, "electron")) {
   const stagedSet = new Set(staged);
   const seen = new Set();
   const missing = [];
@@ -68,7 +68,7 @@ export function verifyPackage(directory) {
   for (const name of COMPONENTS) {
     if (fileHash(resolve(root, "resources", name)) !== manifest.components[name]) throw new Error(`Embedded component mismatch: ${name}`);
   }
-  for (const name of [...STAGED_APP_MODULES, "dist/index.html"]) {
+  for (const name of [...STAGED_APP_MODULES, "dist/index.html", "dist/coordination-engine.cjs"]) {
     if (!asar.extractFile(archive, name).length) throw new Error(`Missing app content: ${name}`);
   }
   const unpackedChild = resolve(root, "resources/app.asar.unpacked/pinned-harness-child.ts");

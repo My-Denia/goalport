@@ -132,3 +132,13 @@ progress, verified, budget-stop and reopened-history states; inspect the PNGs an
 `walkthrough.md` yourself. Failed subprocess checks are feedback in these fixtures;
 a failed CLI turn stays terminal. This does not establish Windows behavior, real
 CLI confinement or independent-model judgment.
+
+## C2 background close-and-return acceptance
+
+Build with `pnpm build` (renderer plus the same engine as `dist/coordination-engine.cjs`) and `cargo build -p goalport-core`. Run `pnpm test:acceptance-background` for job/worker/host/driver checks and `pnpm test:unit` for renderer interactions. Offline package staging explicitly includes the worker, job store, background bridge, read-only Core coverage guard, verified Core client and engine bundle; no Windows packaging is needed to check completeness.
+
+Use `pnpm acceptance:background-native --out goal-runs/goalport-execute-and-native-acceptance/evidence/continuation-c2-<fresh-id>` on Linux with a display. The isolated sentinel-shadowed driver closes the actual desktop before a writer, keeps its identity-matched live Core/temporary fixture, and reopens only the UI against those same identities. BG1 completes the failed-check critique and one repair (six read/two write turns), BG2 revokes after return before a later writer, and BG3 terminates only the owned worker during an admitted turn. Process/main/renderer exit times, job and pending identities, command claims, ledger/grants, immutable test/source bytes, separate checker evidence, DOM facts and native-size screenshots at 860/1020/1440 px are retained. Driver cleanup is not a product tool-stop claim.
+
+Ordinary Sends remain window-bound and the existing C1 driver is unchanged: protect it with `pnpm test:acceptance-feedback` and `pnpm acceptance:feedback-native --out <fresh continuation-c2-c1-regression directory>`. History restores reports, never permission. A background job is one live admission, not a restart/resume service; unreachable control stays unconfirmed and non-retryable. No real model/vendor CLI, Windows, paid API, login, push or full-GAH claim is part of this run.
+
+The worker checks the current selected snapshot and the existing `goal_overview`/`goal_detail` read projections before every turn and before repair. Detail reads restore the shared selection; they issue no selection/authority command. Truncated overview, failed detail, hidden held responsibility or native conflict refuses the launch. Negative worker fixtures include a hold/native conflict outside a blank selected view and a new hold appearing at the repair boundary.

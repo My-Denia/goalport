@@ -14,6 +14,8 @@ const { createCoreConnection, acknowledgedStopSnapshot, createPendingDecisionNot
 const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state.cjs");
 const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
+const { createBackgroundHost } = require("./coordination-background.cjs");
+const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
@@ -657,6 +659,24 @@ function coordinationRuntime() {
   }
   return harnessRuntime;
 }
+const backgroundHost = createBackgroundHost({
+  directory: coordinationDirectory,
+  ready: () => !profileManager || profileReady,
+  env: process.env,
+  ordinaryScope: () => coordinationScope.current(),
+  endpoint: () => controlEndpointFor(coreConnectPath()),
+  workerPath: path.join(__dirname, "coordination-worker.cjs"),
+  snapshot: () => invokeCore({ protocolVersion: "goalport.ipc.v2", requestId: `background-admission-${randomUUID()}`, entityVersion: 0, messageType: "snapshot", payload: {} }),
+  config: () => ({
+    connectPath: coreConnectPath(), servePipe: coreServePipe(process.platform, configuredPipeName), coreBinary: coreBinary(),
+    identity: identityProfile() || { coreSha256: fileSha256(coreBinary()), database: dbPath(), pipe: coreConnectPath() },
+    stateDir: process.env.GOALPORT_HARNESS_STATE_DIR || path.join(coordinationDirectory(), "harness-state"),
+    enginePath: path.join(appRoot, "dist", "coordination-engine.cjs"),
+  }),
+});
+function refuseCompetingCoordination() {
+  if (backgroundHost.outstanding()) throw new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
+}
 function closeHarnessRuntime() {
   if (!harnessRuntime) return;
   const runtime = harnessRuntime;
@@ -1169,7 +1189,13 @@ app.whenReady().then(() => {
     return choice.canceled ? null : choice.filePaths[0] || null;
   });
   handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
-  handleTrusted("goalport:core-command", (_, request) => invokeCore(request));
+  handleTrusted("goalport:core-command", (_, request) => {
+    if (["create_campaign", "create_campaign_with_task", "select_runtime", "start_conversation", "conversation_send", "send_message", "handoff", "resume_native_session", "request_owner_action", "queue_override", "continue_in_isolated_workspace"].includes(request?.messageType)) refuseCompetingCoordination();
+    return invokeCore(request);
+  });
+  handleTrusted("goalport:background-start", (_, input) => backgroundHost.start(input));
+  handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
+  handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });
   handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
   handleTrusted("goalport:request-close", async () => {
@@ -1277,7 +1303,7 @@ app.whenReady().then(() => {
     }
   });
   handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation));
-  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => launchOne(
+  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => { refuseCompetingCoordination(); return launchOne(
     process.env,
     coordinationRuntime(),
     command,
@@ -1285,25 +1311,25 @@ app.whenReady().then(() => {
     // The third argument is the scope generation captured at authorize. A
     // launch without it stays exactly the legacy two-argument launch.
     typeof scopeGeneration === "number" ? { scope: coordinationScope, scopeGeneration } : undefined
-  ));
+  ); });
   handleTrusted("goalport:coordinate-cancel", (_event, generation) => {
     coordinationRuntime().cancel(generation);
     return { ok: true };
   });
-  handleTrusted("goalport:coordination-authorize", (_event, payload) => authorizeCoordination(
+  handleTrusted("goalport:coordination-authorize", (_event, payload) => { refuseCompetingCoordination(); return authorizeCoordination(
     payload,
     coordinationScope,
     // BOTH member lists use this same fresh zero-quota discovery. Validation
     // and subscription/API-key refusals run before the scope can be minted.
     () => discoverCliProviders({ stateDir: coordinationRuntime().stateDir })
-  ));
+  ); });
   handleTrusted("goalport:coordination-scope", () => coordinationScope.current());
   handleTrusted("goalport:coordination-revoke", () => {
     coordinationScope.revoke();
     return { ok: true };
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
-  handleTrusted("goalport:coordination-save", (_event, record) => saveRecord(coordinationDirectory(), record));
+  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(); return saveRecord(coordinationDirectory(), record); });
   handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
     clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
     return { ok: true };

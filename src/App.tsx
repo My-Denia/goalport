@@ -1,3 +1,4 @@
+import type { BackgroundStatus } from "./coordination/backgroundStatus";
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   getCoreClient,
@@ -20,7 +21,7 @@ import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
 import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
-import { CoordinationStatus, CoordinationProgress } from "./conversation/CoordinationStatus";
+import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
@@ -165,6 +166,10 @@ function App() {
   const [allowedTurns, setAllowedTurns] = useState(4);
   const [writeInstances, setWriteInstances] = useState<readonly string[]>([]);
   const [writeTurns, setWriteTurns] = useState(2);
+  const [backgroundConsent, setBackgroundConsent] = useState(false);
+  const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
+  const [backgroundView, setBackgroundView] = useState(false);
+  const backgroundAttached = useRef(false);
   const [scopeMirror, setScopeMirror] = useState<{
     instances: readonly string[];
     maxTurns: number;
@@ -357,6 +362,28 @@ function App() {
   // One discovery per runtime-less draft open powers the harness-access panel.
   // This writes only panel state: a discovery that resolves while the user is
   // typing never overwrites the message and never closes or opens anything.
+  useEffect(() => {
+    if (!coreReady) return;
+    const read = window.goalportCore?.backgroundStatus;
+    if (!read) return;
+    let cancelled = false;
+    let reading = false;
+    const poll = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const job = await read();
+        if (cancelled) return;
+        setBackgroundJob(current => current?.jobId === job?.jobId && ((current?.revoked && !job?.revoked) || (current?.active === false && job?.active === true)) ? current : job);
+        if (job && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+      } catch {
+        if (!cancelled) setBackgroundJob(job => job ? { ...job, state: "unconfirmed", live: false } : null);
+      } finally { reading = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 700);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [coreReady]);
   const runtimeLessDraftKey = draftGoal && draftGoal.provider.trim() === "" ? draftGoal.requestId : null;
   useEffect(() => {
     if (!runtimeLessDraftKey || !scopeBridgeReady) return undefined;
@@ -371,6 +398,7 @@ function App() {
     // from history or from another draft's live scope.
     setWriteInstances([]);
     setWriteTurns(2);
+    setBackgroundConsent(false);
     setPanelRequestId(runtimeLessDraftKey);
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
@@ -673,6 +701,29 @@ function App() {
       let completedReport: CoordinationView | null = null;
       setDraftBusy(true);
       try {
+        if (backgroundConsent) {
+          const start = window.goalportCore?.backgroundStart;
+          if (!scopedSend || !start) { setDraftError({ sentence: "Background Send is unavailable; nothing was admitted." }); return; }
+          // Admission is this job's single Send, never a retryable draft or
+          // an ordinary main-process record write. Even a lost Start reply
+          // cannot authorize another owner or a window-only resend.
+          setDraftBlocked(true);
+          let job: BackgroundStatus;
+          try {
+            job = await start({ requestId: draftGoal.requestId, goal: message, workspaceRoot: workspace,
+              readInstances: [...selectedInstances], readMaxTurns: allowedTurns,
+              ...(writeInstances.length ? { write: { instances: [...writeInstances], workspaceRoot: workspace, maxTurns: writeTurns } } : {}),
+              priorPlan: draftGoal.revision?.planText, priorReview: draftGoal.revision?.reviewText,
+              ...(draftGoal.avoid ? { avoidInstances: [draftGoal.avoid.instanceId] } : {}), backgroundConsent: true });
+          } catch (error) {
+            setBackgroundConsent(false);
+            setDraftError({ sentence: error instanceof Error ? error.message : "Background admission could not be confirmed. Do not resend this goal; return to its job status." });
+            return;
+          }
+          setBackgroundJob(job); backgroundAttached.current = true; setBackgroundView(true);
+          setBackgroundConsent(false);
+          return;
+        }
         // Authorize before anything else: a failed authorization shows its
         // sentence and sends nothing at all.
         let scopeGeneration: number | undefined;
@@ -1756,7 +1807,7 @@ function App() {
         detailsOpen={detailsOpen}
         onToggleDetails={() => setDetailsOpen((value) => !value)}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-        onNewGoal={handleNewGoal}
+        onNewGoal={() => { backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
         onCloseWindow={handleCloseWindow}
@@ -1775,10 +1826,12 @@ function App() {
             savedAt: plan.savedAt,
           }))}
           onSelectPlan={(requestId) => {
+            backgroundAttached.current = true; setBackgroundView(false);
             closeDraft(false);
             setSelectedPlanId(requestId);
           }}
           onSelectCampaign={(campaignId) => {
+            backgroundAttached.current = true; setBackgroundView(false);
             setSelectedPlanId(null);
             void selectCampaign(campaignId);
           }}
@@ -1802,7 +1855,12 @@ function App() {
             onReconnect={handleReconnect}
           />
 
-          {selectedPlan ? (
+          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => setBackgroundView(value => !value)}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
+          {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
+            <BackgroundCoordinationStatus job={backgroundJob} onStopAllowing={() => {
+              void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
+            }} />
+          </div> : selectedPlan ? (
             <div className="timeline-scroll" tabIndex={-1} aria-label="Saved plan">
               <CoordinationStatus
                 goal={selectedPlan.goal}
@@ -1921,6 +1979,8 @@ function App() {
                 <>
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
+                      backgroundConsent={backgroundConsent}
+                      onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
                       providers={panelProviders}
                       selected={selectedInstances}
                       onToggle={(instanceId, selected) => {

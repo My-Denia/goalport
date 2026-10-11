@@ -105,19 +105,23 @@ function ownedCore(pipe, db) {
 }
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-export async function launchApp(env, caseRoot) {
+export async function launchApp(env, caseRoot, reuse = null) {
   const safe = await guardedEnv(env);
   // isolatedChildEnv is deliberately passthrough; intersect with our allowlist.
   for (const key of Object.keys(safe)) if (!(key in env)) delete safe[key];
-  if (fs.existsSync(env.GOALPORT_CORE_PIPE)) throw new Error('socket already exists; refusing reuse');
+  const matchedCore = ownedCore(env.GOALPORT_CORE_PIPE, env.GOALPORT_CORE_DB);
+  if (reuse && (!reuse.closed || !matchedCore.length || JSON.stringify(matchedCore) !== JSON.stringify(reuse.corePids) || !fs.existsSync(env.TMPDIR))) throw new Error('owned live-Core reopen identity mismatch');
+  if (!reuse && fs.existsSync(env.GOALPORT_CORE_PIPE)) throw new Error('socket already exists; refusing reuse');
   const binary = path.join(ROOT, 'node_modules/electron/dist/electron');
   fs.accessSync(binary, fs.constants.X_OK);
   fs.accessSync(path.join(ROOT, 'target/debug/goalport-core'), fs.constants.X_OK);
   fs.accessSync(path.join(ROOT, 'dist/index.html'));
   // Chromium's SingletonSocket also has a Unix length bound: deep evidence
   // TMPDIR would fail before a window exists. Claim a fresh short owned temp.
-  if (fs.existsSync(env.TMPDIR)) throw new Error('temporary directory already exists; refusing reuse');
-  fs.mkdirSync(env.TMPDIR);
+  if (!reuse) {
+    if (fs.existsSync(env.TMPDIR)) throw new Error('temporary directory already exists; refusing reuse');
+    fs.mkdirSync(env.TMPDIR);
+  }
   for (const directory of [env.HOME, env.CODEX_HOME, env.CLAUDE_CONFIG_DIR, env.GOALPORT_HARNESS_STATE_DIR, SYNTHETIC]) fs.mkdirSync(directory, { recursive: true });
   const stdout = fs.createWriteStream(path.join(caseRoot, 'electron.stdout.log'), { flags: 'wx' });
   const stderr = fs.createWriteStream(path.join(caseRoot, 'electron.stderr.log'), { flags: 'wx' });
@@ -125,12 +129,23 @@ export async function launchApp(env, caseRoot) {
   child.stdout.pipe(stdout); child.stderr.pipe(stderr);
   let exit = null;
   const exited = new Promise(resolve => {
-    child.once('exit', (code, signal) => { exit = { code, signal }; resolve(exit); });
+    child.once('exit', (code, signal) => { exit = { code, signal, observedAt: new Date().toISOString() }; resolve(exit); });
     child.once('error', error => { exit = { error: error.message }; resolve(exit); });
   });
   return {
     child, command: [binary, '.'], cwd: ROOT,
     selectedEnv: Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'GOALPORT_STUB_SENTINEL' && k !== 'DBUS_SESSION_BUS_ADDRESS' && k !== 'XAUTHORITY')),
+    async closeUi(app) {
+      if (!exit) await Promise.race([exited, sleep(5000)]);
+      if (!exit || exit.code !== 0 || exit.signal) throw Error('desktop did not exit normally; refusing reopen');
+      app?.close();
+      stdout.end(); stderr.end();
+      return { electronExit: exit, forcedElectron: false, corePids: ownedCore(env.GOALPORT_CORE_PIPE, env.GOALPORT_CORE_DB), tempRetained: fs.existsSync(env.TMPDIR) };
+    },
+    async reopenUi(reopenRoot) {
+      if (!exit || exit.code !== 0 || exit.signal) throw Error('desktop must exit normally before live-Core reopen');
+      return launchApp({ ...env, GOALPORT_CDP_PORT: String(await freePort()) }, reopenRoot, { closed: true, corePids: ownedCore(env.GOALPORT_CORE_PIPE, env.GOALPORT_CORE_DB) });
+    },
     async cleanup(app) {
       const result = { requestClose: false, forcedElectron: false, coreMatchedPids: [], socketRemoved: false };
       if (app && !exit) { result.requestCloseRequested = true; try { await app.evaluate('window.goalportCore.requestClose()', true); result.requestClose = true; } catch (error) { result.closeError = error.message; } }

@@ -15,6 +15,8 @@ export interface AuthorizationScopeLine {
 
 export interface AuthorizationPanelProps {
   /** One discovery remembered from when this runtime-less draft opened. */
+  readonly backgroundConsent?: boolean;
+  readonly onBackgroundConsentChange?: (enabled: boolean) => void;
   readonly providers: readonly ProviderSnapshot[];
   readonly selected: readonly string[];
   readonly onToggle: (instanceId: string, selected: boolean) => void;
@@ -90,6 +92,8 @@ export function AuthorizationPanel({
   onStopAllowing,
   onConfirmChange,
   onUseAgain,
+  backgroundConsent = false,
+  onBackgroundConsentChange,
 }: AuthorizationPanelProps) {
   const catalog = catalogFromProviderSnapshots(providers);
   const editable = changeMode || scope === null;
@@ -105,8 +109,13 @@ export function AuthorizationPanel({
       </p>
       <p>
         If independent verification then finds unfinished work, GoalPort may organize one further
-        checked repair inside the budgets you choose here — keep this window open for it.
+        checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>
+      {onBackgroundConsentChange ? <div className="authorization-background">
+        <label><input type="checkbox" aria-label="Keep working after closing" checked={backgroundConsent}
+          onChange={event => onBackgroundConsentChange(event.target.checked)} /> Keep working after closing</label>
+        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes.</p>
+      </div> : null}
       <ul className="authorization-provider-list">
         {catalog.map((instance) => {
           const { state, reason } = rowState(instance);
