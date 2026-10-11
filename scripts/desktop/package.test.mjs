@@ -195,7 +195,7 @@ test("the offline staging check covers every required electron module, including
 test("removing any one staged module name turns the offline dependency check red", (t) => {
   for (const name of STAGED_APP_MODULES) {
     const withoutOne = STAGED_APP_MODULES.filter((candidate) => candidate !== name);
-    assert.throws(() => stagedDependenciesCoverGraph(withoutOne), new RegExp(name.replace(/[.]/g, "\\.")), name);
+    assert.throws(() => stagedDependenciesCoverGraph(withoutOne), new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
   }
 });
 
