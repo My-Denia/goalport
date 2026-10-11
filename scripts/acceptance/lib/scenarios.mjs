@@ -68,13 +68,13 @@ export function authorizationFactsExpression() {
   })()`;
 }
 
-// The write dimension is off only when every write member exists, matches the
-// discovered read membership one-for-one, is unchecked, and the panel still
-// states that no file changes are allowed.
+// The write dimension is off when every discovered read row has its own
+// unchecked write control. Blocked harnesses are static read rows without a
+// Select checkbox, so selectable checkboxes are not the membership boundary.
 export function writeConsentOff(facts) {
-  const read = Array.isArray(facts?.readSelects) ? facts.readSelects : [];
+  const rows = Array.isArray(facts?.readRows) ? facts.readRows : [];
   const write = Array.isArray(facts?.writeSelects) ? facts.writeSelects : [];
-  return write.length > 0 && write.length === read.length && facts?.writeSectionPresent === true && facts?.noWriteSentenceShown === true
+  return rows.length > 0 && write.length === rows.length && facts?.writeSectionPresent === true && facts?.noWriteSentenceShown === true
     && write.every(member => member.checked === false && typeof member.label === 'string' && member.label.startsWith('Allow changes through '));
 }
 
@@ -457,7 +457,7 @@ export async function runA5Relaunch(app, caseRoot, result) {
   })`) };
   check('relaunch.blockedRowShownBeforeSend', panel.rows.some(r => r.instance === 'codex' && r.state.includes('authorization-row-blocked')) && panel.blockedText && panel.rowDetails && panel.rowUseAgain);
   check('relaunch.claudeStillSelectable', panel.rows.some(r => r.instance === 'claude' && r.state.includes('authorization-row-selectable')));
-  check('relaunch.writeConsentStaysOff', panelFacts.readSelects.length === 2 && writeConsentOff(panelFacts));
+  check('relaunch.writeConsentStaysOff', panelFacts.readRows.length === 2 && panelFacts.readSelects.length === 1 && writeConsentOff(panelFacts));
   result.screenshots.push(await app.screenshot(caseRoot, 'blocked-panel', 1020));
   result.walkthrough.push('Relaunch: before anything is sent, the panel already says Codex is blocked on this machine since the earlier failure, with the technical detail folded away and a Use again control. The memory survived the close.');
   await app.click('.authorization-row[data-instance="codex"] button[aria-label="Use again Codex"]');

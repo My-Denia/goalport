@@ -66,7 +66,7 @@ const scenarioSourcePath = path.join(libDir, "scenarios.mjs");
 // Mirrors the real draft panel state: the app owns the read/write selections,
 // so a checked box really stays checked (a stateless stub would re-render
 // controlled inputs back to unchecked).
-function PanelHarness({ providers, initialSelected }: { providers: readonly ProviderSnapshot[]; initialSelected: readonly string[] }) {
+function PanelHarness({ providers, initialSelected, scope = null }: { providers: readonly ProviderSnapshot[]; initialSelected: readonly string[]; scope?: { remaining: number; maxTurns: number } | null }) {
   const [selected, setSelected] = useState<readonly string[]>(initialSelected);
   const [writeSelected, setWriteSelected] = useState<readonly string[]>([]);
   return (
@@ -82,7 +82,7 @@ function PanelHarness({ providers, initialSelected }: { providers: readonly Prov
       writeTurns={2}
       onWriteTurnsChange={() => {}}
       writeScope={null}
-      scope={null}
+      scope={scope}
       changeMode={false}
       onEnterChangeMode={() => {}}
       onStopAllowing={() => {}}
@@ -94,8 +94,8 @@ function PanelHarness({ providers, initialSelected }: { providers: readonly Prov
 
 // Mirrors the real draft panel: workspace chosen, read members selected, write
 // consent untouched (empty writeSelected) and no live write scope.
-function mountDraftPanel(providers: readonly ProviderSnapshot[], selected: readonly string[]) {
-  return render(<PanelHarness providers={providers} initialSelected={selected} />);
+function mountDraftPanel(providers: readonly ProviderSnapshot[], selected: readonly string[], scope: { remaining: number; maxTurns: number } | null = null) {
+  return render(<PanelHarness providers={providers} initialSelected={selected} scope={scope} />);
 }
 
 function driverFacts(): AuthorizationFacts {
@@ -158,6 +158,22 @@ describe("R2 read-member selectors against the current two-list panel", () => {
     expect(assertions.readMemberRows).toBe(true);
     expect(assertions.readMembersChecked).toBe(true);
     expect(assertions.readTurnsBudget).toBe(true);
+  });
+
+  it("keeps blocked-health membership separate from the one selectable read checkbox", () => {
+    const blockedCodex: ProviderSnapshot = {
+      ...codex,
+      environmentHealth: { since: "2026-10-10T15:00:00.000Z", detail: "helper_unknown_error" },
+    };
+    const { container } = mountDraftPanel([blockedCodex, claude], ["codex", "claude"], { remaining: 3, maxTurns: 4 });
+    const facts = driverFacts();
+    expect(facts.readRows.map(row => row.instance)).toEqual(["codex", "claude"]);
+    expect(facts.readSelects.map(member => member.label)).toEqual([readSelectLabel("Claude")]);
+    expect(facts.writeSelects.map(member => member.label)).toEqual(["Allow changes through Codex", "Allow changes through Claude"]);
+    expect(facts.writeSelects.every(member => member.checked === false)).toBe(true);
+    expect(container.querySelector('input[aria-label="Select Codex"]')).toBeNull();
+    expect(container.querySelector('input[aria-label="Allow changes through Codex"]')?.hasAttribute("disabled")).toBe(true);
+    expect(facts.readRows.length === 2 && facts.readSelects.length === 1 && writeConsentOff(facts)).toBe(true);
   });
 
   it("counts a3's single discovered harness as one read member plus one write row", () => {
