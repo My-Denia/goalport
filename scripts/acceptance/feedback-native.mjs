@@ -89,6 +89,11 @@ export async function main(argv = process.argv.slice(2)) {
       if (id === 'c1') {
         result.cleanup = await launched.cleanup(app);
         launched = null; app = null;
+        // The owned temp (with the fixture root) is gone with the close, so the
+        // relaunch stub carries no fixture binding; its turn queues stay empty,
+        // which makes any attempted turn loudly queue-exhausted instead of
+        // silently impossible. Probes keep working through the same sentinel.
+        materializeStubBin(stub.stubDir, { sentinel: stub.sentinel, behavior: { probes: FEEDBACK_SCENARIOS.c1.behavior.probes, turns: { codex: [], claude: [] } } });
         const relaunchRoot = path.join(caseRoot, 'relaunch');
         fs.mkdirSync(relaunchRoot);
         const relaunchEnv = assembleEnv({ caseRoot, pipe: socketName(uniqueToken()), port: await freePort(), stub });

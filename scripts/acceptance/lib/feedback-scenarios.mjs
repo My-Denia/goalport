@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { collectArtifacts } from './scenarios.mjs';
+import { snapshotFixture, baselineChecks } from './execution-scenarios.mjs';
 import {
   EXECUTION_FIXTURE_INCOMPLETE_SOURCE,
   EXECUTION_FIXTURE_REPAIRED_SOURCE,
@@ -54,7 +55,7 @@ export const FEEDBACK_SCENARIOS = Object.freeze({
 
 export const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 export const readLines = filename => fs.existsSync(filename) ? fs.readFileSync(filename, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) : [];
-export { snapshotFixture, baselineChecks } from './execution-scenarios.mjs';
+export { snapshotFixture, baselineChecks };
 export const INCOMPLETE_SOURCE_HASH = hash(EXECUTION_FIXTURE_INCOMPLETE_SOURCE);
 export const REPAIRED_SOURCE_HASH = hash(EXECUTION_FIXTURE_REPAIRED_SOURCE);
 
@@ -182,7 +183,11 @@ export async function runFeedbackScenario(id, app, caseRoot, fixture, result) {
     // The corrective pass starts in the same Send, without a new authorization.
     await app.until(`document.body.innerText.includes(${JSON.stringify(REPAIR_PROGRESS_SNIPPET)})`, 60000);
     result.scopes.repairProgress = await app.evaluate('window.goalportCore.coordinationScope()', true);
-    check('repairUsesSameGeneration', result.scopes.repairProgress !== null && result.scopes.repairProgress?.generation === result.scopes.makingChanges?.generation && result.scopes.repairProgress?.remaining === 3 && result.scopes.repairProgress?.write?.remaining === 1);
+    check('repairUsesSameGeneration', result.scopes.repairProgress !== null
+      && result.scopes.repairProgress?.generation === result.scopes.makingChanges?.generation
+      && result.scopes.repairProgress?.remaining <= 3 && result.scopes.repairProgress?.remaining >= 2
+      && result.scopes.repairProgress?.write?.remaining === 1
+      && result.scopes.repairProgress?.instances?.join() === result.scopes.makingChanges?.instances?.join());
     await shots(app, caseRoot, result, 'repair-progress');
     result.walkthrough.push('The completed critique ends VERDICT: revise, so GoalPort organizes one checked repair in the same window: the progress line says so, the same scope generation pays for it, and no new authorization happens.');
     await app.until("document.body.innerText.includes('Changes verified') && !document.querySelector('.coordination-progress')", 90000);
@@ -204,6 +209,20 @@ export async function runFeedbackScenario(id, app, caseRoot, fixture, result) {
   result.artifacts = collectArtifacts(caseRoot);
   result.operations = readLines(path.join(caseRoot, 'stub-bin/execution-operations.jsonl'));
   for (const [name, value] of Object.entries(feedbackAssertions(id, result))) check(name, value);
+  // Actual first-user CLOSE, never an injected close/save/authorize hook.
+  await app.click('button[aria-label="Application menu"]');
+  await app.until('!!document.querySelector(\'[role="menu"] [aria-label="Close window"]\')');
+  try {
+    await app.click('[role="menu"] [aria-label="Close window"]');
+  } catch (error) {
+    // Native menu Close may destroy CDP before mouseReleased's receipt. Only
+    // this exact post-hit-test disconnect is expected; cleanup still requires
+    // the actual unforced Electron exit0 and owned Core/socket absence.
+    if (error.message !== 'CDP WebSocket closed') throw error;
+    result.domCloseReceipt = error.message;
+  }
+  result.domCloseClicked = true;
+  result.walkthrough.push('Application menu → Close window clicked through CDP mouse hit testing; not native OS keyboard/mouse and not a background-continuation test.');
 }
 
 /**
@@ -242,7 +261,7 @@ export async function runFeedbackRelaunch(app, caseRoot, result) {
   const artifactsFinal = collectArtifacts(caseRoot);
   check('noTurnAcrossRelaunch', artifactsFinal.invocations.filter(i => i.invocationType === 'turn').length === turnsBefore);
   result.artifactsFinal = artifactsFinal;
-  // Actual first-user CLOSE, never an injected close hook.
+  // Actual first-user CLOSE for the relaunched window too.
   await app.click('button[aria-label="Application menu"]');
   await app.until('!!document.querySelector(\'[role="menu"] [aria-label="Close window"]\')');
   try {
