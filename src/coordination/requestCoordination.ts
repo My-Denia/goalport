@@ -183,6 +183,13 @@ export async function requestCoordination(
      * no corrective pass is attempted at all.
      */
     readonly beforeRepair?: (checkpoint: RepairCheckpoint) => Promise<boolean>;
+    /**
+     * Adapter-specific wording for the one repair-refusal stop line: a
+     * background job has no window to confirm. Absent keeps the existing
+     * window-only copy. Wording only — repair eligibility and ceilings are
+     * unchanged.
+     */
+    readonly repairRefusalSentence?: string;
     /** Synchronous round events (started is transient; failed/continued persist). */
     readonly onEvent?: (event: CoordinateSessionEvent) => void;
   },
@@ -318,7 +325,7 @@ export async function requestCoordination(
     } else if (!staffed) {
       noRepairSentence = UNSTAFFED_REPAIR_SENTENCE;
     } else if (!stillCurrent()) {
-      noRepairSentence = REFUSED_REPAIR_SENTENCE;
+      noRepairSentence = input.repairRefusalSentence ?? REFUSED_REPAIR_SENTENCE;
     } else {
       let allowed = false;
       try {
@@ -331,7 +338,7 @@ export async function requestCoordination(
         allowed = false;
       }
       if (!allowed || !stillCurrent()) {
-        noRepairSentence = REFUSED_REPAIR_SENTENCE;
+        noRepairSentence = input.repairRefusalSentence ?? REFUSED_REPAIR_SENTENCE;
       } else {
         repaired = await runCoordinateSession(
           correctiveInput,
