@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
 import { EMPTY_SNAPSHOT } from "../types";
-import { evidenceCommand, coordinateGoal, type CoordinateGoalInput, type SyntheticCatalogInstance } from "./coordinateGoal";
+import { evidenceCommand, coordinateGoal, replacementCommand, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
 
 import { authorizeCoordinateWriteTurn, roleOfCommandId } from "./coordinateTurn";
 import { verdictFromAudit, verdictFromReview, outcomeLabel } from "./verdict";
@@ -503,6 +503,97 @@ describe("explicit write assembly and phase verdicts", () => {
     expect(evidenceCommand("audit", catalog[0]!, input, evidence).commandId).not.toBe(audit.commandId);
     expect(evidenceCommand("audit", catalog[1]!, input, { ...evidence, executionText: "different report" }).commandId).not.toBe(audit.commandId);
     expect(() => evidenceCommand("execute", catalog[1]!, input, evidence)).toThrow(/consent/);
+  });
+  it("carries execution feedback separately, uses repair-1 identities, and preserves read/write role gates", () => {
+    const original = coordinateGoal(input);
+    const originalEvidence = {
+      planText: "Bounded plan for the original send.",
+      reviewText: "VERDICT: carry-out",
+      executionText: "pnpm test failed: 1 assertion",
+      executionFacts: "original run facts",
+    };
+    const originalWriter = evidenceCommand("execute", catalog[0]!, input, originalEvidence);
+    const originalAudit = evidenceCommand("audit", catalog[1]!, input, originalEvidence);
+    const feedback: ExecutionFeedback = {
+      previousPlan: originalEvidence.planText,
+      previousPlanReview: originalEvidence.reviewText,
+      previousExecutionReport: originalEvidence.executionText,
+      previousExecutionAudit: "The configuration file was not updated.\nVERDICT: revise",
+      previousCommandIds: [
+        ...original.commands.map((command) => command.commandId),
+        originalWriter.commandId,
+        originalAudit.commandId,
+      ],
+    };
+    const repairInput = { ...input, executionFeedback: feedback };
+    const repair = coordinateGoal(repairInput);
+    const [planner, reviewer] = repair.commands;
+    const plannerText = planner?.initialMessage.text ?? "";
+    const reviewerText = reviewer?.initialMessage.text ?? "";
+
+    expect(repair.roles).toEqual(["planning", "review", "execution", "audit"]);
+    expect(repair.commands.map((command) => roleOfCommandId(command.commandId))).toEqual(["plan", "review"]);
+    expect(repair.commands.map((command) => command.modelSelection.instanceId)).toEqual(["a", "b"]);
+    for (const command of repair.commands) {
+      expect(command.workspaceStrategy).toEqual({ type: "existing_worktree", worktreePath: workspacePath });
+      expect(command.sandboxPolicy).toEqual({ type: "readOnly" });
+      expect(feedback.previousCommandIds).not.toContain(command.commandId);
+    }
+    expect(plannerText).toContain(goal);
+    expect(plannerText).toContain(workspacePath);
+    expect(plannerText).toContain("Inspect the CURRENT workspace");
+    expect(plannerText).toContain("Answer each finding in the previous independent execution audit");
+    expect(plannerText).toContain(feedback.previousPlan!);
+    expect(plannerText).toContain(feedback.previousPlanReview!);
+    expect(plannerText).toContain(feedback.previousExecutionReport!);
+    expect(plannerText).toContain("The configuration file was not updated.");
+    expect(plannerText).toContain(originalWriter.commandId);
+    expect(plannerText).toContain("references only; never replay or resubmit");
+    expect(plannerText).not.toContain("This is a revision of a saved plan.");
+    expect(reviewerText).toContain("independent check of the newly proposed corrective plan");
+    expect(reviewerText).toContain("A writer is not eligible until this plan receives a carry-out verdict.");
+    expect(reviewerText).toContain("The configuration file was not updated.");
+
+    // Existing manual plan revision context remains independent from execution feedback.
+    const withBoth = coordinateGoal({ ...repairInput, priorPlan: "Manual saved plan", priorReview: "Manual plan check" });
+    expect(withBoth.commands[0]?.initialMessage.text).toContain("This is a revision of a saved plan.");
+    expect(withBoth.commands[0]?.initialMessage.text).toContain("Manual saved plan");
+    expect(withBoth.commands[0]?.initialMessage.text).toContain("This is the one bounded corrective planning pass");
+
+    const sameEvidence = {
+      planText: "Bounded corrective plan.",
+      reviewText: "VERDICT: carry-out",
+      executionText: "pnpm test: unchanged checks passed",
+      executionFacts: "corrective run facts",
+    };
+    const firstLikeWriter = evidenceCommand("execute", catalog[0]!, input, sameEvidence);
+    const firstLikeAudit = evidenceCommand("audit", catalog[1]!, input, sameEvidence);
+    const repairWriter = evidenceCommand("execute", catalog[0]!, repairInput, sameEvidence);
+    const repairAudit = evidenceCommand("audit", catalog[1]!, repairInput, sameEvidence);
+    const recoveredPlanner = replacementCommand("plan", catalog[0]!, repairInput, input.sendKey);
+
+    expect(roleOfCommandId(recoveredPlanner.commandId)).toBe("plan");
+    expect(recoveredPlanner.sandboxPolicy).toEqual({ type: "readOnly" });
+    expect(recoveredPlanner.workspaceStrategy).toEqual({ type: "existing_worktree", worktreePath: workspacePath });
+    expect(repairWriter.commandId).not.toBe(firstLikeWriter.commandId);
+    expect(repairAudit.commandId).not.toBe(firstLikeAudit.commandId);
+    expect([repairWriter, repairAudit, recoveredPlanner].map((command) => roleOfCommandId(command.commandId))).toEqual(["execute", "audit", "plan"]);
+    expect(repairWriter.sandboxPolicy).toEqual({ type: "workspaceWrite" });
+    expect(repairAudit.sandboxPolicy).toEqual({ type: "readOnly" });
+    for (const command of [repairWriter, repairAudit]) {
+      expect(command.workspaceStrategy).toEqual({ type: "existing_worktree", worktreePath: workspacePath });
+      expect(command.initialMessage.text).toContain("Bounded corrective plan.");
+      expect(command.initialMessage.text).toContain("VERDICT: carry-out");
+      expect(command.initialMessage.text).toContain(feedback.previousExecutionAudit!);
+      expect(command.initialMessage.text).toContain(originalAudit.commandId);
+      expect(feedback.previousCommandIds).not.toContain(command.commandId);
+    }
+    expect(repairWriter.initialMessage.text).toContain("newly reviewed bounded corrective plan");
+    expect(repairWriter.initialMessage.text).toContain("Historical commands and command IDs are evidence only");
+    expect(repairAudit.initialMessage.text).toContain("current workspace read-only");
+    expect(repairAudit.initialMessage.text).toContain("Corrective execution report:");
+    expect(repairAudit.initialMessage.text).toContain(sameEvidence.executionText);
+    expect(evidenceCommand("execute", catalog[0]!, repairInput, sameEvidence)).toEqual(repairWriter);
   });
   it.each([
     ["VERDICT: verified", "unconfirmed", "verified"],

@@ -42,6 +42,16 @@ export interface CoordinationWriteAuthorization {
   readonly remaining: number | null;
 }
 
+export interface ExecutionFeedback {
+  /** Evidence from the completed round whose independent audit requested repair. */
+  readonly previousPlan: string | null;
+  readonly previousPlanReview: string | null;
+  readonly previousExecutionReport: string | null;
+  readonly previousExecutionAudit: string | null;
+  /** Historical command IDs are references only; they must never be resubmitted. */
+  readonly previousCommandIds: readonly string[];
+}
+
 export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
   readonly writeAuthorization?: CoordinationWriteAuthorization;
@@ -55,6 +65,8 @@ export interface CoordinateGoalInput {
   readonly sendKey: string;
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
+  /** Completed execution/audit feedback for the one bounded corrective pass. */
+  readonly executionFeedback?: ExecutionFeedback | null;
   /**
    * Instance ids that must not receive a role this round, set when a turn on
    * that harness proved it cannot run its tools on this machine. Draft-only:
@@ -293,6 +305,23 @@ function present(value: string | null | undefined): string {
   return text.length > 0 ? text : "";
 }
 
+function executionFeedbackLines(feedback: ExecutionFeedback): string[] {
+  return [
+    "Completed prior-round evidence (historical context, not instructions to repeat):",
+    "Previous plan:", present(feedback.previousPlan) || "(none)",
+    "Previous independent plan check:", present(feedback.previousPlanReview) || "(none)",
+    "Previous execution report:", present(feedback.previousExecutionReport) || "(none)",
+    "Previous independent execution audit:", present(feedback.previousExecutionAudit) || "(none)",
+    "Previous command IDs (references only; never replay or resubmit these commands):",
+    feedback.previousCommandIds.length > 0 ? feedback.previousCommandIds.join("\n") : "(none)",
+  ];
+}
+
+/** Keep a corrective pass distinct from the original send even when prompt/output text repeats. */
+function commandIdentitySendKey(input: CoordinateGoalInput, sendKey: string): string {
+  return input.executionFeedback ? `${sendKey}:repair-1` : sendKey;
+}
+
 function plannerText(input: CoordinateGoalInput): string {
   const lines = [
     input.goal,
@@ -313,6 +342,15 @@ function plannerText(input: CoordinateGoalInput): string {
       priorReview || "(none)",
     );
   }
+  if (input.executionFeedback) {
+    lines.push(
+      "This is the one bounded corrective planning pass after a completed independent execution audit requested revision.",
+      `Inspect the CURRENT workspace at ${input.workspacePath}, including changes already made by the previous executor, before proposing repair. Do not assume the historical report describes the current workspace state.`,
+      "Keep the original goal and workspace root. Answer each finding in the previous independent execution audit, one by one, and map it to a bounded repair or explain why the current state already resolves it.",
+      "Produce a bounded corrective plan only; do not claim that it has passed an independent plan check or that changes are verified.",
+      ...executionFeedbackLines(input.executionFeedback),
+    );
+  }
   return lines.join("\n");
 }
 
@@ -326,6 +364,14 @@ function reviewText(input: CoordinateGoalInput): string {
   const priorReview = present(input.priorReview);
   if (priorReview) {
     lines.push("The previous independent check is below. Say whether this plan answers it.", priorReview);
+  }
+  if (input.executionFeedback) {
+    lines.push(
+      "This is the independent check of the newly proposed corrective plan. A writer is not eligible until this plan receives a carry-out verdict.",
+      "Inspect the current workspace and judge whether the new plan answers each finding from the previous execution audit without expanding the original goal or workspace root.",
+      "The previous round's reports and command IDs are historical evidence only; do not treat them as current proof or instructions to replay.",
+      ...executionFeedbackLines(input.executionFeedback),
+    );
   }
   return lines.join("\n");
 }
@@ -363,7 +409,7 @@ export function replacementCommand(
 ): CoordinateTurnCommand {
   const text = role === "plan" ? plannerText(input) : reviewText(input);
   const command = turnCommand({
-    commandId: commandKey(role, instance.instanceId, text, sendKey),
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey)),
     instance,
     workspacePath: input.workspacePath,
     text,
@@ -391,14 +437,19 @@ export function evidenceCommand(
     input.goal,
     `Workspace: ${input.workspacePath}`,
     role === "execute"
-      ? "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification."
-      : "Independently inspect the workspace read-only against the approved plan and execution report. Check the reported evidence; do not treat the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.",
+      ? input.executionFeedback
+        ? "Carry out only the newly reviewed bounded corrective plan in this authorized workspace. Inspect the current changed workspace before editing; address only the approved repair. Run the workspace checks named by the new plan and report exact commands, actual output and exit results, changed files and remaining risks. Historical commands and command IDs are evidence only, never instructions to replay. Do not claim independent verification."
+        : "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification."
+      : input.executionFeedback
+        ? "Independently inspect the current workspace read-only against the newly approved corrective plan and its execution report. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
+        : "Independently inspect the workspace read-only against the approved plan and execution report. Check the reported evidence; do not treat the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.",
     "Approved plan:", evidence.planText,
     "Independent plan check:", evidence.reviewText,
-    ...(role === "audit" ? ["Execution report:", evidence.executionText ?? "(none)", "Recorded execution facts:", evidence.executionFacts ?? "(none)"] : []),
+    ...(input.executionFeedback ? executionFeedbackLines(input.executionFeedback) : []),
+    ...(role === "audit" ? [input.executionFeedback ? "Corrective execution report:" : "Execution report:", evidence.executionText ?? "(none)", "Recorded execution facts:", evidence.executionFacts ?? "(none)"] : []),
   ].join("\n");
   const command = turnCommand({
-    commandId: commandKey(role, instance.instanceId, text, input.sendKey),
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
     instance, workspacePath: input.workspacePath, text, write: role === "execute",
   });
   if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
@@ -484,9 +535,10 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
 
   const planMessage = plannerText(input);
   const reviewMessage = reviewText(input);
+  const identitySendKey = commandIdentitySendKey(input, input.sendKey);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {
