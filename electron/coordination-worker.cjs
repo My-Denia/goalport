@@ -94,7 +94,18 @@ async function runWorker(config, deps = {}) {
       },
     }, discovery, { launch: async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
-      try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) { storageFailed = true; return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` }; }
+      try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
+        if (error?.code === "access-revoked") {
+          // The store proved the durable stop won the admission race and
+          // already settled the recorded command as never sent. That is a
+          // clean refusal, not a storage failure: mark the launch proven
+          // not-sent and let the run settle an honest terminal outcome
+          // instead of retaining an unconfirmed admission forever.
+          return { launched: false, dispatched: false, text: "", errorText: "Access was stopped; this command was not sent." };
+        }
+        storageFailed = true;
+        return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` };
+      }
       const result = await launchOne(env, { ...runtime, run: (admittedCommand, generation) => {
         // launchOne has charged the ORIGINAL scope before this synchronous
         // callback. Publish that observed counter before invoking the CLI.

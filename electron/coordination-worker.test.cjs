@@ -36,6 +36,16 @@ async function scenario(t, options = {}) {
     options.store = { ...store, completeCommand: (...args) => { if (launches.length === 1) throw Error("disk full"); return complete(...args); } };
   }
   if (options.preLaunchFailure) options.store = { ...store, updateProgress: (...args) => { if (store.getStatus(start.jobId).pendingCommand) throw Error("pre-launch disk full"); return store.updateProgress(...args); } };
+  if (options.stopWinsAdmissionRace) {
+    // The durable stop lands between the admission read and its write: the
+    // store settles the command as never sent and refuses the launch.
+    options.store = { ...store, recordPendingCommand: (jobId) => {
+      store.revoke(jobId);
+      const error = new Error("Access was stopped; the recorded command was settled as never sent and was not launched.");
+      error.code = "access-revoked";
+      throw error;
+    } };
+  }
   let backgroundEngineInputValue;
   const workerEngine = options.captureExecutionFeedback ? {
     ...engine,
@@ -93,6 +103,18 @@ test("second revise never runs a third chain", async t => { const r = await scen
 test("default four reads do not reconstruct repair budget", async t => { const r = await scenario(t, { reads: 4 }); assert.equal(r.launches.length, 4); assert.equal(r.status.counters.readTurnsRemaining, 1); assert.match(r.result.report.stopReason, /not enough access/); });
 test("read-only consent never admits a writer", async t => { const r = await scenario(t, { readOnly: true }); assert.equal(r.launches.length, 2); assert.ok(r.launches.every(c => c.sandboxPolicy.type === "readOnly")); });
 test("revocation settles current turn but refuses every subsequent launch", async t => { const r = await scenario(t, { revokeAt: 2 }); assert.equal(r.launches.length, 2); assert.equal(r.status.revoked, true); assert.equal(r.status.completedCommands.length, 2); assert.equal(r.records[0].messageDispatched, true); });
+test("a stop winning the admission race never launches and settles a releasable outcome", async t => {
+  const r = await scenario(t, { stopWinsAdmissionRace: true });
+  assert.equal(r.launches.length, 0);
+  // The refusal is clean, not a storage failure: the run settles an honest
+  // terminal outcome and releases the slot instead of retaining an
+  // unconfirmed admission forever.
+  assert.equal(r.result.storageFailed, false);
+  assert.equal(r.status.revoked, true);
+  assert.equal(r.status.pendingCommand, null);
+  assert.ok(["stopped", "failed"].includes(r.status.state));
+  assert.equal(r.status.active, false);
+});
 test("literal unknown dispatch retains pending claim and slot, no replay", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "partial writer", errorText: "lost", messageDispatched: null } }); assert.equal(r.launches.length, 3); assert.equal(r.status.state, "unconfirmed"); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.throws(() => r.store.claimWorker(r.jobId)); });
 test("known-not-sent writer stays terminal without repair", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "", errorText: "never sent", messageDispatched: false } }); assert.equal(r.launches.length, 3); assert.equal(r.status.pendingCommand, null); assert.equal(r.records[0].messageDispatched, true); });
 test("post-turn persistence failure retains durable uncertainty and known live result", async t => { const r = await scenario(t, { storageFailure: true }); assert.equal(r.launches.length, 1); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true); });
