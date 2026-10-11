@@ -84,6 +84,83 @@ function roundEventsOf(value) {
   });
 }
 
+function coordinationRoundFactOf(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const planningHarness = nullableText(value.planningHarness);
+  const reviewHarness = nullableText(value.reviewHarness);
+  const planText = nullableText(value.planText);
+  const reviewText = nullableText(value.reviewText);
+  const executionText = nullableText(value.executionText);
+  const auditText = nullableText(value.auditText);
+  const executionHarness = nullableText(value.executionHarness);
+  const auditHarness = nullableText(value.auditHarness);
+  const result = nullableText(value.result);
+  const stopReason = nullableText(value.stopReason);
+  const verdict = value.verdict === null
+    ? null
+    : (typeof value.verdict === "string" && VERDICTS.has(value.verdict) ? value.verdict : undefined);
+  if (
+    planningHarness === undefined
+    || reviewHarness === undefined
+    || planText === undefined
+    || reviewText === undefined
+    || executionText === undefined
+    || auditText === undefined
+    || executionHarness === undefined
+    || auditHarness === undefined
+    || result === undefined
+    || !stopReason
+    || verdict === undefined
+    || !Array.isArray(value.commandIds)
+  ) return null;
+
+  const fact = {
+    planningHarness,
+    reviewHarness,
+    planText,
+    reviewText,
+    executionText,
+    auditText,
+    executionHarness,
+    auditHarness,
+    result,
+    verdict,
+    stopReason,
+    messageDispatched: dispatched(value.messageDispatched),
+    commandIds: value.commandIds.flatMap((commandId) => {
+      if (typeof commandId !== "string") return [];
+      const text = commandId.trim();
+      return text ? [text] : [];
+    }),
+  };
+  let roundEvents;
+  try {
+    roundEvents = roundEventsOf(value.roundEvents);
+  } catch {
+    // Completed-event history is best-effort and never rejects the round fact.
+    roundEvents = undefined;
+  }
+  return { ...fact, ...(roundEvents === undefined ? {} : { roundEvents }) };
+}
+
+function feedbackHistoryOf(value) {
+  if (!Array.isArray(value)) return undefined;
+  // This slice retains exactly the first completed pass. Later passes are
+  // represented by the record's top-level result fields, not nested history.
+  const first = coordinationRoundFactOf(value[0]);
+  return first ? [first] : [];
+}
+
+// Combine per-pass dispatch with the latest projection into the original
+// Send's tri-state. A later pass that proves it sent nothing cannot erase an
+// earlier sent (or unknown) pass and make the goal appear retryable.
+function sendWideDispatched(value, feedbackHistory) {
+  const dispatchStates = [dispatched(value), ...(feedbackHistory ?? []).map((round) => round.messageDispatched)];
+  if (dispatchStates.includes(true)) return true;
+  if (dispatchStates.includes(null)) return null;
+  return false;
+}
+
 function normalize(input) {
   if (!input || typeof input !== "object") return null;
   const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
@@ -121,6 +198,14 @@ function normalize(input) {
     // the otherwise valid saved plan.
     roundEvents = undefined;
   }
+  let feedbackHistory;
+  try {
+    feedbackHistory = feedbackHistoryOf(input.feedbackHistory);
+  } catch {
+    // Optional first-pass evidence must never make an otherwise valid record
+    // unreadable if its saved shape is malformed.
+    feedbackHistory = undefined;
+  }
   return {
     requestId,
     workspacePath,
@@ -138,9 +223,10 @@ function normalize(input) {
     stopReason,
     planningQuota,
     reviewQuota,
-    messageDispatched: dispatched(input.messageDispatched),
+    messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
     ...(roundEvents === undefined ? {} : { roundEvents }),
+    ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
     savedAt: savedAtOf(input.savedAt),
   };
 }

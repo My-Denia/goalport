@@ -23,6 +23,26 @@ function record(overrides = {}) {
   };
 }
 
+function firstRoundFact(overrides = {}) {
+  return {
+    planningHarness: "Codex",
+    reviewHarness: "Claude",
+    planText: "First bounded plan.",
+    reviewText: "Plan accepted.\nVERDICT: carry-out",
+    executionText: "Changed the helper, but its check failed.",
+    auditText: "The requested behavior is incomplete.\nVERDICT: revise",
+    executionHarness: "Codex",
+    auditHarness: "Claude",
+    result: "The requested behavior is incomplete.\nVERDICT: revise",
+    verdict: "revise",
+    stopReason: "The independent audit requested a correction.",
+    messageDispatched: true,
+    roundEvents: [],
+    commandIds: ["coordinate-plan-send-1", "coordinate-review-send-1", "coordinate-execute-send-1", "coordinate-audit-send-1"],
+    ...overrides,
+  };
+}
+
 test("a saved plan reopens as the same record and a repeat request does not append", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-"));
   try {
@@ -327,6 +347,114 @@ test("pre-M7 records remain readable with null execution and audit fields", () =
     assert.equal(loaded.auditText, null);
     assert.equal(loaded.executionHarness, null);
     assert.equal(loaded.auditHarness, null);
+    assert.equal(Object.hasOwn(loaded, "feedbackHistory"), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("completed first-round feedback facts round-trip beside the latest pass", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-feedback-"));
+  const first = firstRoundFact();
+  try {
+    const saved = saveRecord(directory, record({
+      planText: "Corrective plan.",
+      reviewText: "The corrective plan is acceptable.",
+      executionText: "Repaired the helper and its test.",
+      auditText: "The repaired behavior now passes.\nVERDICT: verified",
+      executionHarness: "Codex",
+      auditHarness: "Claude",
+      result: "The repaired behavior now passes.\nVERDICT: verified",
+      verdict: "verified",
+      stopReason: "The independent corrective audit verified the repair.",
+      messageDispatched: true,
+      feedbackHistory: [first],
+    }));
+    assert.equal(saved.verdict, "verified");
+    assert.equal(saved.planText, "Corrective plan.");
+    assert.equal(saved.messageDispatched, true);
+    assert.deepEqual(saved.feedbackHistory, [first]);
+    assert.deepEqual(readRecords(directory)[0], saved);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("malformed optional feedback history is dropped without rejecting an otherwise valid record", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-feedback-bad-"));
+  try {
+    const malformedShape = saveRecord(directory, record({ feedbackHistory: { verdict: "revise" } }));
+    assert.equal(malformedShape.verdict, "revise");
+    assert.equal(Object.hasOwn(malformedShape, "feedbackHistory"), false);
+
+    const malformedFact = saveRecord(directory, record({
+      requestId: "malformed-fact",
+      feedbackHistory: [firstRoundFact({ commandIds: "not-an-array" })],
+    }));
+    assert.equal(malformedFact.verdict, "revise");
+    assert.deepEqual(malformedFact.feedbackHistory, []);
+
+    const firstOnly = saveRecord(directory, record({
+      requestId: "first-only",
+      feedbackHistory: [firstRoundFact(), firstRoundFact({ verdict: "verified", commandIds: ["coordinate-audit-repair-1"] })],
+    }));
+    assert.deepEqual(firstOnly.feedbackHistory, [firstRoundFact()]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("send-wide dispatch stays non-retryable after a corrective pass is refused, unknown, or cancelled before writing", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-feedback-dispatch-"));
+  const cases = [
+    { requestId: "repair-refused", dispatch: false, stopReason: "Corrective planning was refused before dispatch.", verdict: "failed" },
+    { requestId: "repair-unknown", dispatch: null, stopReason: "Corrective planning dispatch is unknown.", verdict: "unconfirmed" },
+    { requestId: "repair-cancelled", dispatch: true, stopReason: "The corrective pass was cancelled before its writer.", verdict: "stopped" },
+  ];
+  try {
+    for (const item of cases) {
+      const saved = saveRecord(directory, record({
+        requestId: item.requestId,
+        result: item.stopReason,
+        verdict: item.verdict,
+        stopReason: item.stopReason,
+        messageDispatched: item.dispatch,
+        feedbackHistory: [firstRoundFact({ messageDispatched: true })],
+      }));
+      assert.equal(saved.messageDispatched, true, `${item.requestId} must remain sent at the original-Send level`);
+      assert.deepEqual(saved.feedbackHistory, [firstRoundFact({ messageDispatched: true })]);
+      assert.equal(readRecords(directory).find((entry) => entry.requestId === item.requestId).messageDispatched, true);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("feedback history restores evidence only, never budgets, scope, or permission", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-feedback-authority-"));
+  const fact = firstRoundFact({
+    authorizedTurnsLeft: 99,
+    authorizedWriteTurnsLeft: 99,
+    scopeGeneration: 7,
+    allowedInstances: ["codex", "claude"],
+    writeAuthorization: { instances: ["codex"] },
+    liveActivity: "execution",
+  });
+  try {
+    const saved = saveRecord(directory, record({
+      feedbackHistory: [fact],
+      authorizedTurnsLeft: 99,
+      authorizedWriteTurnsLeft: 99,
+      scopeGeneration: 7,
+      allowedInstances: ["codex", "claude"],
+      writeAuthorization: { instances: ["codex"] },
+      liveActivity: "execution",
+    }));
+    for (const key of ["authorizedTurnsLeft", "authorizedWriteTurnsLeft", "scopeGeneration", "allowedInstances", "writeAuthorization", "liveActivity"]) {
+      assert.equal(Object.hasOwn(saved, key), false, `record must not contain ${key}`);
+      assert.equal(Object.hasOwn(saved.feedbackHistory[0], key), false, `round facts must not contain ${key}`);
+    }
+    assert.deepEqual(saved.feedbackHistory, [firstRoundFact()]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
