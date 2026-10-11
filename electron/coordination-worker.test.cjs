@@ -48,6 +48,38 @@ async function scenario(t, options = {}) {
   }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
   return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
 }
+test("a revocation before the worker claim settles stopped without contacting anything", async t => {
+  // Windows-safe: the settlement path returns before the control endpoint,
+  // Core, scopes or harnesses are ever touched, so no Unix socket is needed.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-preclaim-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createCoordinationJobStore(directory, { bootstrapReady: true });
+  const admitted = store.startAdmission({ requestId: "pre-claim-stop", goal: "Stopped before starting", workspacePath: directory,
+    allowedInstances: ["codex"], maxTurns: 4, backgroundConsent: true });
+  store.revoke(admitted.jobId);
+  const touched = [];
+  const result = await runWorker({ directory, stateDir: path.join(directory, "unused-state"), jobId: admitted.jobId,
+    controlEndpoint: path.join(directory, "never-bound.sock") }, {
+    store,
+    engine: { backgroundEngineInput: input => input, requestCoordination: async () => { touched.push("engine"); throw Error("must not run"); } },
+    scope: { revoke: () => touched.push("scope"), current: () => ({ remaining: 4 }) },
+    runtime: { stateDir: directory, discover: async () => { touched.push("runtime"); throw Error("must not run"); }, prepare: async () => { touched.push("runtime"); }, run: async () => { touched.push("launch"); throw Error("must not launch"); }, close() { touched.push("runtime-close"); } },
+    core: { invoke: async () => { touched.push("core"); throw Error("must not call core"); }, exchangeVerified: async () => { touched.push("core"); throw Error("must not call core"); } },
+    discover: async () => { touched.push("discover"); throw Error("must not discover"); },
+    env: { GOALPORT_COORDINATE_SEND: "1" },
+    saveRecord: () => { touched.push("save"); throw Error("must not save"); },
+  });
+  assert.deepEqual(touched, []);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.settledPreStartRevocation, true);
+  const status = store.getStatus(admitted.jobId);
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active, false);
+  assert.equal(status.revoked, true);
+  assert.equal(status.outcome.reason, "revoked-before-start");
+  assert.equal(fs.existsSync(path.join(directory, "coordination-jobs", "active-admission.json")), false);
+  assert.deepEqual(readRecords(directory), []);
+});
 test("same engine completes two chains with one authorization, dual budgets and first pass", async t => {
   const r = await scenario(t);
   assert.equal(r.result.status, "completed"); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1);

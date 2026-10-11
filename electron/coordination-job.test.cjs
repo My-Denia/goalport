@@ -221,6 +221,46 @@ test("revocation is durable control state, retains an in-flight outcome and bloc
   assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8")).revoked, true);
 });
 
+test("a revocation before any worker claim is settled by the spawning worker and releases the admission", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  // Stop allowing lands in the window after the admission was persisted
+  // but before the spawned worker claims — no claim file exists yet.
+  const revoked = store.revoke(admitted.jobId);
+  assert.equal(revoked.revoked, true);
+  assert.equal(revoked.state, "revoked");
+  assert.equal(fs.existsSync(pathFor(profile, admitted.jobId, "claim.json")), false);
+  // The spawning worker claims: nothing was ever admitted to launch (no
+  // prior claim means no command could be recorded), so the claim settles
+  // terminal stopped and releases the profile-wide slot in the same step.
+  const claim = store.claimWorker(admitted.jobId);
+  assert.equal(claim.settledPreStartRevocation, true);
+  assert.equal(claim.status.state, "stopped");
+  assert.equal(claim.status.active, false);
+  assert.equal(claim.status.revoked, true);
+  assert.equal(claim.status.outcome.reason, "revoked-before-start");
+  assert.equal(claim.status.pendingCommand, null);
+  assert.equal(claim.status.completedCommands.length, 0);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  const diskSettled = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8"));
+  assert.equal(diskSettled.state, "stopped");
+  assert.equal(diskSettled.outcome.reason, "revoked-before-start");
+  // No second worker may claim or restart the settled job: with the slot
+  // released, the claim refuses at the admission boundary (the terminal
+  // progress facts back it up behind the same refusal chain).
+  assert.throws(() => store.claimWorker(admitted.jobId), { code: "admission-not-active" });
+  // The profile admits a NEW goal again — the P1 deadlock is gone.
+  const reopened = createCoordinationJobStore(profile, {
+    bootstrapReady: true,
+    idFactory: () => "123e4567-e89b-42d3-a456-426614174999",
+    tokenFactory: () => "b".repeat(64),
+    clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const second = reopened.startAdmission(admission({ requestId: "send-background-2" }));
+  assert.equal(second.ok, true);
+  assert.equal(second.created, true);
+});
+
 test("an atomic progress persistence failure prevents caller launch and preserves prior durable facts", (t) => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-persist-"));
   t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));

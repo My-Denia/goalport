@@ -32,6 +32,15 @@ async function runWorker(config, deps = {}) {
   const core = deps.core ?? workerCore(config);
   const env = deps.env ?? process.env;
   const claim = store.claimWorker(config.jobId);
+  if (claim.settledPreStartRevocation) {
+    // The admission was stopped before this worker started: the store
+    // proved from durable facts (no prior claim, no recorded command) that
+    // no tool call was ever admitted, and the claim itself already settled
+    // the terminal stopped outcome and released the admission slot.
+    // Settling is this run's whole job — no Core, scope, harness or engine
+    // is contacted, and no record is saved for a round that never ran.
+    return { status: "stopped", settledPreStartRevocation: true };
+  }
   const admitted = claim.status.admission;
   const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,

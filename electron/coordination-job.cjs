@@ -555,7 +555,6 @@ function createCoordinationJobStore(profileDirectory, {
     requireWritable();
     const admission = assertActive(jobId);
     const progress = readProgress(jobId);
-    if (progress.revoked) throw refusal("access-revoked", "This job's access was stopped before worker admission.");
     if (OUTCOME_STATES.has(progress.state)) throw refusal("job-terminal", "This job is already terminal and cannot be restarted.");
     if (progress.pendingCommand) throw refusal("pending-command", "A previous command has an unconfirmed launch outcome; this worker cannot resume it.");
     const existing = readClaim(jobId);
@@ -572,6 +571,26 @@ function createCoordinationJobStore(profileDirectory, {
       ownerToken,
       requestId: admission.input.requestId,
     });
+    if (progress.revoked) {
+      // The admission was revoked BEFORE any worker claimed it. No startup
+      // claim existed until the lines above, and recording a command requires
+      // a claimed worker's owner token, so the empty pendingCommand and
+      // completedCommands facts prove no tool call was ever admitted. The
+      // spawning worker claims ownership ONLY to settle that proof: terminal
+      // stopped, nothing launched, admission slot released in the same claim.
+      // Without this settlement the revoked admission would hold the
+      // profile-wide slot forever with no owner left to release it.
+      const at = now();
+      writeAtomic(fileFor(jobId, PROGRESS_FILE), {
+        ...progress,
+        state: "stopped",
+        phase: "stopped",
+        outcome: { status: "stopped", reason: "revoked-before-start", recordedAt: at },
+        updatedAt: at,
+      });
+      releaseAdmission(jobId, ownerToken);
+      return { ok: true, jobId, ownerToken, settledPreStartRevocation: true, status: statusFor(jobId) };
+    }
     const next = { ...progress, state: "running", phase: "starting", updatedAt: now() };
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
     return { ok: true, jobId, ownerToken, status: statusFor(jobId) };
