@@ -47,6 +47,6 @@ export type SavedPlan = CoordinationView & {
   savedAt?: string | null;
   /** Optional: records saved before recovery existed stay valid without it. */
   roundEvents?: readonly RoundEvent[];
-  /** Only the completed first pass is retained here; top-level results are latest. */
-  feedbackHistory?: readonly CoordinationRoundFact[];
+  // feedbackHistory is inherited from CoordinationView: only the completed
+  // first pass is retained, and top-level result fields are the latest pass.
 };

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -985,4 +985,254 @@ it("a complete authorized engine result round-trips through the actual record st
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+// The one in-window corrective pass (C1): request-level boundary tests.
+// A completed execution audit ending VERDICT: revise may start exactly one
+// repair chain in the same Send; everything else stays terminal.
+describe("one in-window corrective pass", () => {
+  const repairCatalog = catalogFromProviderSnapshots(providersWithThird);
+  const repairAllowed = ["codex", "claude", "grok"];
+  const repairWrite = { instances: repairAllowed, workspaceRoot: workspacePath, remaining: 2 };
+  const CRITIQUE_TEXT = "The unchanged checks still fail on the negative case.\nVERDICT: revise";
+  const VERIFIED_TEXT = "Independently inspected the repaired workspace.\nVERDICT: verified";
+  const ok = (text: string, turnsRemaining: number, writeTurnsRemaining: number): CoordinateLaunchResult => ({
+    text, errorText: "", dispatched: true, turnsRemaining, writeTurnsRemaining,
+  });
+  // A healthy first chain that ends in a completed revise verdict.
+  const reviseChain = (): CoordinateLaunchResult[] => [
+    ok("Bounded plan.", 5, 2),
+    ok("The plan can be carried out.\nVERDICT: carry-out", 4, 2),
+    ok("First executor report; checks failed honestly.", 4, 1),
+    ok(CRITIQUE_TEXT, 3, 1),
+  ];
+  // A healthy corrective chain.
+  const repairChain = (audit: string): CoordinateLaunchResult[] => [
+    ok("Corrective plan for the observed failure.", 2, 1),
+    ok("The plan can be carried out.\nVERDICT: carry-out", 1, 1),
+    ok("Corrective executor report; unchanged checks pass.", 1, 0),
+    ok(audit, 0, 0),
+  ];
+  const request = async (
+    results: CoordinateLaunchResult[],
+    overrides: {
+      beforeRepair?: (checkpoint: import("./requestCoordination").RepairCheckpoint) => Promise<boolean>;
+      stillCurrent?: () => boolean;
+    } = {},
+  ) => {
+    const transport = recordingTransport(results);
+    const view = await requestCoordination(
+      {
+        goal, workspacePath, sendKey: "repair-send",
+        allowedInstances: repairAllowed, writeAuthorization: repairWrite,
+        ...(overrides.beforeRepair === undefined ? {} : { beforeRepair: overrides.beforeRepair }),
+      },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+      overrides.stillCurrent,
+    );
+    return { view, transport };
+  };
+
+  it("runs exactly one repair chain after a completed revise, with fresh identities and retained first-round facts", async () => {
+    const checkpoints: import("./requestCoordination").RepairCheckpoint[] = [];
+    const { view, transport } = await request([...reviseChain(), ...repairChain(VERIFIED_TEXT)], {
+      beforeRepair: async (checkpoint) => { checkpoints.push(checkpoint); return true; },
+    });
+    expect(transport.calls).toHaveLength(8);
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual([
+      "codex", "claude", "codex", "claude", "codex", "claude", "codex", "claude",
+    ]);
+    // Fresh command identities: the repair-1 suffix keeps every id distinct.
+    const ids = transport.calls.map((command) => command.commandId);
+    expect(new Set(ids).size).toBe(8);
+    // The corrective prompts carry the actual first-round evidence.
+    expect(transport.calls[4]?.initialMessage.text).toContain(CRITIQUE_TEXT);
+    expect(transport.calls[4]?.initialMessage.text).toContain("Inspect the CURRENT workspace");
+    expect(transport.calls[7]?.initialMessage.text).toContain("Corrective executor report; unchanged checks pass.");
+    expect(view.verdict).toBe("verified");
+    expect(view.executionText).toBe("Corrective executor report; unchanged checks pass.");
+    expect(view.auditText).toBe(VERIFIED_TEXT);
+    expect(view.messageDispatched).toBe(true);
+    expect(view.feedbackHistory).toHaveLength(1);
+    expect(view.feedbackHistory?.[0]).toMatchObject({
+      verdict: "revise", executionHarness: "Codex", auditHarness: "Claude",
+      planText: "Bounded plan.", result: CRITIQUE_TEXT, messageDispatched: true,
+    });
+    expect(view.feedbackHistory?.[0]?.commandIds).toEqual(ids.slice(0, 4));
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]?.firstRound.verdict).toBe("revise");
+    expect(checkpoints[0]?.remainingReadTurns).toBe(3);
+    expect(checkpoints[0]?.remainingWriteTurns).toBe(1);
+  });
+
+  it("keeps the corrective pass on the same scope and never a second authorization", async () => {
+    const { view, transport } = await request([...reviseChain(), ...repairChain(VERIFIED_TEXT)], {
+      beforeRepair: async () => true,
+    });
+    expect(transport.calls).toHaveLength(8);
+    // Every corrective turn is a workspaceWrite only for the writer, and the
+    // write authorization object (memberships + root) is carried unchanged.
+    expect(transport.calls.slice(4).map((command) => command.sandboxPolicy.type)).toEqual([
+      "readOnly", "readOnly", "workspaceWrite", "readOnly",
+    ]);
+    expect(view.authorizedTurnsLeft).toBe(0);
+    expect(view.authorizedWriteTurnsLeft).toBe(0);
+  });
+
+  it("a second revise is terminal even though budget remains", async () => {
+    const { view, transport } = await request([...reviseChain(), ...repairChain("Still incomplete.\nVERDICT: revise")], {
+      beforeRepair: async () => true,
+    });
+    expect(transport.calls).toHaveLength(8);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("independent verification says the changes need revision");
+    expect(view.stopReason).toContain("This send already used its one automatic repair.");
+    expect(view.feedbackHistory?.[0]?.verdict).toBe("revise");
+    expect(view.authorizedTurnsLeft).toBe(0);
+  });
+
+  it("a rejected corrective plan stops before a second writer and spends the allowance", async () => {
+    const results = [...reviseChain(), ok("Corrective plan.", 2, 1), ok("The corrective plan does not answer the audit.\nVERDICT: revise", 1, 1)];
+    const { view, transport } = await request(results, { beforeRepair: async () => true });
+    expect(transport.calls).toHaveLength(6);
+    expect(transport.calls.slice(4).every((command) => command.sandboxPolicy.type === "readOnly")).toBe(true);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("already used its one automatic repair");
+    expect(view.authorizedWriteTurnsLeft).toBe(1);
+  });
+
+  it("insufficient remaining budget explains the stop and launches no corrective turn", async () => {
+    // Four authorized read turns: 3 spent by the first chain, 1 left.
+    const tight = [
+      ok("Bounded plan.", 3, 2),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 2, 2),
+      ok("First executor report.", 2, 1),
+      ok(CRITIQUE_TEXT, 1, 1),
+    ];
+    const beforeRepair = vi.fn(async () => true);
+    const { view, transport } = await request(tight, { beforeRepair });
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("There is not enough access left for one more checked repair");
+    expect(view.stopReason).toContain("GoalPort did not add turns");
+    expect(view.messageDispatched).toBe(true);
+    expect(view).not.toHaveProperty("feedbackHistory");
+    expect(beforeRepair).not.toHaveBeenCalled();
+  });
+
+  it("without the adapter gate the send keeps its one-round behavior", async () => {
+    const { view, transport } = await request([...reviseChain(), ...repairChain(VERIFIED_TEXT)]);
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toBe("The independent verification says the changes need revision, so this stopped.");
+    expect(view).not.toHaveProperty("feedbackHistory");
+  });
+
+  it.each([
+    ["refused", async () => false],
+    ["threw", async () => { throw new Error("checkpoint failed"); }],
+  ])("a %s gate keeps the completed first round and its evidence", async (_kind, beforeRepair) => {
+    const { view, transport } = await request([...reviseChain(), ...repairChain(VERIFIED_TEXT)], { beforeRepair });
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("could not confirm this window for the automatic repair");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.planText).toBe("Bounded plan.");
+    expect(view.auditText).toBe(CRITIQUE_TEXT);
+  });
+
+  it("a proven-not-sent first corrective launch keeps the already-sent goal non-retryable", async () => {
+    const { view, transport } = await request([
+      ...reviseChain(),
+      { text: "", errorText: "The authorized harness scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
+    ], { beforeRepair: async () => true });
+    expect(transport.calls).toHaveLength(5);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("revoked");
+    // Send-wide dispatch: the first chain really sent, so this goal is never silently resendable.
+    expect(view.messageDispatched).toBe(true);
+    expect(view.feedbackHistory?.[0]?.verdict).toBe("revise");
+    const directory = mkdtempSync(join(tmpdir(), "goalport-repair-record-"));
+    const { saveRecord, readRecords } = createRequire(import.meta.url)("../../electron/coordination-record.cjs");
+    try {
+      saveRecord(directory, { ...view, requestId: "refused-repair", goal, workspacePath });
+      const [record] = readRecords(directory);
+      expect(record.verdict).toBe("failed");
+      expect(record.messageDispatched).toBe(true);
+      expect(record.feedbackHistory?.[0]?.commandIds).toEqual(transport.calls.slice(0, 4).map((command) => command.commandId));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("an unknown corrective launch stays terminal without making the goal retryable", async () => {
+    let launches = 0;
+    const transport: CoordinateTransport & { calls: CoordinateTurnCommand[] } = {
+      calls: [],
+      async launch(command) {
+        transport.calls.push(command);
+        launches += 1;
+        if (launches <= 4) return reviseChain()[launches - 1]!;
+        throw new Error("IPC died before the corrective turn");
+      },
+    };
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: "repair-send", allowedInstances: repairAllowed, writeAuthorization: repairWrite, beforeRepair: async () => true },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(5);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("dispatch is unknown");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.feedbackHistory?.[0]?.verdict).toBe("revise");
+  });
+
+  it("cancellation before the corrective writer keeps the first round sent and its facts", async () => {
+    const transport = recordingTransport([...reviseChain(), ...repairChain(VERIFIED_TEXT)]);
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: "repair-send", allowedInstances: repairAllowed, writeAuthorization: repairWrite, beforeRepair: async () => true },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+      () => transport.calls.length < 6,
+    );
+    // Both corrective read turns ran; the corrective writer was refused as replaced.
+    expect(transport.calls).toHaveLength(6);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("replaced");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.reviewText).toBe("The plan can be carried out.\nVERDICT: carry-out");
+    expect(view.feedbackHistory?.[0]?.verdict).toBe("revise");
+    expect(view.feedbackHistory?.[0]?.auditText).toBe(CRITIQUE_TEXT);
+  });
+
+  it("carries burned harnesses into the corrective exclusions", async () => {
+    const { view, transport } = await request([
+      { text: "", errorText: "This harness cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 5, writeTurnsRemaining: 2 },
+      ok("Recovered plan.", 5, 2),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 4, 2),
+      ok("First executor report.", 4, 1),
+      ok(CRITIQUE_TEXT, 3, 1),
+      ...repairChain(VERIFIED_TEXT),
+    ], { beforeRepair: async () => true });
+    expect(transport.calls).toHaveLength(9);
+    // The corrective chain never reuses the burned codex instance.
+    expect(transport.calls.slice(5).map((command) => command.modelSelection.instanceId)).not.toContain("codex");
+    expect(view.verdict).toBe("verified");
+    expect(view.feedbackHistory?.[0]?.roundEvents?.map((event) => `${event.kind}:${event.role}`)).toEqual([
+      "failed:planning", "continued:planning", "continued:review",
+    ]);
+  });
+
+  it("a failed round that merely mentions revision never starts a repair", async () => {
+    const { view, transport } = await request([
+      ok("Bounded plan.", 5, 2),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 4, 2),
+      { text: "Partial edit retained; revise or stop.", errorText: "The harness did not finish, so this stopped.", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 1 },
+    ], { beforeRepair: async () => true });
+    expect(transport.calls).toHaveLength(3);
+    expect(view.verdict).toBe("failed");
+    expect(view).not.toHaveProperty("feedbackHistory");
+  });
 });
