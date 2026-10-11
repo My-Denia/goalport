@@ -16,6 +16,13 @@ export const EXECUTION_PRESETS = Object.freeze({
     codex: Object.freeze(["codex-fixture-plan", "codex-fixture-incomplete-writer", "codex-fixture-corrective-plan", "codex-fixture-corrective-writer"]),
     claude: Object.freeze(["claude-fixture-critique-checker", "claude-fixture-auditor"]),
   }),
+  // Closed plan-revision preset: a genuinely flawed first plan, a separate
+  // read-only plan critique, the revised plan that answers it, then the
+  // existing one-shot writer and separate read-only auditor.
+  "c4-plan-revision": Object.freeze({
+    codex: Object.freeze(["codex-fixture-flawed-plan", "codex-fixture-revised-plan", "codex-fixture-writer"]),
+    claude: Object.freeze(["claude-fixture-plan-critique-checker", "claude-carry-out", "claude-fixture-auditor"]),
+  }),
 });
 
 /**
@@ -26,13 +33,16 @@ export const EXECUTION_PRESETS = Object.freeze({
 export const EXECUTION_OPERATION_PRESETS = Object.freeze({
   plan: Object.freeze(["b1-full-chain", "b2-no-write", "b3-partial-failure", "c1-feedback-repair"]),
   "no-write": Object.freeze(["b2-no-write"]),
-  writer: Object.freeze(["b1-full-chain"]),
+  writer: Object.freeze(["b1-full-chain", "c4-plan-revision"]),
   "partial-writer": Object.freeze(["b3-partial-failure"]),
   "incomplete-writer": Object.freeze(["c1-feedback-repair"]),
   "corrective-plan": Object.freeze(["c1-feedback-repair"]),
   "corrective-writer": Object.freeze(["c1-feedback-repair"]),
   "critique-checker": Object.freeze(["c1-feedback-repair"]),
-  auditor: Object.freeze(["b1-full-chain", "c1-feedback-repair"]),
+  auditor: Object.freeze(["b1-full-chain", "c1-feedback-repair", "c4-plan-revision"]),
+  "flawed-plan": Object.freeze(["c4-plan-revision"]),
+  "revised-plan": Object.freeze(["c4-plan-revision"]),
+  "plan-critique-checker": Object.freeze(["c4-plan-revision"]),
 });
 
 const CONTINUATION_PRESET = "c1-feedback-repair";
@@ -57,6 +67,12 @@ export const EXECUTION_FIXTURE_PARTIAL_SOURCE = "export function add(a, b) { ret
 // the unchanged checks really fail (1 passed, 1 failed) while the CLI turn
 // itself completes honestly.
 export const EXECUTION_FIXTURE_INCOMPLETE_SOURCE = "export function add(a, b) { if (a >= 0) return a + b; return a - b; }\n";
+// The plan-revision preset's first plan is genuinely flawed in one specific
+// way: it covers only positive inputs and names no workspace check, while the
+// unchanged pinned tests contain a negative-value case. The separate critique
+// checker names exactly that missing requirement.
+export const EXECUTION_FIXTURE_FLAWED_PLAN = "Plan: read the pinned src/add.mjs and replace its subtraction with a plain addition for the positive inputs this workspace uses, then report the changed file. This is a closed synthetic fixture operation; no model judgment or arbitrary command is involved.";
+export const EXECUTION_FIXTURE_REVISED_PLAN = "Revised plan: the independent check said the plan ignored the negative-value case and named no workspace check. Read the current src/add.mjs and the unchanged test/add.test.mjs; replace the subtraction with a plain addition that returns the sum for negative and positive values alike; run the unchanged pinned node --test checks so both pinned cases pass; then have a separate read-only auditor read the result and rerun those checks. This is a closed synthetic fixture operation; no model judgment or arbitrary command is involved.";
 export const EXECUTION_FIXTURE_TEST = [
   'import assert from "node:assert/strict";',
   'import { test } from "node:test";',
@@ -308,6 +324,7 @@ function operationRole(operation) {
   if (isWriteOperation(operation)) return "executor";
   if (operation === "auditor") return "read-only-auditor";
   if (operation === "critique-checker") return "read-only-checker";
+  if (operation === "plan-critique-checker") return "read-only-plan-checker";
   return "plan";
 }
 
@@ -315,6 +332,7 @@ function caughtErrorRole(operation) {
   if (isWriteOperation(operation)) return "executor";
   if (operation === "auditor") return "read-only-auditor";
   if (operation === "critique-checker") return "read-only-checker";
+  if (operation === "plan-critique-checker") return "read-only-plan-checker";
   return "read-only-plan";
 }
 
@@ -555,7 +573,7 @@ function auditorMain(configFile) {
   try {
     if (!path.isAbsolute(configFile) || !path.basename(configFile).startsWith("m9-execution-audit-")) throw new Error("auditor config path is not a driver-created audit file");
     config = normalizeExecutionFixture(JSON.parse(fs.readFileSync(configFile, "utf8")));
-    if (config.preset !== "b1-full-chain" && config.preset !== CONTINUATION_PRESET) throw new Error("auditor only accepts the full-chain or continuation fixture preset");
+    if (config.preset !== "b1-full-chain" && config.preset !== CONTINUATION_PRESET && config.preset !== "c4-plan-revision") throw new Error("auditor only accepts the full-chain, continuation or plan-revision fixture preset");
     config = validateMarker(config, process.cwd());
   } catch (error) {
     const refusedReport = { schemaVersion: 1, role: "read-only-auditor", status: "revise-or-stop", verified: false, reason: error.message, cwd: process.cwd(), pid: process.pid, testCommand: null };
@@ -699,6 +717,100 @@ function runAuditor({ config, cwd, stubDir, parentPid }) {
   };
 }
 
+function planCritiqueMain(configFile) {
+  const emit = (report, code) => { process.stdout.write(`${JSON.stringify(report)}\n`); return code; };
+  const refusedReport = (reason) => ({
+    schemaVersion: 1,
+    role: "read-only-plan-checker",
+    checkerKind: "separate-read-only-node-process",
+    noIndependentModelClaim: true,
+    status: "revise-or-stop",
+    verdict: "stop",
+    observedRequirement: false,
+    verified: false,
+    reason,
+    cwd: process.cwd(),
+    pid: process.pid,
+    testCommand: null,
+  });
+  let config;
+  try {
+    if (!path.isAbsolute(configFile) || !path.basename(configFile).startsWith("m9-plan-critique-")) throw new Error("plan critique config path is not a driver-created plan-critique file");
+    config = normalizeExecutionFixture(JSON.parse(fs.readFileSync(configFile, "utf8")));
+    if (config.preset !== "c4-plan-revision") throw new Error("the plan critique checker only accepts the plan-revision preset");
+    config = validateMarker(config, process.cwd());
+  } catch (error) {
+    return emit(refusedReport(error.message), 1);
+  }
+  let testBytes;
+  try {
+    testBytes = checkedRegularFile(path.join(config.root, config.testPath), "fixture test");
+  } catch (error) {
+    return emit(refusedReport(error.message), 1);
+  }
+  const testSha256 = sha256(testBytes);
+  const pinnedTests = testSha256 === config.testSha256;
+  // The named missing requirement is observable in the fixture itself: the
+  // unchanged pinned tests contain a negative-value case.
+  const negativeCasePresent = /add\(\s*-\s*2\s*,\s*-\s*3\s*\)/u.test(testBytes.toString("utf8"));
+  const expected = pinnedTests && negativeCasePresent;
+  const report = {
+    schemaVersion: 1,
+    role: "read-only-plan-checker",
+    checkerKind: "separate-read-only-node-process",
+    noIndependentModelClaim: true,
+    status: expected ? "completed" : "revise-or-stop",
+    verdict: expected ? "revise" : "stop",
+    observedRequirement: expected,
+    negativeCasePresent,
+    cwd: process.cwd(),
+    pid: process.pid,
+    originalTests: { path: config.testPath, sha256: testSha256, matchesPinnedBytes: pinnedTests },
+    testCommand: null,
+    reason: expected ? null : "the checker did not observe the negative-value case in the unchanged pinned tests",
+  };
+  return emit(report, expected ? 0 : 1);
+}
+
+function runPlanCritiqueCheck({ config, cwd, stubDir, parentPid }) {
+  const configPath = path.join(stubDir, `m9-plan-critique-${process.pid}-${crypto.randomUUID()}.json`);
+  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  let command;
+  try {
+    command = runNode([HELPER_PATH, "--offline-plan-critique", configPath], cwd);
+  } finally {
+    fs.rmSync(configPath, { force: true });
+  }
+  let checker;
+  try { checker = JSON.parse(command.stdout); } catch { checker = null; }
+  const observed = command.exitCode === 0 && checker?.role === "read-only-plan-checker" && checker?.verdict === "revise" && checker?.observedRequirement === true;
+  const report = observed
+    ? `Completed plan critique from a separate read-only Node checker process (pid ${checker.pid}): the unchanged pinned tests contain a negative-value case, and the proposed plan covers only positive inputs and names no workspace check. The plan must say how the change covers the negative case and which unchanged checks it will run before any file changes. This critique turn completed and claims no verification and no independent model judgment.\nVERDICT: revise`
+    : `Plan critique checker could not observe the named missing requirement, so no critique is claimed. ${checker?.reason ?? "The actual checker process did not report the pinned negative-value case."}\nVERDICT: stop`;
+  return {
+    operation: "plan-critique-checker",
+    role: "read-only-plan-checker",
+    preset: config.preset,
+    status: observed ? "completed" : "revise-or-stop",
+    verdict: observed ? "revise" : "stop",
+    verified: false,
+    exitCode: observed ? 0 : 1,
+    report,
+    evidence: {
+      ...evidenceBase("plan-critique-checker", config, cwd),
+      parentPid,
+      checkerProcess: command,
+      checker,
+      checkerKind: checker?.checkerKind ?? null,
+      negativeCasePresent: checker?.negativeCasePresent === true,
+      observedRequirement: checker?.observedRequirement === true,
+      testSha256: checker?.originalTests?.sha256 ?? null,
+      cliTurnCompleted: observed,
+      verdict: observed ? "revise" : "stop",
+    },
+  };
+}
+
 function runCritiqueCheck({ config, cwd, stubDir, parentPid }) {
   const configPath = path.join(stubDir, `m9-execution-critique-${process.pid}-${crypto.randomUUID()}.json`);
   fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -756,13 +868,20 @@ export function runExecutionFixtureOperation({ operation, config: rawConfig, ide
   if (mode !== expectedOperationRole(operation)) return refused(operation, `operation ${operation} requires ${expectedOperationRole(operation)} mode but observed ${mode}`, config, cwd);
 
   try {
-    const expectedSourceSha256 = operation === "auditor" || operation === "critique-checker"
+    const expectedSourceSha256 = operation === "auditor" || operation === "critique-checker" || operation === "plan-critique-checker"
       ? null
       : operation === "corrective-plan" || operation === "corrective-writer"
         ? INCOMPLETE_SOURCE_HASH
         : config.sourceSha256;
     const before = readPinnedFixture(config, { expectedSourceSha256 });
-    if (operation === "plan" || operation === "corrective-plan") {
+    if (operation === "plan" || operation === "corrective-plan" || operation === "flawed-plan" || operation === "revised-plan") {
+      const planReport = operation === "plan"
+        ? fixedPlan(config, before.sourceBytes)
+        : operation === "corrective-plan"
+          ? correctivePlan(config, before.sourceBytes)
+          : operation === "flawed-plan"
+            ? EXECUTION_FIXTURE_FLAWED_PLAN
+            : EXECUTION_FIXTURE_REVISED_PLAN;
       return {
         operation,
         role: "read-only-plan",
@@ -770,14 +889,24 @@ export function runExecutionFixtureOperation({ operation, config: rawConfig, ide
         status: "completed",
         verified: false,
         exitCode: 0,
-        report: operation === "plan" ? fixedPlan(config, before.sourceBytes) : correctivePlan(config, before.sourceBytes),
-        evidence: { ...evidenceBase(operation, config, cwd), parentPid, sourceSha256: before.sourceSha256, testSha256: before.testSha256, sourceText: before.sourceBytes.toString("utf8"), changed: false },
+        report: planReport,
+        evidence: {
+          ...evidenceBase(operation, config, cwd),
+          parentPid,
+          sourceSha256: before.sourceSha256,
+          testSha256: before.testSha256,
+          sourceText: before.sourceBytes.toString("utf8"),
+          changed: false,
+          ...(operation === "flawed-plan" ? { missingRequirement: "negative-case-coverage-and-named-checks" } : {}),
+          ...(operation === "revised-plan" ? { answersCritique: "negative-case-coverage-and-named-checks" } : {}),
+        },
       };
     }
     if (operation === "no-write") return runNoWrite({ operation, config, cwd, sourceBytes: before.sourceBytes, testBytes: before.testBytes, parentPid });
     if (operation === "writer" || operation === "partial-writer") return runWriter({ operation, config, cwd, parentPid });
     if (operation === "incomplete-writer" || operation === "corrective-writer") return runFeedbackWriter({ operation, config, cwd, parentPid });
     if (operation === "critique-checker") return runCritiqueCheck({ config, cwd, stubDir, parentPid });
+    if (operation === "plan-critique-checker") return runPlanCritiqueCheck({ config, cwd, stubDir, parentPid });
     if (operation === "auditor") return runAuditor({ config, cwd, stubDir, parentPid });
     return refused(operation, "operation is not in the closed fixture allowlist", config, cwd);
   } catch (error) {
@@ -800,13 +929,13 @@ export function appendExecutionOperationEvidence(stubDir, record) {
   return evidencePath;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === HELPER_PATH && (process.argv[2] === "--offline-audit" || process.argv[2] === "--offline-critique")) {
+if (process.argv[1] && path.resolve(process.argv[1]) === HELPER_PATH && (process.argv[2] === "--offline-audit" || process.argv[2] === "--offline-critique" || process.argv[2] === "--offline-plan-critique")) {
   const mode = process.argv[2];
-  const role = mode === "--offline-critique" ? "read-only-checker" : "read-only-auditor";
+  const role = mode === "--offline-critique" ? "read-only-checker" : mode === "--offline-plan-critique" ? "read-only-plan-checker" : "read-only-auditor";
   if (process.argv.length !== 4) {
     process.stdout.write(`${JSON.stringify({ schemaVersion: 1, role, status: "revise-or-stop", verified: false, reason: "offline helper argv is not the fixed form", cwd: process.cwd(), pid: process.pid, testCommand: null })}\n`);
     process.exitCode = 1;
   } else {
-    process.exitCode = mode === "--offline-audit" ? auditorMain(process.argv[3]) : critiqueMain(process.argv[3]);
+    process.exitCode = mode === "--offline-audit" ? auditorMain(process.argv[3]) : mode === "--offline-critique" ? critiqueMain(process.argv[3]) : planCritiqueMain(process.argv[3]);
   }
 }

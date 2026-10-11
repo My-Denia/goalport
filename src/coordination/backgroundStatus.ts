@@ -14,6 +14,6 @@ export interface BackgroundStatus {
   counters: { readTurnsLeft?: number | null; writeTurnsLeft?: number | null } | null;
   pendingCommand: { commandId: string; state: string } | null;
   completedCommands: readonly { commandId: string; facts: { text?: string; dispatched?: boolean | null } }[];
-  progress: { activity?: string; failures?: readonly string[]; repair?: boolean; firstRound?: CoordinationView } | null;
+  progress: { activity?: string; failures?: readonly string[]; repair?: boolean; planRevision?: boolean; firstRound?: CoordinationView } | null;
   outcome: { status: string; report?: CoordinationView; error?: string } | null;
 }

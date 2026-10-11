@@ -19,7 +19,10 @@ export interface RoundEvent {
  * Completed evidence for a prior pass in the same Send. These are report
  * facts only: they never include budgets, scope generations, memberships, or
  * permission state. commandIds are references to completed turns, not replay
- * instructions.
+ * instructions. A fact may be retained as feedbackHistory (the pass before
+ * the one automatic repair) or as planRevisionHistory (the original
+ * plan-rejected pass before the one revised chain) — one entry each, and a
+ * retained fact never becomes permission for another turn.
  */
 export interface CoordinationRoundFact {
   readonly planningHarness: string | null;
@@ -47,6 +50,7 @@ export type SavedPlan = CoordinationView & {
   savedAt?: string | null;
   /** Optional: records saved before recovery existed stay valid without it. */
   roundEvents?: readonly RoundEvent[];
-  // feedbackHistory is inherited from CoordinationView: only the completed
-  // first pass is retained, and top-level result fields are the latest pass.
+  // feedbackHistory and planRevisionHistory are inherited from
+  // CoordinationView: only completed earlier passes are retained (at most one
+  // entry each), and top-level result fields are always the latest pass.
 };

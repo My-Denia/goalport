@@ -59,6 +59,13 @@ async function runWorker(config, deps = {}) {
     const failures = [];
     liveResult = await engine.requestCoordination({
       ...engine.backgroundEngineInput(input),
+      beforePlanRevision: async checkpoint => {
+        await gate();
+        const s = scope.current();
+        if (!s || s.generation !== authorization.generation || !s.write || s.remaining < 3 || s.write.remaining < 1) return false;
+        persist({ phase: "plan-revision", display: { firstRound: checkpoint.firstRound, planRevision: true, activity: "One checked plan revision is being organized…", failures } });
+        return true;
+      },
       beforeRepair: async checkpoint => {
         await gate();
         const s = scope.current();

@@ -13,6 +13,7 @@ export { requestCoordination } from "./requestCoordination";
 export type {
   CoordinationDiscovery,
   CoordinationView,
+  PlanRevisionCheckpoint,
   RepairCheckpoint,
 } from "./requestCoordination";
 export type {
@@ -21,6 +22,7 @@ export type {
   CoordinateTransport,
 } from "./coordinateSession";
 export {
+  BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   BACKGROUND_REPAIR_REFUSAL_SENTENCE,
   backgroundEngineInput,
   backgroundJobKey,

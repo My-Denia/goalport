@@ -22,6 +22,10 @@ import type { CoordinationWriteAuthorization } from "./coordinateGoal";
 export const BACKGROUND_REPAIR_REFUSAL_SENTENCE =
   "GoalPort could not confirm this background job for the automatic repair, so the repair did not start.";
 
+/** The one plan-revision refusal line for the background adapter: same rule, distinct wording. */
+export const BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE =
+  "GoalPort could not confirm this background job for the automatic plan revision, so the revision did not start.";
+
 /**
  * Caller-stable request id shape: letters, digits, dots, underscores, colons
  * and hyphens, so the same id is safe in logs, endpoint names and job file
@@ -189,6 +193,8 @@ export interface BackgroundEngineInput {
   readonly priorReview?: string | null;
   readonly avoidInstances?: readonly string[];
   readonly repairRefusalSentence: string;
+  /** Distinct background wording for the one plan-revision refusal. */
+  readonly planRevisionRefusalSentence: string;
 }
 
 /**
@@ -217,6 +223,7 @@ export function backgroundEngineInput(start: BackgroundJobStartInput): Backgroun
     ...(start.priorReview === undefined ? {} : { priorReview: start.priorReview }),
     ...(start.avoidInstances === undefined ? {} : { avoidInstances: [...start.avoidInstances] }),
     repairRefusalSentence: BACKGROUND_REPAIR_REFUSAL_SENTENCE,
+    planRevisionRefusalSentence: BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   };
 }
 

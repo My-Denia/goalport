@@ -52,6 +52,12 @@ export interface CoordinationView {
    * latest pass; history never restores live permissions.
    */
   readonly feedbackHistory?: readonly CoordinationRoundFact[];
+  /**
+   * Retained facts of the original plan-rejected pass, present only when the
+   * one revised chain actually launched in this Send. Report facts only:
+   * history never carries budgets, scope generations or permission state.
+   */
+  readonly planRevisionHistory?: readonly CoordinationRoundFact[];
 }
 
 /**
@@ -60,6 +66,18 @@ export interface CoordinationView {
  * the remaining authorized counters at that moment.
  */
 export interface RepairCheckpoint {
+  readonly firstRound: CoordinationView;
+  readonly remainingReadTurns: number | null;
+  readonly remainingWriteTurns: number | null;
+}
+
+/**
+ * What the product adapter may checkpoint before the one revised chain: the
+ * completed first round whose independent PLAN review requested revision and
+ * the remaining authorized counters at that moment. Separate from
+ * RepairCheckpoint: a plan revision happens before any writer launched.
+ */
+export interface PlanRevisionCheckpoint {
   readonly firstRound: CoordinationView;
   readonly remainingReadTurns: number | null;
   readonly remainingWriteTurns: number | null;
@@ -87,6 +105,16 @@ const REFUSED_REPAIR_SENTENCE = "GoalPort could not confirm this window for the 
 const UNSTAFFED_REPAIR_SENTENCE = "The automatic repair could not be staffed with the harnesses you allowed, so it did not start.";
 const REPAIR_CEILING_SENTENCE = "This send already used its one automatic repair.";
 
+// The one pre-write plan revision boundary: the revised chain needs a fresh
+// plan, check and (once approved) execution plus audit — three read turns and
+// one write turn — on top of the two read turns the rejected pass spent.
+const PLAN_REVISION_NEEDED_READ_TURNS = 3;
+const PLAN_REVISION_NEEDED_WRITE_TURNS = 1;
+const PLAN_REVISION_BUDGET_STOP_SENTENCE = "There is not enough access left for one more checked plan revision, which needs three model turns and one write turn. GoalPort did not add turns.";
+const REFUSED_PLAN_REVISION_SENTENCE = "GoalPort could not confirm this window for the automatic plan revision, so the revision did not start.";
+const UNSTAFFED_PLAN_REVISION_SENTENCE = "The automatic plan revision could not be staffed with the harnesses you allowed, so it did not start.";
+const PLAN_REVISION_CEILING_SENTENCE = "This send already used its one automatic plan revision.";
+
 function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped"): CoordinationView {
   return viewFrom({
     planningHarness: null,
@@ -108,12 +136,12 @@ function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped
  * The user sends a goal without picking a runtime and should see the planning
  * harness, the review harness, and why the product stopped.
  */
-/** Send-wide dispatch across both passes: a later pass that proves it sent
- * nothing cannot erase an earlier sent or unknown pass and make the goal look
- * retryable. */
-function sendWideDispatched(first: boolean | null, second: boolean | null | undefined): boolean | null {
-  if (first === true || second === true) return true;
-  if (first === null || second === null) return null;
+/** Send-wide dispatch across every attempted pass: a later pass that proves
+ * it sent nothing cannot erase an earlier sent or unknown pass and make the
+ * goal look retryable. */
+function sendWideDispatched(...passes: readonly (boolean | null | undefined)[]): boolean | null {
+  if (passes.some((dispatched) => dispatched === true)) return true;
+  if (passes.some((dispatched) => dispatched === null)) return null;
   return false;
 }
 
@@ -184,12 +212,28 @@ export async function requestCoordination(
      */
     readonly beforeRepair?: (checkpoint: RepairCheckpoint) => Promise<boolean>;
     /**
+     * Product adapter gate for the ONE revised chain inside this Send: a
+     * scoped, write-consented round whose independent PLAN review completed
+     * with VERDICT: revise, before any execution or audit turn was launched.
+     * The gate must re-confirm liveness and checkpoint the original
+     * plan/review evidence, then return true. Refusal, an exception, or a
+     * stale request keeps the completed first pass as the final result.
+     * Absence preserves the one-round behavior: no revised chain is attempted.
+     */
+    readonly beforePlanRevision?: (checkpoint: PlanRevisionCheckpoint) => Promise<boolean>;
+    /**
      * Adapter-specific wording for the one repair-refusal stop line: a
      * background job has no window to confirm. Absent keeps the existing
      * window-only copy. Wording only — repair eligibility and ceilings are
      * unchanged.
      */
     readonly repairRefusalSentence?: string;
+    /**
+     * Adapter-specific wording for the one plan-revision refusal stop line: a
+     * background job has no window to confirm. Absent keeps the existing
+     * window-only copy. Wording only — eligibility and ceilings are unchanged.
+     */
+    readonly planRevisionRefusalSentence?: string;
     /** Synchronous round events (started is transient; failed/continued persist). */
     readonly onEvent?: (event: CoordinateSessionEvent) => void;
   },
@@ -268,41 +312,43 @@ export async function requestCoordination(
   }
   const hasWriteConsent = input.writeAuthorization !== undefined;
   const firstRound = scopedViewFromSession(sent, hasWriteConsent);
+  const failedInstances = (state: CoordinateSessionState) =>
+    state.roundEvents.filter((event) => event.kind === "failed").map((event) => event.instanceId);
 
   // -----------------------------------------------------------------------
-  // The one in-window corrective boundary. Only a COMPLETED execution audit
-  // that ended VERDICT: revise may start one repair chain in the same Send,
-  // under the same scope generation (never a second authorization), with
-  // fresh command identities and the remaining budgets. A refusal, unknown
-  // launch, cancellation, or corrective failure stays terminal, and the
-  // first round's evidence is retained either way.
+  // C4: the ONE pre-write plan revision boundary. Only an initial scoped
+  // chain whose independent PLAN review completed with VERDICT: revise —
+  // and whose writer and auditor never launched — may run one revised chain
+  // in the same Send, under the same scope generation (never a second
+  // authorization), with a fresh identity namespace and the remaining
+  // budgets. A refusal, unknown launch, cancellation or revised failure
+  // stays terminal, and the original plan/review evidence is retained
+  // either way. This is not recursive: a second plan-review revise stops.
   // -----------------------------------------------------------------------
-  const eligibleForRepair = input.beforeRepair !== undefined
+  const eligibleForPlanRevision = input.beforePlanRevision !== undefined
     && hasWriteConsent
     && sent.verdict === "revise"
-    && (sent.auditText ?? "").trim().length > 0
-    && ((sent.executionText ?? "").trim().length > 0 || Boolean(sent.executionHarness));
-  let repaired: CoordinateSessionState | null = null;
-  let noRepairSentence: string | null = null;
-  if (eligibleForRepair) {
+    && (sent.planText ?? "").trim().length > 0
+    && (sent.reviewText ?? "").trim().length > 0
+    && sent.commands.every((command) =>
+      !command.commandId.startsWith("coordinate-execute-") && !command.commandId.startsWith("coordinate-audit-"));
+  let latest = sent;
+  let planRevisionHistory: readonly CoordinationRoundFact[] | undefined;
+  let noPlanRevisionSentence: string | null = null;
+  if (eligibleForPlanRevision) {
     const burned = [...new Set([
       ...(input.avoidInstances ?? []),
-      ...sent.roundEvents.filter((event) => event.kind === "failed").map((event) => event.instanceId),
+      ...failedInstances(sent),
     ])];
-    const feedback: ExecutionFeedback = {
-      previousPlan: sent.planText,
-      previousPlanReview: sent.reviewText,
-      previousExecutionReport: sent.executionText ?? null,
-      previousExecutionAudit: sent.auditText ?? null,
-      // Historical ids are references for the prompts only; the corrective
-      // chain derives fresh ids (sendKey + repair-1), so nothing is replayed.
-      previousCommandIds: sent.commands.map((command) => command.commandId),
-    };
-    const correctiveInput: CoordinateGoalInput = {
+    const revisionInput: CoordinateGoalInput = {
       catalog,
       goal: input.goal,
       workspacePath: input.workspacePath,
-      sendKey: input.sendKey,
+      // A fresh identity namespace keeps every revised command id distinct
+      // from the original ones; nothing is replayed.
+      sendKey: `${input.sendKey}:plan-revise-1`,
+      priorPlan: sent.planText,
+      priorReview: sent.reviewText,
       avoidInstances: burned,
       allowedInstances: input.allowedInstances,
       // Same memberships and root as the original consent; only the observed
@@ -313,10 +359,104 @@ export async function requestCoordination(
           ? sent.authorizedWriteTurnsLeft
           : input.writeAuthorization!.remaining,
       },
-      executionFeedback: feedback,
     };
     const reads = sent.authorizedTurnsLeft;
     const writes = sent.authorizedWriteTurnsLeft;
+    const budgetAllows = Number.isInteger(reads) && (reads as number) >= PLAN_REVISION_NEEDED_READ_TURNS
+      && Number.isInteger(writes) && (writes as number) >= PLAN_REVISION_NEEDED_WRITE_TURNS;
+    const staffed = budgetAllows && coordinateGoal(revisionInput).commands.length === 2;
+    if (!budgetAllows) {
+      noPlanRevisionSentence = PLAN_REVISION_BUDGET_STOP_SENTENCE;
+    } else if (!staffed) {
+      noPlanRevisionSentence = UNSTAFFED_PLAN_REVISION_SENTENCE;
+    } else if (!stillCurrent()) {
+      noPlanRevisionSentence = input.planRevisionRefusalSentence ?? REFUSED_PLAN_REVISION_SENTENCE;
+    } else {
+      let allowed = false;
+      try {
+        allowed = (await input.beforePlanRevision!({
+          firstRound,
+          remainingReadTurns: reads ?? null,
+          remainingWriteTurns: writes ?? null,
+        })) === true;
+      } catch {
+        allowed = false;
+      }
+      if (!allowed || !stillCurrent()) {
+        noPlanRevisionSentence = input.planRevisionRefusalSentence ?? REFUSED_PLAN_REVISION_SENTENCE;
+      } else {
+        latest = await runCoordinateSession(
+          revisionInput,
+          { sendAuthorized: true, allowedInstances: input.allowedInstances, onEvent: input.onEvent },
+          {
+            async launch(command) {
+              if (!stillCurrent()) return { text: "", errorText: REPLACED };
+              return transport.launch(command);
+            },
+          },
+        );
+        planRevisionHistory = [roundFactFrom(sent)];
+      }
+    }
+  }
+  if (noPlanRevisionSentence !== null) {
+    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noPlanRevisionSentence}` });
+  }
+
+  // -----------------------------------------------------------------------
+  // The one in-window corrective boundary (unchanged semantics), now on
+  // whichever pass is current. Only a COMPLETED execution audit that ended
+  // VERDICT: revise may start one repair chain in the same Send, under the
+  // same scope generation (never a second authorization), with fresh command
+  // identities and the remaining budgets. A refusal, unknown launch,
+  // cancellation, or corrective failure stays terminal, and the completed
+  // pass's evidence — including any retained plan-revision facts — survives.
+  // -----------------------------------------------------------------------
+  const repairBase = planRevisionHistory === undefined
+    ? firstRound
+    : viewFrom({ ...scopedViewFromSession(latest, hasWriteConsent), planRevisionHistory });
+  const eligibleForRepair = input.beforeRepair !== undefined
+    && hasWriteConsent
+    && latest.verdict === "revise"
+    && (latest.auditText ?? "").trim().length > 0
+    && ((latest.executionText ?? "").trim().length > 0 || Boolean(latest.executionHarness));
+  let repaired: CoordinateSessionState | null = null;
+  let noRepairSentence: string | null = null;
+  if (eligibleForRepair) {
+    const burned = [...new Set([
+      ...(input.avoidInstances ?? []),
+      ...failedInstances(sent),
+      ...(planRevisionHistory === undefined ? [] : failedInstances(latest)),
+    ])];
+    const feedback: ExecutionFeedback = {
+      previousPlan: latest.planText,
+      previousPlanReview: latest.reviewText,
+      previousExecutionReport: latest.executionText ?? null,
+      previousExecutionAudit: latest.auditText ?? null,
+      // Historical ids are references for the prompts only; the corrective
+      // chain derives fresh ids, so nothing is replayed.
+      previousCommandIds: [...sent.commands, ...(planRevisionHistory === undefined ? [] : latest.commands)]
+        .map((command) => command.commandId),
+    };
+    const correctiveInput: CoordinateGoalInput = {
+      catalog,
+      goal: input.goal,
+      workspacePath: input.workspacePath,
+      // After a plan revision the repair keeps the revised chain's active
+      // identity namespace (…:plan-revise-1:repair-1), never the original's.
+      sendKey: planRevisionHistory === undefined ? input.sendKey : `${input.sendKey}:plan-revise-1`,
+      avoidInstances: burned,
+      allowedInstances: input.allowedInstances,
+      writeAuthorization: {
+        ...input.writeAuthorization!,
+        remaining: typeof latest.authorizedWriteTurnsLeft === "number" && Number.isFinite(latest.authorizedWriteTurnsLeft)
+          ? latest.authorizedWriteTurnsLeft
+          : input.writeAuthorization!.remaining,
+      },
+      executionFeedback: feedback,
+    };
+    const reads = latest.authorizedTurnsLeft;
+    const writes = latest.authorizedWriteTurnsLeft;
     const budgetAllows = Number.isInteger(reads) && (reads as number) >= REPAIR_NEEDED_READ_TURNS
       && Number.isInteger(writes) && (writes as number) >= REPAIR_NEEDED_WRITE_TURNS;
     const staffed = budgetAllows && coordinateGoal(correctiveInput).commands.length === 2;
@@ -330,7 +470,7 @@ export async function requestCoordination(
       let allowed = false;
       try {
         allowed = (await input.beforeRepair!({
-          firstRound,
+          firstRound: repairBase,
           remainingReadTurns: reads ?? null,
           remainingWriteTurns: writes ?? null,
         })) === true;
@@ -354,17 +494,33 @@ export async function requestCoordination(
     }
   }
   if (repaired === null) {
-    if (noRepairSentence === null) return firstRound;
-    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noRepairSentence}` });
+    if (noRepairSentence === null) {
+      if (planRevisionHistory === undefined) return firstRound;
+      // The revised chain is the latest pass. A second plan-review revise is
+      // the one-revision ceiling; any other outcome keeps its own honest stop.
+      const secondRejection = latest.verdict === "revise"
+        && (latest.auditText ?? "").trim().length === 0
+        && (latest.executionText ?? "").trim().length === 0 && !latest.executionHarness;
+      const latestView = scopedViewFromSession(latest, hasWriteConsent);
+      return viewFrom({
+        ...latestView,
+        messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched),
+        planRevisionHistory,
+        ...(secondRejection ? { stopReason: `${latestView.stopReason} ${PLAN_REVISION_CEILING_SENTENCE}` } : {}),
+      });
+    }
+    return viewFrom({ ...repairBase, stopReason: `${repairBase.stopReason} ${noRepairSentence}` });
   }
-  // Latest pass on top; first pass retained as history. Send-wide dispatch
-  // keeps the goal non-retryable even when the corrective launch provably
-  // dispatched nothing. A second revise is terminal: one repair per Send.
+  // Latest pass on top; the pass it repaired is retained as history. Send-wide
+  // dispatch keeps the goal non-retryable even when a later launch provably
+  // dispatched nothing. A second revise is terminal: one repair per Send, and
+  // retained plan-revision facts survive every later pass.
   const secondRevise = repaired.verdict === "revise";
   return viewFrom({
     ...scopedViewFromSession(repaired, hasWriteConsent),
-    messageDispatched: sendWideDispatched(sent.messageDispatched, repaired.messageDispatched),
-    feedbackHistory: [roundFactFrom(sent)],
+    messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched, repaired.messageDispatched),
+    ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
+    feedbackHistory: [roundFactFrom(latest)],
     ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}` } : {}),
   });
 }

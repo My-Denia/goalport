@@ -459,3 +459,130 @@ test("feedback history restores evidence only, never budgets, scope, or permissi
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+// The one pre-write plan revision (C4): the original plan-rejected pass is
+// retained beside the latest pass, capped at one entry, permission-free, and
+// folded into the same send-wide dispatch truth as the repair history.
+function planRejectedFact(overrides = {}) {
+  return {
+    planningHarness: "Codex",
+    reviewHarness: "Claude",
+    planText: "Flawed bounded plan.",
+    reviewText: "The plan ignores the negative-value case.\nVERDICT: revise",
+    executionText: null,
+    auditText: null,
+    executionHarness: null,
+    auditHarness: null,
+    result: "The plan ignores the negative-value case.\nVERDICT: revise",
+    verdict: "revise",
+    stopReason: "The independent check says the plan needs revision, so this stopped.",
+    messageDispatched: true,
+    roundEvents: [],
+    commandIds: ["coordinate-plan-send-1", "coordinate-review-send-1"],
+    ...overrides,
+  };
+}
+
+test("plan-revision facts round-trip beside the latest pass and stay distinct from repair history", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-plan-revision-"));
+  try {
+    const saved = saveRecord(directory, record({
+      planText: "Revised plan that answers the critique.",
+      reviewText: "The plan can be carried out.\nVERDICT: carry-out",
+      executionText: "Repaired the fixture; the unchanged checks pass.",
+      auditText: "Independently verified.\nVERDICT: verified",
+      executionHarness: "Codex",
+      auditHarness: "Claude",
+      result: "Independently verified.\nVERDICT: verified",
+      verdict: "verified",
+      stopReason: "The independent harness verified the changes, so this stopped.",
+      messageDispatched: true,
+      planRevisionHistory: [planRejectedFact()],
+    }));
+    assert.equal(saved.verdict, "verified");
+    assert.deepEqual(saved.planRevisionHistory, [planRejectedFact()]);
+    assert.equal(Object.hasOwn(saved, "feedbackHistory"), false);
+    assert.deepEqual(readRecords(directory)[0], saved);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("malformed optional plan-revision history is dropped without rejecting an otherwise valid record", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-plan-revision-bad-"));
+  try {
+    const malformedShape = saveRecord(directory, record({ planRevisionHistory: { verdict: "revise" } }));
+    assert.equal(malformedShape.verdict, "revise");
+    assert.equal(Object.hasOwn(malformedShape, "planRevisionHistory"), false);
+
+    const malformedFact = saveRecord(directory, record({
+      requestId: "plan-revision-malformed-fact",
+      planRevisionHistory: [planRejectedFact({ commandIds: "not-an-array" })],
+    }));
+    assert.equal(malformedFact.verdict, "revise");
+    assert.deepEqual(malformedFact.planRevisionHistory, []);
+
+    const firstOnly = saveRecord(directory, record({
+      requestId: "plan-revision-first-only",
+      planRevisionHistory: [planRejectedFact(), planRejectedFact({ verdict: "checked" })],
+    }));
+    assert.deepEqual(firstOnly.planRevisionHistory, [planRejectedFact()]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("send-wide dispatch includes the retained plan-rejected pass", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-plan-revision-dispatch-"));
+  try {
+    const sentOriginal = saveRecord(directory, record({
+      requestId: "revision-refused",
+      verdict: "failed",
+      stopReason: "The revised chain failed before dispatch.",
+      messageDispatched: false,
+      planRevisionHistory: [planRejectedFact({ messageDispatched: true })],
+    }));
+    assert.equal(sentOriginal.messageDispatched, true, "the plan-rejected pass keeps the Send non-retryable");
+
+    const unknownOriginal = saveRecord(directory, record({
+      requestId: "revision-unknown",
+      verdict: "unconfirmed",
+      stopReason: "The revised launch dispatch is unknown.",
+      messageDispatched: null,
+      planRevisionHistory: [planRejectedFact({ messageDispatched: null })],
+    }));
+    assert.equal(unknownOriginal.messageDispatched, null, "unknown stays unknown across both histories");
+
+    const combined = saveRecord(directory, record({
+      requestId: "revision-then-repair",
+      verdict: "verified",
+      stopReason: "The independent harness verified the changes, so this stopped.",
+      messageDispatched: true,
+      planRevisionHistory: [planRejectedFact({ messageDispatched: true })],
+      feedbackHistory: [firstRoundFact({ messageDispatched: false })],
+    }));
+    assert.equal(combined.messageDispatched, true, "any sent pass keeps the whole Send non-retryable");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("plan-revision history restores evidence only, never budgets, scope, or permission", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-plan-revision-authority-"));
+  try {
+    const saved = saveRecord(directory, record({
+      planRevisionHistory: [planRejectedFact({
+        authorizedTurnsLeft: 99,
+        authorizedWriteTurnsLeft: 99,
+        scopeGeneration: 7,
+        allowedInstances: ["codex", "claude"],
+        writeAuthorization: { instances: ["codex"] },
+      })],
+    }));
+    assert.equal(Object.hasOwn(saved.planRevisionHistory[0], "authorizedTurnsLeft"), false);
+    assert.equal(Object.hasOwn(saved.planRevisionHistory[0], "writeAuthorization"), false);
+    assert.deepEqual(saved.planRevisionHistory, [planRejectedFact()]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});

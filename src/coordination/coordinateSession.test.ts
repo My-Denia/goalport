@@ -1236,3 +1236,297 @@ describe("one in-window corrective pass", () => {
     expect(view).not.toHaveProperty("feedbackHistory");
   });
 });
+
+// The one pre-write plan revision (C4): an initial scoped chain whose
+// independent PLAN review returned VERDICT: revise — with no writer or
+// auditor launched — may run exactly one revised chain in the same Send.
+// A second plan-review revise, a refusal, an unknown launch or a short
+// budget stays terminal with the original evidence retained.
+describe("one pre-write plan revision", () => {
+  const catalog = catalogFromProviderSnapshots(providersWithThird);
+  const allowed = ["codex", "claude", "grok"];
+  const write = { instances: allowed, workspaceRoot: workspacePath, remaining: 1 };
+  const CRITIQUE = "The plan ignores the negative-value case the unchanged tests contain.\nVERDICT: revise";
+  const VERIFIED = "Independently inspected the repaired fixture.\nVERDICT: verified";
+  const ok = (text: string, turnsRemaining: number, writeTurnsRemaining: number): CoordinateLaunchResult => ({
+    text, errorText: "", dispatched: true, turnsRemaining, writeTurnsRemaining,
+  });
+  // Five read turns and one write turn fund the healthy revised path exactly.
+  const rejectedPlan = (): CoordinateLaunchResult[] => [
+    ok("Flawed bounded plan.", 4, 1),
+    ok(CRITIQUE, 3, 1),
+  ];
+  const revisedChain = (audit: string): CoordinateLaunchResult[] => [
+    ok("Revised plan that answers the critique.", 2, 1),
+    ok("The plan can be carried out.\nVERDICT: carry-out", 1, 1),
+    ok("Changed the fixture; the unchanged checks pass.", 1, 0),
+    ok(audit, 0, 0),
+  ];
+  const request = async (
+    results: CoordinateLaunchResult[],
+    overrides: {
+      beforePlanRevision?: (checkpoint: import("./requestCoordination").PlanRevisionCheckpoint) => Promise<boolean>;
+      beforeRepair?: (checkpoint: import("./requestCoordination").RepairCheckpoint) => Promise<boolean>;
+      stillCurrent?: () => boolean;
+    } = {},
+  ) => {
+    const transport = recordingTransport(results);
+    const view = await requestCoordination(
+      {
+        goal, workspacePath, sendKey: "plan-revision-send",
+        allowedInstances: allowed, writeAuthorization: write,
+        ...(overrides.beforePlanRevision === undefined ? {} : { beforePlanRevision: overrides.beforePlanRevision }),
+        ...(overrides.beforeRepair === undefined ? {} : { beforeRepair: overrides.beforeRepair }),
+      },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+      overrides.stillCurrent,
+    );
+    return { view, transport };
+  };
+
+  it("runs exactly one revised chain after a rejected plan, with fresh identities and retained original facts", async () => {
+    const checkpoints: import("./requestCoordination").PlanRevisionCheckpoint[] = [];
+    const { view, transport } = await request([...rejectedPlan(), ...revisedChain(VERIFIED)], {
+      beforePlanRevision: async (checkpoint) => { checkpoints.push(checkpoint); return true; },
+    });
+    expect(transport.calls).toHaveLength(6);
+    expect(transport.calls.map((command) => command.modelSelection.instanceId)).toEqual([
+      "codex", "claude", "codex", "claude", "codex", "claude",
+    ]);
+    // Fresh command identities: the plan-revise-1 suffix keeps every id distinct.
+    const ids = transport.calls.map((command) => command.commandId);
+    expect(new Set(ids).size).toBe(6);
+    // The revised planner prompt answers the actual critique, and the writer
+    // only runs after the revised plan passed a fresh independent check.
+    expect(transport.calls[2]?.initialMessage.text).toContain("This is a revision of a saved plan");
+    expect(transport.calls[2]?.initialMessage.text).toContain(CRITIQUE);
+    expect(transport.calls[2]?.initialMessage.text).toContain("Flawed bounded plan.");
+    expect(transport.calls[4]?.initialMessage.text).toContain("Revised plan that answers the critique.");
+    expect(view.verdict).toBe("verified");
+    expect(view.executionText).toBe("Changed the fixture; the unchanged checks pass.");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.planRevisionHistory).toHaveLength(1);
+    expect(view.planRevisionHistory?.[0]).toMatchObject({
+      verdict: "revise", planText: "Flawed bounded plan.", result: CRITIQUE, messageDispatched: true,
+      executionText: null, auditText: null, executionHarness: null, auditHarness: null,
+    });
+    expect(view.planRevisionHistory?.[0]?.commandIds).toEqual(ids.slice(0, 2));
+    expect(view).not.toHaveProperty("feedbackHistory");
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]?.firstRound.verdict).toBe("revise");
+    expect(checkpoints[0]?.remainingReadTurns).toBe(3);
+    expect(checkpoints[0]?.remainingWriteTurns).toBe(1);
+  });
+
+  it("keeps the revised chain on the same scope and never a second authorization", async () => {
+    const { view, transport } = await request([...rejectedPlan(), ...revisedChain(VERIFIED)], {
+      beforePlanRevision: async () => true,
+    });
+    expect(transport.calls).toHaveLength(6);
+    expect(transport.calls.map((command) => command.sandboxPolicy.type)).toEqual([
+      "readOnly", "readOnly", "readOnly", "readOnly", "workspaceWrite", "readOnly",
+    ]);
+    expect(view.authorizedTurnsLeft).toBe(0);
+    expect(view.authorizedWriteTurnsLeft).toBe(0);
+  });
+
+  it("a second plan rejection is terminal: no third planning pass and no writer", async () => {
+    const { view, transport } = await request([
+      ...rejectedPlan(),
+      ok("Revised plan that answers the critique.", 2, 1),
+      ok("The revision still does not cover the failing case.\nVERDICT: revise", 1, 1),
+    ], { beforePlanRevision: async () => true });
+    expect(transport.calls).toHaveLength(4);
+    expect(transport.calls.every((command) => command.sandboxPolicy.type === "readOnly")).toBe(true);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("The independent check says the plan needs revision");
+    expect(view.stopReason).toContain("This send already used its one automatic plan revision.");
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+    expect(view.authorizedWriteTurnsLeft).toBe(1);
+    expect(view).not.toHaveProperty("feedbackHistory");
+  });
+
+  it("insufficient remaining budget explains the stop and launches no revised turn", async () => {
+    // Four authorized read turns: 2 spent by the rejected pass, 2 left.
+    const tight = [
+      ok("Flawed bounded plan.", 3, 1),
+      ok(CRITIQUE, 2, 1),
+    ];
+    const beforePlanRevision = vi.fn(async () => true);
+    const { view, transport } = await request(tight, { beforePlanRevision });
+    expect(transport.calls).toHaveLength(2);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("There is not enough access left for one more checked plan revision");
+    expect(view.stopReason).toContain("GoalPort did not add turns");
+    expect(view.messageDispatched).toBe(true);
+    expect(view).not.toHaveProperty("planRevisionHistory");
+    expect(beforePlanRevision).not.toHaveBeenCalled();
+  });
+
+  it("without the adapter gate the send keeps its one-round behavior", async () => {
+    const { view, transport } = await request([...rejectedPlan(), ...revisedChain(VERIFIED)]);
+    expect(transport.calls).toHaveLength(2);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toBe("The independent check says the plan needs revision, so this stopped.");
+    expect(view).not.toHaveProperty("planRevisionHistory");
+  });
+
+  it.each([
+    ["refused", async () => false],
+    ["threw", async () => { throw new Error("checkpoint failed"); }],
+  ])("a %s gate keeps the completed rejected round and its evidence", async (_kind, beforePlanRevision) => {
+    const { view, transport } = await request([...rejectedPlan(), ...revisedChain(VERIFIED)], { beforePlanRevision });
+    expect(transport.calls).toHaveLength(2);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("could not confirm this window for the automatic plan revision");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.planText).toBe("Flawed bounded plan.");
+    expect(view.reviewText).toBe(CRITIQUE);
+    expect(view).not.toHaveProperty("planRevisionHistory");
+  });
+
+  it("a burned sole writer stops the initial round before any revision boundary", async () => {
+    // Claude is the only write member. Its review failure would need a
+    // replacement chain that can still staff a writer; the chain pre-check
+    // refuses honestly, so no rejected round and no revision ever forms.
+    const transport = recordingTransport([
+      ok("Flawed bounded plan.", 4, 1),
+      { text: "", errorText: "This harness cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 3, writeTurnsRemaining: 1 },
+    ]);
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: "plan-revision-send", allowedInstances: allowed,
+        writeAuthorization: { instances: ["claude"], workspaceRoot: workspacePath, remaining: 1 },
+        beforePlanRevision: async () => { throw new Error("must not be called"); } },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(2);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("Claude cannot run on this machine right now");
+    expect(view).not.toHaveProperty("planRevisionHistory");
+  });
+
+  it("a proven-not-sent first revised launch keeps the already-sent goal non-retryable", async () => {
+    const { view, transport } = await request([
+      ...rejectedPlan(),
+      { text: "", errorText: "The authorized harness scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
+    ], { beforePlanRevision: async () => true });
+    expect(transport.calls).toHaveLength(3);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("revoked");
+    // Send-wide dispatch: the rejected pass really sent, so this goal is never silently resendable.
+    expect(view.messageDispatched).toBe(true);
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+    const directory = mkdtempSync(join(tmpdir(), "goalport-plan-revision-record-"));
+    const { saveRecord, readRecords } = createRequire(import.meta.url)("../../electron/coordination-record.cjs");
+    try {
+      saveRecord(directory, { ...view, requestId: "revoked-revision", goal, workspacePath });
+      const [record] = readRecords(directory);
+      expect(record.verdict).toBe("failed");
+      expect(record.messageDispatched).toBe(true);
+      expect(record.planRevisionHistory?.[0]?.commandIds).toEqual(transport.calls.slice(0, 2).map((command) => command.commandId));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("an unknown revised launch stays terminal without making the goal retryable", async () => {
+    let launches = 0;
+    const transport: CoordinateTransport & { calls: CoordinateTurnCommand[] } = {
+      calls: [],
+      async launch(command) {
+        transport.calls.push(command);
+        launches += 1;
+        if (launches <= 2) return rejectedPlan()[launches - 1]!;
+        throw new Error("IPC died before the revised turn");
+      },
+    };
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: "plan-revision-send", allowedInstances: allowed, writeAuthorization: write, beforePlanRevision: async () => true },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(3);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("dispatch is unknown");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+  });
+
+  it("cancellation before the revised writer keeps the rejected pass sent and its facts", async () => {
+    const transport = recordingTransport([...rejectedPlan(), ...revisedChain(VERIFIED)]);
+    const view = await requestCoordination(
+      { goal, workspacePath, sendKey: "plan-revision-send", allowedInstances: allowed, writeAuthorization: write, beforePlanRevision: async () => true },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+      () => transport.calls.length < 4,
+    );
+    // Both revised read turns ran; the revised writer was refused as replaced.
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("failed");
+    expect(view.stopReason).toContain("replaced");
+    expect(view.messageDispatched).toBe(true);
+    expect(view.reviewText).toBe("The plan can be carried out.\nVERDICT: carry-out");
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+    expect(view.planRevisionHistory?.[0]?.reviewText).toBe(CRITIQUE);
+  });
+
+  it("a completed initial execution audit never starts a plan revision: the two boundaries stay distinct", async () => {
+    // The initial chain ran its writer and its audit revises: C1 territory.
+    const { view, transport } = await request([
+      ok("Bounded plan.", 6, 2),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 5, 2),
+      ok("First executor report.", 5, 1),
+      ok("Execution critique.\nVERDICT: revise", 4, 1),
+    ], {
+      beforePlanRevision: async () => { throw new Error("must not be called"); },
+      beforeRepair: async () => false,
+    });
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("could not confirm this window for the automatic repair");
+    expect(view).not.toHaveProperty("planRevisionHistory");
+  });
+
+  it("combined C4→C1: a revised chain whose audit revises runs the one repair under the revised namespace", async () => {
+    // Nine read turns and two write turns fund all three chains.
+    const results: CoordinateLaunchResult[] = [
+      ok("Flawed bounded plan.", 8, 2),
+      ok(CRITIQUE, 7, 2),
+      ok("Revised plan that answers the critique.", 6, 2),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 5, 2),
+      ok("Revised executor report; checks fail honestly.", 5, 1),
+      ok("Execution critique after the revised pass.\nVERDICT: revise", 4, 1),
+      ok("Corrective plan.", 3, 1),
+      ok("The plan can be carried out.\nVERDICT: carry-out", 2, 1),
+      ok("Corrective executor report; checks pass.", 2, 0),
+      ok(VERIFIED, 1, 0),
+    ];
+    const repairCheckpoints: import("./requestCoordination").RepairCheckpoint[] = [];
+    const { view, transport } = await request(results, {
+      beforePlanRevision: async () => true,
+      beforeRepair: async (checkpoint) => { repairCheckpoints.push(checkpoint); return true; },
+    });
+    expect(transport.calls).toHaveLength(10);
+    const ids = transport.calls.map((command) => command.commandId);
+    expect(new Set(ids).size).toBe(10);
+    expect(view.verdict).toBe("verified");
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+    expect(view.planRevisionHistory?.[0]?.commandIds).toEqual(ids.slice(0, 2));
+    expect(view.feedbackHistory?.[0]?.verdict).toBe("revise");
+    expect(view.feedbackHistory?.[0]?.commandIds).toEqual(ids.slice(2, 6));
+    expect(view.messageDispatched).toBe(true);
+    expect(view.authorizedTurnsLeft).toBe(1);
+    expect(view.authorizedWriteTurnsLeft).toBe(0);
+    // The repair checkpoint's first round retains the plan-revision facts.
+    expect(repairCheckpoints).toHaveLength(1);
+    expect(repairCheckpoints[0]?.firstRound.verdict).toBe("revise");
+    expect(repairCheckpoints[0]?.firstRound.planRevisionHistory?.[0]?.result).toBe(CRITIQUE);
+    expect(repairCheckpoints[0]?.remainingReadTurns).toBe(4);
+    expect(repairCheckpoints[0]?.remainingWriteTurns).toBe(1);
+    // The corrective prompts carry the revised pass's actual evidence.
+    expect(transport.calls[6]?.initialMessage.text).toContain("Execution critique after the revised pass.");
+    expect(transport.calls[6]?.initialMessage.text).toContain("Inspect the CURRENT workspace");
+  });
+});

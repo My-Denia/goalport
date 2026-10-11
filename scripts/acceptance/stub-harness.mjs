@@ -111,6 +111,12 @@ export const STUB_BEHAVIORS = Object.freeze({
   "codex-fixture-corrective-plan": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-plan" }),
   "codex-fixture-corrective-writer": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-writer" }),
   "claude-fixture-critique-checker": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "critique-checker" }),
+  // C4 plan-revision operations. The first plan is genuinely flawed in one
+  // named way; a separate read-only plan checker critiques exactly that
+  // missing requirement, and the revised plan answers it before any writer.
+  "codex-fixture-flawed-plan": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "flawed-plan" }),
+  "codex-fixture-revised-plan": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "revised-plan" }),
+  "claude-fixture-plan-critique-checker": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "plan-critique-checker" }),
   // Native integration holds only the reply, not a fabricated progress state.
   // These fixed offline delays keep the real writer/auditor launches observable.
   "codex-fixture-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer", delayMs: 18000 }),
@@ -122,6 +128,12 @@ export const STUB_BEHAVIORS = Object.freeze({
   "codex-fixture-incomplete-writer-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "incomplete-writer", delayMs: 12000 }),
   "claude-fixture-critique-checker-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "critique-checker", delayMs: 12000 }),
   "codex-fixture-corrective-plan-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "corrective-plan", delayMs: 12000 }),
+  // C4 plan-revision progress variants: the same fixed offline delay so the
+  // real plan critique, the revised planner and the revised writer are
+  // observable in flight (and the desktop can close before them).
+  "claude-fixture-plan-critique-checker-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "plan-critique-checker", delayMs: 12000 }),
+  "codex-fixture-revised-plan-delayed": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "revised-plan", delayMs: 12000 }),
+  "codex-fixture-writer-delayed-plan-revision": Object.freeze({ kind: "turn", exitCode: 0, stdout: "", stderr: "", fixtureOperation: "writer", delayMs: 12000 }),
 });
 
 function isProbe(identity, argv) {

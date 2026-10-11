@@ -151,11 +151,23 @@ function feedbackHistoryOf(value) {
   return first ? [first] : [];
 }
 
+// The original plan-rejected pass retained by the one revised chain: same
+// bounded shape (at most one entry), same permission-free facts.
+function planRevisionHistoryOf(value) {
+  if (!Array.isArray(value)) return undefined;
+  const first = coordinationRoundFactOf(value[0]);
+  return first ? [first] : [];
+}
+
 // Combine per-pass dispatch with the latest projection into the original
 // Send's tri-state. A later pass that proves it sent nothing cannot erase an
 // earlier sent (or unknown) pass and make the goal appear retryable.
-function sendWideDispatched(value, feedbackHistory) {
-  const dispatchStates = [dispatched(value), ...(feedbackHistory ?? []).map((round) => round.messageDispatched)];
+function sendWideDispatched(value, feedbackHistory, planRevisionHistory) {
+  const dispatchStates = [
+    dispatched(value),
+    ...(feedbackHistory ?? []).map((round) => round.messageDispatched),
+    ...(planRevisionHistory ?? []).map((round) => round.messageDispatched),
+  ];
   if (dispatchStates.includes(true)) return true;
   if (dispatchStates.includes(null)) return null;
   return false;
@@ -206,6 +218,14 @@ function normalize(input) {
     // unreadable if its saved shape is malformed.
     feedbackHistory = undefined;
   }
+  let planRevisionHistory;
+  try {
+    planRevisionHistory = planRevisionHistoryOf(input.planRevisionHistory);
+  } catch {
+    // Optional plan-revision evidence degrades the same way: dropped, never
+    // fatal to the rest of the saved record.
+    planRevisionHistory = undefined;
+  }
   return {
     requestId,
     workspacePath,
@@ -223,10 +243,11 @@ function normalize(input) {
     stopReason,
     planningQuota,
     reviewQuota,
-    messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory),
+    messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory, planRevisionHistory),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
     ...(roundEvents === undefined ? {} : { roundEvents }),
     ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
+    ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     savedAt: savedAtOf(input.savedAt),
   };
 }

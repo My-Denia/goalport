@@ -2633,6 +2633,184 @@ describe("one in-window repair", () => {
     expect(screen.getByText(/file changes need separate consent again/)).toBeTruthy();
     expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
   });
+  describe("C4 one pre-write plan revision", () => {
+    const planCritique = "Read-only plan critique: the plan ignores the negative-value case the unchanged tests contain.\nVERDICT: revise";
+    const revisedPlanText = "Revised plan that answers the critique.";
+    const revisedExecution = "Revised executor: repaired helper.ts; the unchanged checks pass.";
+    const revisedAudit = "Checked the revised result independently.\nVERDICT: verified";
+    // Five read turns and one write turn fund the rejected pass (2 reads) plus
+    // the revised four-role chain (3 reads, 1 write) exactly.
+    function planRevisionRound(command: { commandId: string }, call: number): Record<string, unknown> {
+      const revised = call >= 3;
+      const text = command.commandId.includes("-execute-")
+        ? revisedExecution
+        : command.commandId.includes("-audit-")
+          ? revisedAudit
+          : command.commandId.includes("-plan-")
+            ? revised ? revisedPlanText : PLAN_TEXT
+            : revised ? CHECK_TEXT : planCritique;
+      return {
+        text, errorText: "", dispatched: true,
+        turnsRemaining: [4, 3, 2, 1, 1, 0][call - 1] ?? 0,
+        writeTurnsRemaining: [1, 1, 1, 1, 0, 0][call - 1] ?? 0,
+      };
+    }
+    function consentToPlanRevision() {
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/goal" } });
+      fireEvent.click(screen.getByRole("checkbox", { name: "Allow changes through Codex" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Allow changes through Claude" }));
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Write turns to allow" }), { target: { value: "1" } });
+      typeMessage("Fix the helper and check the changes.");
+    }
+
+    it("runs the rejected plan and the revised chain from one authorization and one Send, retaining the original pass", async () => {
+      const saves: Array<{ record: Record<string, unknown>; atLaunches: number }> = [];
+      const bridge = scopedBridge({
+        providers: repairProviders(),
+        launch: async (command, call) => planRevisionRound(command, call),
+        save: (record) => {
+          saves.push({ record, atLaunches: bridge.launchCount() });
+          return saveCoordinationRecordForTest(bridge.saved, record);
+        },
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "5" } });
+      consentToPlanRevision();
+      sendMessage();
+      expect(await screen.findByText("Changes verified", { selector: "dd" })).toBeTruthy();
+      // Exactly one authorization, exactly one Send, six distinct turns, and
+      // the writer only launched after the revised plan passed its check.
+      expect(bridge.authorizations).toHaveLength(1);
+      expect(bridge.launchCount()).toBe(6);
+      expect(bridge.launched.map((item) => item.commandId.split("-")[1])).toEqual([
+        "plan", "review", "plan", "review", "execute", "audit",
+      ]);
+      expect(new Set(bridge.launched.map((item) => item.commandId)).size).toBe(6);
+      // The rejected round was checkpointed with an honest unconfirmed
+      // revision intent BEFORE the first revised launch.
+      expect(saves).toHaveLength(3);
+      expect(saves[1]?.atLaunches).toBe(2);
+      expect(saves[1]?.record).toMatchObject({ verdict: "revise", messageDispatched: true });
+      expect(String(saves[1]?.record.stopReason)).toContain("plan revision is being organized");
+      expect(saves[2]?.atLaunches).toBe(6);
+      expect((saves[2]?.record.planRevisionHistory as Array<Record<string, unknown>> | undefined)?.[0]).toMatchObject({ verdict: "revise", planText: PLAN_TEXT });
+      // Both passes stay readable: the revised result once, the rejected pass folded.
+      expect(screen.getByText(/wrote one revised plan and had it/)).toBeTruthy();
+      expect(screen.getByText(revisedExecution)).toBeTruthy();
+      const retained = screen.getByText("Before plan revision").closest("details") as HTMLDetailsElement;
+      expect(retained.hasAttribute("open")).toBe(false);
+      fireEvent.click(screen.getByText("Before plan revision"));
+      expect(retained.hasAttribute("open")).toBe(true);
+      expect(screen.getByText(PLAN_TEXT)).toBeTruthy();
+      expect(screen.getByText(/Read-only plan critique: the plan ignores/)).toBeTruthy();
+      expect(screen.getByText("0 of 5 authorized model turns left.")).toBeTruthy();
+      expect(screen.getByText("0 of 1 write turns left.")).toBeTruthy();
+    });
+
+    it("shows the revision progress line while the revised chain is running", async () => {
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const bridge = scopedBridge({
+        providers: repairProviders(),
+        launch: async (command, call) => {
+          if (call === 3) await gate;
+          return planRevisionRound(command, call);
+        },
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "5" } });
+      consentToPlanRevision();
+      sendMessage();
+      expect(await screen.findByText(/one revised plan is now being written and checked/)).toBeTruthy();
+      expect(screen.getByText(/No file changes happen until the revised plan passes its check/)).toBeTruthy();
+      release();
+      await screen.findByText("Changes verified", { selector: "dd" });
+      expect(bridge.launchCount()).toBe(6);
+    });
+
+    it("a failed revision checkpoint sends no revised turn and keeps the rejected round non-retryable", async () => {
+      const bridge = scopedBridge({
+        providers: repairProviders(),
+        launch: async (command, call) => planRevisionRound(command, call),
+        save: (record) => {
+          if (String(record.stopReason).includes("plan revision is being organized")) throw new Error("disk full");
+          return saveCoordinationRecordForTest(bridge.saved, record);
+        },
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      fireEvent.change(screen.getByRole("spinbutton", { name: "Model turns to allow" }), { target: { value: "5" } });
+      consentToPlanRevision();
+      sendMessage();
+      await waitFor(() => expect(bridge.launchCount()).toBe(2));
+      expect(await screen.findByText(/could not be saved/)).toBeTruthy();
+      expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+      expect(screen.getByText(/could not confirm this window for the automatic plan revision/)).toBeTruthy();
+      expect(screen.queryByText("Before plan revision")).toBeNull();
+      expect(bridge.saved.at(-1)).toMatchObject({ verdict: "revise", messageDispatched: true });
+      expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    });
+
+    it("the default four read turns cannot fund the revised path and explain the stop", async () => {
+      const bridge = scopedBridge({
+        providers: repairProviders(),
+        launch: async (command, call) => ({
+          ...planRevisionRound(command, call),
+          // The counters a four-read-turn authorization actually reports.
+          turnsRemaining: [3, 2][call - 1] ?? 2,
+          writeTurnsRemaining: 1,
+        }),
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      consentToPlanRevision();
+      sendMessage();
+      await waitFor(() => expect(bridge.launchCount()).toBe(2));
+      expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
+      expect(screen.getByText(/not enough access left for one more checked plan revision/)).toBeTruthy();
+      expect(screen.getByText(/GoalPort did not add turns/)).toBeTruthy();
+      expect(screen.getByText("2 of 4 authorized model turns left.")).toBeTruthy();
+      expect(screen.queryByText("Before plan revision")).toBeNull();
+      expect(bridge.authorizations).toHaveLength(1);
+    });
+
+    it("reloads a plan-revised record as facts only: retained rejected pass, no live controls, write consent off", async () => {
+      const record = normalizeCoordinationRecordForTest({
+        requestId: "historic-plan-revision", workspacePath: "/work/goal", goal: "Fix the helper.",
+        planningHarness: "Codex", reviewHarness: "Claude", planText: revisedPlanText, reviewText: CHECK_TEXT,
+        executionHarness: "Codex", auditHarness: "Claude", executionText: revisedExecution, auditText: revisedAudit,
+        result: revisedAudit, verdict: "verified", stopReason: "The independent harness verified the changes, so this stopped.",
+        planningQuota: "available", reviewQuota: "available", messageDispatched: true,
+        planRevisionHistory: [{
+          planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: planCritique,
+          executionText: null, auditText: null, executionHarness: null, auditHarness: null,
+          result: planCritique, verdict: "revise", stopReason: "The independent check says the plan needs revision, so this stopped.",
+          messageDispatched: true, roundEvents: [], commandIds: ["coordinate-plan-a", "coordinate-review-b"],
+        }],
+      });
+      scopedBridge({ providers: repairProviders(), launch: async () => ({ text: "", errorText: "" }), records: [record!] });
+      render(<App />);
+      expect(await screen.findByText("Changes verified", { selector: "dd" })).toBeTruthy();
+      expect(screen.getByText(/wrote one revised plan and had it/)).toBeTruthy();
+      expect(screen.getByText("Before plan revision")).toBeTruthy();
+      for (const name of ["Change", "Stop allowing", "Allow more turns"]) expect(screen.queryByRole("button", { name })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
+      await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+      expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement).value).toBe("4");
+    });
+
+    it("the harness-access panel explains the plan revision before sending, distinct from the repair explanation", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async () => ({ text: "", errorText: "" }) });
+      render(<App />);
+      await openDraftWithPanel();
+      expect(screen.getByText(/independent check rejects the plan itself/)).toBeTruthy();
+      expect(screen.getByText(/write one revised plan/)).toBeTruthy();
+      expect(screen.getByText(/independent verification then finds unfinished work/)).toBeTruthy();
+    });
+  });
   describe("C2 explicit background integration", () => {
     const liveJob = {
       jobId: "same-job", requestId: "same-send", goal: "One independent goal", state: "running" as const,

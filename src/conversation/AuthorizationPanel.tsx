@@ -108,6 +108,10 @@ export function AuthorizationPanel({
           : "Choose the harnesses GoalPort may use for plan and check turns. Nothing is sent until you press Send."}
       </p>
       <p>
+        If the independent check rejects the plan itself, GoalPort may write one revised plan and
+        have it checked again inside the budgets you choose here, before any file changes.
+      </p>
+      <p>
         If independent verification then finds unfinished work, GoalPort may organize one further
         checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>

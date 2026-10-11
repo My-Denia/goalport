@@ -197,6 +197,8 @@ function App() {
     activity: string | null;
     /** True while the one in-window corrective pass is running. */
     repair?: boolean;
+    /** True while the one in-window plan revision is running. */
+    planRevision?: boolean;
   } | null>(null);
   // The most recent coordination discovery, so an environment failure can say
   // honestly whether another usable harness exists. Null until this window
@@ -794,6 +796,43 @@ function App() {
         const discovery = await discover(generation);
         if (!stillCurrent()) return;
         if (discovery.connected) discoveredProvidersRef.current = discovery.providers;
+        // Shared liveness/scope validator for BOTH in-window continuations
+        // (the one pre-write plan revision and the one corrective repair).
+        // Same checks a first send made: current request and draft, governing
+        // Core state, the captured scope generation, unchanged memberships
+        // and root, and honest remaining counters. Returns the validated
+        // live scope or null; null always means "launch nothing further".
+        const confirmContinuationScope = async (neededReadTurns: number | null) => {
+          if (!stillCurrent()) return null;
+          const currentDraft = draftGoalRef.current;
+          if (!currentDraft || currentDraft.requestId !== draftGoal.requestId
+            || currentDraft.workspace.trim() !== workspace) return null;
+          // The same new-work capacity and governing-held checks as a
+          // first send: a coordination verdict never releases or
+          // bypasses native Core state.
+          const liveSnapshot = snapshotRef.current;
+          if (liveSnapshot.bounds?.projectionUnavailable) return null;
+          if (liveSnapshot.stopResponsibility?.writeResponsibility === "held"
+            && liveSnapshot.stopResponsibility.blocksCurrentWorkspace !== false) return null;
+          let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number;
+            write?: { instances: string[]; maxTurns: number; remaining: number | null; workspaceRoot: string } } | null = null;
+          try {
+            scope = await window.goalportCore!.coordinationScope!();
+          } catch {
+            return null;
+          }
+          if (!stillCurrent()) return null;
+          if (!scope || scope.generation !== scopeGeneration) return null;
+          if (scope.instances.length !== selectedInstances.length
+            || !scope.instances.every((id) => selectedInstances.includes(id))) return null;
+          const liveWrite = scope.write;
+          if (!liveWrite || liveWrite.workspaceRoot !== workspace
+            || liveWrite.instances.length !== writeAuthorization!.instances.length
+            || !liveWrite.instances.every((id) => writeAuthorization!.instances.includes(id))) return null;
+          if (!Number.isInteger(scope.remaining) || scope.remaining < (neededReadTurns ?? 0)) return null;
+          if (!Number.isInteger(liveWrite.remaining) || (liveWrite.remaining ?? 0) < 1) return null;
+          return scope;
+        };
         // A manual Revise of a terminal execution-audit revision carries the
         // completed reports as execution feedback; the plain plan-revision
         // inputs stay for a plan check revision. Both sends are fresh Sends
@@ -819,45 +858,20 @@ function App() {
             avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
             allowedInstances: scopedSend ? [...selectedInstances] : undefined,
             writeAuthorization,
-            // The one in-window corrective pass needs this gate: only a
+            // The one in-window corrective pass and the one pre-write plan
+            // revision share one local liveness/scope validator: only a
             // scoped, explicitly write-consented send with record persistence
-            // available gets one, and the gate must have re-confirmed liveness
-            // and checkpointed the first round before any corrective turn.
+            // available gets either, and each gate must have re-confirmed
+            // liveness and checkpointed the completed pass before its next
+            // turn. Neither gate introduces a new authority — the same
+            // captured scope generation, memberships, root and live counters
+            // a first send checked are re-read from the same IPC.
             beforeRepair: scopedSend && writeAuthorization
               && typeof window.goalportCore?.coordinationSave === "function"
               && typeof window.goalportCore?.coordinationScope === "function"
               ? async (checkpoint) => {
-                if (!stillCurrent()) return false;
-                const currentDraft = draftGoalRef.current;
-                if (!currentDraft || currentDraft.requestId !== draftGoal.requestId
-                  || currentDraft.workspace.trim() !== workspace) return false;
-                // The same new-work capacity and governing-held checks as a
-                // first send: a coordination verdict never releases or
-                // bypasses native Core state.
-                const liveSnapshot = snapshotRef.current;
-                if (liveSnapshot.bounds?.projectionUnavailable) return false;
-                if (liveSnapshot.stopResponsibility?.writeResponsibility === "held"
-                  && liveSnapshot.stopResponsibility.blocksCurrentWorkspace !== false) return false;
-                // Same captured scope generation, unchanged memberships and
-                // root, and enough remaining counters — never a second
-                // authorization and never borrowed access.
-                let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number;
-                  write?: { instances: string[]; maxTurns: number; remaining: number | null; workspaceRoot: string } } | null = null;
-                try {
-                  scope = await window.goalportCore!.coordinationScope!();
-                } catch {
-                  return false;
-                }
-                if (!stillCurrent()) return false;
-                if (!scope || scope.generation !== scopeGeneration) return false;
-                if (scope.instances.length !== selectedInstances.length
-                  || !scope.instances.every((id) => selectedInstances.includes(id))) return false;
-                const liveWrite = scope.write;
-                if (!liveWrite || liveWrite.workspaceRoot !== workspace
-                  || liveWrite.instances.length !== writeAuthorization!.instances.length
-                  || !liveWrite.instances.every((id) => writeAuthorization!.instances.includes(id))) return false;
-                if (!Number.isInteger(scope.remaining) || scope.remaining < (checkpoint.remainingReadTurns ?? 0)) return false;
-                if (!Number.isInteger(liveWrite.remaining) || (liveWrite.remaining ?? 0) < 1) return false;
+                const scope = await confirmContinuationScope(checkpoint.remainingReadTurns);
+                if (scope === null) return false;
                 // Checkpoint the completed first round with an honest
                 // unconfirmed repair intent BEFORE the first corrective
                 // launch; a failed recording sends no corrective turn.
@@ -871,6 +885,28 @@ function App() {
                 setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
                 setRoundProgress((current) => current && current.requestId === draftGoal.requestId
                   ? { ...current, repair: true }
+                  : current);
+                return true;
+              }
+              : undefined,
+            beforePlanRevision: scopedSend && writeAuthorization
+              && typeof window.goalportCore?.coordinationSave === "function"
+              && typeof window.goalportCore?.coordinationScope === "function"
+              ? async (checkpoint) => {
+                const scope = await confirmContinuationScope(checkpoint.remainingReadTurns);
+                if (scope === null) return false;
+                // Same honest unconfirmed-intent checkpoint, distinct wording:
+                // a plan revision happens before any writer launched.
+                const checkpointView: CoordinationView = {
+                  ...checkpoint.firstRound,
+                  stopReason: `${checkpoint.firstRound.stopReason} One checked plan revision is being organized with the remaining access; its outcome is not confirmed yet.`,
+                };
+                const remembered = await rememberPlan(draftGoal.requestId, workspace, message, checkpointView);
+                if (!stillCurrent()) return false;
+                if (!remembered || !remembered.recorded) return false;
+                setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
+                setRoundProgress((current) => current && current.requestId === draftGoal.requestId
+                  ? { ...current, planRevision: true }
                   : current);
                 return true;
               }
@@ -1883,6 +1919,7 @@ function App() {
                 onSendAgainWithout={selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
                 roundEvents={selectedPlan.roundEvents ?? []}
                 feedbackHistory={selectedPlan.feedbackHistory ?? []}
+                planRevisionHistory={selectedPlan.planRevisionHistory ?? []}
                 onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
                   ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId); }
                   : undefined}
@@ -1928,6 +1965,7 @@ function App() {
                   })}
                   roundEvents={coordination.roundEvents ?? []}
                   feedbackHistory={coordination.feedbackHistory ?? []}
+                  planRevisionHistory={coordination.planRevisionHistory ?? []}
                   onUseAgain={coordination.environmentBlocked && unblockAvailable
                     ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId); }
                     : undefined}
@@ -1969,6 +2007,7 @@ function App() {
                   failures={roundProgress.failures}
                   activity={roundProgress.activity}
                   repair={roundProgress.repair === true}
+                  planRevision={roundProgress.planRevision === true}
                   remaining={scopeMirror?.remaining ?? null}
                   maxTurns={scopeMirror?.maxTurns ?? null}
                   writeRemaining={scopeMirror?.write?.remaining ?? null}

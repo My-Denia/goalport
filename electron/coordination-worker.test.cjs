@@ -26,7 +26,7 @@ async function scenario(t, options = {}) {
     if (options.revokeAt === launches.length) store.revoke(start.jobId);
     const n = launches.length;
     const role = command.commandId.split("-")[1];
-    const text = role === "review" ? "Execute this plan.\nVERDICT: carry-out" : role === "audit" ? `Tests checked.\nVERDICT: ${options.secondRevise || n === 4 ? "revise" : "verified"}` : role === "execute" ? "Changed fixture." : "A bounded plan.";
+    const text = role === "review" ? (options.reviewAt?.[n] ?? "Execute this plan.\nVERDICT: carry-out") : role === "audit" ? `Tests checked.\nVERDICT: ${options.secondRevise || n === 4 ? "revise" : "verified"}` : role === "execute" ? "Changed fixture." : "A bounded plan.";
     return options.resultAt === n ? options.result : { ok: true, text, messageDispatched: true };
   } };
   if (options.storageFailure) {
@@ -81,4 +81,54 @@ test("fresh global coverage refuses repair after the first completed audit witho
 
 test("storage failure after reservation but before runtime invocation sends nothing", async t => {
   const r = await scenario(t, { preLaunchFailure: true }); assert.equal(r.launches.length, 0); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true);
+});
+
+// C4: the same worker runs the ONE pre-write plan revision when the initial
+// chain's independent plan review rejects the plan, with the job-owned gate
+// (live Core coverage + original scope) before the first revised turn.
+test("worker completes a rejected plan and its revised chain with one authorization and retained facts", async t => {
+  const r = await scenario(t, { reads: 5, reviewAt: { 2: "The plan ignores a required case.\nVERDICT: revise" } });
+  assert.equal(r.result.status, "completed");
+  assert.equal(r.launches.length, 6);
+  assert.equal(r.authorizations, 1);
+  assert.equal(new Set(r.launches.map(c => c.commandId)).size, 6);
+  assert.deepEqual(r.status.counters, { readTurnsRemaining: 0, writeTurnsRemaining: 1 });
+  assert.equal(r.records[0].verdict, "verified");
+  assert.equal(r.records[0].planRevisionHistory.length, 1);
+  assert.equal(r.records[0].planRevisionHistory[0].verdict, "revise");
+  assert.equal(r.records[0].planRevisionHistory[0].commandIds.length, 2);
+  assert.equal("feedbackHistory" in r.records[0], false);
+  assert.equal("authorizedTurnsLeft" in r.records[0], false);
+  assert.equal(r.status.active, false);
+});
+
+test("worker stops after a second plan rejection without a third planning pass", async t => {
+  const r = await scenario(t, { reviewAt: { 2: "The plan ignores a required case.\nVERDICT: revise", 4: "The revision is still incomplete.\nVERDICT: revise" } });
+  assert.equal(r.launches.length, 4);
+  assert.ok(r.launches.every(c => c.sandboxPolicy.type === "readOnly"));
+  assert.equal(r.result.report.verdict, "revise");
+  assert.match(r.result.report.stopReason, /one automatic plan revision/);
+  assert.equal(r.records[0].planRevisionHistory.length, 1);
+  assert.equal(r.records[0].messageDispatched, true);
+});
+
+test("worker default four reads cannot fund the revised chain", async t => {
+  const r = await scenario(t, { reads: 4, reviewAt: { 2: "The plan ignores a required case.\nVERDICT: revise" } });
+  assert.equal(r.launches.length, 2);
+  assert.equal(r.status.counters.readTurnsRemaining, 2);
+  assert.match(r.result.report.stopReason, /not enough access left for one more checked plan revision/);
+  assert.match(r.result.report.stopReason, /GoalPort did not add turns/);
+  assert.equal("planRevisionHistory" in r.records[0], false);
+});
+
+test("worker refuses the revision when fresh Core coverage is held and retains the rejected round", async t => {
+  const r = await scenario(t, {
+    reviewAt: { 2: "The plan ignores a required case.\nVERDICT: revise" },
+    overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] },
+    detail: (count, request) => ({ bounds: {}, activeCampaignId: request.payload.campaignId, ...(count >= 2 ? { stopResponsibility: { writeResponsibility: "held" } } : {}) }),
+  });
+  assert.equal(r.launches.length, 2);
+  assert.equal(r.records[0].reviewText.includes("VERDICT: revise"), true);
+  assert.match(r.records[0].stopReason, /background job.*automatic plan revision/);
+  assert.equal(r.records[0].messageDispatched, true);
 });

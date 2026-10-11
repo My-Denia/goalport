@@ -4,8 +4,10 @@ import type { CoordinateTurnCommand } from "./coordinateTurn";
 import type { CoordinateLaunchResult, CoordinateTransport } from "./coordinateSession";
 import { requestCoordination as requestCoordinationFromWindow } from "./requestCoordination";
 import type { RepairCheckpoint } from "./requestCoordination";
+import type { PlanRevisionCheckpoint } from "./requestCoordination";
 import { requestCoordination as requestCoordinationFromWorkerEntry } from "./workerEntry";
 import {
+  BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   BACKGROUND_REPAIR_REFUSAL_SENTENCE,
   backgroundEngineInput,
   backgroundJobKey,
@@ -265,6 +267,51 @@ describe("background job contract", () => {
     expect(transport.calls).toHaveLength(4);
     expect(view.stopReason).toContain("could not confirm this window for the automatic repair");
     expect(view.stopReason).not.toContain(BACKGROUND_REPAIR_REFUSAL_SENTENCE);
+  });
+
+  it("uses the background plan-revision refusal wording when the adapter gate refuses", async () => {
+    const transport = recordingTransport([
+      ok("Flawed bounded plan.", 4, 1),
+      ok("The plan ignores the negative-value case.\nVERDICT: revise", 3, 1),
+    ]);
+    const view = await requestCoordinationFromWorkerEntry(
+      { ...backgroundEngineInput(writeStart), beforePlanRevision: async () => false },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(2);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain(BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE);
+    expect(view.stopReason).not.toContain("this window");
+    expect(view.stopReason).not.toContain(BACKGROUND_REPAIR_REFUSAL_SENTENCE);
+  });
+
+  it("runs the same one-plan-revision boundary and ceiling through the background adapter", async () => {
+    const transport = recordingTransport([
+      ok("Flawed bounded plan.", 4, 1),
+      ok("The plan ignores the negative-value case.\nVERDICT: revise", 3, 1),
+      ok("Revised plan that answers the critique.", 2, 1),
+      ok("The revision is still incomplete.\nVERDICT: revise", 1, 1),
+    ]);
+    const checkpoints: PlanRevisionCheckpoint[] = [];
+    const view = await requestCoordinationFromWorkerEntry(
+      {
+        ...backgroundEngineInput(writeStart),
+        beforePlanRevision: async (checkpoint) => {
+          checkpoints.push(checkpoint);
+          return true;
+        },
+      },
+      { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+      transport,
+    );
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).toBe("revise");
+    expect(view.stopReason).toContain("This send already used its one automatic plan revision.");
+    expect(view.planRevisionHistory?.[0]?.verdict).toBe("revise");
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]?.remainingReadTurns).toBe(3);
+    expect(checkpoints[0]?.remainingWriteTurns).toBe(1);
   });
 
   it("runs the same one-repair boundary and ceilings through the background adapter", async () => {

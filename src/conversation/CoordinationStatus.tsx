@@ -37,6 +37,11 @@ export interface CoordinationStatusProps {
    * Facts only: history never carries live controls or restores permissions.
    */
   feedbackHistory?: readonly CoordinationRoundFact[];
+  /**
+   * Retained facts of the original plan-rejected pass when the one automatic
+   * plan revision ran in this Send. Same rule: facts only, never permission.
+   */
+  planRevisionHistory?: readonly CoordinationRoundFact[];
   /** Forgets that this machine could not run the blocked harness's tools. */
   onUseAgain?: () => void;
   /**
@@ -155,11 +160,11 @@ function EnvironmentBlockedCard({
   );
 }
 
-/** The retained first pass, folded away: reports stay readable as facts. */
-function RetainedRoundSection({ round }: { round: CoordinationRoundFact }) {
+/** One retained earlier pass, folded away with an explicit heading. */
+function RetainedRoundSection({ round, heading }: { round: CoordinationRoundFact; heading: string }) {
   return (
     <details className="coordination-retained-round">
-      <summary>Before automatic repair</summary>
+      <summary>{heading}</summary>
       <dl>
         <dt>Outcome</dt><dd>{outcomeLabel(round.verdict)}</dd>
         <dt>Planning harness</dt><dd>{fact(round.planningHarness)}</dd>
@@ -201,6 +206,7 @@ export function CoordinationStatus({
   onSendAgainWithout,
   roundEvents,
   feedbackHistory,
+  planRevisionHistory,
   onUseAgain,
   roundSummary,
   budget,
@@ -227,6 +233,13 @@ export function CoordinationStatus({
           with the remaining access you allowed. The result above is the repaired pass.
         </p>
       ) : null}
+      {planRevisionHistory && planRevisionHistory.length > 0 ? (
+        <p className="coordination-repair-note">
+          The independent check rejected the plan, so GoalPort wrote one revised plan and had it
+          checked again with the remaining access you allowed before any file changed. The result
+          above is the revised pass.
+        </p>
+      ) : null}
       {verdict === "checked" && !executionHarness && !executionText ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
       {executionEvidence ? (
         <article className="coordination-result" aria-label="Workspace changes result">
@@ -243,7 +256,10 @@ export function CoordinationStatus({
         </article>
       ) : null}
       {feedbackHistory && feedbackHistory.length > 0
-        ? feedbackHistory.map((round, index) => <RetainedRoundSection key={`${round.verdict ?? "none"}-${index}`} round={round} />)
+        ? feedbackHistory.map((round, index) => <RetainedRoundSection key={`repair-${round.verdict ?? "none"}-${index}`} round={round} heading="Before automatic repair" />)
+        : null}
+      {planRevisionHistory && planRevisionHistory.length > 0
+        ? planRevisionHistory.map((round, index) => <RetainedRoundSection key={`plan-revision-${round.verdict ?? "none"}-${index}`} round={round} heading="Before plan revision" />)
         : null}
       {roundSummary ? <p className="coordination-summary">{roundSummary}</p> : null}
       {environmentBlocked ? (
@@ -340,6 +356,8 @@ export interface CoordinationProgressProps {
   readonly activity: string | null;
   /** True while the one in-window corrective pass is running. */
   readonly repair?: boolean;
+  /** True while the one in-window plan revision is running. */
+  readonly planRevision?: boolean;
   readonly remaining: number | null;
   readonly maxTurns: number | null;
   readonly writeRemaining?: number | null;
@@ -353,10 +371,16 @@ export interface CoordinationProgressProps {
  * user sees which harness is working, which failed, who took over, and how
  * many authorized model turns are left.
  */
-export function CoordinationProgress({ failures, activity, repair, remaining, maxTurns, writeRemaining, maxWriteTurns, onStopAllowing }: CoordinationProgressProps) {
+export function CoordinationProgress({ failures, activity, repair, planRevision, remaining, maxTurns, writeRemaining, maxWriteTurns, onStopAllowing }: CoordinationProgressProps) {
   return (
     <section className="coordination-status coordination-progress" aria-label="Round in progress" aria-live="polite">
       <p>You sent a goal without picking a runtime. The harnesses you allowed are working on it now.</p>
+      {planRevision ? (
+        <p className="coordination-progress-repair">
+          The first check rejected the plan, so one revised plan is now being written and checked
+          again with the remaining allowed turns. No file changes happen until the revised plan passes its check.
+        </p>
+      ) : null}
       {repair ? (
         <p className="coordination-progress-repair">
           The first check found unfinished work, so one checked repair is now running with the remaining allowed turns.
@@ -399,9 +423,9 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing }: { job: Bac
     <h2>{job.goal}</h2><p role="status">{sentence}</p>
     {job.live && job.active && !job.revoked ? <button type="button" className="button button-outline" onClick={onStopAllowing}>Stop allowing</button> : null}
     {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
-      repair={job.progress?.repair === true} remaining={job.counters?.readTurnsLeft ?? null} maxTurns={job.readMaxTurns}
+      repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={job.counters?.readTurnsLeft ?? null} maxTurns={job.readMaxTurns}
       writeRemaining={job.counters?.writeTurnsLeft ?? null} maxWriteTurns={job.writeMaxTurns} /> : <p>Observed remaining access: {job.counters?.readTurnsLeft ?? "Unknown"} model turns{job.writeMaxTurns !== null ? `; ${job.counters?.writeTurnsLeft ?? "Unknown"} write turns` : ""}.</p>}
-    {report ? <CoordinationStatus {...report} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} /> : null}
+    {report ? <CoordinationStatus {...report} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
     {!report && job.completedCommands.map(command => command.facts.text ? <article className="coordination-result" key={command.commandId}><h3>Completed {command.commandId.startsWith("coordinate-plan-") ? "plan" : command.commandId.startsWith("coordinate-review-") ? "check" : command.commandId.startsWith("coordinate-execute-") ? "changes" : "verification"}</h3><p>{command.facts.text}</p></article> : null)}
     {job.outcome?.error ? <p>{job.outcome.error}</p> : null}
     <details className="technical-details"><summary>Technical details</summary><p>Job: {job.jobId}; worker: {job.workerPid ?? "unconfirmed"}</p>
