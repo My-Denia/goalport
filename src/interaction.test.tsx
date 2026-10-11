@@ -3230,6 +3230,50 @@ describe("one in-window repair", () => {
       await new Promise((resolve) => setTimeout(resolve, 1600));
       expect(lists).toBe(2);
     });
+    it("a failed terminal re-list retries on later polls and still lands the finished round", async () => {
+      let finished = false;
+      let lists = 0;
+      const round = {
+        requestId: "bg-round", workspacePath: "/work/goal", goal: "Finish in the background.",
+        planningHarness: "Codex", reviewHarness: "Claude",
+        planText: "Background plan.", reviewText: "Checked in the background.\nVERDICT: carry-out",
+        result: "Checked in the background.\nVERDICT: carry-out", verdict: "checked",
+        stopReason: null, planningQuota: "available", reviewQuota: "available",
+        savedAt: "2026-10-11T12:00:00.000Z",
+      };
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        // Scripted read sequence: the mount load succeeds on an empty
+        // profile, then the terminal re-list throws once, returns a
+        // non-array once, and only then returns the finished round.
+        records: (async () => {
+          lists += 1;
+          if (lists === 1) return [] as Array<Record<string, unknown>>;
+          if (lists === 2) throw new Error("records read failed");
+          if (lists === 3) return null as unknown as Array<Record<string, unknown>>;
+          return finished ? [round] : ([] as Array<Record<string, unknown>>);
+        }) as unknown as () => Promise<Array<Record<string, unknown>>>,
+      });
+      window.goalportCore!.backgroundStatus = async () => (
+        finished ? { ...liveJob, active: false, live: false, state: "completed" as const } : { ...liveJob }
+      );
+      render(<App />);
+      await screen.findByRole("region", { name: "Background goal" });
+      expect(screen.getByRole("button", { name: "Leave job view" })).toBeTruthy();
+      finished = true;
+      // The first terminal read throws and the second resolves to a
+      // non-array; neither may mark the job as listed. The finished round
+      // must still land through a later poll's retry.
+      expect(await screen.findByText(/This background job finished/, undefined, { timeout: 5000 })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      expect(await screen.findByText("Background plan.", undefined, { timeout: 5000 })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Can be carried out · / })).toBeTruthy();
+      // Mount(1) + throw(2) + non-array(3) + successful retry(4): the two
+      // failures were retried, and no further reads stack afterwards.
+      expect(lists).toBe(4);
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      expect(lists).toBe(4);
+    });
     it("Stop allowing uses the acknowledged job connection only and retains current evidence", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       let job = { ...liveJob };

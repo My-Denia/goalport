@@ -198,8 +198,12 @@ function App() {
   const [backgroundView, setBackgroundView] = useState(false);
   const backgroundAttached = useRef(false);
   // Job id whose terminal closeout already re-listed the plans in this
-  // session; one re-list per job, never one per 700ms poll.
+  // session — set only AFTER a valid records array actually replaced the
+  // plans, so failed reads retry on later polls instead of being skipped.
   const plansListedTerminalRef = useRef<string | null>(null);
+  // True while a terminal-triggered records read is in flight: one read at
+  // a time, so the 700ms poll never stacks concurrent duplicate reads.
+  const terminalListInFlightRef = useRef(false);
   const [scopeMirror, setScopeMirror] = useState<{
     instances: readonly string[];
     maxTurns: number;
@@ -421,10 +425,25 @@ function App() {
         // never reaches Plans in this session and Revise cannot continue
         // from the current view. The send path's own disk re-read keeps
         // command identity (record count) unchanged.
-        if (job && job.active === false && BACKGROUND_JOB_TERMINAL_STATES.has(job.state) && plansListedTerminalRef.current !== job.jobId) {
-          plansListedTerminalRef.current = job.jobId;
+        // The per-job mark is set ONLY after a valid records array actually
+        // replaced the plans: a read that throws, resolves to a non-array,
+        // or finds no records port leaves the job unmarked, so the next
+        // poll retries it instead of permanently skipping the finished
+        // round. One read in flight at a time; failures never double-stack.
+        if (job && job.active === false && BACKGROUND_JOB_TERMINAL_STATES.has(job.state)
+          && plansListedTerminalRef.current !== job.jobId && !terminalListInFlightRef.current) {
           const list = window.goalportCore?.coordinationRecords;
-          if (list) void list().then((records) => { if (!cancelled && Array.isArray(records)) setPlans(records); }).catch(() => undefined);
+          if (list) {
+            terminalListInFlightRef.current = true;
+            const listedJobId = job.jobId;
+            void list().then((records) => {
+              if (!cancelled && Array.isArray(records)) {
+                plansListedTerminalRef.current = listedJobId;
+                setPlans(records);
+              }
+            }).catch(() => undefined)
+              .finally(() => { terminalListInFlightRef.current = false; });
+          }
         }
       } catch {
         if (!cancelled) setBackgroundJob(job => job ? { ...job, state: "unconfirmed", live: false } : null);
