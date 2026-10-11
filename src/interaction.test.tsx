@@ -3164,16 +3164,71 @@ describe("one in-window repair", () => {
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
       expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
     });
-    it.each([
-      ["an inactive finished job", { ...liveJob, active: false, live: false, state: "completed" as const }, /This background job finished/],
-      ["an active but already revoked job", { ...liveJob, live: false, state: "unconfirmed" as const, revoked: true }, /Progress unavailable or interrupted/],
-    ])("%s offers no Stop allowing", async (_name, job, sentence) => {
-      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
-      window.goalportCore!.backgroundStatus = async () => job;
+    it("a restored finished job never takes the main view; its closeout stays one deliberate click away", async () => {
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        records: async () => [{
+          requestId: "saved-plan", workspacePath: "/work/goal", goal: "Explain the failure.",
+          planningHarness: "Codex", reviewHarness: "Claude",
+          planText: "Bounded plan.", reviewText: "Needs a smaller step.\nVERDICT: revise",
+          result: "Needs a smaller step.\nVERDICT: revise", verdict: "revise",
+          stopReason: "The independent check says the plan needs revision, so this stopped.",
+          planningQuota: "available", reviewQuota: "available", savedAt: "2026-10-08T06:10:00.000Z",
+        }],
+      });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, active: false, live: false, state: "completed" as const });
       render(<App />);
-      expect(await screen.findByText(sentence)).toBeTruthy();
+      // The startup view stays the newest plan, not the old job's closeout.
+      expect(await screen.findByText("Bounded plan.")).toBeTruthy();
+      await waitFor(() => expect(window.goalportCore!.backgroundStatus).toBeTruthy());
+      expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
+      // The finished job stays reachable, but only on the user's click.
+      fireEvent.click(screen.getByRole("button", { name: "Return to background goal" }));
+      expect(await screen.findByText(/This background job finished/)).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    });
+    it("an active but already revoked job offers no Stop allowing", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: false, state: "unconfirmed" as const, revoked: true });
+      render(<App />);
+      expect(await screen.findByText(/Progress unavailable or interrupted/)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    });
+    it("a background round finishing in this session refreshes Plans without a reload", async () => {
+      let finished = false;
+      let lists = 0;
+      const round = {
+        requestId: "bg-round", workspacePath: "/work/goal", goal: "Finish in the background.",
+        planningHarness: "Codex", reviewHarness: "Claude",
+        planText: "Background plan.", reviewText: "Checked in the background.\nVERDICT: carry-out",
+        result: "Checked in the background.\nVERDICT: carry-out", verdict: "checked",
+        stopReason: null, planningQuota: "available", reviewQuota: "available",
+        savedAt: "2026-10-11T12:00:00.000Z",
+      };
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        records: async () => { lists += 1; return finished ? [round] : []; },
+      });
+      window.goalportCore!.backgroundStatus = async () => (
+        finished ? { ...liveJob, active: false, live: false, state: "completed" as const } : { ...liveJob }
+      );
+      render(<App />);
+      // The live job attaches and opens its own view; Plans is still empty.
+      await screen.findByRole("region", { name: "Background goal" });
+      expect(screen.getByRole("button", { name: "Leave job view" })).toBeTruthy();
+      // The worker persists the record BEFORE the store marks the job terminal.
+      finished = true;
+      // The next poll sees the terminal state and re-lists the plans once.
+      expect(await screen.findByText(/This background job finished/, undefined, { timeout: 3000 })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      expect(await screen.findByText("Background plan.", undefined, { timeout: 3000 })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Can be carried out · / })).toBeTruthy();
+      expect(lists).toBe(2);
+      // One re-list per job: later polls never list again.
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      expect(lists).toBe(2);
     });
     it("Stop allowing uses the acknowledged job connection only and retains current evidence", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });

@@ -80,6 +80,15 @@ const MESSAGE_TYPE_LABEL: Record<string, string> = {
 const BACKGROUND_JOB_OUTSTANDING_SENTENCE =
   "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
 
+/**
+ * The confirmed-terminal job states. This mirrors the main process's
+ * confirmed-terminal set (electron/coordination-background.cjs `projection`):
+ * only these prove the round ended, and only the main process may decide
+ * that. Every other state (including "revoked" before release and honest
+ * "unconfirmed") is still live-or-unknown and gets no terminal treatment.
+ */
+const BACKGROUND_JOB_TERMINAL_STATES = new Set(["completed", "failed", "stopped"]);
+
 function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice | null {
   const outcome = next.commandOutcome;
   if (outcome?.messageType === messageType) {
@@ -188,6 +197,9 @@ function App() {
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
   const [backgroundView, setBackgroundView] = useState(false);
   const backgroundAttached = useRef(false);
+  // Job id whose terminal closeout already re-listed the plans in this
+  // session; one re-list per job, never one per 700ms poll.
+  const plansListedTerminalRef = useRef<string | null>(null);
   const [scopeMirror, setScopeMirror] = useState<{
     instances: readonly string[];
     maxTurns: number;
@@ -395,7 +407,25 @@ function App() {
         const job = await read();
         if (cancelled) return;
         setBackgroundJob(current => current?.jobId === job?.jobId && ((current?.revoked && !job?.revoked) || (current?.active === false && job?.active === true)) ? current : job);
-        if (job && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        // Only a job that still holds admission may take the main view on
+        // its own: the user's live work (running, or honestly unconfirmed)
+        // reattaches visibly, while a restored TERMINAL job is history and
+        // must not hijack the startup view — its closeout stays one click
+        // away on the background-return button, and its record is already
+        // in Plans through the records load.
+        if (job?.active && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        // A background round persists its plan record BEFORE the job store
+        // records the terminal outcome (electron/coordination-worker.cjs),
+        // so the first poll that sees a confirmed-terminal state can re-list
+        // the plans: without this, a round that finishes in the background
+        // never reaches Plans in this session and Revise cannot continue
+        // from the current view. The send path's own disk re-read keeps
+        // command identity (record count) unchanged.
+        if (job && job.active === false && BACKGROUND_JOB_TERMINAL_STATES.has(job.state) && plansListedTerminalRef.current !== job.jobId) {
+          plansListedTerminalRef.current = job.jobId;
+          const list = window.goalportCore?.coordinationRecords;
+          if (list) void list().then((records) => { if (!cancelled && Array.isArray(records)) setPlans(records); }).catch(() => undefined);
+        }
       } catch {
         if (!cancelled) setBackgroundJob(job => job ? { ...job, state: "unconfirmed", live: false } : null);
       } finally { reading = false; }
