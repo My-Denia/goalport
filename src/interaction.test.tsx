@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import App, { coordinationGeneration } from "./App";
+import { BackgroundCoordinationStatus, CoordinationStatus } from "./conversation/CoordinationStatus";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, EMPTY_PREVIEW_SNAPSHOT, type ProductConversationItem } from "./types";
@@ -2203,6 +2204,8 @@ describe("harness access panel and scoped rounds", () => {
     // The reloaded record auto-selects and renders its persistent facts…
     expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
     expect(screen.getByText(/Codex could not run its tools on this machine, so this stopped for it\./)).toBeTruthy();
+    expect(screen.getByText("Step not completed")).toBeTruthy();
+    expect(screen.queryByText("A harness failed")).toBeNull();
     // …without any transient authorization state.
     expect(screen.queryByRole("button", { name: "Allow more turns" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
@@ -2712,4 +2715,59 @@ describe("one in-window repair", () => {
   });
 
 });
+});
+
+describe("unsuccessful coordination events", () => {
+  const base = {
+    planningHarness: "Codex",
+    reviewHarness: "Claude",
+    planText: "Replace the subtraction.",
+    reviewText: "The plan can be carried out.",
+    verdict: "failed" as const,
+    stopReason: "Access stopped; the current turn may finish, but no further turn was sent.",
+    planningQuota: "unknown" as const,
+    reviewQuota: "unknown" as const,
+    result: null,
+  };
+
+  it("does not blame a harness when access was stopped", () => {
+    render(<CoordinationStatus {...base} roundEvents={[{ kind: "failed", role: "execution", instanceId: "codex", harness: "Codex", sentence: "Access stopped; the current turn may finish, but no further turn was sent.", detail: "revoked before the next launch" }]} />);
+    expect(screen.getByText("Step not completed")).toBeTruthy();
+    expect(screen.getAllByText("Access stopped; the current turn may finish, but no further turn was sent.").length).toBeGreaterThan(0);
+    expect(screen.queryByText("A harness failed")).toBeNull();
+    expect(screen.getByText("revoked before the next launch")).toBeTruthy();
+  });
+
+  it("keeps a genuine tool failure specific without calling it a harness malfunction", () => {
+    render(<CoordinationStatus {...base} stopReason="Codex could not run its tools on this machine, so this stopped for it." roundEvents={[{ kind: "failed", role: "planning", instanceId: "codex", harness: "Codex", sentence: "Codex could not run its tools on this machine, so this stopped for it.", detail: "helper exploded" }]} />);
+    expect(screen.getByText("Step not completed")).toBeTruthy();
+    expect(screen.getAllByText(/Codex could not run its tools on this machine/).length).toBeGreaterThan(0);
+    expect(screen.getByText("helper exploded")).toBeTruthy();
+    expect(screen.queryByText("A harness failed")).toBeNull();
+  });
+
+  it("keeps takeover separate from an incomplete step", () => {
+    render(<CoordinationStatus {...base} roundEvents={[
+      { kind: "failed", role: "planning", instanceId: "codex", harness: "Codex", sentence: "Codex could not run its tools on this machine, so this stopped for it." },
+      { kind: "continued", role: "planning", instanceId: "claude", harness: "Claude", sentence: "Claude took over the planning step." },
+    ]} />);
+    expect(screen.getByText("Step not completed")).toBeTruthy();
+    expect(screen.getByText("Took over")).toBeTruthy();
+    expect(screen.getByText("Claude took over the planning step.")).toBeTruthy();
+  });
+
+  it("shows a stopped background result without reconstructing stop or send controls", () => {
+    const start = vi.fn();
+    render(<BackgroundCoordinationStatus job={{
+      jobId: "same-job", requestId: "one-send", goal: "Repair the fixture.", state: "stopped", active: false, live: false, revoked: true,
+      workerPid: 42, readMaxTurns: 6, writeMaxTurns: 2, counters: { readTurnsLeft: 4, writeTurnsLeft: 1 }, pendingCommand: null, completedCommands: [],
+      progress: null,
+      outcome: { status: "stopped", report: { ...base, roundEvents: [{ kind: "failed", role: "execution", instanceId: "codex", harness: "Codex", sentence: "Access stopped; the current turn may finish, but no further turn was sent." }] } },
+    }} onStopAllowing={start} />);
+    expect(screen.getByText(/Access stopped. The current turn may finish/)).toBeTruthy();
+    expect(screen.getByText("Step not completed")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(start).not.toHaveBeenCalled();
+  });
 });

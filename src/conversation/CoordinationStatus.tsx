@@ -77,7 +77,8 @@ function RoundEventCard({ event }: { event: RoundEvent }) {
       <div className="tl-avatar" aria-hidden="true">{failed ? "✕" : "⇄"}</div>
       <div className="tl-event-body">
         <div className="tl-meta">
-          <span className="tl-kind">{failed ? "A harness failed" : "Took over"}</span>
+          {/* This kind also covers launch refusals, so it cannot establish harness fault. */}
+          <span className="tl-kind">{failed ? "Step not completed" : "Took over"}</span>
         </div>
         <div className="tl-system-body">{event.sentence}</div>
         {event.detail ? (
