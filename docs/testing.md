@@ -99,3 +99,36 @@ IME, native system notifications, packaging, or real Runtime execution.
 Use the opt-in [native Linux task driver](linux-development.md#native-acceptance)
 for actual Codex acceptance. Windows ZIP packaging tests must run on Windows;
 PowerShell cannot consume the Linux temporary paths used by a Linux test process.
+
+## Continuation (one in-window repair) acceptance
+
+The offline real-app continuation driver proves the C1 boundary — one Send may
+run a second four-role chain after a completed `VERDICT: revise` audit — without
+any real vendor CLI or model:
+
+```sh
+pnpm build && cargo build -p goalport-core
+pnpm test:acceptance-feedback
+pnpm acceptance:feedback-native --out goal-runs/<run>/evidence/continuation-c1-r1
+```
+
+The driver launches the real Electron main/preload, built renderer and Core with
+both sentinel-controlled offline stub processes, then:
+
+- **C1** — the user authorizes six read turns and two write turns and sends once;
+  the first writer leaves a genuinely incomplete edit while its CLI turn completes
+  honestly, a separate read-only Node checker observes the failing unchanged tests
+  and returns `VERDICT: revise`, and the app runs the corrective chain (fresh
+  command IDs, same scope generation) until a second separate checker verifies.
+  It then closes and relaunches with a fresh process/socket/temp against the same
+  durable records and ledger: reopened evidence only, null scope, no added turns,
+  write consent OFF.
+- **C2** — the unchanged default of four read turns runs the first chain and stops
+  with the explained budget refusal; no fifth turn is launched and the intermediate
+  edit stays on disk.
+
+Screenshots are captured at 860, 1020 and 1440 px for consent, corrective
+progress, verified, budget-stop and reopened-history states; inspect the PNGs and
+`walkthrough.md` yourself. Failed subprocess checks are feedback in these fixtures;
+a failed CLI turn stays terminal. This does not establish Windows behavior, real
+CLI confinement or independent-model judgment.
