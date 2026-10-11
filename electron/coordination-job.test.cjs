@@ -13,6 +13,8 @@ const {
   normalizeAdmissionInput,
   requestControl,
   ADMISSION_SCHEMA,
+  REVOCATION_FILE,
+  REVOCATION_SCHEMA,
 } = require("./coordination-job.cjs");
 
 const FIXED_JOB_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -219,6 +221,36 @@ test("revocation is durable control state, retains an in-flight outcome and bloc
   assert.equal(settled.startupClaim.pid, process.pid);
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), true);
   assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8")).revoked, true);
+});
+
+test("a stale-snapshot progress replacement cannot erase a durable revocation", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  // The worker read its snapshot BEFORE the stop lands (writeAtomic only
+  // serializes one replacement; a cross-process read-modify-write has no
+  // transaction). This is the exact lost-update interleaving.
+  const stale = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8"));
+  assert.equal(stale.revoked, false);
+  const revoked = store.revoke(admitted.jobId);
+  assert.equal(revoked.revoked, true);
+  assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, REVOCATION_FILE), "utf8")).schema, REVOCATION_SCHEMA);
+  // The worker's atomic replace lands from the stale snapshot, overwriting
+  // the revoked progress projection exactly as the race allows.
+  fs.writeFileSync(pathFor(profile, admitted.jobId, "progress.json"), `${JSON.stringify({ ...stale, phase: "running" }, null, 2)}\n`);
+  // Every read merges the write-once marker back in: the stop fact survives.
+  const after = store.getStatus(admitted.jobId);
+  assert.equal(after.revoked, true);
+  assert.equal(after.revokeRequestedAt, "2026-10-12T13:14:15.000Z");
+  assert.throws(() => store.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-9" }, ownerToken), { code: "access-revoked" });
+  // A worker write through the store also carries the merged stop forward.
+  store.updateProgress(admitted.jobId, { detail: "late display update" }, ownerToken);
+  assert.equal(store.getStatus(admitted.jobId).revoked, true);
+  assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8")).revoked, true);
+  // Re-revoking stays idempotent, and a corrupt marker refuses fail-closed.
+  assert.equal(store.revoke(admitted.jobId).revoked, true);
+  fs.writeFileSync(pathFor(profile, admitted.jobId, REVOCATION_FILE), "{not json");
+  assert.throws(() => store.getStatus(admitted.jobId), { code: "malformed-state" });
 });
 
 test("a revocation before any worker claim is settled by the spawning worker and releases the admission", (t) => {
