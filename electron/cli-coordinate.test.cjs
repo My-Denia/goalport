@@ -3,7 +3,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, piWindowsLaunch, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
+const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
+const { readHealth, markBlocked } = require("./harness-health.cjs");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -30,6 +32,9 @@ test("installed subscription CLIs are visible without a checkout", async () => {
         assert.deepEqual(args, ["login", "status"]);
         return { stdout: "Logged in using ChatGPT\n" };
       }
+      // A failing pi probe keeps this test's roster at codex+claude; the pi
+      // discovery cases below cover the success shape.
+      if (file === "pi") return { stdout: "" };
       assert.equal(file, "claude");
       assert.deepEqual(args, ["auth", "status", "--json"]);
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro", email: "hidden@example.invalid" }) };
@@ -51,6 +56,7 @@ test("Codex login status on stderr still counts as signed in", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "", stderr: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: "", stderr: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
     },
   });
@@ -67,6 +73,7 @@ test("an API-key login is not given an included model", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using an API key\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "apiKey" }) };
     },
   });
@@ -79,6 +86,13 @@ test("an API-key login is not given an included model", async () => {
 test("codex and claude replies keep the assistant text", () => {
   assert.equal(codexReply('{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n'), "Bounded plan.");
   assert.equal(claudeReply('{"type":"result","result":"Needs a smaller step.\\nVERDICT: revise","is_error":false}').text, "Needs a smaller step.\nVERDICT: revise");
+});
+
+test("a pi reply is the trimmed stdout text and never a provider failure", () => {
+  assert.deepEqual(replyFrom("pi", " ok\n "), { text: "ok", failed: false });
+  // Empty text stays failed:false so runCliTurn's no-text stop sentence
+  // ("finished without any text") carries it through the existing path.
+  assert.deepEqual(replyFrom("pi", "   \n"), { text: "", failed: false });
 });
 
 test("a granted command spawns once and a repeat returns the stored text", async () => {
@@ -341,6 +355,7 @@ test("a ChatGPT login without an explicit model still names the built-in default
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
     },
   });
@@ -357,8 +372,654 @@ test("a single-quoted top-level model line is read", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) };
     },
   });
   assert.equal(discovered.providers[0].models[0].slug, "gpt-6.1-sol");
+});
+
+// The real-machine probe shape (pi --offline --list-models): a provider/
+// model/context header row plus model rows whose context column starts with
+// a digit (1M, 262.1K, ...).
+const PI_TABLE_STDOUT = [
+  "provider     model                      context  max-out  thinking  images",
+  "deepseek     deepseek-flash             1M       384K     yes       yes",
+  "kimi-coding  kimi-for-coding            1.0M     32.8K    yes       yes",
+  "",
+].join("\n");
+
+test("a pi install with an enumerable model table is discovered with its built-in default", async () => {
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return 'model = "gpt-6.1-sol"\n';
+    },
+    execFile(file, args) {
+      if (file === "pi") {
+        assert.deepEqual(args, ["--no-extensions", "--no-mcp", "--no-skills", "--no-context-files", "--offline", "--list-models"]);
+        return { stdout: PI_TABLE_STDOUT };
+      }
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      return { stdout: "" };
+    },
+  });
+  assert.deepEqual(discovered.providers.map((item) => item.instanceId), ["codex", "pi"]);
+  assert.deepEqual(discovered.providers[1], {
+    instanceId: "pi",
+    displayName: "Pi",
+    driver: "pi",
+    enabled: true,
+    installed: true,
+    availability: "available",
+    status: "ready",
+    auth: { status: "authenticated" },
+    models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
+  });
+});
+
+test("a pi probe that fails, stays empty, or prints non-table text is not discovered", async () => {
+  const roster = async (piProbe) => discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return "";
+    },
+    execFile(file) {
+      if (file === "pi") {
+        if (piProbe instanceof Error) throw piProbe;
+        return piProbe;
+      }
+      return { stdout: "" };
+    },
+  });
+  // A spawn failure rejects, so the provider arm yields null.
+  assert.deepEqual((await roster(new Error("spawn pi ENOENT"))).providers, []);
+  assert.deepEqual((await roster({ stdout: "" })).providers, []);
+  // Nonempty error text on either stream never matches the table shape, so
+  // a nonzero exit cannot smuggle a provider in through the discarded code.
+  assert.deepEqual((await roster({ stdout: "", stderr: "error: offline mode cannot list models\n" })).providers, []);
+  assert.deepEqual((await roster({ stdout: "pi: failed to load models\nrun 'pi auth login' first\n" })).providers, []);
+});
+
+// The captured diagnostic turn (goal-runs/goalport-pr26-blockers-codex-diag/
+// evidence/diag/stdout.jsonl), with the username and home path redacted. The
+// structure is byte-faithful: two config warnings, an honest intent, three
+// failed tool calls (two carrying sandbox-helper signatures), and the model's
+// honest final report. codex exits 0 on this turn.
+const DIAGNOSTIC_STDOUT = "{\"type\": \"thread.started\", \"thread_id\": \"01a11e93-bded-7ee3-919e-9f38d019ba92\"}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_0\", \"type\": \"error\", \"message\": \"Under-development features enabled: local_thread_store_compression. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in C:\\\\Users\\\\user\\\\.codex\\\\config.toml.\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_1\", \"type\": \"error\", \"message\": \"Configured service tier `standard` is not advertised as supported for model `gpt-6.1-sol` and will be omitted from requests.\"}}\n{\"type\": \"turn.started\"}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_2\", \"type\": \"agent_message\", \"text\": \"I’ll read the root AGENTS.md and quote its first heading.\\n\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_3\", \"type\": \"command_execution\", \"command\": \"\\\"C:\\\\\\\\Users\\\\\\\\user\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Microsoft\\\\\\\\WindowsApps\\\\\\\\pwsh.exe\\\" -Command \\\"Get-Content -LiteralPath 'C:\\\\\\\\Files\\\\\\\\goalport\\\\\\\\AGENTS.md' -TotalCount 12\\\"\", \"aggregated_output\": \"\", \"exit_code\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_3\", \"type\": \"command_execution\", \"command\": \"\\\"C:\\\\\\\\Users\\\\\\\\user\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Microsoft\\\\\\\\WindowsApps\\\\\\\\pwsh.exe\\\" -Command \\\"Get-Content -LiteralPath 'C:\\\\\\\\Files\\\\\\\\goalport\\\\\\\\AGENTS.md' -TotalCount 12\\\"\", \"aggregated_output\": \"Failed to create unified exec process: helper_unknown_error: setup refresh had errors\", \"exit_code\": -1, \"status\": \"failed\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_4\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read first heading of AGENTS.md\"}, \"result\": null, \"error\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_4\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read first heading of AGENTS.md\"}, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"trusted Node process exited unexpectedly; kernel reset, rerun your request\"}], \"structured_content\": null}, \"error\": null, \"status\": \"failed\"}}\n{\"type\": \"item.started\", \"item\": {\"id\": \"item_5\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read AGENTS.md heading\"}, \"result\": null, \"error\": null, \"status\": \"in_progress\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_5\", \"type\": \"mcp_tool_call\", \"server\": \"node_repl\", \"tool\": \"js\", \"arguments\": {\"code\": \"var fs = await import('node:fs/promises'); var content = await fs.readFile('C:/Files/goalport/AGENTS.md', 'utf8'); nodeRepl.write(content.split(/\\\\r?\\\\n/).find(line => /^#{1,6}\\\\s/.test(line)));\", \"title\": \"Read AGENTS.md heading\"}, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"node_repl kernel exited unexpectedly\\n\\nnode_repl diagnostics: {\\\"kernel_pid\\\":18040,\\\"kernel_status\\\":\\\"exited(code=1)\\\",\\\"kernel_stderr_tail\\\":\\\"windows sandbox failed: helper_unknown_error: setup refresh had errors\\\",\\\"reason\\\":\\\"stdout_eof\\\",\\\"stream_error\\\":null}\"}], \"structured_content\": null}, \"error\": null, \"status\": \"failed\"}}\n{\"type\": \"item.completed\", \"item\": {\"id\": \"item_6\", \"type\": \"agent_message\", \"text\": \"I couldn’t read the file because the sandbox failed to initialize. The AGENTS.md text supplied in your message starts with:\\n\\n```text\\n# Codex adapter for shared owner policy\\n```\\n\\nNo files were created, modified, or deleted.\"}}\n{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 154539, \"cached_input_tokens\": 118784, \"cache_write_input_tokens\": 0, \"output_tokens\": 388, \"reasoning_output_tokens\": 17}}";
+
+test("codexEnvironmentBlocked recognizes the captured diagnostic turn", () => {
+  const detail = codexEnvironmentBlocked(DIAGNOSTIC_STDOUT);
+  assert.ok(detail, "the diagnostic turn is environment-blocked");
+  assert.match(detail, /helper_unknown_error/);
+});
+
+test("a turn with a successful tool call is not environment-blocked", () => {
+  const stdout = [
+    '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"AGENTS.md","exit_code":0,"status":"completed"}}',
+    '{"type":"item.completed","item":{"type":"command_execution","command":"grep x","aggregated_output":"helper_unknown_error in a doc","exit_code":0,"status":"completed"}}',
+  ].join("\n");
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("failed tool calls without a signature are not environment-blocked", () => {
+  const stdout = [
+    '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"node_repl","tool":"js","result":{"content":[{"type":"text","text":"trusted Node process exited unexpectedly; kernel reset, rerun your request"}]},"status":"failed"}}',
+  ].join("\n");
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("a turn with no tool events is not environment-blocked", () => {
+  const stdout = '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n';
+  assert.equal(codexEnvironmentBlocked(stdout), null);
+});
+
+test("an environment-blocked turn fails with the machine sentence, stays dispatched, and is never respawned", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-env-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  let spawns = 0;
+  const spawnTurn = async () => {
+    spawns += 1;
+    return { code: 0, stdout: DIAGNOSTIC_STDOUT, stderr: "" };
+  };
+  try {
+    const first = await runCliTurn(command("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(first.ok, false);
+    assert.equal(first.environmentBlocked, true);
+    assert.equal(first.messageDispatched, true);
+    assert.match(first.text, /sandbox failed to initialize/);
+    assert.equal(first.errorText, "This harness cannot run its tools on this machine, so this stopped.");
+    assert.match(first.environmentDetail, /helper_unknown_error/);
+    assert.ok(first.environmentDetail.length <= 300);
+    // The quota was spent, so the grant is consumed and the claim persists.
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-plan-codex")), true);
+    // A repeat of the same command id replays the stored result, never a new turn.
+    const second = await runCliTurn(command("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(second.ok, false);
+    assert.equal(second.environmentBlocked, true);
+    assert.equal(second.environmentDetail, first.environmentDetail);
+    assert.equal(spawns, 1);
+    const ledger = JSON.parse(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"));
+    assert.equal(ledger["coordinate-plan-codex"].environmentBlocked, true);
+    assert.match(ledger["coordinate-plan-codex"].environmentDetail, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a claude turn never reports environment blocking even with a signature on stderr", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-env-claude-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  try {
+    const ran = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 1,
+        stdout: '{"result":"partial","is_error":false}',
+        stderr: "ERROR windows sandbox failed: helper_unknown_error",
+      }),
+    });
+    assert.equal(ran.environmentBlocked, undefined);
+    assert.match(ran.errorText, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("an environment-blocked turn leaves a health record for its instance", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-env-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  try {
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({ code: 0, stdout: DIAGNOSTIC_STDOUT, stderr: "" }),
+    });
+    assert.equal(result.environmentBlocked, true);
+    const health = readHealth(directory);
+    assert.deepEqual(Object.keys(health), ["codex"]);
+    assert.equal(health.codex.commandId, "coordinate-plan-codex");
+    assert.equal(typeof health.codex.blockedAt, "string");
+    assert.equal(Number.isNaN(Date.parse(health.codex.blockedAt)), false);
+    assert.ok(health.codex.detail.length <= 300);
+    assert.match(health.codex.detail, /helper_unknown_error/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a failing turn whose stderr tail carries a proven signature marks claude too", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-stderr-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  try {
+    const result = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "setup\nwindows sandbox failed: helper_unknown_error: setup refresh had errors\n",
+      }),
+    });
+    // The turn result keeps today's shape: no typed flag, just the stop text.
+    assert.equal(result.ok, false);
+    assert.equal(result.environmentBlocked, undefined);
+    assert.match(result.errorText, /helper_unknown_error/);
+    const health = readHealth(directory);
+    assert.equal(health.claude.commandId, "coordinate-review-claude");
+    assert.match(health.claude.detail, /sandbox failed/);
+    assert.ok(health.claude.detail.length <= 300);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a codex success turn without tool events keeps an existing health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-keep-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-older");
+  try {
+    const done = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n',
+      }),
+    });
+    assert.equal(done.ok, true);
+    const health = readHealth(directory);
+    assert.match(health.codex.detail, /sandbox failed/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a codex success turn with a completed tool clears the health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-clear-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-codex\n");
+  markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-older");
+  try {
+    const done = await runCliTurn(command("codex", "gpt-6.1-sol"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: [
+          '{"type":"item.completed","item":{"type":"command_execution","command":"ls","aggregated_output":"AGENTS.md","exit_code":0,"status":"completed"}}',
+          '{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}',
+        ].join("\n") + "\n",
+      }),
+    });
+    assert.equal(done.ok, true);
+    assert.deepEqual(readHealth(directory), {});
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a claude ok turn clears its own health record", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-claude-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+  markBlocked(directory, "claude", "sandbox failed", "coordinate-review-older");
+  try {
+    const done = await runCliTurn(command("claude", "opus", "coordinate-review-claude"), {
+      stateDir: directory,
+      spawnTurn: async () => ({
+        code: 0,
+        stdout: '{"type":"result","result":"Stop.\\nVERDICT: stop","is_error":false}',
+      }),
+    });
+    assert.equal(done.ok, true);
+    assert.deepEqual(readHealth(directory), {});
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("discovery merges health onto matching instances and leaves the rest byte-identical", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-health-discover-"));
+  const probe = {
+    home: "/home/person",
+    readFile() {
+      return 'model = "gpt-6.1-sol"\n';
+    },
+    execFile(file) {
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
+      return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
+    },
+  };
+  try {
+    const base = await discoverCliProviders(probe);
+    assert.equal(JSON.stringify(base).includes("environmentHealth"), false);
+    // No health file at all: identical snapshot.
+    const withoutFile = await discoverCliProviders({ ...probe, stateDir: directory });
+    assert.deepEqual(withoutFile.providers, base.providers);
+    // A record lands only on its own instance.
+    markBlocked(directory, "codex", "sandbox failed", "coordinate-plan-codex");
+    const merged = await discoverCliProviders({ ...probe, stateDir: directory });
+    assert.deepEqual(merged.providers.find((item) => item.instanceId === "claude"), base.providers.find((item) => item.instanceId === "claude"));
+    const codex = merged.providers.find((item) => item.instanceId === "codex");
+    assert.equal(codex.environmentHealth.detail, "sandbox failed");
+    assert.equal(typeof codex.environmentHealth.since, "string");
+    // An empty state dir behaves as no health.
+    const emptyState = await discoverCliProviders({ ...probe, stateDir: "" });
+    assert.deepEqual(emptyState.providers, base.providers);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("codexToolSuccess demands a completed non-failed tool event", () => {
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.started","item":{"type":"command_execution","command":"ls","status":"in_progress"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"failed","aggregated_output":"boom"}}\n'), false);
+  assert.equal(codexToolSuccess('{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"completed","aggregated_output":"ok"}}\n'), true);
+  assert.equal(codexToolSuccess('not json at all'), false);
+});
+
+test("writeGrant appends only when the line is absent and preserves hand-written lines", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-writegrant-"));
+  try {
+    // Absent line: inserted, and the caller learns it owns the line.
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), true);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-plan-codex\n");
+    // Same line again: no duplicate, no write.
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), false);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-plan-codex\n");
+    // A hand-written line is preserved; a new line is appended after it.
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-review-claude\n");
+    assert.equal(writeGrant(directory, "coordinate-plan-codex"), true);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-review-claude\ncoordinate-plan-codex\n");
+    // The pre-existing line is never duplicated either.
+    assert.equal(writeGrant(directory, "coordinate-review-claude"), false);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-review-claude\ncoordinate-plan-codex\n");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("an old-format command id with a claim still returns its stored result without replay", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-old-command-id-"));
+  const oldCommandId = "coordinate-plan-legacyhash";
+  let spawns = 0;
+  try {
+    fs.writeFileSync(path.join(directory, `claim-${oldCommandId}`), "");
+    fs.writeFileSync(path.join(directory, "sent-turns.json"), JSON.stringify({
+      [oldCommandId]: { ok: true, text: "Legacy stored plan.", errorText: "", messageDispatched: true },
+    }));
+    const result = await runCliTurn(command("codex", "gpt-6.1-sol", oldCommandId), {
+      stateDir: directory,
+      spawnTurn: async () => {
+        spawns += 1;
+        return { code: 0, stdout: "must not run" };
+      },
+    });
+
+    assert.deepEqual(result, { ok: true, text: "Legacy stored plan.", errorText: "", messageDispatched: true });
+    assert.equal(spawns, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("failure branches emit their stop codes: no-text, not-finished, not-installed, and none for is_error", async () => {
+  const run = async (instanceId, model, spawnTurn, commandId = `coordinate-plan-${instanceId}`) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-stopcode-"));
+    try {
+      fs.writeFileSync(path.join(directory, "send-authorization"), `${commandId}\n`);
+      return await runCliTurn(command(instanceId, model, commandId), { stateDir: directory, spawnTurn });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  };
+  // Clean exit without any reply text is the only producer of "no-text".
+  const noText = await run("codex", "gpt-6.1-sol", async () => ({ code: 0, stdout: "" }));
+  assert.equal(noText.errorText, "The harness finished without any text, so this stopped.");
+  assert.equal(noText.stopCode, "no-text");
+  // A nonzero exit with text that is not a provider-level failure is "not-finished".
+  const notFinished = await run("codex", "gpt-6.1-sol", async () => ({
+    code: 1,
+    stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}\n',
+  }));
+  assert.equal(notFinished.stopCode, "not-finished");
+  assert.equal(notFinished.messageDispatched, true);
+  // A provider-level failure (claude is_error) gets NO stop code: its class
+  // falls to the errorText mapping and it must never look resumable.
+  const isError = await run("claude", "opus", async () => ({
+    code: 1,
+    stdout: '{"result":"Model refused.","is_error":true}',
+  }), "coordinate-review-claude");
+  assert.equal(isError.text, "Model refused.");
+  assert.equal(isError.messageDispatched, true);
+  assert.equal(isError.stopCode, null);
+  // A spawn failure is "not-installed", and the grant came back for a retry.
+  const notInstalled = await run("codex", "gpt-6.1-sol", async () => ({ spawnError: true }));
+  assert.match(notInstalled.errorText, /not installed/);
+  assert.equal(notInstalled.stopCode, "not-installed");
+  assert.equal(notInstalled.messageDispatched, false);
+});
+
+// M5 dormant write capability: the explicitly-write twin of the read command,
+// same grant/claim/ledger semantics, guarded by the id's role.
+function writeCommand(instanceId, model, commandId = `coordinate-execute-${instanceId}`) {
+  return {
+    commandId,
+    type: "goalport.coordinateTurn",
+    modelSelection: { instanceId, model },
+    runtimeMode: "approval-required",
+    approvalPolicy: "never",
+    sandboxPolicy: { type: "workspaceWrite" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath: "/work/goal" },
+    initialMessage: { text: "Carry out the plan." },
+  };
+}
+
+test("roleOfCommandId classifies the closed prefix set and nothing else", () => {
+  assert.equal(roleOfCommandId("coordinate-plan-abc123"), "plan");
+  assert.equal(roleOfCommandId("coordinate-review-abc123"), "review");
+  assert.equal(roleOfCommandId("coordinate-execute-abc123"), "execute");
+  assert.equal(roleOfCommandId("coordinate-audit-abc123"), "audit");
+  assert.equal(roleOfCommandId("coordinate-other-abc123"), null);
+  assert.equal(roleOfCommandId("coordinate-plan"), null);
+  assert.equal(roleOfCommandId(""), null);
+  assert.equal(roleOfCommandId(42), null);
+});
+
+test("guardCoordinateWriteCommand demands the write literals and an absolute existing worktree", () => {
+  assert.equal(guardCoordinateWriteCommand(writeCommand("codex", "gpt-6.1-sol")), null);
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "C:\\work\\goal" } }), null);
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), type: "message.dispatch" }), "The command is not a coordinate turn.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), runtimeMode: "full-access" }), "runtimeMode must be approval-required.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), approvalPolicy: "on-request" }), "approvalPolicy must be never. approval-required alone asks for every read.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), sandboxPolicy: { type: "readOnly" } }), "sandboxPolicy.type must be workspaceWrite.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), sandboxPolicy: { type: "dangerFullAccess" } }), "sandboxPolicy.type must be workspaceWrite.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "root" } }), "A write turn must run in an existing worktree.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "   " } }), "A write turn must run in an existing worktree.");
+  assert.equal(guardCoordinateWriteCommand({ ...writeCommand("codex", "gpt-6.1-sol"), workspaceStrategy: { type: "existing_worktree", worktreePath: "work/relative" } }), "A write turn needs an absolute worktree path.");
+});
+
+test("write argv flips exactly one flag per harness; read argv stays byte-identical", () => {
+  const readCodex = turnSpec(command("codex", "gpt-6.1-sol", "coordinate-execute-codex"));
+  const writeCodex = turnSpec(writeCommand("codex", "gpt-6.1-sol"));
+  assert.deepEqual(writeCodex.args, ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."]);
+  assert.deepEqual(readCodex.args, ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Plan only."]);
+  assert.equal(writeCodex.args.length, readCodex.args.length);
+  const codexDiffs = writeCodex.args.filter((arg, index) => arg !== ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."][index]);
+  assert.deepEqual(codexDiffs, ["workspace-write"]);
+  const writeClaude = turnSpec(writeCommand("claude", "opus"));
+  assert.deepEqual(writeClaude.args, ["-p", "--output-format", "json", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."]);
+  const readClaude = turnSpec(command("claude", "opus", "coordinate-execute-claude"));
+  assert.equal(writeClaude.args.length, readClaude.args.length);
+  const claudeDiffs = writeClaude.args.filter((arg, index) => arg !== ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."][index]);
+  assert.deepEqual(claudeDiffs, ["acceptEdits"]);
+});
+
+test("a pi read turn is toolless and modelless, and a pi write turn is refused", () => {
+  const read = turnSpec(command("pi", "default", "coordinate-plan-pi"), {}, "linux");
+  assert.deepEqual(read, {
+    file: "pi",
+    cwd: "/work/goal",
+    args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", "Plan only."],
+  });
+  assert.equal(read.args.includes("--model"), false);
+  assert.deepEqual(turnSpec(writeCommand("pi", "default")), {
+    errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.",
+  });
+});
+
+function piLaunchFixture(t, { cli = true, node = true, shim = ".cmd" } = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-pi-launch-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const prefix = path.join(directory, "npm prefix");
+  const runtime = path.join(directory, "node runtime");
+  const cliJs = path.join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+  const nodeExe = path.join(runtime, "node.exe");
+  fs.mkdirSync(prefix, { recursive: true });
+  fs.mkdirSync(runtime, { recursive: true });
+  if (shim) fs.writeFileSync(path.join(prefix, `pi${shim}`), "@echo off\r\n");
+  if (cli) {
+    fs.mkdirSync(path.dirname(cliJs), { recursive: true });
+    fs.writeFileSync(cliJs, "// fixture only\n");
+  }
+  if (node) fs.writeFileSync(nodeExe, "fixture only\n");
+  return { env: { PATH: [prefix, runtime].join(path.delimiter), PATHEXT: ".exe;.cmd;.bat" }, cliJs, nodeExe };
+}
+
+test("a Windows pi npm shim launches node.exe with only cli.js prepended to the read argv", (t) => {
+  const input = command("pi", "default");
+  input.initialMessage.text = 'Plan "only" & <risk> ^ %PATH% tail\\';
+  const expected = turnSpec(input, {}, "linux");
+  for (const shim of [".cmd", ".bat"]) {
+    const { env, cliJs, nodeExe } = piLaunchFixture(t, { shim });
+    assert.deepEqual(piWindowsLaunch(env, "win32"), { file: nodeExe, prefixArgs: [cliJs] });
+    const spec = turnSpec(input, env, "win32");
+    assert.deepEqual(spec, { file: nodeExe, cwd: expected.cwd, args: [cliJs, ...expected.args] });
+    assert.equal(JSON.stringify(spec.args.slice(1)), JSON.stringify(expected.args));
+    assert.deepEqual(turnSpec(writeCommand("pi", "default"), env, "win32"), {
+      errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.",
+    });
+  }
+});
+
+test("a Windows pi shim without the npm-layout cli.js keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { cli: false });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+  assert.equal(turnSpec(input, env, "win32").file, "pi");
+});
+
+test("a Windows pi shim without node.exe keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { node: false });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+  assert.equal(turnSpec(input, env, "win32").file, "pi");
+});
+
+test("a Windows pi launch without a cmd or bat shim keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { shim: "" });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+});
+
+test("the pi Windows launch helper does not probe files off Windows", () => {
+  const fsApi = { existsSync() { throw new Error("must not probe off Windows"); } };
+  assert.equal(piWindowsLaunch({}, "linux", fsApi), null);
+  assert.equal(piWindowsLaunch({}, "darwin", fsApi), null);
+});
+
+// Byte-frozen regression lock: the codex and claude argv exactly as on HEAD,
+// read and write, while pi joins the roster.
+test("codex and claude argv stay byte-frozen for both read and write turns", () => {
+  assert.deepEqual(turnSpec(command("codex", "gpt-6.1-sol", "coordinate-plan-codex")), {
+    file: "codex",
+    cwd: "/work/goal",
+    args: ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Plan only."],
+  });
+  assert.deepEqual(turnSpec(writeCommand("codex", "gpt-6.1-sol")), {
+    file: "codex",
+    cwd: "/work/goal",
+    args: ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."],
+  });
+  assert.deepEqual(turnSpec(command("claude", "opus", "coordinate-plan-claude")), {
+    file: "claude",
+    cwd: "/work/goal",
+    args: ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", "opus", "Plan only."],
+  });
+  assert.deepEqual(turnSpec(writeCommand("claude", "opus")), {
+    file: "claude",
+    cwd: "/work/goal",
+    args: ["-p", "--output-format", "json", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."],
+  });
+});
+
+test("a granted pi turn returns the trimmed text, and a refused write turn never spawns", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-pi-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-pi\ncoordinate-execute-pi\n");
+  let spawns = 0;
+  const expected = turnSpec(command("pi", "default", "coordinate-plan-pi"));
+  const spawnTurn = async (spec) => {
+    spawns += 1;
+    assert.equal(spec.file, expected.file);
+    assert.equal(spec.cwd, "/work/goal");
+    assert.deepEqual(spec.args, expected.args);
+    return { code: 0, stdout: " ok\n " };
+  };
+  try {
+    const plan = await runCliTurn(command("pi", "default", "coordinate-plan-pi"), { stateDir: directory, spawnTurn });
+    assert.deepEqual(plan, { ok: true, text: "ok", errorText: "", messageDispatched: true });
+    const write = await runCliTurn(writeCommand("pi", "default"), { stateDir: directory, spawnTurn });
+    assert.equal(write.ok, false);
+    assert.equal(write.messageDispatched, false);
+    assert.equal(write.errorText, "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.");
+    assert.equal(spawns, 1);
+    // The refusal came before the claim, so its grant line stayed intact.
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-execute-pi\n");
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-pi")), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("pairing is refused in both directions before any spawn, with the grant left intact", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-pairing-"));
+  let spawns = 0;
+  const spawnTurn = async () => {
+    spawns += 1;
+    return { code: 0, stdout: "" };
+  };
+  try {
+    // An execute-role id carrying the read-only sandbox hits the write guard.
+    fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\ncoordinate-plan-codex\n");
+    const executeReadOnly = await runCliTurn({ ...writeCommand("codex", "gpt-6.1-sol", "coordinate-execute-codex"), sandboxPolicy: { type: "readOnly" } }, { stateDir: directory, spawnTurn });
+    assert.equal(executeReadOnly.ok, false);
+    assert.equal(executeReadOnly.errorText, "sandboxPolicy.type must be workspaceWrite.");
+    assert.equal(executeReadOnly.messageDispatched, false);
+    // A plan-role id carrying the write sandbox hits the read guard.
+    const planWrite = await runCliTurn({ ...command("codex", "gpt-6.1-sol", "coordinate-plan-codex"), sandboxPolicy: { type: "workspaceWrite" } }, { stateDir: directory, spawnTurn });
+    assert.equal(planWrite.ok, false);
+    assert.equal(planWrite.errorText, "sandboxPolicy.type must be readOnly.");
+    assert.equal(planWrite.messageDispatched, false);
+    assert.equal(spawns, 0);
+    // Neither refusal consumed its grant or left a claim behind.
+    const grants = fs.readFileSync(path.join(directory, "send-authorization"), "utf8");
+    assert.equal(grants.includes("coordinate-execute-codex"), true);
+    assert.equal(grants.includes("coordinate-plan-codex"), true);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-codex")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-plan-codex")), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a granted write turn consumes its grant, keeps the claim ledger semantics, and replays", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-write-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-execute-codex\n");
+  const spawned = [];
+  const spawnTurn = async (spec) => {
+    spawned.push(spec);
+    return { code: 0, stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"Carried out."}}\n' };
+  };
+  try {
+    const first = await runCliTurn(writeCommand("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(first.ok, true);
+    assert.equal(first.text, "Carried out.");
+    assert.deepEqual(spawned[0].args, ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."]);
+    assert.equal(spawned[0].cwd, "/work/goal");
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-codex")), true);
+    const second = await runCliTurn(writeCommand("codex", "gpt-6.1-sol"), { stateDir: directory, spawnTurn });
+    assert.equal(second.text, "Carried out.");
+    assert.equal(spawned.length, 1);
+    const ledger = JSON.parse(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"));
+    assert.deepEqual(ledger["coordinate-execute-codex"], { ok: true, text: "Carried out.", errorText: "", messageDispatched: true });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("extended role ids cannot substitute for per-turn authorization grants", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-no-write-grant-"));
+  let spawns = 0;
+  try {
+    for (const role of ["execute", "audit"]) {
+      const commandId = `coordinate-${role}-codex`;
+      const input = role === "execute"
+        ? writeCommand("codex", "gpt-6.1-sol", commandId)
+        : command("codex", "gpt-6.1-sol", commandId);
+      const result = await runCliTurn(input, { stateDir: directory, spawnTurn: async () => {
+        spawns += 1;
+        return { code: 0, stdout: "" };
+      } });
+      assert.equal(result.ok, false);
+      assert.equal(result.messageDispatched, false);
+      assert.equal(fs.existsSync(path.join(directory, `claim-${commandId}`)), false);
+    }
+    assert.equal(spawns, 0);
+    // Live scoped write consent is separately enforced by coordinate-service.
+    // M7 may now mint these ids; the obsolete M5 grep-only dormant pin is gone.
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });

@@ -1,7 +1,38 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { argsFor, artifactPaths, asarApi, COMPONENTS, fileHash, sha256 } from "./package.mjs";
+import { argsFor, artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, STAGED_APP_MODULES } from "./package.mjs";
+
+// Offline staging regression (no packaging run, no Windows): walk the local
+// require graph of the staged entry points and refuse any relative .cjs
+// dependency that the explicit staging list does not carry. A name missing
+// here produces a packaged app that cannot start, so the check must be red
+// the moment a module is added without its staging entry.
+export function stagedDependenciesCoverGraph(staged = STAGED_APP_MODULES, roots = ["main.cjs", "preload.cjs", "coordination-worker.cjs"], electronDir = resolve(ROOT, "electron")) {
+  const stagedSet = new Set(staged);
+  const seen = new Set();
+  const missing = [];
+  const visit = (name) => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    if (!stagedSet.has(name)) {
+      missing.push(name);
+      return;
+    }
+    const source = readFileSync(resolve(electronDir, name), "utf8");
+    for (const match of source.matchAll(/require\("\.\/([^"]+)"\)/g)) {
+      const target = match[1];
+      if (!target.endsWith(".cjs") || seen.has(target)) continue;
+      if (!stagedSet.has(target)) missing.push(`${name} -> ${target}`);
+      visit(target);
+    }
+  };
+  for (const root of roots) visit(root);
+  if (missing.length > 0) {
+    throw new Error(`Staged Electron app modules are missing required dependencies: ${[...new Set(missing)].sort().join(", ")}`);
+  }
+  return [...seen].sort();
+}
 
 export function verifyPackage(directory) {
   const root = resolve(directory);
@@ -37,7 +68,7 @@ export function verifyPackage(directory) {
   for (const name of COMPONENTS) {
     if (fileHash(resolve(root, "resources", name)) !== manifest.components[name]) throw new Error(`Embedded component mismatch: ${name}`);
   }
-  for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordination-record.cjs", "cli-coordinate.cjs", "harness-runtime.cjs", "dist/index.html"]) {
+  for (const name of [...STAGED_APP_MODULES, "dist/index.html", "dist/coordination-engine.cjs"]) {
     if (!asar.extractFile(archive, name).length) throw new Error(`Missing app content: ${name}`);
   }
   const unpackedChild = resolve(root, "resources/app.asar.unpacked/pinned-harness-child.ts");

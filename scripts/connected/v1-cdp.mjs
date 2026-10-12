@@ -69,6 +69,10 @@ export function createCdpClient(ws, { requestTimeoutMs = 30_000 } = {}) {
     const timer = setTimeout(() => settle(id, new Error(`CDP command timed out: ${method}`)), requestTimeoutMs);
     pending.set(id, { resolve, reject, timer });
     try { ws.send(JSON.stringify({ id, method, params })); } catch (error) { settle(id, error); }
+  }).catch((error) => {
+    // The raw WebSocket error carries no method context; every caller
+    // debugging a rejected CDP command needs to know WHICH command failed.
+    throw new Error(`${method}: ${error.message}`);
   });
   const evaluate = async (expression, awaitPromise = false) => {
     const result = await cdp("Runtime.evaluate", { expression, awaitPromise, returnByValue: true });

@@ -99,3 +99,94 @@ IME, native system notifications, packaging, or real Runtime execution.
 Use the opt-in [native Linux task driver](linux-development.md#native-acceptance)
 for actual Codex acceptance. Windows ZIP packaging tests must run on Windows;
 PowerShell cannot consume the Linux temporary paths used by a Linux test process.
+
+## Continuation (one in-window repair) acceptance
+
+The offline real-app continuation driver proves the C1 boundary — one Send may
+run a second four-role chain after a completed `VERDICT: revise` audit — without
+any real vendor CLI or model:
+
+```sh
+pnpm build && cargo build -p goalport-core
+pnpm test:acceptance-feedback
+pnpm acceptance:feedback-native --out goal-runs/<run>/evidence/continuation-c1-r1
+```
+
+The driver launches the real Electron main/preload, built renderer and Core with
+both sentinel-controlled offline stub processes, then:
+
+- **C1** — the user authorizes six read turns and two write turns and sends once;
+  the first writer leaves a genuinely incomplete edit while its CLI turn completes
+  honestly, a separate read-only Node checker observes the failing unchanged tests
+  and returns `VERDICT: revise`, and the app runs the corrective chain (fresh
+  command IDs, same scope generation) until a second separate checker verifies.
+  It then closes and relaunches with a fresh process/socket/temp against the same
+  durable records and ledger: reopened evidence only, null scope, no added turns,
+  write consent OFF.
+- **C2** — the unchanged default of four read turns runs the first chain and stops
+  with the explained budget refusal; no fifth turn is launched and the intermediate
+  edit stays on disk.
+
+Screenshots are captured at 860, 1020 and 1440 px for consent, corrective
+progress, verified, budget-stop and reopened-history states; inspect the PNGs and
+`walkthrough.md` yourself. Failed subprocess checks are feedback in these fixtures;
+a failed CLI turn stays terminal. This does not establish Windows behavior, real
+CLI confinement or independent-model judgment.
+
+## C2 background close-and-return acceptance
+
+Build with `pnpm build` (renderer plus the same engine as `dist/coordination-engine.cjs`) and `cargo build -p goalport-core`. Run `pnpm test:acceptance-background` for job/worker/host/driver checks and `pnpm test:unit` for renderer interactions. Offline package staging explicitly includes the worker, job store, background bridge, read-only Core coverage guard, verified Core client and engine bundle; no Windows packaging is needed to check completeness.
+
+Use `pnpm acceptance:background-native --out goal-runs/goalport-execute-and-native-acceptance/evidence/continuation-c2-<fresh-id>` on Linux with a display. The isolated sentinel-shadowed driver closes the actual desktop before a writer, keeps its identity-matched live Core/temporary fixture, and reopens only the UI against those same identities. BG1 completes the failed-check critique and one repair (six read/two write turns), BG2 revokes after return before a later writer, and BG3 terminates only the owned worker during an admitted turn. Process/main/renderer exit times, job and pending identities, command claims, ledger/grants, immutable test/source bytes, separate checker evidence, DOM facts and native-size screenshots at 860/1020/1440 px are retained. Driver cleanup is not a product tool-stop claim.
+
+Ordinary Sends remain window-bound and the existing C1 driver is unchanged: protect it with `pnpm test:acceptance-feedback` and `pnpm acceptance:feedback-native --out <fresh continuation-c2-c1-regression directory>`. History restores reports, never permission. A background job is one live admission, not a restart/resume service; unreachable control stays unconfirmed and non-retryable. No real model/vendor CLI, Windows, paid API, login, push or full-GAH claim is part of this run.
+
+The worker checks the current selected snapshot and the existing `goal_overview`/`goal_detail` read projections before every turn and before repair. Detail reads restore the shared selection; they issue no selection/authority command. Truncated overview, failed detail, hidden held responsibility or native conflict refuses the launch. Negative worker fixtures include a hold/native conflict outside a blank selected view and a new hold appearing at the repair boundary.
+
+## C4 plan-revision (one pre-write revision) acceptance
+
+The offline real-app plan-revision driver proves the C4 boundary — one Send may
+run one revised chain after its independent **plan check** returned
+`VERDICT: revise`, before any writer launched — without any real vendor CLI or
+model:
+
+```sh
+pnpm build && cargo build -p goalport-core
+pnpm test:acceptance-plan-revision
+pnpm acceptance:plan-revision-native --out goal-runs/<run>/evidence/continuation-c4-<fresh-id>
+```
+
+The driver launches the real Electron main/preload, built renderer and Core with
+both sentinel-controlled offline stub processes, then:
+
+- **PR1** — the user authorizes five read turns and one write turn and sends once;
+  the first plan is genuinely flawed in one named way (it covers only positive
+  inputs and names no check), a separate read-only Node plan checker reads the
+  unchanged pinned tests, names that exact missing requirement and returns
+  `VERDICT: revise`; the app writes one revised plan that answers it, a fresh
+  independent check approves, only then does the real writer repair the fixture,
+  and a second separate read-only checker verifies. Six fresh command IDs, one
+  authorization, and the rejected pass folded under **Before plan revision**. It
+  then closes and relaunches against the same durable records: reopened evidence
+  only, null scope, write consent OFF.
+- **PR2** — the unchanged default of four read turns runs the rejected pass and
+  stops with the explained budget refusal (the revised chain needs three more
+  model turns and one write turn); no third turn launches and the fixture bytes
+  stay unchanged.
+- **PR3** — the revised reviewer again returns `VERDICT: revise`: exactly four
+  read turns, zero writes, no third planning pass, and the one-revision ceiling
+  sentence with the rejected pass retained.
+- **PR4** — the same journey as an explicitly admitted background job: the desktop
+  closes while the initial critique is still in flight (before the revised planner
+  launched), the same worker continues the revision, repair and verification on its
+  own, and returning shows the retained verified result without another Send or
+  authorization.
+
+Screenshots are captured at 860, 1020 and 1440 px for consent (which explains the
+plan revision distinctly from the later repair), critique, revision progress,
+verified, budget-stop, second-rejection and reopened-history states; inspect the
+PNGs and `walkthrough.md` yourself. The plan critique, the revised-review approval
+and the final auditor are closed offline fixture behaviors and separate read-only
+Node processes over a disposable fixture: real filesystem/subprocess evidence,
+**not independent-model judgment**. This does not establish Windows behavior,
+real CLI confinement or a general revision loop; full GAH is not claimed.

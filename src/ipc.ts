@@ -1,5 +1,13 @@
+import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
+import type { BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
-import type { SavedPlan } from "./coordination/savedPlan";
+import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
+import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
+
+export type CoordinationRecord = Omit<SavedPlan, "roundEvents" | "authorizedTurnsLeft" | "authorizedWriteTurnsLeft" | "scopeExhausted"> & {
+  /** Optional for records saved before completed recovery events existed. */
+  readonly roundEvents?: readonly RoundEvent[];
+};
 import {
   appendPreviewConversationMessage,
   appendPreviewMessage,
@@ -307,21 +315,43 @@ declare global {
           auth?: { status?: string; type?: string; label?: string };
           models?: readonly { slug?: string; name?: string; isDefault?: boolean; isLegacy?: boolean }[];
           usageLimits?: { unavailable?: unknown; windows?: readonly { id?: string; usedPercent?: number }[] };
+          environmentHealth?: { since: string; detail: string } | null;
         }[];
         stopReason: string | null;
       }>;
-      coordinateLaunch?: (command: {
-        type: "goalport.coordinateTurn";
-        modelSelection: { instanceId: string; model: string };
-        runtimeMode: "approval-required";
-        approvalPolicy: "never";
-        sandboxPolicy: { type: "readOnly" };
-        workspaceStrategy: { type: "root"; branch?: string } | { type: "existing_worktree"; worktreePath: string; branch?: string };
-        initialMessage: { text: string };
-      }, generation?: string) => Promise<{ text: string; errorText: string; prepared?: boolean; dispatched?: boolean | null }>;
+      // The launch command is the audited CoordinateTurnCommand; the third
+      // argument is the scope generation captured at authorize (a launch
+      // without it stays the legacy two-argument launch).
+      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number) => Promise<{
+        text: string;
+        errorText: string;
+        prepared?: boolean;
+        dispatched?: boolean | null;
+        environmentBlocked?: boolean | null;
+        environmentDetail?: string | null;
+        stopCode?: "no-text" | "not-finished" | "not-installed" | "scope-exhausted" | "scope-revoked" | null;
+        // Read turns and explicit workspace-change turns are independent.
+        turnsRemaining?: number | null;
+        writeTurnsRemaining?: number | null;
+        scopeExhausted?: boolean;
+      }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
-      coordinationRecords?: () => Promise<SavedPlan[]>;
-      coordinationSave?: (record: SavedPlan) => Promise<SavedPlan>;
+      backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
+      backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
+      backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
+      coordinationAuthorize?: (scope: {
+        instances: string[];
+        maxTurns: number;
+        write?: { instances: string[]; maxTurns: number; workspaceRoot: string };
+      }) => Promise<{ ok: boolean; generation: number; remaining: number; writeTurnsRemaining?: number; errorText?: string }>;
+      coordinationScope?: () => Promise<{
+        instances: string[]; maxTurns: number; remaining: number; generation: number;
+        write?: { instances: string[]; maxTurns: number; remaining: number; workspaceRoot: string };
+      } | null>;
+      coordinationRevoke?: () => Promise<{ ok: boolean }>;
+      coordinationRecords?: () => Promise<CoordinationRecord[]>;
+      coordinationSave?: (record: CoordinationRecord) => Promise<CoordinationRecord>;
+      coordinationUnblock?: (instanceId: string) => Promise<{ ok: boolean }>;
     };
   }
 }

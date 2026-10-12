@@ -22,7 +22,8 @@ test("every real IPC channel uses one fail-closed sender gate", () => {
   const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /ipcMain\.handle\(/);
   const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 16);
+  assert.equal(channels.length, 23);
+  for (const channel of ["goalport:background-start", "goalport:background-status", "goalport:background-revoke"]) assert.ok(channels.includes(channel));
   for (const channel of channels) {
     const f = fixture(); let calls = 0;
     f.handle(channel, () => ++calls);
@@ -118,5 +119,82 @@ test("preload exposes bridge only to exact main app document, never external/sub
       require: () => ({ contextBridge: { exposeInMainWorld: (name) => exposed.push(name) }, ipcRenderer: {} }) });
     assert.equal(exposed.includes("goalportCore"), trusted, `${url}/${main}/${argument}`);
     assert.equal(logs.length, trusted ? 0 : 1, logs.join(" "));
+  }
+});
+
+test("trusted authorization handler validates optional write through the tested fresh-discovery bridge", async () => {
+  const { authorizeCoordination } = require("../../electron/coordinate-service.cjs");
+  const coordinationScope = require("../../electron/coordination-scope.cjs");
+  const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
+  const start = source.indexOf('  handleTrusted("goalport:coordination-authorize"');
+  const end = source.indexOf('  handleTrusted("goalport:coordination-records"', start);
+  assert.ok(start > 0 && end > start);
+  const f = fixture();
+  let probes = 0;
+  let outstanding = false;
+  vm.runInNewContext(source.slice(start, end), {
+    handleTrusted: f.handle,
+    authorizeCoordination,
+    refuseCompetingCoordination: () => { if (outstanding) throw new Error("Background job outstanding"); },
+    coordinationScope,
+    coordinationRuntime: () => ({ stateDir: "/injected/state" }),
+    discoverCliProviders: async (options) => {
+      probes += 1;
+      assert.equal(options.stateDir, "/injected/state");
+      return { ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] };
+    },
+  });
+  const authorize = f.handlers.get("goalport:coordination-authorize");
+  const query = f.handlers.get("goalport:coordination-scope");
+  const revoke = f.handlers.get("goalport:coordination-revoke");
+  const payload = { instances: ["codex"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" } };
+  coordinationScope.revoke();
+  try {
+    assert.throws(() => authorize({ sender: {} }, payload), /Untrusted/);
+    assert.equal(probes, 0);
+    const result = await authorize(f.event, payload);
+    assert.equal(result.ok, true);
+    assert.equal(result.remaining, 4);
+    assert.equal(result.writeTurnsRemaining, 2);
+    assert.equal(probes, 1);
+    assert.deepEqual(query(f.event).write, { instances: ["codex"], maxTurns: 2, remaining: 2, workspaceRoot: "/work/goal" });
+    const before = query(f.event);
+    const denied = await authorize(f.event, { ...payload, write: { ...payload.write, instances: ["missing"] } });
+    assert.equal(denied.ok, false);
+    assert.equal(probes, 2);
+    assert.deepEqual(query(f.event), before);
+    const invalid = await authorize(f.event, { ...payload, write: { ...payload.write, workspaceRoot: "relative" } });
+    assert.equal(invalid.ok, false);
+    assert.equal(probes, 2);
+    assert.deepEqual(query(f.event), before);
+    outstanding = true;
+    assert.throws(() => authorize(f.event, payload), /Background job outstanding/);
+    assert.equal(probes, 2);
+    assert.equal(revoke(f.event).ok, true);
+    assert.equal(query(f.event), null);
+  } finally { coordinationScope.revoke(); }
+});
+
+test("trusted preload forwards read-only and explicit-write requests on the same channel unchanged", async () => {
+  const code = readFileSync(new URL("../../electron/preload.cjs", import.meta.url), "utf8");
+  const exposed = new Map();
+  const calls = [];
+  vm.runInNewContext(code, {
+    URL, location: { href: appUrl }, console,
+    process: { isMainFrame: true, argv: [`--goalport-app-document=${encodeURIComponent(appUrl)}`] },
+    require: () => ({
+      contextBridge: { exposeInMainWorld: (name, bridge) => exposed.set(name, bridge) },
+      ipcRenderer: { invoke: async (...args) => { calls.push(args); return { ok: true }; } },
+    }),
+  });
+  const bridge = exposed.get("goalportCore");
+  for (const payload of [
+    { instances: ["codex"], maxTurns: 4 },
+    { instances: ["codex"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" } },
+  ]) {
+    await bridge.coordinationAuthorize(payload);
+    assert.equal(calls.at(-1)[0], "goalport:coordination-authorize");
+    assert.equal(calls.at(-1)[1], payload);
+    assert.equal(calls.at(-1).length, 2);
   }
 });

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { CoreSnapshot, GoalCard } from "../types";
-import { outcomeLabel } from "../coordination/verdict";
+import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
   collapsed: boolean;
-  plans?: readonly { requestId: string; title: string; active: boolean; verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null; savedAt?: string | null }[];
+  plans?: readonly { requestId: string; title: string; active: boolean; verdict: CoordinationVerdict | null; savedAt?: string | null }[];
   onSelectPlan?: (requestId: string) => void;
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
@@ -230,7 +230,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
   );
 }
 
-function planSubline(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null, savedAt?: string | null): string {
+function planSubline(verdict: CoordinationVerdict | null, savedAt?: string | null): string {
   const label = outcomeLabel(verdict);
   if (!savedAt) return label;
   const parsed = Date.parse(savedAt);
@@ -239,8 +239,9 @@ function planSubline(verdict: "checked" | "revise" | "stopped" | "failed" | "unc
   return `${label} · ${saved}`;
 }
 
-function planStateClass(verdict: "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | null): string {
+function planStateClass(verdict: CoordinationVerdict | null): string {
   switch (verdict) {
+    case "verified":
     case "checked":
       return "campaign-state-complete";
     case "failed":

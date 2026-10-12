@@ -7,9 +7,20 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT = resolve(import.meta.dirname, "../..");
 export const COMPONENTS = ["goalport-core.exe", "goalport-core-launcher.exe", "goalport-claude-stop-broker.exe"];
+// The explicit staging list for local Electron app modules. This is NOT
+// automatic dependency discovery: a module that a staged entry requires but
+// that is missing here ships a packaged app that cannot start, so the offline
+// regression check in verify-package.mjs walks the require graph of the entry
+// points against exactly this list.
+export const STAGED_APP_MODULES = Object.freeze([
+  "main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs",
+  "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordinate-guard.cjs",
+  "coordination-scope.cjs", "coordination-record.cjs", "harness-health.cjs", "cli-coordinate.cjs",
+  "harness-runtime.cjs", "coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "coordination-core-guard.cjs"
+]);
 export const ROOT_BUILD_INPUTS = Object.freeze([
   "Cargo.lock", "Cargo.toml", "index.html", "package.json", "pnpm-lock.yaml", "rust-toolchain.toml",
-  "tsconfig.app.json", "tsconfig.json", "tsconfig.node.json", "vite.config.ts"
+  "tsconfig.app.json", "tsconfig.json", "tsconfig.node.json", "vite.config.ts", "vite.coordination.config.ts"
 ]);
 const ROOT_BUILD_INPUT_SET = new Set(ROOT_BUILD_INPUTS);
 const ROOT_BUILD_INPUT_PATTERNS = [
@@ -157,6 +168,7 @@ export async function main(argv = process.argv.slice(2)) {
     const frontend = resolve(out, "frontend");
     run(process.execPath, [resolve(ROOT, "node_modules/typescript/bin/tsc"), "-b", "--force"], ROOT, env, log);
     run(process.execPath, [resolve(ROOT, "node_modules/vite/bin/vite.js"), "build", "--outDir", frontend], ROOT, env, log);
+    run(process.execPath, [resolve(ROOT, "node_modules/vite/bin/vite.js"), "build", "--config", "vite.coordination.config.ts", "--outDir", frontend], ROOT, env, log);
     run("cargo", ["build", "--locked", "--release", "--target-dir", env.CARGO_TARGET_DIR, "-p", "goalport-core", "-p", "goalport-core-launcher"], ROOT, env, log);
     const binaries = COMPONENTS.map((name) => resolve(env.CARGO_TARGET_DIR, "release", name));
     for (const binary of binaries) if (!existsSync(binary) || !statSync(binary).size) throw new Error(`Missing freshly built component: ${binary}`);
@@ -173,7 +185,7 @@ export async function main(argv = process.argv.slice(2)) {
     };
     const stage = resolve(out, "stage");
     mkdirSync(stage);
-    for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordination-record.cjs", "cli-coordinate.cjs", "harness-runtime.cjs", "pinned-harness-child.ts"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
+    for (const name of [...STAGED_APP_MODULES, "pinned-harness-child.ts"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
     cpSync(frontend, resolve(stage, "dist"), { recursive: true });
     writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, main: "main.cjs" }, null, 2));
     writeFileSync(resolve(stage, "build-info.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);

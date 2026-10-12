@@ -770,6 +770,212 @@ test("a peer that stays busy until the 120 s deadline refuses, and other failure
   }
 });
 
+// ---- C2 leaf: the reusable verified Core connection constructor ----
+// createCoreConnection extracts the main-process frame exchange and Core
+// verification wiring so a second host of the same mechanics (a detached
+// coordination worker) shares them verbatim instead of copying them. The vm
+// harness below keeps proving the real main-process end-to-end path; these
+// tests pin the constructor itself: frame-protocol parity, the verification
+// composition, the main-process snapshot retry, and the read-only refusal a
+// fresh-snapshots-only attachment depends on (nothing was sent).
+const { createCoreConnection, MAX_FRAME_BYTES: CONNECTION_MAX_FRAME_BYTES } = require("../../electron/core-client.cjs");
+const { EventEmitter: ConnectionEmitter } = require("node:events");
+const FIXTURE_ENDPOINT = "\\\\.\\pipe\\goalport-connection-fixture";
+
+function connectionHarness(overrides = {}) {
+  const written = [];   // decoded requests that reached a socket write
+  const rawFrames = []; // the exact frame buffers written
+  const sockets = [];
+  const peerRuns = [];
+  const attachments = [];
+  let peerPid = overrides.peerPid ?? 4242;
+  let failNextType = overrides.failNextType ?? null;
+  const hang = overrides.hang ?? null; // "end" | "close" | "silent"
+  let armedTimer = null;
+  const defaultRespond = (request) => request.messageType === "get_startup_receipt"
+    ? { ok: true, requestId: request.requestId, payload: { receipt: { startupState: "READY_COMMITTED", core: { pid: 4242 } } } }
+    : { ok: true, requestId: request.requestId, payload: { requestId: request.requestId, accepted: true, snapshot: { attempt: { id: "attempt-1" } } } };
+  const connect = (target) => {
+    assert.equal(target, FIXTURE_ENDPOINT);
+    const socket = new ConnectionEmitter();
+    sockets.push(socket);
+    socket.destroy = () => {};
+    socket.end = () => {};
+    socket.write = (frame) => {
+      rawFrames.push(frame);
+      const request = JSON.parse(frame.subarray(4).toString("utf8"));
+      written.push(request);
+      setImmediate(() => {
+        if (hang === "end") { socket.emit("end"); return; }
+        if (hang === "close") { socket.emit("close"); return; }
+        if (hang === "silent") return;
+        if (failNextType === request.messageType) {
+          failNextType = null;
+          socket.emit("error", new Error("Core connection closed before acknowledgement"));
+          return;
+        }
+        const response = overrides.respond ? overrides.respond(request) : defaultRespond(request);
+        const payload = Buffer.from(JSON.stringify(response));
+        const reply = Buffer.alloc(4 + payload.length);
+        reply.writeUInt32LE(payload.length, 0);
+        payload.copy(reply, 4);
+        socket.emit("data", reply);
+      });
+    };
+    setImmediate(() => socket.emit("connect"));
+    return socket;
+  };
+  const connection = createCoreConnection({
+    connectPath: () => FIXTURE_ENDPOINT,
+    connect,
+    runPeer: async () => { peerRuns.push(peerPid); return { code: 0, stdout: okPeer(peerPid) }; },
+    isBusy: pipePeerBusy,
+    assertPeer: overrides.assertPeer || ((stdout, receipt) => assertPipePeer(stdout, receipt)),
+    verificationSkipped: overrides.verificationSkipped,
+    // Default mirrors the main process: an attachment check that re-verifies
+    // through the gate. `false` models a host that owns no attachment at all.
+    ensureCore: overrides.ensureCore === false ? undefined : async () => {
+      attachments.push(1);
+      if (overrides.ensureCore) await overrides.ensureCore();
+      else await connection.verify();
+    },
+    allowedMessageTypes: overrides.allowedMessageTypes,
+    onResult: overrides.onResult,
+    setTimer: overrides.manualTimers ? (callback) => { armedTimer = callback; return 1; } : undefined,
+    clearTimer: overrides.manualTimers ? () => { armedTimer = null; } : undefined,
+    maxFrameBytes: overrides.maxFrameBytes
+  });
+  return {
+    connection, written, rawFrames, peerRuns, attachments,
+    socketCount: () => sockets.length,
+    setFailNext: (type) => { failNextType = type; },
+    setPeerPid: (pid) => { peerPid = pid; },
+    fireTimer: () => { assert.ok(armedTimer, "no exchange timer was armed"); armedTimer(); }
+  };
+}
+
+test("connection constructor refuses to be built without its host-owned inputs", () => {
+  const base = { connectPath: () => FIXTURE_ENDPOINT, connect: () => null, runPeer: async () => ({ code: 0, stdout: "" }), isBusy: () => false, assertPeer: () => {} };
+  for (const key of ["connectPath", "connect", "runPeer", "isBusy", "assertPeer"]) {
+    assert.throws(() => createCoreConnection({ ...base, [key]: undefined }), new RegExp(`requires a ${key} function`), key);
+  }
+});
+
+test("connection constructor keeps the main-process frame protocol, size limits and deadline wording", async () => {
+  assert.equal(CONNECTION_MAX_FRAME_BYTES, 16 * 1024 * 1024, "the shared frame limit stays 16 MiB");
+  const harness = connectionHarness({ maxFrameBytes: 200 });
+  const request = { protocolVersion: "goalport.ipc.v2", requestId: "s1", entityVersion: 0, messageType: "snapshot", payload: {} };
+  const result = await harness.connection.exchange(request);
+  assert.deepEqual(result, { ok: true, requestId: "s1", payload: { requestId: "s1", accepted: true, snapshot: { attempt: { id: "attempt-1" } } } }, "the raw exchange returns the parsed response envelope, unwrapped by nobody");
+  // Exact frame layout: 4-byte little-endian length prefix + UTF-8 JSON body.
+  const frame = harness.rawFrames[0];
+  assert.ok(Buffer.isBuffer(frame));
+  assert.equal(frame.readUInt32LE(0), frame.length - 4);
+  assert.deepEqual(JSON.parse(frame.subarray(4).toString("utf8")), request);
+  // An oversized response frame is refused, never truncated or buffered whole.
+  const oversized = connectionHarness({ maxFrameBytes: 200, respond: () => ({ ok: true, requestId: "big", payload: { padding: "x".repeat(400) } }) });
+  await assert.rejects(oversized.connection.exchange({ messageType: "snapshot", requestId: "big" }), /response frame exceeds limit/);
+  // An oversized request never reaches the wire.
+  const tooBig = connectionHarness({ maxFrameBytes: 200 });
+  await assert.rejects(tooBig.connection.exchange({ messageType: "snapshot", requestId: "big", payload: { padding: "x".repeat(400) } }), /request frame exceeds limit/);
+  assert.deepEqual(tooBig.rawFrames, []);
+  // Deadline wording keeps the rounded-seconds main-process contract.
+  const hung = connectionHarness({ hang: "silent", manualTimers: true });
+  const late = hung.connection.exchange({ messageType: "snapshot", requestId: "late" }, { timeoutMs: 1500 }).catch((error) => error);
+  await new Promise((done) => setImmediate(() => done()));
+  hung.fireTimer();
+  assert.match(String(await late), /Core IPC response timed out after 2 seconds/);
+  const defaultLate = hung.connection.exchange({ messageType: "snapshot", requestId: "late-default" }).catch((error) => error);
+  await new Promise((done) => setImmediate(() => done()));
+  hung.fireTimer();
+  assert.match(String(await defaultLate), /Core IPC response timed out after 120 seconds/);
+  // A Core that ends or closes before acknowledging keeps both messages distinct.
+  for (const [mode, message] of [["end", /Core closed the connection before acknowledging the request/], ["close", /Core connection closed before acknowledgement/]]) {
+    const closed = connectionHarness({ hang: mode });
+    await assert.rejects(closed.connection.exchange({ messageType: "snapshot", requestId: "gone" }), message);
+  }
+});
+
+test("connection constructor composes peer, receipt and identity assertions exactly like the main process", async () => {
+  const harness = connectionHarness();
+  await harness.connection.exchangeVerified({ protocolVersion: "goalport.ipc.v2", requestId: "m1", entityVersion: 0, messageType: "send_message", payload: {} });
+  assert.deepEqual(harness.written.map((entry) => entry.messageType), ["get_startup_receipt", "send_message"], "a non-snapshot request verifies before it is sent");
+  assert.deepEqual(harness.peerRuns, [4242]);
+  const receiptRequest = harness.written[0];
+  assert.equal(receiptRequest.protocolVersion, "goalport.ipc.v2");
+  assert.equal(receiptRequest.entityVersion, 0);
+  assert.deepEqual(receiptRequest.payload, {});
+  assert.match(receiptRequest.requestId, /^identity-/);
+  // A peer that is not the receipt Core refuses before any command frame.
+  const mismatch = connectionHarness({ peerPid: 9999 });
+  await assert.rejects(mismatch.connection.exchangeVerified({ messageType: "safe_stop", requestId: "stop-1", payload: {} }), /could not be verified/);
+  assert.deepEqual(mismatch.written.map((entry) => entry.messageType), ["get_startup_receipt"], "no command frame after a failed identity assertion");
+  // A refused snapshot is a definite refusal: no retry, no attachment probe.
+  const refused = connectionHarness({ respond: (request) => ({ ok: false, requestId: request.requestId, error: "snapshot refused" }) });
+  await assert.rejects(refused.connection.invoke({ messageType: "snapshot", requestId: "read-1", payload: {} }), /snapshot refused/);
+  assert.deepEqual(refused.attachments, []);
+  // An unavailable startup receipt is an attachment refusal, and the command never leaves.
+  const noReceipt = connectionHarness({ respond: (request) => ({ ok: false, requestId: request.requestId, error: "not ready" }) });
+  await assert.rejects(noReceipt.connection.exchangeVerified({ messageType: "record_close_choice", requestId: "c1", payload: {} }), /startup identity is unavailable/);
+  assert.deepEqual(noReceipt.written.map((entry) => entry.messageType), ["get_startup_receipt"]);
+  // The legacy profile-less contract keeps its historical skip: no peer, no receipt, straight to the frame.
+  const legacy = connectionHarness({ verificationSkipped: () => true });
+  await legacy.connection.exchangeVerified({ messageType: "send_message", requestId: "m2", payload: {} });
+  assert.deepEqual(legacy.written.map((entry) => entry.messageType), ["send_message"]);
+  assert.deepEqual(legacy.peerRuns, []);
+});
+
+test("connection constructor keeps the main-process snapshot retry: one re-attachment, one re-verified retry", async () => {
+  const results = [];
+  const harness = connectionHarness({ onResult: (snapshot, request) => results.push([request.requestId, snapshot]) });
+  harness.setFailNext("snapshot");
+  const snapshot = await harness.connection.invoke({ protocolVersion: "goalport.ipc.v2", requestId: "poll-1", entityVersion: 0, messageType: "snapshot", payload: {} });
+  assert.deepEqual(snapshot, { attempt: { id: "attempt-1" } });
+  assert.deepEqual(harness.written.map((entry) => entry.messageType), ["snapshot", "get_startup_receipt", "snapshot"]);
+  assert.deepEqual(harness.peerRuns, [4242], "the retry runs one full verification");
+  assert.equal(harness.attachments.length, 1, "exactly one attachment check");
+  assert.deepEqual(results, [["poll-1", { attempt: { id: "attempt-1" } }]], "observed snapshots keep their request identity");
+  assert.equal(harness.connection.needsVerification(), false);
+});
+
+test("connection constructor: without an attachment owner a lost snapshot is never retried", async () => {
+  const harness = connectionHarness({ ensureCore: false });
+  harness.setFailNext("snapshot");
+  await assert.rejects(harness.connection.invoke({ messageType: "snapshot", requestId: "only-1", payload: {} }), /Core connection closed before acknowledgement/);
+  assert.deepEqual(harness.written.map((entry) => entry.messageType), ["snapshot"], "exactly one attempt");
+  assert.deepEqual(harness.peerRuns, [], "no blind retry forces a verification");
+});
+
+test("a read-restricted connection refuses every other command before any socket exists", async () => {
+  const harness = connectionHarness({ allowedMessageTypes: ["snapshot"], ensureCore: false });
+  assert.deepEqual(await harness.connection.invoke({ messageType: "snapshot", requestId: "poll-1", payload: {} }), { attempt: { id: "attempt-1" } });
+  for (const request of [
+    { messageType: "safe_stop", requestId: "stop-1", payload: {} },
+    { messageType: "record_close_choice", requestId: "close-1", payload: {} },
+    { messageType: "send_message", requestId: "send-1", payload: {} },
+    { messageType: "select_runtime", requestId: "runtime-1", payload: {} },
+    { messageType: "create_campaign", requestId: "campaign-1", payload: {} },
+    { messageType: "continue_in_isolated_workspace", requestId: "iso-1", payload: {} },
+    { messageType: "get_startup_receipt", requestId: "sneak-1", payload: {} }
+  ]) {
+    await assert.rejects(harness.connection.invoke(request), /was refused and nothing was sent/, request.messageType);
+    await assert.rejects(harness.connection.exchangeVerified(request), /was refused and nothing was sent/, request.messageType);
+    await assert.rejects(harness.connection.exchange(request), /was refused and nothing was sent/, request.messageType);
+  }
+  assert.deepEqual(harness.written.map((entry) => entry.messageType), ["snapshot"], "only the allowed snapshot ever reached a socket");
+  assert.equal(harness.socketCount(), 1, "a refused command creates no connection at all");
+  // Verification-internal frames still flow under the restriction: after a
+  // lost snapshot (no attachment owner, so no retry), the NEXT snapshot is
+  // re-verified through pipe-peer and the startup receipt before it is sent.
+  harness.setFailNext("snapshot");
+  await assert.rejects(harness.connection.invoke({ messageType: "snapshot", requestId: "poll-2", payload: {} }), /Core connection closed before acknowledgement/);
+  assert.equal(harness.connection.needsVerification(), true);
+  await harness.connection.invoke({ messageType: "snapshot", requestId: "poll-3", payload: {} });
+  assert.deepEqual(harness.written.map((entry) => entry.messageType), ["snapshot", "snapshot", "get_startup_receipt", "snapshot"]);
+  assert.deepEqual(harness.peerRuns, [4242]);
+  assert.equal(harness.connection.needsVerification(), false);
+});
+
 test("the real Electron entrypoint routes Core requests and close choices through the verified gate", async (t) => {
   const { EventEmitter } = await import("node:events");
   const { createHash } = await import("node:crypto");

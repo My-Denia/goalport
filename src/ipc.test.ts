@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { getCoreClient, persistedAttemptId, reusableAttemptId, resetCoreClientForTests } from "./ipc";
+import { getCoreClient, persistedAttemptId, reusableAttemptId, resetCoreClientForTests, type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, resolveCoreSnapshot } from "./types";
 
-afterEach(() => resetCoreClientForTests());
+afterEach(() => {
+  resetCoreClientForTests();
+  delete window.__GOALPORT_ELECTRON__;
+  delete window.goalportCore;
+});
 
 describe("Core client preview transport", () => {
   it("treats the display placeholder Attempt id as absent", () => {
@@ -230,5 +234,89 @@ describe("Core client preview transport", () => {
       residualExecutionState: "unknown",
       writeResponsibility: "held"
     }));
+  });
+});
+
+// The competing-background guard envelope: main returns this shape from the
+// one guarded core-command path, and the existing renderer consumption in
+// performDispatch must keep mapping it to a typed, definite refusal without
+// touching the connection. These tests pin that existing contract.
+describe("competing-background command rejection envelope", () => {
+  const GUARD_SENTENCE =
+    "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
+
+  function mountElectronBridge(command: (request: CoreCommand) => Promise<unknown>) {
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => DEMO_SNAPSHOT,
+      command,
+      startCore: async () => DEMO_SNAPSHOT,
+      openInVsCode: async () => undefined,
+    } as never;
+  }
+
+  function guardEnvelope(request: CoreCommand): Record<string, unknown> {
+    return {
+      goalportRejected: true,
+      requestId: request.requestId,
+      error: GUARD_SENTENCE,
+      rejection: {
+        code: "background-job-outstanding",
+        message: GUARD_SENTENCE,
+        deliveryState: "FAILED",
+        nativeDispatchState: "NOT_STARTED",
+        retryMode: "NEW_REQUEST",
+        reservation: null,
+      },
+    };
+  }
+
+  it("maps the typed guard envelope to a refused outcome with the exact NEW_REQUEST shape", async () => {
+    mountElectronBridge(async (request) => guardEnvelope(request));
+    const client = getCoreClient();
+    await client.snapshot();
+    const after = await client.startConversation!("C:\\work", "codex", "competing goal", "stable-start");
+
+    expect(after.commandOutcome).toEqual({
+      kind: "refused",
+      requestId: "stable-start",
+      messageType: "start_conversation",
+      error: GUARD_SENTENCE,
+      rejection: {
+        code: "background-job-outstanding",
+        message: GUARD_SENTENCE,
+        deliveryState: "FAILED",
+        nativeDispatchState: "NOT_STARTED",
+        retryMode: "NEW_REQUEST",
+        reservation: null,
+      },
+    });
+  });
+
+  it("a guard refusal never marks a connected client disconnected", async () => {
+    mountElectronBridge(async (request) => guardEnvelope(request));
+    const client = getCoreClient();
+    const before = await client.snapshot();
+    const after = await client.startConversation!("C:\\work", "codex", "competing goal", "stable-start");
+
+    expect(after.connection).toBe(before.connection);
+    expect(after.notices[0]).toBe(`Core refused: ${GUARD_SENTENCE}`);
+  });
+
+  it("an unrelated transport failure keeps the existing uncertain behavior", async () => {
+    mountElectronBridge(async () => {
+      throw new Error("EPIPE: broken pipe");
+    });
+    const client = getCoreClient();
+    const after = await client.startConversation!("C:\\work", "codex", "competing goal", "stable-start");
+
+    expect(after.connection).toBe("disconnected");
+    expect(after.commandOutcome).toEqual(expect.objectContaining({
+      kind: "transport-error",
+      messageType: "start_conversation",
+      error: "EPIPE: broken pipe",
+    }));
+    expect(after.commandOutcome?.rejection).toBeUndefined();
+    expect(after.notices[0]).toMatch(/^Core request failed:/);
   });
 });

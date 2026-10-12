@@ -275,5 +275,5 @@ module.exports = {
   launchArguments, relaunchArguments, resolveProfilePaths, validateProfileIdentity, assertCoreIdentity,
   childEnvironment, normalizedPath, assertPipePeer, pipePeerBusy, PIPE_PEER_SCHEMA, PIPE_PEER_REFUSAL,
   CHANNEL_DIRECTORIES, canonicalPath, storagePathRelationship, assertProfileStorageBoundary,
-  resolveUnixSocket, windowsPipeName, coreServePipe, coreConnectEndpoint
+  resolveUnixSocket, endpointSocketLeafName, windowsPipeName, coreServePipe, coreConnectEndpoint
 };

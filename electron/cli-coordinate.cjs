@@ -4,7 +4,8 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { guardCoordinateCommand } = require("./coordinate-service.cjs");
+const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
+const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
 const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
@@ -14,6 +15,7 @@ const NO_TEXT = "The harness finished without any text, so this stopped.";
 const NOT_FINISHED = "The harness did not finish, so this stopped.";
 const NOT_INSTALLED = "This harness is not installed, so nothing was sent.";
 const CREDITS = "This model requires extra usage credits. It was not used.";
+const ENVIRONMENT_STOP = "This harness cannot run its tools on this machine, so this stopped.";
 
 function creditGated(model) {
   return typeof model === "string" && /fable/i.test(model);
@@ -84,6 +86,17 @@ function resolveCommand(file, env = process.env, platform = process.platform) {
     }
   }
   return file;
+}
+
+function piWindowsLaunch(env = process.env, platform = process.platform, fsApi = fs) {
+  if (platform !== "win32") return null;
+  const shim = resolveCommand("pi", env, platform);
+  if (!/\.(cmd|bat)$/i.test(shim)) return null;
+  const cliJs = path.resolve(path.dirname(shim), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+  if (!fsApi.existsSync(cliJs)) return null;
+  const nodeExe = resolveCommand("node.exe", env, platform);
+  if (nodeExe === "node.exe") return null;
+  return { file: path.resolve(nodeExe), prefixArgs: [cliJs] };
 }
 
 function launchSpec(file, args, env = process.env, platform = process.platform) {
@@ -244,22 +257,81 @@ async function claudeProvider(io) {
   });
 }
 
+async function piProvider(io) {
+  // One hardened probe: no extensions, no MCP, no skills, no context files,
+  // offline, and only a model listing — nothing from the workspace project is
+  // ever executed and no network call is made.
+  let stdout = "";
+  try {
+    stdout = String((await io.execFile("pi", [
+      "--no-extensions",
+      "--no-mcp",
+      "--no-skills",
+      "--no-context-files",
+      "--offline",
+      "--list-models",
+    ])).stdout ?? "");
+  } catch {
+    return null;
+  }
+  // The success predicate is the model-table shape, never the exit code
+  // (defaultExec discards it): a provider/model/context header line plus at
+  // least one model-shaped row. Nonempty error text from a nonzero exit,
+  // empty output, or a shim banner all fail this shape and yield null.
+  const hasHeader = stdout.split(/\r?\n/).some((line) => /^provider\s+model\s+context/i.test(line.trim()));
+  if (!hasHeader || !/^\S+\s+\S+\s+\d/m.test(stdout)) return null;
+  return provider({
+    instanceId: "pi",
+    displayName: "Pi",
+    driver: "pi",
+    // The probe proves the install and an enumerable model catalog — it is
+    // NOT credential verification. "authenticated" is the minimal claim the
+    // panel renders as a selectable row (any other status shows "not signed
+    // in"), and a dead credential surfaces on the first turn through the
+    // existing failed/health path instead of being guessed here.
+    auth: { status: "authenticated" },
+    // The turn passes no --model, so pi runs on its own configured default
+    // (mirrors the codex built-in default arm).
+    models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
+  });
+}
+
 async function discoverCliProviders(io = {}) {
   const probe = {
     execFile: io.execFile ?? ((file, args) => defaultExec(file, args, { timeoutMs: io.timeoutMs, env: io.env })),
     readFile: io.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
     home: io.home ?? os.homedir(),
   };
+  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe), piProvider(probe)])).filter(Boolean);
+  // Harnesses blocked on this machine are still discovered, but the snapshot
+  // carries the stamped evidence. Without a state dir or a health record every
+  // provider object stays exactly as it was.
+  const stateDir = typeof io.stateDir === "string" && io.stateDir ? io.stateDir : "";
+  if (stateDir) {
+    const health = readHealth(stateDir);
+    for (const provider of providers) {
+      const record = health[provider.instanceId];
+      if (record) provider.environmentHealth = { since: record.blockedAt, detail: record.detail };
+    }
+  }
   return {
     ok: true,
-    providers: (await Promise.all([codexProvider(probe), claudeProvider(probe)])).filter(Boolean),
+    providers,
     stopReason: null,
   };
 }
 
-function commandIdOf(command) {
-  const commandId = typeof command?.commandId === "string" ? command.commandId.trim() : "";
+// The one canonical command-id rule, shared with the coordination scope:
+// anything that is not a non-empty [a-zA-Z0-9._-] token (a newline, a space,
+// a path) is not an id, and every writer must refuse it before any side
+// effect.
+function isValidCommandId(text) {
+  const commandId = typeof text === "string" ? text.trim() : "";
   return /^[a-zA-Z0-9._-]+$/.test(commandId) ? commandId : "";
+}
+
+function commandIdOf(command) {
+  return isValidCommandId(command?.commandId);
 }
 
 function worktreeOf(command) {
@@ -283,7 +355,7 @@ function instanceOf(command) {
   return typeof instanceId === "string" ? instanceId : "";
 }
 
-function turnSpec(command) {
+function turnSpec(command, env = process.env, platform = process.platform) {
   const model = modelOf(command);
   const worktree = worktreeOf(command);
   const prompt = promptOf(command);
@@ -291,18 +363,48 @@ function turnSpec(command) {
     return { errorText: "The read-only session was not prepared, so nothing was sent." };
   }
   if (creditGated(model)) return { errorText: CREDITS };
+  // The explicitly authorized write branch flips exactly one flag per harness
+  // and keeps every other byte of the argv (and of the read branch) as it was
+  // audited. The flags are chosen from the documented CLI surface only — no
+  // binary was ever launched to verify them; real-flag behavior stays an
+  // owner-gated residual.
+  const writes = command?.sandboxPolicy?.type === "workspaceWrite";
   if (instanceOf(command) === "codex") {
     return {
       file: "codex",
       cwd: worktree,
-      args: ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", worktree, prompt],
+      args: ["exec", "--json", "--ephemeral", "--sandbox", writes ? "workspace-write" : "read-only", "--skip-git-repo-check", "--cd", worktree, prompt],
     };
   }
   if (instanceOf(command) === "claude") {
     return {
       file: "claude",
       cwd: worktree,
-      args: ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", model, prompt],
+      args: ["-p", "--output-format", "json", "--permission-mode", writes ? "acceptEdits" : "plan", "--permission-prompts", "none", "--model", model, prompt],
+    };
+  }
+  if (instanceOf(command) === "pi") {
+    // Pi has no write sandbox in this build, so the explicitly-write branch
+    // refuses (the CREDITS refusal shape) instead of launching pi with its
+    // default, unconstrained tools.
+    if (writes) {
+      return { errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox." };
+    }
+    // Read-only flags from the documented CLI surface only, with --no-tools
+    // as the forced no-side-effect level; no --model, so pi runs on its own
+    // configured default like the codex built-in default arm.
+    const launch = piWindowsLaunch(env, platform);
+    if (launch) {
+      return {
+        file: launch.file,
+        cwd: worktree,
+        args: [...launch.prefixArgs, "-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", prompt],
+      };
+    }
+    return {
+      file: "pi",
+      cwd: worktree,
+      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", prompt],
     };
   }
   return { errorText: NOT_INSTALLED };
@@ -327,6 +429,98 @@ function codexReply(stdout) {
   return text;
 }
 
+// Sandbox-helper signatures proven by the captured diagnostic turn
+// (goal-runs/goalport-pr26-blockers-codex-diag/evidence/diag/stdout.jsonl):
+// the read-only sandbox helper fails to initialize, so every tool call dies
+// in the sandbox layer while codex still exits 0 with an honest text reply.
+const ENVIRONMENT_SIGNATURES = [
+  /helper_unknown_error/i,
+  /Failed to create unified exec process/i,
+  /sandbox failed/i,
+];
+
+function toolEventText(item) {
+  // command_execution carries its failure in aggregated_output; an
+  // mcp_tool_call carries it in result.content[].text and sometimes error.
+  const parts = [];
+  if (typeof item?.aggregated_output === "string") parts.push(item.aggregated_output);
+  const content = item?.result?.content;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block && typeof block.text === "string") parts.push(block.text);
+    }
+  }
+  if (typeof item?.error === "string") parts.push(item.error);
+  return parts.join("\n");
+}
+
+/**
+ * A codex turn is environment-blocked when the model issued at least one tool
+ * call, every one of them failed, and at least one failure carries a proven
+ * sandbox-helper signature. Any successful tool call, or failures without a
+ * signature (a grep with no match), is a normal turn. Returns the bounded
+ * signature-bearing detail, or null.
+ */
+function codexEnvironmentBlocked(stdout) {
+  let tools = 0;
+  let failed = 0;
+  let detail = null;
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== "item.completed") continue;
+    const item = event?.item ?? event?.params?.item;
+    const kind = typeof item?.type === "string" ? item.type : "";
+    if (kind !== "command_execution" && kind !== "mcp_tool_call") continue;
+    tools += 1;
+    if (item?.status === "failed") failed += 1;
+    const text = toolEventText(item);
+    if (text && detail === null) {
+      for (const pattern of ENVIRONMENT_SIGNATURES) {
+        if (pattern.test(text)) {
+          detail = text.slice(0, 300);
+          break;
+        }
+      }
+    }
+  }
+  if (tools === 0 || failed !== tools || detail === null) return null;
+  return detail;
+}
+
+// Evidence that the sandbox truly ran: at least one completed codex tool
+// event whose status is not "failed". A text-only success is not this
+// evidence — ok:true never required tool events.
+function codexToolSuccess(stdout) {
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (event?.type !== "item.completed") continue;
+    const item = event?.item ?? event?.params?.item;
+    const kind = typeof item?.type === "string" ? item.type : "";
+    if (kind !== "command_execution" && kind !== "mcp_tool_call") continue;
+    if (item?.status !== "failed") return true;
+  }
+  return false;
+}
+
+// Clearing is evidence-based: codex must show a ran tool; any other instance
+// clears on the ok turn itself, the strongest evidence it can offer.
+function clearHealthOnSuccess(stateDir, instanceId, stdout) {
+  if (instanceId === "codex" && !codexToolSuccess(stdout)) return;
+  clearBlocked(stateDir, instanceId);
+}
+
 function claudeReply(stdout) {
   try {
     const parsed = JSON.parse(String(stdout));
@@ -342,6 +536,10 @@ function claudeReply(stdout) {
 function replyFrom(instanceId, stdout) {
   if (instanceId === "codex") return { text: codexReply(stdout), failed: false };
   if (instanceId === "claude") return claudeReply(stdout);
+  // A pi text-mode turn prints exactly the final text on stdout; an empty
+  // reply stays failed:false so runCliTurn's existing no-text stop path
+  // ("finished without any text") carries it.
+  if (instanceId === "pi") return { text: String(stdout).trim(), failed: false };
   return { text: "", failed: true };
 }
 
@@ -367,6 +565,10 @@ function writeLedger(stateDir, ledger) {
 
 function claimFile(stateDir, commandId) {
   return path.join(stateDir, `claim-${commandId}`);
+}
+
+function hasClaim(stateDir, commandId) {
+  return Boolean(stateDir) && fs.existsSync(claimFile(stateDir, commandId));
 }
 
 function storedResult(stateDir, commandId) {
@@ -422,11 +624,19 @@ function takeGrant(stateDir, commandId) {
   return true;
 }
 
-function restoreGrant(stateDir, commandId) {
+// Append-if-absent, shared with the coordination scope's JIT grant path.
+// Returns whether this call inserted the line, so the writer knows whether it
+// owns what it just wrote.
+function writeGrant(stateDir, commandId) {
   const lines = grantLines(stateDir);
-  if (lines.includes(commandId)) return;
+  if (lines.includes(commandId)) return false;
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(grantFile(stateDir), `${[...lines, commandId].join("\n")}\n`);
+  return true;
+}
+
+function restoreGrant(stateDir, commandId) {
+  writeGrant(stateDir, commandId);
 }
 
 function defaultSpawn(spec) {
@@ -478,9 +688,15 @@ async function runCliTurn(command, options = {}) {
   const stateDir = typeof options.stateDir === "string" ? options.stateDir : "";
   const commandId = commandIdOf(command);
   if (!stateDir || !commandId) return refused;
-  if (fs.existsSync(claimFile(stateDir, commandId))) return storedResult(stateDir, commandId);
+  if (hasClaim(stateDir, commandId)) return storedResult(stateDir, commandId);
   if (!grantLines(stateDir).includes(commandId)) return refused;
-  const problem = guardCoordinateCommand(command);
+  // The guard follows the id's role: only an execute-role command may carry
+  // the write guard; every other id (plan, review, audit, unknown) keeps the
+  // audited read guard, which refuses workspaceWrite — so a write sandbox can
+  // never ride in under a read role.
+  const problem = roleOfCommandId(commandId) === "execute"
+    ? guardCoordinateWriteCommand(command)
+    : guardCoordinateCommand(command);
   if (problem) return { ok: false, text: "", errorText: problem, messageDispatched: false };
   const spec = turnSpec(command);
   if (spec.errorText) return { ok: false, text: "", errorText: spec.errorText, messageDispatched: false };
@@ -511,7 +727,7 @@ async function runCliTurn(command, options = {}) {
   if (spawned?.spawnError) {
     releaseTurn(stateDir, commandId);
     restoreGrant(stateDir, commandId);
-    return { ok: false, text: "", errorText: NOT_INSTALLED, messageDispatched: false };
+    return { ok: false, text: "", errorText: NOT_INSTALLED, messageDispatched: false, stopCode: "not-installed" };
   }
   if (options.cancelled?.()) {
     const replaced = { ok: false, text: "", errorText: REPLACED, messageDispatched: true };
@@ -519,9 +735,30 @@ async function runCliTurn(command, options = {}) {
     return replaced;
   }
   const reply = replyFrom(instanceOf(command), spawned?.stdout ?? "");
+  // Environment-blocked turns exit 0 with an honest text reply (the model
+  // reports it could not run its tools), so this check must come before the
+  // success branch. The quota was spent, so the turn stays dispatched and the
+  // claim ledger keeps blocking a resend of this command id.
+  const environment = instanceOf(command) === "codex" ? codexEnvironmentBlocked(spawned?.stdout ?? "") : null;
+  if (environment) {
+    const blocked = {
+      ok: false,
+      text: reply.text,
+      errorText: ENVIRONMENT_STOP,
+      messageDispatched: true,
+      environmentBlocked: true,
+      environmentDetail: environment,
+    };
+    finishTurn(stateDir, commandId, blocked);
+    // The evidence is persisted so discovery can steer later rounds away from
+    // this harness; a failed note must never change this turn's result.
+    markBlocked(stateDir, instanceOf(command), environment, commandId);
+    return blocked;
+  }
   if (spawned?.code === 0 && reply.text && !reply.failed) {
     const done = { ok: true, text: reply.text, errorText: "", messageDispatched: true };
     finishTurn(stateDir, commandId, done);
+    clearHealthOnSuccess(stateDir, instanceOf(command), spawned?.stdout ?? "");
     return done;
   }
   // The stderr tail rides along on the stop sentence (never into `text`) so
@@ -529,13 +766,33 @@ async function runCliTurn(command, options = {}) {
   // not left with a generic "finished without any text".
   const detail = stderrDetail(spawned?.stderr);
   const stopSentence = !reply.text ? NO_TEXT : (reply.failed ? reply.text : NOT_FINISHED);
+  // Structured stop codes, emitted only here and nowhere else: "no-text" is a
+  // clean-exit-only fact, "not-finished" needs a nonzero exit with text, and
+  // a provider-level failure (reply.failed, e.g. a claude is_error) gets NO
+  // code at all — its classification falls to the errorText mapping, and it
+  // must never masquerade as a resumable completion code.
+  const stopCode = reply.failed === true
+    ? null
+    : spawned?.code === 0 && !reply.text
+      ? "no-text"
+      : spawned?.code !== 0 && reply.text
+        ? "not-finished"
+        : null;
   const failed = {
     ok: false,
     text: reply.text,
     errorText: detail ? `${stopSentence} ${detail}` : stopSentence,
     messageDispatched: true,
+    stopCode,
   };
   finishTurn(stateDir, commandId, failed);
+  // The stderr-signature fallback: when the bounded tail carries one of the
+  // already-proven environment signatures, persist the block for this
+  // instance too. No new signatures — the same set the typed codex path and
+  // the provider-error classification already use.
+  if (detail && ENVIRONMENT_SIGNATURES.some((pattern) => pattern.test(detail))) {
+    markBlocked(stateDir, instanceOf(command), detail, commandId);
+  }
   return failed;
 }
 
@@ -544,9 +801,17 @@ module.exports = {
   runCliTurn,
   codexModel,
   codexReply,
+  codexEnvironmentBlocked,
+  codexToolSuccess,
   claudeReply,
+  replyFrom,
   turnSpec,
+  piWindowsLaunch,
   launchSpec,
   killProcessTree,
   defaultExec,
+  isValidCommandId,
+  hasClaim,
+  writeGrant,
+  takeGrant,
 };

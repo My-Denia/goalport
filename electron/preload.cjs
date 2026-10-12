@@ -59,10 +59,19 @@ contextBridge.exposeInMainWorld("goalportCore", {
   confirmCloseChoice: (payload) => ipcRenderer.invoke("goalport:confirm-close-choice", payload),
   dismissCloseChoice: () => ipcRenderer.invoke("goalport:dismiss-close-choice"),
   coordinateDiscover: (generation) => ipcRenderer.invoke("goalport:coordinate-discover", generation),
-  coordinateLaunch: (command, generation) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation),
+  coordinateLaunch: (command, generation, scopeGeneration) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration),
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
+  // Optional write: { instances: string[], maxTurns: number, workspaceRoot: string }.
+  // Forward unchanged; only the trusted main-process scope grants consent.
+  backgroundStart: (input) => ipcRenderer.invoke("goalport:background-start", input),
+  backgroundStatus: (jobId) => ipcRenderer.invoke("goalport:background-status", jobId),
+  backgroundRevoke: (jobId) => ipcRenderer.invoke("goalport:background-revoke", jobId),
+  coordinationAuthorize: (scope) => ipcRenderer.invoke("goalport:coordination-authorize", scope),
+  coordinationScope: () => ipcRenderer.invoke("goalport:coordination-scope"),
+  coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),
   coordinationRecords: () => ipcRenderer.invoke("goalport:coordination-records"),
   coordinationSave: (record) => ipcRenderer.invoke("goalport:coordination-save", record),
+  coordinationUnblock: (instanceId) => ipcRenderer.invoke("goalport:coordination-unblock", instanceId),
   onClosePrompt: (callback) => {
     const listener = () => callback();
     ipcRenderer.on("goalport:close-prompt", listener);

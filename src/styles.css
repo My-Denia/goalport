@@ -322,6 +322,52 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .coordination-status dl { display: grid; grid-template-columns: 9.5rem 1fr; gap: 6px 12px; margin: 0; }
 .coordination-status dt { color: var(--ink-muted); font-size: 12px; }
 .coordination-status dd { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-summary { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-budget { margin: 10px 0 0; color: var(--ink-soft); font-size: 13px; }
+.coordination-budget p { margin: 0 0 6px; }
+.coordination-access {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.coordination-access-label { color: var(--ink-muted); font-size: 12px; font-weight: 700; margin-right: auto; }
+.coordination-access-caption { color: var(--ink-muted); font-size: 12px; line-height: 1.45; }
+.coordination-progress-failure { color: var(--red) !important; }
+.coordination-progress-activity { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-progress-repair { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-repair-note { color: var(--ink-soft) !important; font-weight: 600; }
+.coordination-retained-round { margin: 10px 0 0; padding-top: 10px; border-top: 1px dashed var(--line); }
+.coordination-retained-round > summary { color: var(--ink-muted); font-size: 12px; font-weight: 700; cursor: pointer; }
+.coordination-retained-round dl { margin-top: 8px; }
+.authorization-panel {
+  margin: 12px 22px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.authorization-panel-lead { margin: 0 0 10px; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
+.authorization-provider-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.authorization-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.authorization-row-select { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 13px; }
+.authorization-row-static { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.authorization-row-name { color: var(--ink); font-size: 13px; font-weight: 600; }
+.authorization-row-reason { color: var(--ink-muted); font-size: 12.5px; }
+.authorization-row-blocked .authorization-row-reason { color: var(--ink-soft); }
+.authorization-turns-row { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+.authorization-turns-row input {
+  width: 5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  padding: 5px 8px;
+  font-size: 13px;
+}
+.authorization-scope-line { margin: 0; color: var(--ink-soft); font-size: 13px; }
 .banner {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 16px; font-size: 12.5px; line-height: 1.45;
@@ -648,6 +694,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .provider-claude { background: #3a3344; color: #d3b8e7; }
 .provider-codex { background: #2d443e; color: #a5ddc6; }
 .provider-grok { background: #3f3b31; color: #e5d3a2; }
+.provider-pi { background: #40302b; color: #e6c5a8; }
 .provider-scenario { background: #2f3a4e; color: #b7d0ef; }
 .provider-unassigned { background: var(--panel-soft); color: var(--ink-muted); }
 .runtime-picker-list {
@@ -1150,3 +1197,27 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   line-height: 1.6;
   color: var(--text-secondary, #a9b0bd);
 }
+
+/* Separate file-change consent and useful execution results stay in the
+   existing journey surfaces, with root and long output wrapping at 860px. */
+.authorization-write-section { border-top: 1px solid var(--line); padding-top: 12px; margin: 12px 0; }
+.authorization-write-section h3, .coordination-result h3 { font-size: 14px; margin: 0 0 8px; }
+.authorization-write-section p { font-size: 13px; line-height: 1.5; color: var(--ink-muted); margin: 0 0 10px; }
+.authorization-workspace { overflow-wrap: anywhere; }
+.coordination-status h2 { font-size: 18px; margin: 0 0 10px; }
+.coordination-result { border-left: 2px solid var(--line); padding-left: 12px; margin: 16px 0; }
+.coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordination-status .coordination-outcome { margin-bottom: 14px; }
+.coordination-outcome dd:first-of-type { font-size: 18px; font-weight: 600; }
+
+/* One live job's return surface uses the existing report cards and wrapping. */
+.background-return { padding: 10px 22px 0; }
+.background-job { padding: 14px 22px 24px; min-width: 0; overflow-wrap: anywhere; }
+.background-job h2 { margin: 0 0 12px; font-size: 20px; line-height: 1.35; }
+.background-job > p { font-size: 14px; line-height: 1.5; }
+.background-job .coordination-progress, .background-job .coordination-status { margin-left: 0; margin-right: 0; }
+.background-job .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Quiet load hold above the draft actions: harness access is still
+   resolving, so Send waits (progress, not an error). */
+.composer-wait { margin: 10px 0 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; }

@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { finished } from "node:stream/promises";
 import test from "node:test";
-import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity } from "./package.mjs";
-import { verifyPackage } from "./verify-package.mjs";
+import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity, STAGED_APP_MODULES } from "./package.mjs";
+import { stagedDependenciesCoverGraph, verifyPackage } from "./verify-package.mjs";
 
 function fixtureGitEnv(root) {
   return {
@@ -65,7 +65,7 @@ async function fixture(t) {
   for (const name of COMPONENTS) writeFileSync(resolve(root, "resources", name), `test-only ${name}`);
   writeFileSync(resolve(root, "GoalPort.exe"), "test-only executable");
   writeFileSync(resolve(root, "icudtl.dat"), "test-only runtime data");
-  for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordination-record.cjs", "cli-coordinate.cjs", "harness-runtime.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
+  for (const name of [...STAGED_APP_MODULES, "dist/index.html", "dist/coordination-engine.cjs"]) writeFileSync(resolve(stage, name), "test-only app content");
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", version: "1.0.0-rc.1", main: "main.cjs" }));
   const files = [{ path: "package.json", sha256: "a".repeat(64) }];
   const source = { revision: "b".repeat(40), dirty: true, files, treeSha256: sha256(files.map(({ path, sha256: hash }) => `${path}\0${hash}\n`).join("")) };
@@ -179,4 +179,31 @@ test("untracked or ignored Cargo config is refused while tracked safe config is 
   assert.equal(privateConfig.treeSha256, trackedConfig.treeSha256);
   assert.equal(privateConfig.dirty, false);
   assert.ok(!privateConfig.files.some(({ path }) => path === ".npmrc" || path === ".env.local"));
+});
+
+test("the offline staging check covers every required electron module, including the guard and scope leaves", (t) => {
+  // The whole require graph of the staged entry points must be on the
+  // explicit staging list; this runs offline, against source, with no
+  // packaging run and no Windows.
+  const covered = stagedDependenciesCoverGraph();
+  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs"]) {
+    assert.ok(STAGED_APP_MODULES.includes(name), `${name} must stay on the staging list`);
+    assert.ok(covered.includes(name), `${name} must be reachable from the staged entry points`);
+  }
+});
+
+test("removing any one staged module name turns the offline dependency check red", (t) => {
+  for (const name of STAGED_APP_MODULES) {
+    const withoutOne = STAGED_APP_MODULES.filter((candidate) => candidate !== name);
+    assert.throws(() => stagedDependenciesCoverGraph(withoutOne), new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
+  }
+});
+
+test("C2 offline staging includes detached owner and shared engine without Windows packaging", () => {
+  for (const name of ["coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "core-client.cjs"]) assert.ok(STAGED_APP_MODULES.includes(name));
+  assert.ok(stagedDependenciesCoverGraph().includes("coordination-worker.cjs"));
+  const source = readFileSync(resolve(ROOT, "scripts/desktop/package.mjs"), "utf8");
+  assert.ok(source.includes('"--config", "vite.coordination.config.ts", "--outDir", frontend'));
+  const verification = readFileSync(resolve(ROOT, "scripts/desktop/verify-package.mjs"), "utf8");
+  assert.ok(verification.includes('"dist/coordination-engine.cjs"'));
 });

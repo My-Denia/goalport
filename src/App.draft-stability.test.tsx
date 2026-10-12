@@ -3,7 +3,7 @@
 // surface must stay mounted — and keep the user's focus — across
 // capacity-limited snapshot polls. Only a real transition (Core creating or
 // moving to a conversation) replaces the draft.
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import App from "./App";
 import { type CoreCommand } from "./ipc";
@@ -35,6 +35,74 @@ function draftBox(): HTMLTextAreaElement {
 }
 
 describe("draft composer lifecycle across snapshot polls", () => {
+  it("a draft-open discovery resolving mid-typing does not overwrite the message", async () => {
+    let resolveDiscover: ((value: unknown) => void) | null = null;
+    window.__GOALPORT_ELECTRON__ = true;
+    window.goalportCore = {
+      snapshot: async () => EMPTY_PREVIEW_SNAPSHOT,
+      command: async () => EMPTY_PREVIEW_SNAPSHOT,
+      startCore: async () => EMPTY_PREVIEW_SNAPSHOT,
+      openInVsCode: async () => undefined,
+      appInfo: async () => ({
+        version: "test",
+        channel: "test",
+        testMode: false,
+        dataPath: "profile",
+        coordinationConfigured: true,
+      }),
+      // The draft-open discovery stays pending until the test resolves it,
+      // mid-typing.
+      coordinateDiscover: () => new Promise((resolve) => { resolveDiscover = resolve; }),
+      coordinateLaunch: async () => ({ text: "", errorText: "" }),
+      coordinationAuthorize: async () => ({ ok: true, generation: 1, remaining: 4 }),
+      coordinationScope: async () => null,
+      coordinationRevoke: async () => ({ ok: true }),
+      coordinationUnblock: async () => ({ ok: true }),
+    } as never;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const draft = await waitFor(() => draftBox());
+    fireEvent.change(draft, { target: { value: "typed while discovering" } });
+    expect(draft.value).toBe("typed while discovering");
+    // The draft-open discovery starts (a scope read, then discover) even
+    // though the words were typed first; it must stay pending until resolved.
+    await waitFor(() => expect(resolveDiscover).not.toBeNull());
+    resolveDiscover!({
+      connected: true,
+      sendAuthorized: true,
+      stopReason: null,
+      providers: [
+        {
+          instanceId: "codex",
+          displayName: "Codex",
+          enabled: true,
+          installed: true,
+          availability: "available",
+          status: "ready",
+          auth: { status: "authenticated", type: "subscription" },
+          models: [{ slug: "codex-model", name: "codex-model", isDefault: true }],
+          usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+        },
+        {
+          instanceId: "claude",
+          displayName: "Claude",
+          enabled: true,
+          installed: true,
+          availability: "available",
+          status: "ready",
+          auth: { status: "authenticated", type: "subscription" },
+          models: [{ slug: "claude-model", name: "claude-model", isDefault: true }],
+          usageLimits: { windows: [{ id: "five_hour", usedPercent: 1 }] },
+        },
+      ],
+    });
+    // The panel arrives from the late discovery; the draft and its text stay.
+    await waitFor(() => expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy());
+    const composer = screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
+    expect(composer.value).toBe("typed while discovering");
+    expect(document.querySelector(".draft-composer")).not.toBeNull();
+  });
+
   it("a capacity-limited poll never unmounts the draft or steals its focus", async () => {
     polled = EMPTY_PREVIEW_SNAPSHOT;
     mountApp();

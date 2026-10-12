@@ -50,7 +50,13 @@ export async function startPreview({ dist = resolve("dist"), fixture = "empty", 
     server.closeAllConnections();
     await Promise.race([new Promise((done) => server.close(done)), sleep(1000)]);
     await sleep(100);
-    rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      // Windows: a not-yet-released Chromium lock on the profile dir can
+      // EPERM here. The temp dir is disposable — never let its removal mask
+      // the ORIGINAL start/drive error that triggered this cleanup path.
+    }
   };
   try {
     const deadline = Date.now() + 15_000;

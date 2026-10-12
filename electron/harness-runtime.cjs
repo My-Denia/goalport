@@ -222,7 +222,9 @@ function createHarnessRuntime(options = {}) {
         // The probes run off the main thread; a rejection here means a CLI
         // could not be asked at all, which is "no harness assigned", not a
         // crash of the window.
-        return discoverCliProviders(options.cliProbe).catch(() => ({
+        // The local CLI path owns its own state dir, so discovery is where
+        // the harness-health memory joins the provider snapshot.
+        return discoverCliProviders({ ...options.cliProbe, stateDir }).catch(() => ({
           ok: false,
           providers: [],
           errorText: "The harness list could not be read, so no harness was assigned.",

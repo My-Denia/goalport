@@ -21,6 +21,8 @@ export interface ProviderSnapshot {
     readonly unavailable?: unknown;
     readonly windows?: readonly { readonly id?: unknown; readonly usedPercent?: unknown }[];
   };
+  /** Persisted harness-health evidence merged into the snapshot by discovery. */
+  readonly environmentHealth?: unknown;
 }
 
 function modelSpecificWindow(id: unknown): boolean {
@@ -37,6 +39,24 @@ function quotaFromSnapshot(snapshot: ProviderSnapshot): SyntheticQuota {
     return "exhausted";
   }
   return "available";
+}
+
+/**
+ * Health evidence maps to the catalog's avoided marker: a well-formed record
+ * keeps its since/detail, a malformed one degrades to null (blocked-by-shape
+ * is never guessed), and a snapshot without the field leaves the catalog
+ * exactly as it was before this field existed.
+ */
+function environmentAvoidedOf(
+  snapshot: ProviderSnapshot,
+): { since: string; detail: string } | null | undefined {
+  if (!("environmentHealth" in snapshot)) return undefined;
+  const health = snapshot.environmentHealth as { since?: unknown; detail?: unknown } | null | undefined;
+  if (typeof health !== "object" || health === null) return null;
+  const since = typeof health.since === "string" ? health.since.trim() : "";
+  const detail = typeof health.detail === "string" ? health.detail.trim() : "";
+  if (since.length === 0 || detail.length === 0) return null;
+  return { since, detail };
 }
 
 function billing(snapshot: ProviderSnapshot): SyntheticCatalogInstance["billing"] {
@@ -64,6 +84,7 @@ export function catalogFromProviderSnapshots(
     const overageWindowIds = (snapshot.usageLimits?.windows ?? []).flatMap((window) =>
       typeof window.id === "string" ? [window.id] : [],
     );
+    const environmentAvoided = environmentAvoidedOf(snapshot);
     return [{
       instanceId: snapshot.instanceId,
       name: typeof snapshot.displayName === "string" && snapshot.displayName.trim().length > 0
@@ -79,6 +100,7 @@ export function catalogFromProviderSnapshots(
       launchable: snapshot.availability !== "unavailable" && snapshot.status !== "disabled" && snapshot.status !== "error",
       quota: quotaFromSnapshot(snapshot),
       billing: billing(snapshot),
+      ...(environmentAvoided === undefined ? {} : { environmentAvoided }),
     } satisfies SyntheticCatalogInstance];
   });
 }

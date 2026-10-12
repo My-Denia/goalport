@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
-import { artifactPaths, asarApi, COMPONENTS, fileHash, sourceIdentity } from "../desktop/package.mjs";
+import { artifactPaths, asarApi, COMPONENTS, fileHash, sourceIdentity, STAGED_APP_MODULES } from "../desktop/package.mjs";
 import { buildReleaseBundle } from "./build-release-bundle.mjs";
 
 function fixtureGitEnv(root) {
@@ -53,7 +53,7 @@ async function packageFixture(t, { version = "1.0.0-rc.1", source }) {
   writeFileSync(resolve(root, "GoalPort.exe"), "test-only executable");
   writeFileSync(resolve(root, "LICENSE"), "fixture Electron MIT text\n");
   writeFileSync(resolve(root, "LICENSES.chromium.html"), "<html>fixture chromium notices</html>\n");
-  for (const name of ["main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs", "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordination-record.cjs", "cli-coordinate.cjs", "harness-runtime.cjs", "dist/index.html"]) writeFileSync(resolve(stage, name), "test-only app content");
+  for (const name of [...STAGED_APP_MODULES, "dist/index.html", "dist/coordination-engine.cjs"]) writeFileSync(resolve(stage, name), "test-only app content");
   writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", version, main: "main.cjs" }));
   const buildInfo = { schemaVersion: 1, product: "GoalPort", version, channel: "Stable V1 RC", electronVersion: "44.0.0", source, components: Object.fromEntries(COMPONENTS.map((name) => [name, fileHash(resolve(root, "resources", name))])) };
   writeFileSync(resolve(stage, "build-info.json"), JSON.stringify(buildInfo));

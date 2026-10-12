@@ -56,6 +56,8 @@ interface DraftGoalComposerProps {
   connected: boolean;
   busy: boolean;
   blockedFromSending: boolean;
+  /** Non-null holds Send (quiet progress, not an error): harness access for this draft is still resolving. */
+  waitingOn: string | null;
   retryLabel?: string;
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
@@ -74,11 +76,12 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const canSubmit = !busy
+    && !waitingOn
     && (!blockedFromSending || Boolean(retryLabel))
     && connected
     && draft.workspace.trim().length > 0
@@ -147,6 +150,8 @@ export function DraftGoalComposer({
           disabled={busy}
         />
 
+        {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
+
         {error ? (
           <div className="dialog-note" role="alert">
             <span aria-hidden="true">!</span>
@@ -163,7 +168,7 @@ export function DraftGoalComposer({
         ) : null}
 
         <div className="dialog-actions">
-          <button className="button button-quiet" type="button" onClick={onDiscard} disabled={busy}>Discard draft</button>
+          <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy}>Discard draft</button>
           <button className="button button-primary" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
             {busy ? "Starting…" : (retryLabel ?? "Send")}
             <span aria-hidden="true">↗</span>

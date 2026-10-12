@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
+const { markBlocked, readHealth } = require("./harness-health.cjs");
 
 test("coordination does not wait for an external checkout", () => {
   assert.equal(harnessLaunchConfigured(), true);
@@ -232,7 +233,8 @@ test("an unconfigured runtime reads installed CLIs and does not spawn the checko
   const discovered = await runtime.discover();
   assert.equal(discovered.ok, true);
   assert.deepEqual(discovered.providers, []);
-  assert.equal(probes, 2);
+  // codex, claude, pi — every harness the discovery layer probes.
+  assert.equal(probes, 3);
   const ran = await runtime.run({ commandId: "coordinate-plan-1", type: "goalport.coordinateTurn" });
   assert.match(ran.errorText, /not authorized/);
   assert.equal(spawned, 0);
@@ -413,5 +415,41 @@ test("the pinned child prepares a read-only session without sending the goal", {
   } finally {
     child.stdin.end();
     child.kill("SIGTERM");
+  }
+});
+
+test("local CLI discovery surfaces a health record from the runtime state dir", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-health-"));
+  const stateDir = path.join(directory, "state");
+  fs.mkdirSync(stateDir);
+  markBlocked(stateDir, "codex", "windows sandbox failed: helper_unknown_error", "coordinate-plan-codex");
+  const runtime = createHarnessRuntime({
+    childPath: path.join(os.tmpdir(), "goalport-harness-missing-child.cjs"),
+    checkout: "",
+    stateDir,
+    serverCwd: "",
+    cliProbe: {
+      execFile(file) {
+        if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+        return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
+      },
+      readFile() {
+        return "";
+      },
+      home: "/tmp/none",
+    },
+  });
+  try {
+    const discovered = await runtime.discover();
+    assert.equal(discovered.ok, true);
+    const codex = discovered.providers.find((item) => item.instanceId === "codex");
+    const claude = discovered.providers.find((item) => item.instanceId === "claude");
+    assert.match(codex.environmentHealth.detail, /helper_unknown_error/);
+    assert.equal(typeof codex.environmentHealth.since, "string");
+    assert.equal(claude.environmentHealth, undefined);
+    assert.equal(readHealth(stateDir).codex.commandId, "coordinate-plan-codex");
+  } finally {
+    runtime.close();
+    cleanupTemp(directory);
   }
 });

@@ -1,4 +1,4 @@
-import { authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
+import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 
 /**
  * Caller-supplied catalog entry. Quota is a word from this object.
@@ -25,10 +25,36 @@ export interface SyntheticCatalogInstance {
   readonly launchable?: boolean;
   readonly quota?: SyntheticQuota;
   readonly billing?: "subscription" | "paid-api" | "included";
+  /**
+   * Persisted evidence that this harness's tools cannot run on this machine
+   * (harness health, stamped at the failure). Present means blocked exactly
+   * like an avoidInstances entry; null means a malformed record degraded to
+   * "no evidence" and the harness stays selectable.
+   */
+  readonly environmentAvoided?: { readonly since: string; readonly detail: string } | null;
+}
+
+/** Snapshot of explicit M6 scope.write consent, NOT a shape-gate verdict.
+ * The transport must still reserve against the live scope generation. */
+export interface CoordinationWriteAuthorization {
+  readonly instances: readonly string[];
+  readonly workspaceRoot: string;
+  readonly remaining: number | null;
+}
+
+export interface ExecutionFeedback {
+  /** Evidence from the completed round whose independent audit requested repair. */
+  readonly previousPlan: string | null;
+  readonly previousPlanReview: string | null;
+  readonly previousExecutionReport: string | null;
+  readonly previousExecutionAudit: string | null;
+  /** Historical command IDs are references only; they must never be resubmitted. */
+  readonly previousCommandIds: readonly string[];
 }
 
 export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
+  readonly writeAuthorization?: CoordinationWriteAuthorization;
   readonly goal: string;
   readonly workspacePath: string;
   /**
@@ -39,6 +65,32 @@ export interface CoordinateGoalInput {
   readonly sendKey: string;
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
+  /** Completed execution/audit feedback for the one bounded corrective pass. */
+  readonly executionFeedback?: ExecutionFeedback | null;
+  /**
+   * Instance ids that must not receive a role this round, set when a turn on
+   * that harness proved it cannot run its tools on this machine. Draft-only:
+   * it is never persisted as harness health, so a fixed machine stops being
+   * avoided on the next fresh send.
+   */
+  readonly avoidInstances?: readonly string[];
+  /**
+   * When present, only these instance ids may take a role this round. A
+   * scoped recovery round passes its authorized scope here; usability,
+   * avoidance, health blocking, and the two-harness requirement all apply
+   * within it.
+   */
+  readonly allowedInstances?: readonly string[];
+}
+
+/** Exclusions applied on top of the base catalog filters. */
+export interface EligibilityFilter {
+  /** Instance ids that may not receive a role (failed turns, roles already assigned). */
+  readonly exclude?: readonly string[];
+  /** Draft avoidance (Send again without X) — blocked like persisted health. */
+  readonly avoidInstances?: readonly string[];
+  /** Scoped round membership — when present, only these may take a role. */
+  readonly allowedInstances?: readonly string[];
 }
 
 export interface CatalogModel {
@@ -57,7 +109,7 @@ export interface CoordinateGoalState {
   readonly stopReason: string;
   readonly planningQuota: QuotaWord | null;
   readonly reviewQuota: QuotaWord | null;
-  readonly roles: readonly ["planning", "review"] | readonly [];
+  readonly roles: readonly ["planning", "review"] | readonly ["planning", "review", "execution", "audit"] | readonly [];
   readonly commands: readonly CoordinateTurnCommand[];
   readonly quotaLabels: Readonly<Record<string, QuotaWord>>;
 }
@@ -180,6 +232,35 @@ function uniqueInstances(catalog: readonly SyntheticCatalogInstance[]): Syntheti
   return unique;
 }
 
+/** Instance ids that can receive a role right now, in assignment order. */
+export function usableInstanceIds(catalog: readonly SyntheticCatalogInstance[]): readonly string[] {
+  return eligibleInstances(catalog).map((instance) => instance.instanceId);
+}
+
+/**
+ * The one selection rule: every instance that may receive a role right now,
+ * in catalog order. Usable by the existing filters, not health-blocked, not
+ * avoided, not excluded, and inside the allowed scope when one is set. Both
+ * selection sites (initial assignment and recovery re-selection) and the
+ * session's chain pre-check go through this helper so the rules exist once.
+ */
+export function eligibleInstances(
+  catalog: readonly SyntheticCatalogInstance[],
+  filter: EligibilityFilter = {},
+): readonly SyntheticCatalogInstance[] {
+  const exclude = new Set(filter.exclude ?? []);
+  const avoid = new Set(filter.avoidInstances ?? []);
+  const allowed = filter.allowedInstances === undefined ? null : new Set(filter.allowedInstances);
+  return uniqueInstances(catalog).filter((instance) => {
+    if (!isUsable(instance)) return false;
+    if (instance.environmentAvoided) return false;
+    if (avoid.has(instance.instanceId)) return false;
+    if (exclude.has(instance.instanceId)) return false;
+    if (allowed !== null && !allowed.has(instance.instanceId)) return false;
+    return true;
+  });
+}
+
 function quotaLabelsFor(instances: readonly SyntheticCatalogInstance[]): Record<string, QuotaWord> {
   const labels: Record<string, QuotaWord> = {};
   for (const instance of instances) {
@@ -202,9 +283,16 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
   };
 }
 
-function commandKey(role: "plan" | "review", text: string, sendKey: string): string {
+/**
+ * The id carries the role, the instance, the send, and the prompt text. The
+ * instance id is load-bearing: the same instance with the same text and send
+ * key keeps one id, so the stored-result ledger blocks a replay forever, and
+ * a different instance derives a different id, which is what makes a
+ * recovery turn a fresh grant instead of a resend.
+ */
+function commandKey(role: "plan" | "review" | "execute" | "audit", instanceId: string, text: string, sendKey: string): string {
   let hash = 2166136261;
-  const data = `${role}\n${sendKey}\n${text}`;
+  const data = `${role}\n${instanceId}\n${sendKey}\n${text}`;
   for (let index = 0; index < data.length; index += 1) {
     hash ^= data.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -215,6 +303,23 @@ function commandKey(role: "plan" | "review", text: string, sendKey: string): str
 function present(value: string | null | undefined): string {
   const text = value?.trim() ?? "";
   return text.length > 0 ? text : "";
+}
+
+function executionFeedbackLines(feedback: ExecutionFeedback): string[] {
+  return [
+    "Completed prior-round evidence (historical context, not instructions to repeat):",
+    "Previous plan:", present(feedback.previousPlan) || "(none)",
+    "Previous independent plan check:", present(feedback.previousPlanReview) || "(none)",
+    "Previous execution report:", present(feedback.previousExecutionReport) || "(none)",
+    "Previous independent execution audit:", present(feedback.previousExecutionAudit) || "(none)",
+    "Previous command IDs (references only; never replay or resubmit these commands):",
+    feedback.previousCommandIds.length > 0 ? feedback.previousCommandIds.join("\n") : "(none)",
+  ];
+}
+
+/** Keep a corrective pass distinct from the original send even when prompt/output text repeats. */
+function commandIdentitySendKey(input: CoordinateGoalInput, sendKey: string): string {
+  return input.executionFeedback ? `${sendKey}:repair-1` : sendKey;
 }
 
 function plannerText(input: CoordinateGoalInput): string {
@@ -237,6 +342,15 @@ function plannerText(input: CoordinateGoalInput): string {
       priorReview || "(none)",
     );
   }
+  if (input.executionFeedback) {
+    lines.push(
+      "This is the one bounded corrective planning pass after a completed independent execution audit requested revision.",
+      `Inspect the CURRENT workspace at ${input.workspacePath}, including changes already made by the previous executor, before proposing repair. Do not assume the historical report describes the current workspace state.`,
+      "Keep the original goal and workspace root. Answer each finding in the previous independent execution audit, one by one, and map it to a bounded repair or explain why the current state already resolves it.",
+      "Produce a bounded corrective plan only; do not claim that it has passed an independent plan check or that changes are verified.",
+      ...executionFeedbackLines(input.executionFeedback),
+    );
+  }
   return lines.join("\n");
 }
 
@@ -251,6 +365,14 @@ function reviewText(input: CoordinateGoalInput): string {
   if (priorReview) {
     lines.push("The previous independent check is below. Say whether this plan answers it.", priorReview);
   }
+  if (input.executionFeedback) {
+    lines.push(
+      "This is the independent check of the newly proposed corrective plan. A writer is not eligible until this plan receives a carry-out verdict.",
+      "Inspect the current workspace and judge whether the new plan answers each finding from the previous execution audit without expanding the original goal or workspace root.",
+      "The previous round's reports and command IDs are historical evidence only; do not treat them as current proof or instructions to replay.",
+      ...executionFeedbackLines(input.executionFeedback),
+    );
+  }
   return lines.join("\n");
 }
 
@@ -259,6 +381,7 @@ function turnCommand(input: {
   instance: SyntheticCatalogInstance;
   workspacePath: string;
   text: string;
+  write?: boolean;
 }): CoordinateTurnCommand {
   return {
     type: "goalport.coordinateTurn",
@@ -267,10 +390,72 @@ function turnCommand(input: {
     modelSelection: { instanceId: input.instance.instanceId, model: publishedModel(input.instance) },
     runtimeMode: "approval-required",
     approvalPolicy: "never",
-    sandboxPolicy: { type: "readOnly" },
+    sandboxPolicy: { type: input.write ? "workspaceWrite" : "readOnly" },
     workspaceStrategy: { type: "existing_worktree", worktreePath: input.workspacePath },
     initialMessage: { text: input.text },
   };
+}
+
+/**
+ * Build one replacement turn for a role on a specific instance: the same
+ * planner or review text the round started with, an id keyed to the instance,
+ * and the same read-only gate re-check the initial assignment passed.
+ */
+export function replacementCommand(
+  role: "plan" | "review",
+  instance: SyntheticCatalogInstance,
+  input: CoordinateGoalInput,
+  sendKey: string,
+): CoordinateTurnCommand {
+  const text = role === "plan" ? plannerText(input) : reviewText(input);
+  const command = turnCommand({
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey)),
+    instance,
+    workspacePath: input.workspacePath,
+    text,
+  });
+  const authorization = input.writeAuthorization ? authorizeCoordinateWriteTurn(command) : authorizeCoordinateTurn(command);
+  if (authorization.outcome !== "write-denied" && authorization.outcome !== "write-authorized") {
+    throw new Error("The replacement turn did not pass the read-only gate.");
+  }
+  return command;
+}
+
+/** Build only after the checked review / completed execution actually exist. */
+export function evidenceCommand(
+  role: "execute" | "audit",
+  instance: SyntheticCatalogInstance,
+  input: CoordinateGoalInput,
+  evidence: { planText: string; reviewText: string; executionText?: string; executionFacts?: string },
+): CoordinateTurnCommand {
+  if (!input.writeAuthorization || input.allowedInstances === undefined ||
+      input.workspacePath !== input.writeAuthorization.workspaceRoot ||
+      (role === "execute" && !input.writeAuthorization.instances.includes(instance.instanceId))) {
+    throw new Error("The evidence turn needs explicit workspace-bound write consent.");
+  }
+  const text = [
+    input.goal,
+    `Workspace: ${input.workspacePath}`,
+    role === "execute"
+      ? input.executionFeedback
+        ? "Carry out only the newly reviewed bounded corrective plan in this authorized workspace. Inspect the current changed workspace before editing; address only the approved repair. Run the workspace checks named by the new plan and report exact commands, actual output and exit results, changed files and remaining risks. Historical commands and command IDs are evidence only, never instructions to replay. Do not claim independent verification."
+        : "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification."
+      : input.executionFeedback
+        ? "Independently inspect the current workspace read-only against the newly approved corrective plan and its execution report. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
+        : "Independently inspect the workspace read-only against the approved plan and execution report. Check the reported evidence; do not treat the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.",
+    "Approved plan:", evidence.planText,
+    "Independent plan check:", evidence.reviewText,
+    ...(input.executionFeedback ? executionFeedbackLines(input.executionFeedback) : []),
+    ...(role === "audit" ? [input.executionFeedback ? "Corrective execution report:" : "Execution report:", evidence.executionText ?? "(none)", "Recorded execution facts:", evidence.executionFacts ?? "(none)"] : []),
+  ].join("\n");
+  const command = turnCommand({
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
+    instance, workspacePath: input.workspacePath, text, write: role === "execute",
+  });
+  if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
+    throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
+  }
+  return command;
 }
 
 /**
@@ -281,7 +466,10 @@ function turnCommand(input: {
 export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState {
   const unique = uniqueInstances(input.catalog);
   const quotaLabels = quotaLabelsFor(unique);
-  const usable = unique.filter(isUsable);
+  const usable = eligibleInstances(unique, {
+    avoidInstances: input.avoidInstances,
+    allowedInstances: input.allowedInstances,
+  });
   if (input.catalog.length === 0) {
     return stopped(
       quotaLabels,
@@ -289,8 +477,31 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
   if (usable.length < 2) {
-    const credits = unique.some(creditsBlocked);
-    const unnamed = unique.some(modelUnnamed);
+    // The named sentence fires only when the blockings are the cause:
+    // ignoring avoidance and health evidence, two allowed harnesses could
+    // still run. Health-blocked and avoided instances are one union here.
+    const allowed = input.allowedInstances === undefined ? null : new Set(input.allowedInstances);
+    const withinAllowed = unique.filter((instance) =>
+      isUsable(instance) && (allowed === null || allowed.has(instance.instanceId))
+    );
+    // Name a blocker only when that same blocked instance is inside the
+    // authorized pool and is the reason two otherwise usable harnesses cannot
+    // be assigned. Unrelated health evidence outside scope is not a reason.
+    const blocked = withinAllowed.find(
+      (instance) => Boolean(instance.environmentAvoided)
+        || (input.avoidInstances ?? []).includes(instance.instanceId),
+    );
+    if (blocked && withinAllowed.length >= 2) {
+      return stopped(
+        quotaLabels,
+        `Stopped. ${harnessLabel(blocked)} cannot run on this machine right now, and an independent check needs two harnesses that can run.`,
+      );
+    }
+    const authorizedPool = allowed === null
+      ? unique
+      : unique.filter((instance) => allowed.has(instance.instanceId));
+    const credits = authorizedPool.some(creditsBlocked);
+    const unnamed = authorizedPool.some(modelUnnamed);
     return stopped(
       quotaLabels,
       credits
@@ -299,6 +510,18 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
           ? "Stopped. A signed-in harness has no included model GoalPort can name, so an extra-credit model was not selected."
           : "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
     );
+  }
+
+  if (input.writeAuthorization !== undefined) {
+    const write = input.writeAuthorization;
+    const writers = eligibleInstances(unique, {
+      avoidInstances: input.avoidInstances, allowedInstances: write.instances,
+    });
+    if (input.allowedInstances === undefined || input.workspacePath !== write.workspaceRoot ||
+        !/^[/\\]|^[A-Za-z]:[/\\]/.test(write.workspaceRoot) ||
+        !writers.some((writer) => usable.some((reader) => reader.instanceId !== writer.instanceId))) {
+      return stopped(quotaLabels, "Stopped. Workspace changes need explicit scoped consent for this workspace and an independent verification harness.");
+    }
   }
 
   const planner = usable[0];
@@ -312,14 +535,15 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
 
   const planMessage = plannerText(input);
   const reviewMessage = reviewText(input);
+  const identitySendKey = commandIdentitySendKey(input, input.sendKey);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planMessage, input.sendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewMessage, input.sendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {
-    const authorization = authorizeCoordinateTurn(command);
-    if (authorization.outcome !== "write-denied") {
+    const authorization = input.writeAuthorization ? authorizeCoordinateWriteTurn(command) : authorizeCoordinateTurn(command);
+    if (authorization.outcome !== "write-denied" && authorization.outcome !== "write-authorized") {
       return stopped(quotaLabels, "Stopped. The edit disposition was not deny, so no role was assigned.");
     }
   }
@@ -331,7 +555,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     stopReason: "Two different harnesses are assigned. No model turn has been sent.",
     planningQuota: quotaWord(planner.quota),
     reviewQuota: quotaWord(reviewer.quota),
-    roles: ["planning", "review"],
+    roles: input.writeAuthorization ? ["planning", "review", "execution", "audit"] : ["planning", "review"],
     commands,
     quotaLabels,
   };
