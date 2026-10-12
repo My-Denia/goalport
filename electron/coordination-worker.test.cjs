@@ -130,7 +130,7 @@ test("a record-save failure still settles the job terminal and releases the slot
   assert.equal(r.status.active, false);
   assert.equal(typeof r.status.outcome?.error, "string");
   // The concrete user harm: a NEW goal is admissible in the same profile.
-  const second = r.store.startAdmission({ requestId: "after-save-failure", goal: "Next goal", workspacePath: "C:\\work\\gp", allowedInstances: ["codex", "claude"], maxTurns: 4, backgroundConsent: true });
+  const second = r.store.startAdmission({ requestId: "after-save-failure", goal: "Next goal", workspacePath: path.resolve("/tmp/gp-savefail"), allowedInstances: ["codex", "claude"], maxTurns: 4, backgroundConsent: true });
   assert.equal(second.ok, true);
 });
 test("blank selected workspace cannot clear governing hold", async t => { const r = await scenario(t, { snapshot: { bounds: { projectionUnavailable: false }, project: { workspaceRoot: "" }, stopResponsibility: { writeResponsibility: "held" } } }); assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0); });
