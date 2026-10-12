@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
@@ -40,7 +41,7 @@ function discoveryFailureText(discovered) {
   return "The harness list could not be read, so no harness was assigned.";
 }
 
-async function discoverCoordination(env, runtime, generation) {
+async function discoverCoordination(env, runtime, generation, consentReader) {
   if (!runtimeReady(runtime)) {
     return {
       connected: false,
@@ -71,13 +72,13 @@ async function discoverCoordination(env, runtime, generation) {
   }
   return {
     connected: true,
-    sendAuthorized: env.GOALPORT_COORDINATE_SEND === "1",
+    sendAuthorized: harnessLaunchConfigured(env, consentReader),
     providers: Array.isArray(discovered.providers) ? discovered.providers : [],
     stopReason: null,
   };
 }
 
-async function launchOne(env, runtime, command, generation, scopeCtx) {
+async function launchOne(env, runtime, command, generation, scopeCtx, consentReader) {
   const scopeModule = scopedLaunch(scopeCtx);
   const hadWrite = Boolean(scopeModule?.current?.()?.write);
   const metadata = () => scopeModule ? remainingAfter(scopeModule, hadWrite) : {};
@@ -93,7 +94,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx) {
   if (!runtimeReady(runtime)) {
     return { launched: false, prepared: false, text: "", errorText: DISCONNECTED_LAUNCH, ...refusalMetadata() };
   }
-  if (env.GOALPORT_COORDINATE_SEND !== "1") {
+  if (!harnessLaunchConfigured(env, consentReader)) {
     return { launched: false, prepared: true, text: "", errorText: UNAUTHORIZED, ...refusalMetadata() };
   }
   if (typeof runtime.run !== "function") {

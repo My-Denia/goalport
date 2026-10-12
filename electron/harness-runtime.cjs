@@ -18,8 +18,10 @@ function chosenPath(options, key, envName) {
   return configuredPath(process.env[envName]);
 }
 
-function harnessLaunchConfigured() {
-  return true;
+function harnessLaunchConfigured(env = process.env, consentReader = () => ({ allowed: false })) {
+  if (env.GOALPORT_COORDINATE_SEND === "1") return true;
+  try { return consentReader?.()?.allowed === true; }
+  catch { return false; } // Unreadable consent never grants capability.
 }
 
 function defaultChildPath() {
