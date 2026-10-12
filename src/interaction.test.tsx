@@ -2282,6 +2282,42 @@ describe("harness access panel and scoped rounds", () => {
     expect(bridge.launched.length).toBe(2);
   });
 
+  it("saving harness access keeps the just-saved write selection and consent across the requestId rotation", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (_command, call) => {
+        if (call === 1) return { text: PLAN_TEXT, errorText: "", turnsRemaining: 1 };
+        return { text: "", errorText: "", stopCode: "scope-exhausted", scopeExhausted: true, turnsRemaining: 0 };
+      },
+    });
+    window.goalportCore!.backgroundStart = async () => { throw new Error("not sent in this test"); };
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    // Enter change mode, make the user's choices: a write harness, non-default
+    // write turns, and keep-working consent.
+    fireEvent.click(screen.getByRole("button", { name: "Allow more turns" }));
+    expect(await screen.findByRole("button", { name: "Save harness access" })).toBeTruthy();
+    const writeBox = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+    fireEvent.click(writeBox);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /write turns/i }), { target: { value: "3" } });
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Keep working after closing" }));
+    // The save rotates the draft requestId (anti-replay kept); the panel
+    // effect must not wipe the selections the user just saved.
+    fireEvent.click(screen.getByRole("button", { name: "Save harness access" }));
+    await waitFor(async () => {
+      const box = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+      expect((box as HTMLInputElement).checked).toBe(true);
+    });
+    await waitFor(async () => {
+      expect((await screen.findByRole("spinbutton", { name: /write turns/i }) as HTMLInputElement).value).toBe("3");
+      expect(((await screen.findByRole("checkbox", { name: "Keep working after closing" })) as HTMLInputElement).checked).toBe(true);
+    });
+    expect(bridge.order.filter((step) => step === "authorize").length).toBe(2);
+  });
+
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
     const bridge = scopedBridge({
       providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],

@@ -125,13 +125,27 @@ async function runWorker(config, deps = {}) {
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
     const pending = store.getStatus(config.jobId).pendingCommand;
     const status = pending || liveResult.verdict === "unconfirmed" ? "unconfirmed" : store.getStatus(config.jobId).revoked ? "stopped" : ["verified", "checked", "revise"].includes(liveResult.verdict) ? "completed" : "failed";
+    // The plan record (history/Plans) and the job's own terminal outcome
+    // are separate durable facts. A record-save failure must not prevent
+    // the honest terminal outcome, the scope revoke, or the admission
+    // release — otherwise one failed history write wedges the profile slot
+    // forever and no later goal can start. The outcome carries an honest
+    // note instead; the success path keeps the audited record-before-
+    // outcome order unchanged.
+    let recordSaveFailed = false;
     try {
       (deps.saveRecord ?? saveRecord)(config.directory, { ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal, savedAt: new Date().toISOString() });
-      store.recordOutcome(config.jobId, { status, report: liveResult }, owner);
-    } catch (error) { storageFailed = true; throw error; }
+    } catch {
+      recordSaveFailed = true;
+    }
+    store.recordOutcome(config.jobId, {
+      status,
+      report: liveResult,
+      ...(recordSaveFailed ? { error: "The saved plan record could not be written; the retained result below is this job's own record." } : {}),
+    }, owner);
     scope.revoke();
     if (status !== "unconfirmed") store.releaseAdmission(config.jobId, owner);
-    return { status, report: liveResult };
+    return { status, report: liveResult, ...(recordSaveFailed ? { recordSaveFailed: true } : {}) };
   } catch (error) {
     scope.revoke();
     if (!storageFailed) {

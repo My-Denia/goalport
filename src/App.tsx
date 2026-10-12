@@ -325,6 +325,10 @@ function App() {
   // Set when a handler opens a fresh draft whose panel must start in change
   // mode; the draft-open effect consumes it exactly once.
   const openPanelInChangeMode = useRef(false);
+  // Set by handleConfirmAccessChange: the access-save rotates the draft's
+  // requestId (anti-replay, unchanged), and the panel effect must NOT wipe
+  // the write/consent selections the user just saved on that rotation.
+  const preservePanelSelections = useRef(false);
   const historyRequest = useRef(0);
 
   useEffect(() => {
@@ -474,10 +478,16 @@ function App() {
     setPanelFailSentence(null);
     setScopeMirror(null);
     // Each fresh draft starts without file-change consent. Never restore it
-    // from history or from another draft's live scope.
-    setWriteInstances([]);
-    setWriteTurns(2);
-    setBackgroundConsent(false);
+    // from history or from another draft's live scope — except across the
+    // requestId rotation that a Save-harness-access performs, where the
+    // user's just-saved selections are exactly what must survive.
+    const preserveSelections = preservePanelSelections.current;
+    preservePanelSelections.current = false;
+    if (!preserveSelections) {
+      setWriteInstances([]);
+      setWriteTurns(2);
+      setBackgroundConsent(false);
+    }
     setPanelRequestId(runtimeLessDraftKey);
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
@@ -1447,7 +1457,10 @@ function App() {
       : current));
     setPanelChangeMode(false);
     // The saved change makes the next Send a new round, never a replay of the
-    // round whose record already carries this draft's old request id.
+    // round whose record already carries this draft's old request id. The
+    // rotation below re-keys the panel effect; flag it to keep the write
+    // instances/turns and background consent the user just saved.
+    preservePanelSelections.current = true;
     setDraftGoal((current) => (current ? { ...current, requestId: freshRequestId(), intent: undefined } : current));
   }
 

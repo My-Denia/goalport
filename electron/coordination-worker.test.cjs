@@ -120,6 +120,19 @@ test("literal unknown dispatch retains pending claim and slot, no replay", async
 test("known-not-sent writer stays terminal without repair", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "", errorText: "never sent", messageDispatched: false } }); assert.equal(r.launches.length, 3); assert.equal(r.status.pendingCommand, null); assert.equal(r.records[0].messageDispatched, true); });
 test("post-turn persistence failure retains durable uncertainty and known live result", async t => { const r = await scenario(t, { storageFailure: true }); assert.equal(r.launches.length, 1); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true); });
 test("terminal ordinary record failure does not continue or replenish access", async t => { const r = await scenario(t, { saveFailure: true }); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1); assert.equal(r.scope.current(), null); });
+test("a record-save failure still settles the job terminal and releases the slot", async t => {
+  // The plan record and the job outcome are separate durable facts: a
+  // history write failure must not wedge the profile in a running job
+  // forever (the defect: no later goal could start).
+  const r = await scenario(t, { saveFailure: true });
+  assert.equal(r.result.recordSaveFailed, true);
+  assert.equal(r.status.state, "completed");
+  assert.equal(r.status.active, false);
+  assert.equal(typeof r.status.outcome?.error, "string");
+  // The concrete user harm: a NEW goal is admissible in the same profile.
+  const second = r.store.startAdmission({ requestId: "after-save-failure", goal: "Next goal", workspacePath: "C:\\work\\gp", allowedInstances: ["codex", "claude"], maxTurns: 4, backgroundConsent: true });
+  assert.equal(second.ok, true);
+});
 test("blank selected workspace cannot clear governing hold", async t => { const r = await scenario(t, { snapshot: { bounds: { projectionUnavailable: false }, project: { workspaceRoot: "" }, stopResponsibility: { writeResponsibility: "held" } } }); assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0); });
 test("Core unavailable/active projections refuse", () => { assert.ok(coreRefusal(null)); assert.ok(coreRefusal({ bounds: { projectionUnavailable: true } })); assert.ok(coreRefusal({ bounds: {}, attempt: { state: "ACTIVE" } })); });
 
