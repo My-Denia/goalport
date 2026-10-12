@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, piWindowsLaunch, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
 const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
 
@@ -814,7 +814,7 @@ test("write argv flips exactly one flag per harness; read argv stays byte-identi
 });
 
 test("a pi read turn is toolless and modelless, and a pi write turn is refused", () => {
-  const read = turnSpec(command("pi", "default", "coordinate-plan-pi"));
+  const read = turnSpec(command("pi", "default", "coordinate-plan-pi"), {}, "linux");
   assert.deepEqual(read, {
     file: "pi",
     cwd: "/work/goal",
@@ -824,6 +824,69 @@ test("a pi read turn is toolless and modelless, and a pi write turn is refused",
   assert.deepEqual(turnSpec(writeCommand("pi", "default")), {
     errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.",
   });
+});
+
+function piLaunchFixture(t, { cli = true, node = true, shim = ".cmd" } = {}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-pi-launch-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const prefix = path.join(directory, "npm prefix");
+  const runtime = path.join(directory, "node runtime");
+  const cliJs = path.join(prefix, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+  const nodeExe = path.join(runtime, "node.exe");
+  fs.mkdirSync(prefix, { recursive: true });
+  fs.mkdirSync(runtime, { recursive: true });
+  if (shim) fs.writeFileSync(path.join(prefix, `pi${shim}`), "@echo off\r\n");
+  if (cli) {
+    fs.mkdirSync(path.dirname(cliJs), { recursive: true });
+    fs.writeFileSync(cliJs, "// fixture only\n");
+  }
+  if (node) fs.writeFileSync(nodeExe, "fixture only\n");
+  return { env: { PATH: [prefix, runtime].join(path.delimiter), PATHEXT: ".exe;.cmd;.bat" }, cliJs, nodeExe };
+}
+
+test("a Windows pi npm shim launches node.exe with only cli.js prepended to the read argv", (t) => {
+  const input = command("pi", "default");
+  input.initialMessage.text = 'Plan "only" & <risk> ^ %PATH% tail\\';
+  const expected = turnSpec(input, {}, "linux");
+  for (const shim of [".cmd", ".bat"]) {
+    const { env, cliJs, nodeExe } = piLaunchFixture(t, { shim });
+    assert.deepEqual(piWindowsLaunch(env, "win32"), { file: nodeExe, prefixArgs: [cliJs] });
+    const spec = turnSpec(input, env, "win32");
+    assert.deepEqual(spec, { file: nodeExe, cwd: expected.cwd, args: [cliJs, ...expected.args] });
+    assert.equal(JSON.stringify(spec.args.slice(1)), JSON.stringify(expected.args));
+    assert.deepEqual(turnSpec(writeCommand("pi", "default"), env, "win32"), {
+      errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.",
+    });
+  }
+});
+
+test("a Windows pi shim without the npm-layout cli.js keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { cli: false });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+  assert.equal(turnSpec(input, env, "win32").file, "pi");
+});
+
+test("a Windows pi shim without node.exe keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { node: false });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+  assert.equal(turnSpec(input, env, "win32").file, "pi");
+});
+
+test("a Windows pi launch without a cmd or bat shim keeps the exact legacy fallback", (t) => {
+  const { env } = piLaunchFixture(t, { shim: "" });
+  const input = command("pi", "default");
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(turnSpec(input, env, "win32"), turnSpec(input, env, "linux"));
+});
+
+test("the pi Windows launch helper does not probe files off Windows", () => {
+  const fsApi = { existsSync() { throw new Error("must not probe off Windows"); } };
+  assert.equal(piWindowsLaunch({}, "linux", fsApi), null);
+  assert.equal(piWindowsLaunch({}, "darwin", fsApi), null);
 });
 
 // Byte-frozen regression lock: the codex and claude argv exactly as on HEAD,
@@ -855,11 +918,12 @@ test("a granted pi turn returns the trimmed text, and a refused write turn never
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-pi-"));
   fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-pi\ncoordinate-execute-pi\n");
   let spawns = 0;
+  const expected = turnSpec(command("pi", "default", "coordinate-plan-pi"));
   const spawnTurn = async (spec) => {
     spawns += 1;
-    assert.equal(spec.file, "pi");
+    assert.equal(spec.file, expected.file);
     assert.equal(spec.cwd, "/work/goal");
-    assert.deepEqual(spec.args, ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", "Plan only."]);
+    assert.deepEqual(spec.args, expected.args);
     return { code: 0, stdout: " ok\n " };
   };
   try {
