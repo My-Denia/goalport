@@ -17,6 +17,26 @@ function setup(t, overrides = {}) {
   const input = { requestId: 'one-send', goal: 'Plan this fixture', workspaceRoot: directory, readInstances: ['codex', 'claude'], readMaxTurns: 4, backgroundConsent: true };
   return { directory, options, input, launches, host };
 }
+test('background gate truth table preserves per-goal and checkout refusals', async t => {
+  for (const envSet of [false, true]) for (const allowed of [false, true]) {
+    for (const backgroundConsent of [false, true]) for (const checkout of [false, true]) for (const serverCwd of [false, true]) {
+      const env = { GOALPORT_COORDINATE_SEND: envSet ? '1' : '0',
+        ...(checkout ? { GOALPORT_HARNESS_CHECKOUT: '/pinned' } : {}),
+        ...(serverCwd ? { GOALPORT_HARNESS_SERVER_CWD: '/pinned/server' } : {}) };
+      const r = setup(t, { env, consent: () => ({ allowed }) });
+      const capability = (envSet || allowed) && !checkout && !serverCwd;
+      if (capability && backgroundConsent) {
+        await r.host.start({ ...r.input, backgroundConsent });
+        assert.equal(r.launches.length, 1);
+      } else {
+        await assert.rejects(() => r.host.start({ ...r.input, backgroundConsent }),
+          error => error.code === (capability ? 'background-consent-required' : 'background-unavailable'));
+        assert.equal(r.launches.length, 0);
+        assert.equal(fs.existsSync(path.join(r.directory, 'coordination-jobs')), false);
+      }
+    }
+  }
+});
 test('separate consent gates and bootstrap/refused Core launch nothing', async t => {
   for (const overrides of [{ ready: () => false }, { env: {} }, { env: { GOALPORT_COORDINATE_SEND: '1', GOALPORT_HARNESS_CHECKOUT: '/pinned' } }, { ordinaryScope: () => ({ generation: 1 }) }, { snapshot: async () => ({ bounds: { projectionUnavailable: true } }) }, { snapshot: async () => ({ bounds: {}, project: { workspaceRoot: '' }, stopResponsibility: { writeResponsibility: 'held' } }) }]) {
     const r = setup(t, overrides); await assert.rejects(() => r.host.start(r.input)); assert.equal(r.launches.length, 0);

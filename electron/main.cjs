@@ -15,6 +15,7 @@ const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state
 const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
 const { createBackgroundHost, backgroundStartReply } = require("./coordination-background.cjs");
+const { createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
@@ -659,8 +660,12 @@ function coordinationRuntime() {
   }
   return harnessRuntime;
 }
+function backgroundSendConsent() {
+  return createBackgroundSendConsentStore(coordinationDirectory());
+}
 const backgroundHost = createBackgroundHost({
   directory: coordinationDirectory,
+  consent: () => backgroundSendConsent().read(),
   ready: () => !profileManager || profileReady,
   env: process.env,
   ordinaryScope: () => coordinationScope.current(),
@@ -1190,7 +1195,7 @@ app.whenReady().then(() => {
     // userData as both.
     dataPath: profile?.durableDirectory ?? app.getPath("userData"),
     browserStatePath: profile?.browserStateDirectory ?? app.getPath("userData"),
-    coordinationConfigured: harnessLaunchConfigured()
+    coordinationConfigured: harnessLaunchConfigured(process.env, () => backgroundSendConsent().read())
   }));
   handleTrusted("goalport:bootstrap-current", () => {
     // An additive optional diagnostics child exposes
@@ -1218,6 +1223,10 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:core-snapshot", (_, request) => invokeCore(request));
   handleTrusted("goalport:core-command", (_, request) => guardedCoreCommand(request));
+  handleTrusted("goalport:background-send-consent", (_, action) => {
+    if (action !== "read" && profileManager && !profileReady) throw new Error("Profile bootstrap must finish before changing background Send consent.");
+    return backgroundSendConsent().act(action);
+  });
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
@@ -1327,7 +1336,7 @@ app.whenReady().then(() => {
       return { ok: false, requestId, choice: "stop", allowQuitLatch: false, coreAcknowledged: false, error: message };
     }
   });
-  handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation));
+  handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation, () => backgroundSendConsent().read()));
   handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => { refuseCompetingCoordination(); return launchOne(
     process.env,
     coordinationRuntime(),
@@ -1335,7 +1344,8 @@ app.whenReady().then(() => {
     generation,
     // The third argument is the scope generation captured at authorize. A
     // launch without it stays exactly the legacy two-argument launch.
-    typeof scopeGeneration === "number" ? { scope: coordinationScope, scopeGeneration } : undefined
+    typeof scopeGeneration === "number" ? { scope: coordinationScope, scopeGeneration } : undefined,
+    () => backgroundSendConsent().read()
   ); });
   handleTrusted("goalport:coordinate-cancel", (_event, generation) => {
     coordinationRuntime().cancel(generation);

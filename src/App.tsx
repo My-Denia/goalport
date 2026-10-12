@@ -265,7 +265,10 @@ function App() {
   // The full harness-access surface (panel, scoped sends, Use again) needs the
   // whole scope bridge. A build with only the legacy discover/launch pair
   // keeps the pre-panel behavior untouched.
-  const scopeBridgeReady = coordinationAvailable
+  // Discovery can show the grant affordance before any quota-spending Send.
+  const scopeBridgeReady = (coordinationAvailable
+    || (client.mode === "electron" && Boolean(window.goalportCore?.backgroundSendConsent)
+      && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch)))
     && Boolean(window.goalportCore?.coordinationAuthorize)
     && Boolean(window.goalportCore?.coordinationScope)
     && Boolean(window.goalportCore?.coordinationRevoke)
@@ -826,6 +829,7 @@ function App() {
       setDraftBusy(true);
       try {
         if (backgroundConsent) {
+          if (appInfo?.coordinationConfigured !== true) return; // Grant affordance explains the blocked Send.
           const start = window.goalportCore?.backgroundStart;
           if (!scopedSend || !start) { setDraftError({ sentence: "Background Send is unavailable; nothing was admitted." }); return; }
           // Admission is this job's single Send, never a retryable draft or
@@ -2196,6 +2200,14 @@ function App() {
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
                       backgroundConsent={backgroundConsent}
+                      backgroundConfigured={appInfo?.coordinationConfigured === true}
+                      onAllowBackgroundSend={window.goalportCore?.backgroundSendConsent ? async () => {
+                        const consent = await window.goalportCore!.backgroundSendConsent!("grant");
+                        if (!consent.allowed) throw new Error("Background Send consent was not granted.");
+                        const info = await client.appInfo?.();
+                        if (!info?.coordinationConfigured) throw new Error("Background Send capability is not ready.");
+                        setAppInfo(info);
+                      } : undefined}
                       onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
                       providers={panelProviders}
                       selected={selectedInstances}
@@ -2240,7 +2252,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
