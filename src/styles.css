@@ -694,6 +694,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .provider-claude { background: #3a3344; color: #d3b8e7; }
 .provider-codex { background: #2d443e; color: #a5ddc6; }
 .provider-grok { background: #3f3b31; color: #e5d3a2; }
+.provider-pi { background: #40302b; color: #e6c5a8; }
 .provider-scenario { background: #2f3a4e; color: #b7d0ef; }
 .provider-unassigned { background: var(--panel-soft); color: var(--ink-muted); }
 .runtime-picker-list {

@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, turnSpec, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
+const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
 const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
 
@@ -32,6 +32,9 @@ test("installed subscription CLIs are visible without a checkout", async () => {
         assert.deepEqual(args, ["login", "status"]);
         return { stdout: "Logged in using ChatGPT\n" };
       }
+      // A failing pi probe keeps this test's roster at codex+claude; the pi
+      // discovery cases below cover the success shape.
+      if (file === "pi") return { stdout: "" };
       assert.equal(file, "claude");
       assert.deepEqual(args, ["auth", "status", "--json"]);
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro", email: "hidden@example.invalid" }) };
@@ -53,6 +56,7 @@ test("Codex login status on stderr still counts as signed in", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "", stderr: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: "", stderr: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
     },
   });
@@ -69,6 +73,7 @@ test("an API-key login is not given an included model", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using an API key\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "apiKey" }) };
     },
   });
@@ -81,6 +86,13 @@ test("an API-key login is not given an included model", async () => {
 test("codex and claude replies keep the assistant text", () => {
   assert.equal(codexReply('{"type":"item.completed","item":{"type":"agent_message","text":"Bounded plan."}}\n'), "Bounded plan.");
   assert.equal(claudeReply('{"type":"result","result":"Needs a smaller step.\\nVERDICT: revise","is_error":false}').text, "Needs a smaller step.\nVERDICT: revise");
+});
+
+test("a pi reply is the trimmed stdout text and never a provider failure", () => {
+  assert.deepEqual(replyFrom("pi", " ok\n "), { text: "ok", failed: false });
+  // Empty text stays failed:false so runCliTurn's no-text stop sentence
+  // ("finished without any text") carries it through the existing path.
+  assert.deepEqual(replyFrom("pi", "   \n"), { text: "", failed: false });
 });
 
 test("a granted command spawns once and a repeat returns the stored text", async () => {
@@ -343,6 +355,7 @@ test("a ChatGPT login without an explicit model still names the built-in default
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
     },
   });
@@ -359,10 +372,73 @@ test("a single-quoted top-level model line is read", async () => {
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }) };
     },
   });
   assert.equal(discovered.providers[0].models[0].slug, "gpt-6.1-sol");
+});
+
+// The real-machine probe shape (pi --offline --list-models): a provider/
+// model/context header row plus model rows whose context column starts with
+// a digit (1M, 262.1K, ...).
+const PI_TABLE_STDOUT = [
+  "provider     model                      context  max-out  thinking  images",
+  "deepseek     deepseek-flash             1M       384K     yes       yes",
+  "kimi-coding  kimi-for-coding            1.0M     32.8K    yes       yes",
+  "",
+].join("\n");
+
+test("a pi install with an enumerable model table is discovered with its built-in default", async () => {
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return 'model = "gpt-6.1-sol"\n';
+    },
+    execFile(file, args) {
+      if (file === "pi") {
+        assert.deepEqual(args, ["--no-extensions", "--no-mcp", "--no-skills", "--no-context-files", "--offline", "--list-models"]);
+        return { stdout: PI_TABLE_STDOUT };
+      }
+      if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      return { stdout: "" };
+    },
+  });
+  assert.deepEqual(discovered.providers.map((item) => item.instanceId), ["codex", "pi"]);
+  assert.deepEqual(discovered.providers[1], {
+    instanceId: "pi",
+    displayName: "Pi",
+    driver: "pi",
+    enabled: true,
+    installed: true,
+    availability: "available",
+    status: "ready",
+    auth: { status: "authenticated" },
+    models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
+  });
+});
+
+test("a pi probe that fails, stays empty, or prints non-table text is not discovered", async () => {
+  const roster = async (piProbe) => discoverCliProviders({
+    home: "/home/person",
+    readFile() {
+      return "";
+    },
+    execFile(file) {
+      if (file === "pi") {
+        if (piProbe instanceof Error) throw piProbe;
+        return piProbe;
+      }
+      return { stdout: "" };
+    },
+  });
+  // A spawn failure rejects, so the provider arm yields null.
+  assert.deepEqual((await roster(new Error("spawn pi ENOENT"))).providers, []);
+  assert.deepEqual((await roster({ stdout: "" })).providers, []);
+  // Nonempty error text on either stream never matches the table shape, so
+  // a nonzero exit cannot smuggle a provider in through the discarded code.
+  assert.deepEqual((await roster({ stdout: "", stderr: "error: offline mode cannot list models\n" })).providers, []);
+  assert.deepEqual((await roster({ stdout: "pi: failed to load models\nrun 'pi auth login' first\n" })).providers, []);
 });
 
 // The captured diagnostic turn (goal-runs/goalport-pr26-blockers-codex-diag/
@@ -567,6 +643,7 @@ test("discovery merges health onto matching instances and leaves the rest byte-i
     },
     execFile(file) {
       if (file === "codex") return { stdout: "Logged in using ChatGPT\n" };
+      if (file === "pi") return { stdout: "" };
       return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
     },
   };
@@ -734,6 +811,71 @@ test("write argv flips exactly one flag per harness; read argv stays byte-identi
   assert.equal(writeClaude.args.length, readClaude.args.length);
   const claudeDiffs = writeClaude.args.filter((arg, index) => arg !== ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."][index]);
   assert.deepEqual(claudeDiffs, ["acceptEdits"]);
+});
+
+test("a pi read turn is toolless and modelless, and a pi write turn is refused", () => {
+  const read = turnSpec(command("pi", "default", "coordinate-plan-pi"));
+  assert.deepEqual(read, {
+    file: "pi",
+    cwd: "/work/goal",
+    args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", "Plan only."],
+  });
+  assert.equal(read.args.includes("--model"), false);
+  assert.deepEqual(turnSpec(writeCommand("pi", "default")), {
+    errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.",
+  });
+});
+
+// Byte-frozen regression lock: the codex and claude argv exactly as on HEAD,
+// read and write, while pi joins the roster.
+test("codex and claude argv stay byte-frozen for both read and write turns", () => {
+  assert.deepEqual(turnSpec(command("codex", "gpt-6.1-sol", "coordinate-plan-codex")), {
+    file: "codex",
+    cwd: "/work/goal",
+    args: ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--cd", "/work/goal", "Plan only."],
+  });
+  assert.deepEqual(turnSpec(writeCommand("codex", "gpt-6.1-sol")), {
+    file: "codex",
+    cwd: "/work/goal",
+    args: ["exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", "/work/goal", "Carry out the plan."],
+  });
+  assert.deepEqual(turnSpec(command("claude", "opus", "coordinate-plan-claude")), {
+    file: "claude",
+    cwd: "/work/goal",
+    args: ["-p", "--output-format", "json", "--permission-mode", "plan", "--permission-prompts", "none", "--model", "opus", "Plan only."],
+  });
+  assert.deepEqual(turnSpec(writeCommand("claude", "opus")), {
+    file: "claude",
+    cwd: "/work/goal",
+    args: ["-p", "--output-format", "json", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--model", "opus", "Carry out the plan."],
+  });
+});
+
+test("a granted pi turn returns the trimmed text, and a refused write turn never spawns", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-pi-"));
+  fs.writeFileSync(path.join(directory, "send-authorization"), "coordinate-plan-pi\ncoordinate-execute-pi\n");
+  let spawns = 0;
+  const spawnTurn = async (spec) => {
+    spawns += 1;
+    assert.equal(spec.file, "pi");
+    assert.equal(spec.cwd, "/work/goal");
+    assert.deepEqual(spec.args, ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", "Plan only."]);
+    return { code: 0, stdout: " ok\n " };
+  };
+  try {
+    const plan = await runCliTurn(command("pi", "default", "coordinate-plan-pi"), { stateDir: directory, spawnTurn });
+    assert.deepEqual(plan, { ok: true, text: "ok", errorText: "", messageDispatched: true });
+    const write = await runCliTurn(writeCommand("pi", "default"), { stateDir: directory, spawnTurn });
+    assert.equal(write.ok, false);
+    assert.equal(write.messageDispatched, false);
+    assert.equal(write.errorText, "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.");
+    assert.equal(spawns, 1);
+    // The refusal came before the claim, so its grant line stayed intact.
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-execute-pi\n");
+    assert.equal(fs.existsSync(path.join(directory, "claim-coordinate-execute-pi")), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });
 
 test("pairing is refused in both directions before any spawn, with the grant left intact", async () => {

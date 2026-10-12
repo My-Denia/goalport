@@ -246,13 +246,52 @@ async function claudeProvider(io) {
   });
 }
 
+async function piProvider(io) {
+  // One hardened probe: no extensions, no MCP, no skills, no context files,
+  // offline, and only a model listing — nothing from the workspace project is
+  // ever executed and no network call is made.
+  let stdout = "";
+  try {
+    stdout = String((await io.execFile("pi", [
+      "--no-extensions",
+      "--no-mcp",
+      "--no-skills",
+      "--no-context-files",
+      "--offline",
+      "--list-models",
+    ])).stdout ?? "");
+  } catch {
+    return null;
+  }
+  // The success predicate is the model-table shape, never the exit code
+  // (defaultExec discards it): a provider/model/context header line plus at
+  // least one model-shaped row. Nonempty error text from a nonzero exit,
+  // empty output, or a shim banner all fail this shape and yield null.
+  const hasHeader = stdout.split(/\r?\n/).some((line) => /^provider\s+model\s+context/i.test(line.trim()));
+  if (!hasHeader || !/^\S+\s+\S+\s+\d/m.test(stdout)) return null;
+  return provider({
+    instanceId: "pi",
+    displayName: "Pi",
+    driver: "pi",
+    // The probe proves the install and an enumerable model catalog — it is
+    // NOT credential verification. "authenticated" is the minimal claim the
+    // panel renders as a selectable row (any other status shows "not signed
+    // in"), and a dead credential surfaces on the first turn through the
+    // existing failed/health path instead of being guessed here.
+    auth: { status: "authenticated" },
+    // The turn passes no --model, so pi runs on its own configured default
+    // (mirrors the codex built-in default arm).
+    models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
+  });
+}
+
 async function discoverCliProviders(io = {}) {
   const probe = {
     execFile: io.execFile ?? ((file, args) => defaultExec(file, args, { timeoutMs: io.timeoutMs, env: io.env })),
     readFile: io.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
     home: io.home ?? os.homedir(),
   };
-  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe)])).filter(Boolean);
+  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe), piProvider(probe)])).filter(Boolean);
   // Harnesses blocked on this machine are still discovered, but the snapshot
   // carries the stamped evidence. Without a state dir or a health record every
   // provider object stays exactly as it was.
@@ -331,6 +370,22 @@ function turnSpec(command) {
       file: "claude",
       cwd: worktree,
       args: ["-p", "--output-format", "json", "--permission-mode", writes ? "acceptEdits" : "plan", "--permission-prompts", "none", "--model", model, prompt],
+    };
+  }
+  if (instanceOf(command) === "pi") {
+    // Pi has no write sandbox in this build, so the explicitly-write branch
+    // refuses (the CREDITS refusal shape) instead of launching pi with its
+    // default, unconstrained tools.
+    if (writes) {
+      return { errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox." };
+    }
+    // Read-only flags from the documented CLI surface only, with --no-tools
+    // as the forced no-side-effect level; no --model, so pi runs on its own
+    // configured default like the codex built-in default arm.
+    return {
+      file: "pi",
+      cwd: worktree,
+      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", prompt],
     };
   }
   return { errorText: NOT_INSTALLED };
@@ -462,6 +517,10 @@ function claudeReply(stdout) {
 function replyFrom(instanceId, stdout) {
   if (instanceId === "codex") return { text: codexReply(stdout), failed: false };
   if (instanceId === "claude") return claudeReply(stdout);
+  // A pi text-mode turn prints exactly the final text on stdout; an empty
+  // reply stays failed:false so runCliTurn's existing no-text stop path
+  // ("finished without any text") carries it.
+  if (instanceId === "pi") return { text: String(stdout).trim(), failed: false };
   return { text: "", failed: true };
 }
 
@@ -726,6 +785,7 @@ module.exports = {
   codexEnvironmentBlocked,
   codexToolSuccess,
   claudeReply,
+  replyFrom,
   turnSpec,
   launchSpec,
   killProcessTree,
