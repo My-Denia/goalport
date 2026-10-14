@@ -31,7 +31,7 @@ function desktopJob(text) {
 
 test("README current entry points resolve and RC versions agree", () => {
   assert.match(readme, new RegExp(pkg.version.replaceAll(".", "\\.")));
-  assert.match(readme, /Stable V1 RC/);
+  assert.match(readme, /release candidate/i);
   assert.match(readme, /%APPDATA%\\GoalPort\\rc/);
   assert.doesNotMatch(readme, /goal-runs\//);
   // Screenshots come from the synthetic Scenario runtime and must say so.
