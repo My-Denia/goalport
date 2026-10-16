@@ -706,6 +706,7 @@ async function smoke() {
       const thirdTaskId = third.activeTask.id;
       await send("RC-MARKER-TURN-FAIL isolated terminal Attempt C", { turnFailure: true });
       const terminal = (await snapshot()).attempt.id;
+      const beforeRace = counts();
       const race = await read(`(async () => {
         const request = (provider) => window.goalportCore.command({ protocolVersion: "goalport.ipc.v2", requestId: crypto.randomUUID(), entityVersion: 0, messageType: "select_runtime", payload: { provider, campaignId: ${JSON.stringify(third.activeCampaignId)}, taskId: ${JSON.stringify(thirdTaskId)}, attemptId: ${JSON.stringify(terminal)} } });
         const scenario = request("scenario");
@@ -715,7 +716,17 @@ async function smoke() {
       assert.equal(race.scenario.goalportRejected ?? false, false, "same-provider rollover is admitted");
       assert.equal(race.scenario.accepted, true);
       assert.equal(race.codex.goalportRejected, true, "cross-provider race request is refused");
-      assert.match(race.codex.error, /already bound to a different Runtime binding/);
+      // Either request may reach Core first. Scenario-first reaches the occupied
+      // binding guard; Codex-first reaches the synthetic native-admission guard.
+      // Both must refuse Codex without writing a competing Attempt or process.
+      const codexRefusal = race.codex.error;
+      const raceRefusalKind = /^attempt \S+ is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused$/.test(codexRefusal)
+        ? "occupied-binding"
+        : /^adapter capability unsupported: test profile permits only the in-process Scenario Runtime; native provider codex is refused$/.test(codexRefusal)
+          ? "synthetic-firewall"
+          : null;
+      assert.ok(raceRefusalKind, `unexpected cross-provider race refusal: ${codexRefusal}`);
+      assert.deepEqual(counts(), { ...beforeRace, attempts: beforeRace.attempts + 1 }, "the race writes only the Scenario replacement Attempt");
       const live = dbRows("SELECT * FROM attempts WHERE task_id=? AND state IN ('ACTIVE','AWAITING_REVIEW','Active','AwaitingReview')", thirdTaskId);
       assert.equal(live.length, 1, "only one live replacement");
       const replacement = live[0].id;
@@ -724,9 +735,25 @@ async function smoke() {
       assert.equal(events(replacement).filter((event) => event.kind === "attempt.created" && event.payload?.rolledFrom === terminal).length, 1, "race replacement records lineage");
       assert.equal(dbRows("SELECT COUNT(*) AS n FROM attempts WHERE task_id=?", thirdTaskId)[0].n, 2, "terminal source plus exactly one replacement");
       assertNoNativeChildren();
+      // Separately exercise the exact occupied-binding refusal after the
+      // Scenario replacement exists; the race alone cannot guarantee order.
+      const beforeBindingProbe = counts();
+      const sourceEventsBeforeBindingProbe = events(terminal);
+      const replacementEventsBeforeBindingProbe = events(replacement);
+      const selectedBeforeBindingProbe = (await snapshot()).attempt.id;
+      const bindingProbe = await command("select_runtime", {
+        provider: "codex", campaignId: third.activeCampaignId, taskId: thirdTaskId, attemptId: terminal
+      });
+      assert.equal(bindingProbe.goalportRejected, true);
+      assert.match(bindingProbe.error, /already bound to a different Runtime binding/);
+      assert.deepEqual(counts(), beforeBindingProbe, "occupied-binding refusal writes no rows");
+      assert.deepEqual(events(terminal), sourceEventsBeforeBindingProbe, "occupied-binding refusal writes no source events");
+      assert.deepEqual(events(replacement), replacementEventsBeforeBindingProbe, "occupied-binding refusal writes no replacement events");
+      assert.equal((await snapshot()).attempt.id, selectedBeforeBindingProbe, "occupied-binding refusal keeps the selected Scenario replacement");
+      assertNoNativeChildren();
       await screen("07-cross-provider-race");
       marker("api+db/concurrent-cross-provider-race-one-replacement-exact-refusal", {
-        terminal, replacement, scenarioAccepted: race.scenario.accepted === true, codexRefusal: race.codex.error, attemptsForTask: 2, nativeChildren: 0,
+        terminal, replacement, scenarioAccepted: race.scenario.accepted === true, codexRefusal, raceRefusalKind, bindingProbeRefusal: bindingProbe.error, attemptsForTask: 2, nativeChildren: 0,
         probe: "two concurrent raw select_runtime commands; the UI picker serializes and cannot issue two selections in one task",
         superseded: "old two-button one-task UI race"
       });
