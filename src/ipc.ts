@@ -339,6 +339,7 @@ declare global {
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {
         instances: string[];
         maxTurns: number;
@@ -486,6 +487,23 @@ class PreviewCoreClient implements CoreClient {
   async openInVsCode(): Promise<void> {
     // The browser preview cannot launch a local editor. The UI keeps this action explicit.
     return Promise.resolve();
+  }
+
+  async resumeSession(attemptId: string): Promise<CoreSnapshot> {
+    const product = this.state.productConversation;
+    if (!product || this.state.attempt.id !== attemptId) return this.state;
+    this.state = {
+      ...this.state,
+      productConversation: {
+        ...product,
+        runtime: product.runtime.provider
+          ? { ...product.runtime, state: "selected" }
+          : product.runtime,
+        session: { state: "attached", nativeIdKnown: true },
+        turn: { state: "idle", canSend: true, canStop: false, actions: ["send"] }
+      }
+    };
+    return this.state;
   }
 
   async appInfo(): Promise<AppInfo> {

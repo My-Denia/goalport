@@ -327,14 +327,16 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .coordination-budget p { margin: 0 0 6px; }
 .coordination-access {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--line);
 }
+.coordination-access .button { flex: 0 0 auto; white-space: nowrap; }
 .coordination-access-label { color: var(--ink-muted); font-size: 12px; font-weight: 700; margin-right: auto; }
-.coordination-access-caption { color: var(--ink-muted); font-size: 12px; line-height: 1.45; }
+.coordination-access-caption { flex: 1 1 220px; color: var(--ink-muted); font-size: 12px; line-height: 1.45; }
 .coordination-progress-failure { color: var(--red) !important; }
 .coordination-progress-activity { color: var(--ink-soft) !important; font-weight: 600; }
 .coordination-progress-repair { color: var(--ink-soft) !important; font-weight: 600; }
@@ -732,7 +734,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .composer textarea::placeholder { color: #807e87; }
 .composer textarea:disabled { cursor: not-allowed; opacity: 0.66; }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
-.composer-hint { overflow: hidden; color: var(--ink-muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.composer-hint { min-width: 0; color: var(--ink-muted); font-size: 11.5px; line-height: 1.35; }
 .composer-buttons { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
 .composer-secondary {
   display: inline-flex; align-items: center; gap: 6px;
@@ -957,7 +959,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 @media (max-width: 1020px) {
   :root { --sidebar-w: 206px; --content-max: 720px; }
-  .titlebar-campaign { display: none; }
+  .titlebar-campaign-wrap { display: none; }
   .connection-pill .connection-text { display: none; }
   .connection-pill { padding: 0 8px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
@@ -1092,13 +1094,17 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .activity-body { overflow-wrap: anywhere; }
 
 /* First-use draft composer. */
-.draft-composer { max-width: 640px; margin: 0 auto; width: 100%; }
+.draft-composer { max-width: 640px; margin: 18px auto 0; width: 100%; }
 .draft-composer-form {
   display: grid; gap: 8px; padding: 18px;
   border: 1px solid var(--line); border-radius: 12px;
   background: rgba(26, 26, 31, 0.85);
 }
 .draft-workspace-row { margin-bottom: 2px; }
+.draft-background-consent {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--ink-soft); font-size: 13px; line-height: 1.4;
+}
 .draft-runtime-picker { margin-bottom: 2px; }
 .draft-composer-form textarea {
   width: 100%; min-width: 0; resize: none; min-height: 110px;
@@ -1213,6 +1219,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .background-return { padding: 10px 22px 0; }
 .background-job { padding: 14px 22px 24px; min-width: 0; overflow-wrap: anywhere; }
 .background-job h2 { margin: 0 0 12px; font-size: 20px; line-height: 1.35; }
+.background-job-place { margin: 0 0 12px; color: var(--ink-faint); font-size: 12px; }
 .background-job > p { font-size: 14px; line-height: 1.5; }
 .background-job .coordination-progress, .background-job .coordination-status { margin-left: 0; margin-right: 0; }
 .background-job .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }

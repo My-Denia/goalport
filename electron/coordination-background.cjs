@@ -15,6 +15,7 @@ const HOST_REFUSAL_CODES = new Set([
   "background-invalid-admission",
   "background-job-conflict",
   "background-admission-unknown",
+  "background-still-live",
 ]);
 const PREFLIGHT_MESSAGE = "Background Send could not be prepared, so nothing was admitted.";
 const UNKNOWN_MESSAGE = "GoalPort could not confirm this background start.";
@@ -35,6 +36,7 @@ function projection(status, live = false) {
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
     counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress: status.progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
+    workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null };
 }
 function createBackgroundHost(options) {
@@ -53,7 +55,11 @@ function createBackgroundHost(options) {
     // A missing pointer is not proof that an earlier owner/tools stopped.
     // Retained nonterminal or pending job facts still block ordinary/native
     // admission; only confirmed terminal facts permit normal competition.
-    return jobIds().some(id => { const facts = s.getStatus(id); return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand; });
+    return jobIds().some(id => {
+      const facts = s.getStatus(id);
+      if (facts.acknowledgedStuckAt) return false;
+      return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand;
+    });
   }
   async function status(jobId, controlEndpoint) {
     const s = store();
@@ -152,6 +158,14 @@ function createBackgroundHost(options) {
       }
     } finally { starting = false; }
   }
+  async function acknowledge(jobId) {
+    const current = await status(jobId);
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
+    try { store().acknowledgeStuck(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
   async function revoke(jobId) {
     const s = store();
     const facts = s.getStatus(jobId);
@@ -164,7 +178,7 @@ function createBackgroundHost(options) {
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, outstanding };
+  return { start, status, revoke, acknowledge, outstanding };
 }
 function withControlAck(facts, ack) {
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {

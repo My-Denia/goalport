@@ -374,6 +374,10 @@ function createCoordinationJobStore(profileDirectory, {
     if (OUTCOME_STATES.has(value.state) && (!isPlainObject(value.outcome) || value.outcome.status !== value.state)) {
       throw refusal("malformed-progress", "The terminal job outcome is malformed; the admission slot remains held.");
     }
+    if (value.acknowledgedStuckAt !== undefined && value.acknowledgedStuckAt !== null
+      && (typeof value.acknowledgedStuckAt !== "string" || Number.isNaN(Date.parse(value.acknowledgedStuckAt)))) {
+      throw refusal("malformed-progress", "The stuck-job acknowledgement is malformed; the admission slot remains held.");
+    }
     try {
       if (value.counters !== null && value.counters !== undefined) checkCounters(value.counters);
       if (value.display !== null && value.display !== undefined) cloneJson(value.display, "Progress display");
@@ -427,6 +431,7 @@ function createCoordinationJobStore(profileDirectory, {
       detail: progress.detail ?? null,
       progress: progress.display ?? null,
       outcome: progress.outcome ?? null,
+      acknowledgedStuckAt: typeof progress.acknowledgedStuckAt === "string" ? progress.acknowledgedStuckAt : null,
       startupClaim: claim ? { claimedAt: claim.claimedAt, pid: claim.pid ?? null } : null,
       workerState: claim ? "claimed-owner-unconfirmed" : (active?.jobId === jobId ? "awaiting-startup-claim" : "not-active"),
       active: active?.jobId === jobId,
@@ -457,6 +462,14 @@ function createCoordinationJobStore(profileDirectory, {
       }
       const progress = readProgress(entry.name);
       readClaim(entry.name);
+      // A user left this job unreplayed. Absence of a worker is not that fact;
+      // the timestamp is. The same request id cannot be admitted again.
+      if (typeof progress.acknowledgedStuckAt === "string") {
+        if (normalized.requestId === requestId) {
+          throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
+        }
+        continue;
+      }
       const safelyReleased = RELEASE_STATES.has(progress.state) && !!progress.outcome && !progress.pendingCommand;
       if (!safelyReleased) {
         // A missing profile slot cannot be interpreted as a dead worker or a
@@ -714,6 +727,27 @@ function createCoordinationJobStore(profileDirectory, {
     return statusFor(jobId);
   }
 
+  /**
+   * The user leaves an interrupted job so a different send can be admitted.
+   * The pending command and unconfirmed outcome stay on this job. Nothing is
+   * replayed, and the same request id cannot be admitted again.
+   */
+  function acknowledgeStuck(jobId) {
+    requireWritable();
+    readAdmission(jobId);
+    const progress = readProgress(jobId);
+    if (typeof progress.acknowledgedStuckAt === "string") return statusFor(jobId);
+    if (RELEASE_STATES.has(progress.state) && progress.outcome && !progress.pendingCommand) return statusFor(jobId);
+    const at = now();
+    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...progress, acknowledgedStuckAt: at, updatedAt: at });
+    const active = readActive();
+    if (active?.jobId === jobId) {
+      fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
+      syncDirectory(storeRoot);
+    }
+    return statusFor(jobId);
+  }
+
   function readControlCredential(jobId) {
     readAdmission(jobId);
     const credential = readJson(fileFor(jobId, TOKEN_FILE), "The local control credential");
@@ -846,6 +880,7 @@ function createCoordinationJobStore(profileDirectory, {
     revoke,
     recordOutcome,
     releaseAdmission,
+    acknowledgeStuck,
     readControlCredential,
     controlEndpointFor: endpointFor,
     startControlServer,

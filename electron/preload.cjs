@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("goalportCore", {
   backgroundStart: (input) => ipcRenderer.invoke("goalport:background-start", input),
   backgroundStatus: (jobId) => ipcRenderer.invoke("goalport:background-status", jobId),
   backgroundRevoke: (jobId) => ipcRenderer.invoke("goalport:background-revoke", jobId),
+  backgroundAcknowledge: (jobId) => ipcRenderer.invoke("goalport:background-acknowledge", jobId),
   coordinationAuthorize: (scope) => ipcRenderer.invoke("goalport:coordination-authorize", scope),
   coordinationScope: () => ipcRenderer.invoke("goalport:coordination-scope"),
   coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),

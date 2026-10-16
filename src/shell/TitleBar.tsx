@@ -8,6 +8,9 @@ interface TitleBarProps {
   browserPreview?: boolean;
   snapshot: CoreSnapshot;
   campaignTitle: string | null;
+  /** Folder name shown when a background job owns the window and Core has no project. */
+  workspaceLabel?: string | null;
+  workspaceTitle?: string | null;
   appInfo: AppInfo | null;
   navCollapsed: boolean;
   onToggleNav: () => void;
@@ -32,7 +35,7 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
 
@@ -53,14 +56,14 @@ export function TitleBar({
           <div className="titlebar-identity">
             <span className="titlebar-app" title={appInfo ? `GoalPort ${appInfo.version}` : "GoalPort"}>GoalPort</span>
             <span className="titlebar-sep" aria-hidden="true">/</span>
-            <span className="titlebar-workspace" title={snapshot.project.workspaceRoot || snapshot.project.name}>
-              {snapshot.project.name || "No workspace"}
+            <span className="titlebar-workspace" title={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name}>
+              {workspaceLabel || snapshot.project.name || "No workspace"}
             </span>
             {campaignTitle ? (
-              <>
+              <span className="titlebar-campaign-wrap">
                 <span className="titlebar-sep" aria-hidden="true">/</span>
                 <span className="titlebar-campaign">{campaignTitle}</span>
-              </>
+              </span>
             ) : null}
           </div>
         </div>

@@ -514,3 +514,25 @@ test("a real control server round-trips on the derived long Linux socket path", 
   assert.equal(revoked.revoked, true);
   assert.equal(revoked.active, true);
 });
+
+test("leaving a stuck job keeps the unconfirmed command and admits a different send", (t) => {
+  let n = 0;
+  const ids = [FIXED_JOB_ID, "223e4567-e89b-42d3-a456-426614174001"];
+  const { profile, store } = fixture(t, { idFactory: () => ids[n++] });
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  store.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-unknown", role: "planning" }, ownerToken);
+  store.recordOutcome(admitted.jobId, { status: "unconfirmed", reason: "Worker outcome was not observed." }, ownerToken);
+  const left = store.acknowledgeStuck(admitted.jobId);
+  assert.equal(left.active, false);
+  assert.equal(left.state, "unconfirmed");
+  assert.equal(left.pendingCommand.commandId, "coordinate-plan-send-unknown");
+  assert.equal(typeof left.acknowledgedStuckAt, "string");
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  assert.throws(() => start(store), { code: "stuck-acknowledged" });
+  const next = store.startAdmission(admission({ requestId: "send-background-2" }));
+  assert.equal(next.ok, true);
+  assert.equal(next.created, true);
+  assert.notEqual(next.jobId, admitted.jobId);
+  assert.equal(store.getStatus(admitted.jobId).pendingCommand.commandId, "coordinate-plan-send-unknown");
+});

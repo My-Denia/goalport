@@ -1221,6 +1221,7 @@ app.whenReady().then(() => {
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
+  handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });
   handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
   handleTrusted("goalport:request-close", async () => {

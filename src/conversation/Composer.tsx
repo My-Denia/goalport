@@ -72,6 +72,7 @@ interface ComposerProps {
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSelectRuntime: (provider: string) => void;
   onStop: () => void;
+  onResume?: () => void;
 }
 
 /**
@@ -82,7 +83,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop }: ComposerProps) {
+export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop, onResume }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
@@ -92,6 +93,9 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
   const canSubmit = draft.trim().length > 0 && connected && !busy
     && (reconciling || (!held && turn.canSend));
   const pending = turn.state === "starting" || turn.state === "stopping";
+  const canResume = Boolean(onResume) && connected && !held && !controlUnavailable
+    && !closingSession && !turn.canStop && !pending
+    && turn.actions?.includes("resume-session") === true;
   const turnProblem = turnErrorCopy(turn);
 
   // One input layer, one copy: auto-grow, IME-safe Enter and focus-on-goal
@@ -114,6 +118,8 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
     ? "Some tools may still be running. Your draft stays here while the workspace is protected."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
+      : canResume
+      ? "Resume continues this session. Earlier messages stay put."
       : !turn.canSend
         ? turnProblem || "Sending is not available right now."
         : "Enter to send · Shift+Enter for a new line";
@@ -159,6 +165,10 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
                 disabled={busy}
               >
                 <span aria-hidden="true">■</span> Stop
+              </button>
+            ) : canResume ? (
+              <button className="send-button" type="button" aria-label="Resume session" onClick={onResume} disabled={busy}>
+                <span>Resume session</span>
               </button>
             ) : pending ? (
               <button

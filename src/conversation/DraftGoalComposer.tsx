@@ -61,6 +61,8 @@ interface DraftGoalComposerProps {
   canBrowse: boolean;
   coordinationAvailable: boolean;
   workspacePlaceholder?: string;
+  backgroundConsent?: boolean;
+  onBackgroundConsentChange?: (enabled: boolean) => void;
   onBrowse: () => void;
   onChange: (value: GoalDraftValue) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -74,7 +76,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -162,6 +164,18 @@ export function DraftGoalComposer({
           </div>
         ) : null}
 
+        {onBackgroundConsentChange ? (
+          <label className="draft-background-consent">
+            <input
+              type="checkbox"
+              aria-label="Keep working after closing"
+              checked={backgroundConsent}
+              disabled={busy}
+              onChange={(event) => onBackgroundConsentChange(event.target.checked)}
+            />
+            Keep working after closing
+          </label>
+        ) : null}
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy}>Discard draft</button>
           <button className="button button-primary" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>

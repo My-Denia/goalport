@@ -9,6 +9,10 @@ export interface BackgroundStatus {
   live: boolean;
   revoked: boolean;
   workerPid: number | null;
+  /** Workspace this job was admitted against. Older projections may omit it. */
+  workspacePath?: string;
+  /** Set when the user left an interrupted job so a different send can start. */
+  acknowledgedStuckAt?: string | null;
   readMaxTurns: number;
   writeMaxTurns: number | null;
   counters: { readTurnsLeft?: number | null; writeTurnsLeft?: number | null } | null;

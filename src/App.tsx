@@ -162,6 +162,8 @@ interface GoalDraft extends GoalDraftValue {
    * Draft-only, never persisted as harness health.
    */
   avoid?: { instanceId: string; harness: string; startedAt: string | null };
+  /** Shown on a fresh draft opened from Use again or an interrupted job. Nothing has been sent. */
+  readyNote?: string;
 }
 
 function App() {
@@ -1254,15 +1256,40 @@ function App() {
     });
   }
 
-  // Forget that this machine could not run the harness's tools, then discover
-  // again: the panel row becomes selectable when the health memory is gone.
-  async function handleUseAgain(instanceId: string) {
+  function openReadyDraft(source: { workspace: string; message: string; note: string }) {
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    setSelectedPlanId(null);
+    closeDraft(false);
+    setBackgroundView(false);
+    setDraftGoal({
+      requestId: freshRequestId(),
+      baselineCampaignId: snapshot.activeCampaignId,
+      workspace: source.workspace,
+      provider: "",
+      message: source.message,
+      readyNote: source.note,
+    });
+  }
+
+  // Forget that this machine could not run the harness's tools. From a finished
+  // result this also opens a new draft of the same goal; the failed round is
+  // not replayed, and nothing is sent until Send. From the access panel the
+  // draft already open stays put and the row becomes selectable.
+  async function handleUseAgain(instanceId: string, continueFrom?: { workspacePath: string; goal: string; harness: string }) {
     const bridge = window.goalportCore;
     if (!bridge?.coordinationUnblock) return;
     try {
       await bridge.coordinationUnblock(instanceId);
     } catch {
       setActiveNotice({ sentence: "GoalPort could not forget that this harness was blocked. Try again in a moment." });
+      return;
+    }
+    if (continueFrom) {
+      openReadyDraft({
+        workspace: continueFrom.workspacePath,
+        message: continueFrom.goal,
+        note: `${continueFrom.harness} can be used again. Nothing is sent until you press Send.`,
+      });
       return;
     }
     if (!bridge.coordinateDiscover) return;
@@ -1370,6 +1397,36 @@ function App() {
     // The saved change makes the next Send a new round, never a replay of the
     // round whose record already carries this draft's old request id.
     setDraftGoal((current) => (current ? { ...current, requestId: freshRequestId(), intent: undefined } : current));
+  }
+
+  async function handleContinueBackgroundJob() {
+    const job = backgroundJob;
+    if (!job) return;
+    const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand);
+    if (interrupted && !job.acknowledgedStuckAt) {
+      const acknowledge = window.goalportCore?.backgroundAcknowledge;
+      if (!acknowledge) {
+        setActiveNotice({ sentence: "This build cannot leave the interrupted job, so a new send was not opened." });
+        return;
+      }
+      try {
+        const next = await acknowledge(job.jobId);
+        setBackgroundJob(next);
+      } catch (error) {
+        setActiveNotice({
+          sentence: "The interrupted job is still in the way, so no new send was opened.",
+          technical: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+    openReadyDraft({
+      workspace: job.workspacePath ?? "",
+      message: job.goal,
+      note: interrupted
+        ? "The interrupted turn was not replayed. This is a new send, and nothing goes out until you press Send."
+        : "This is a new send for the same goal. Nothing goes out until you press Send.",
+    });
   }
 
   function handleNewGoal() {
@@ -1684,7 +1741,9 @@ function App() {
     const next = await client.resumeSession(attemptId);
     if (viewIntent !== selectionIntent.current) return;
     setSnapshot(next);
-    const failure = commandFailure(next, "resume_native_session");
+    // Preview has no Core command receipt. A missing receipt there is not a
+    // failed resume; the session state below is the result.
+    const failure = client.mode === "browser-preview" ? null : commandFailure(next, "resume_native_session");
     const turn = next.productConversation?.turn;
     // A retry can reuse the same attempt. The pending reason, not a new id,
     // is what means verification has not finished.
@@ -1923,6 +1982,8 @@ function App() {
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal ? title : null}
+        workspaceLabel={backgroundJob ? backgroundJob.goal : null}
+        workspaceTitle={backgroundJob?.workspacePath ?? null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
@@ -1959,6 +2020,12 @@ function App() {
           }}
           onSelectProject={(projectId) => { void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
+          runningJob={backgroundJob ? {
+            goal: backgroundJob.goal,
+            viewing: backgroundView,
+            stateLabel: backgroundJob.live ? "Running" : backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : "Finished",
+          } : null}
+          onOpenRunningJob={() => setBackgroundView(true)}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
@@ -1977,9 +2044,14 @@ function App() {
             onReconnect={handleReconnect}
           />
 
-          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => setBackgroundView(value => !value)}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
+          {backgroundJob && draftError ? (
+            <div className="dialog-note" role="alert">
+              <span aria-hidden="true">!</span>
+              <span>{draftError.sentence}</span>
+            </div>
+          ) : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
-            <BackgroundCoordinationStatus job={backgroundJob} onStopAllowing={() => {
+            <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
             }} />
           </div> : selectedPlan ? (
@@ -2007,7 +2079,11 @@ function App() {
                 feedbackHistory={selectedPlan.feedbackHistory ?? []}
                 planRevisionHistory={selectedPlan.planRevisionHistory ?? []}
                 onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
-                  ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId); }
+                  ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId, {
+                    workspacePath: selectedPlan.workspacePath,
+                    goal: selectedPlan.goal,
+                    harness: selectedPlan.environmentBlocked!.harness ?? selectedPlan.environmentBlocked!.instanceId,
+                  }); }
                   : undefined}
                 roundSummary={selectedPlanOverlay
                   ? roundSummaryLine(selectedPlan.planningHarness, selectedPlan.reviewHarness, selectedPlan.planText, selectedPlan.reviewText)
@@ -2053,7 +2129,11 @@ function App() {
                   feedbackHistory={coordination.feedbackHistory ?? []}
                   planRevisionHistory={coordination.planRevisionHistory ?? []}
                   onUseAgain={coordination.environmentBlocked && unblockAvailable
-                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId); }
+                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId, {
+                      workspacePath: draftGoal?.workspace ?? "",
+                      goal: draftGoal?.message ?? "",
+                      harness: coordination.environmentBlocked!.harness ?? coordination.environmentBlocked!.instanceId,
+                    }); }
                     : undefined}
                   roundSummary={draftOverlay
                     ? roundSummaryLine(coordination.planningHarness, coordination.reviewHarness, coordination.planText, coordination.reviewText)
@@ -2081,6 +2161,9 @@ function App() {
                       : ""}
                 </p>
               ) : null}
+              {draftGoal?.readyNote ? (
+                <p className="revision-note">{draftGoal.readyNote}</p>
+              ) : null}
               {draftGoal?.avoid ? (
                 <p className="revision-note">
                   This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
@@ -2101,6 +2184,44 @@ function App() {
                 />
               ) : (
                 <>
+                  <DraftGoalComposer
+                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
+                    runtimes={snapshot.runtimes}
+                    connected={snapshot.connection === "connected"}
+                    busy={draftBusy}
+                    blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    retryLabel={draftRetryLabel}
+                    error={draftError}
+                    canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
+                    coordinationAvailable={coordinationAvailable}
+                    workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
+                    backgroundConsent={backgroundConsent}
+                    onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
+                    onBrowse={() => { void chooseWorkspace(); }}
+                    onChange={(value) => {
+                      const current = draftGoal;
+                      if (!current) {
+                        setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
+                        return;
+                      }
+                      const changed = current.workspace !== value.workspace
+                        || current.provider !== value.provider
+                        || current.message !== value.message;
+                      if (current.workspace !== value.workspace) {
+                        setWriteInstances([]);
+                        setScopeMirror((scope) => scope ? { instances: scope.instances, generation: scope.generation, maxTurns: scope.maxTurns, remaining: scope.remaining } : null);
+                      }
+                      if (changed) abandonCoordination();
+                      const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
+                      setDraftGoal({
+                        ...current,
+                        ...value,
+                        ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
+                      });
+                    }}
+                    onSubmit={handleDraftSend}
+                    onDiscard={handleDiscardDraft}
+                  />
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
                       backgroundConsent={backgroundConsent}
@@ -2129,45 +2250,21 @@ function App() {
                       onUseAgain={(instanceId) => { void handleUseAgain(instanceId); }}
                     />
                   ) : null}
-                  <DraftGoalComposer
-                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
-                    runtimes={snapshot.runtimes}
-                    connected={snapshot.connection === "connected"}
-                    busy={draftBusy}
-                    blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
-                    retryLabel={draftRetryLabel}
-                    error={draftError}
-                    canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
-                    coordinationAvailable={coordinationAvailable}
-                    workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
-                    onBrowse={() => { void chooseWorkspace(); }}
-                    onChange={(value) => {
-                      const current = draftGoal;
-                      if (!current) {
-                        setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
-                        return;
-                      }
-                      const changed = current.workspace !== value.workspace
-                        || current.provider !== value.provider
-                        || current.message !== value.message;
-                      if (current.workspace !== value.workspace) {
-                        setWriteInstances([]);
-                        setScopeMirror((scope) => scope ? { instances: scope.instances, generation: scope.generation, maxTurns: scope.maxTurns, remaining: scope.remaining } : null);
-                      }
-                      if (changed) abandonCoordination();
-                      const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
-                      setDraftGoal({
-                        ...current,
-                        ...value,
-                        ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
-                      });
-                    }}
-                    onSubmit={handleDraftSend}
-                    onDiscard={handleDiscardDraft}
-                  />
                 </>
               )}
             </div>
+          ) : confirmedEmptyProfile && !hasGoal ? (
+            <section className="empty-goal" aria-label="No goal yet">
+              <h2>No goal open</h2>
+              <p>Start one when you are ready. Nothing is saved until you send it.</p>
+              <button
+                className="button button-primary empty-goal-cta"
+                type="button"
+                onClick={() => { backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
+              >
+                New goal
+              </button>
+            </section>
           ) : !hasGoal ? null : product === null ? (
             <div className="compatibility-notice" role="status">
               <h2>Conversation view unavailable</h2>
@@ -2249,6 +2346,7 @@ function App() {
                 onSubmit={handleSend}
                 onSelectRuntime={(provider) => { void selectRuntime(provider); }}
                 onStop={() => { void handleStop(); }}
+                onResume={() => { void handleResumeSession(); }}
               />
             </>
           )}
@@ -2310,6 +2408,12 @@ function App() {
       ) : null}
     </div>
   );
+}
+
+function workspaceFolder(root: string): string {
+  const trimmed = root.replace(/[\\/]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {

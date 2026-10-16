@@ -115,11 +115,9 @@ export function AuthorizationPanel({
         If independent verification then finds unfinished work, GoalPort may organize one further
         checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>
-      {onBackgroundConsentChange ? <div className="authorization-background">
-        <label><input type="checkbox" aria-label="Keep working after closing" checked={backgroundConsent}
-          onChange={event => onBackgroundConsentChange(event.target.checked)} /> Keep working after closing</label>
-        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes.</p>
-      </div> : null}
+      {onBackgroundConsentChange ? (
+        <p>After you close GoalPort, only this goal keeps running with the access you set here. File changes still follow the workspace section below. Choose that next to Send.</p>
+      ) : null}
       <ul className="authorization-provider-list">
         {catalog.map((instance) => {
           const { state, reason } = rowState(instance);

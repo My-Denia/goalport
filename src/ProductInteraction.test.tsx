@@ -197,8 +197,11 @@ describe('conversation-first product boundary', () => {
     verified.productConversation!.turn = { state: 'completed', canSend: true, canStop: false, actions: ['send', 'close-session'] };
     verified.productConversation!.items = [{ id: 'reply-1', kind: 'assistant-message', body: 'after-resume' }];
     const command = mount(closed, async () => pending);
-    fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Resume session' }));
+    const composer = await screen.findByRole('form', { name: 'Message composer' });
+    expect(composer.textContent).toContain('Earlier messages stay put.');
+    fireEvent.click(screen.getByRole('button', { name: 'Open details panel' }));
+    expect(within(screen.getByRole('complementary', { name: 'Session details' })).getByRole('button', { name: 'Resume session' })).toBeTruthy();
+    fireEvent.click(within(composer).getByRole('button', { name: 'Resume session' }));
     expect(await screen.findByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeTruthy();
     expect(screen.queryByText('Session resume was not confirmed. Check its status in details.')).toBeNull();
     expect(screen.getAllByText('Ready').length).toBeGreaterThan(0);
@@ -233,8 +236,7 @@ describe('conversation-first product boundary', () => {
     verified.productConversation!.session = { state: 'attached', nativeIdKnown: true };
     verified.productConversation!.turn = { state: 'completed', canSend: true, canStop: false, actions: ['send', 'close-session'] };
     const command = mount(closed, async () => pending);
-    fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Resume session' }));
+    fireEvent.click(within(await screen.findByRole('form', { name: 'Message composer' })).getByRole('button', { name: 'Resume session' }));
     expect(await screen.findByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeTruthy();
     expect(screen.queryByText('Runtime session resumed. You can continue this goal.')).toBeNull();
     expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'resume_native_session', payload: { attemptId: 'attempt-reused' } }));
@@ -255,10 +257,22 @@ describe('conversation-first product boundary', () => {
       resumed.productConversation!.turn = { state: 'idle', canSend: true, canStop: false };
       return resumed;
     });
-    fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Resume session' }));
+    const composer = await screen.findByRole('form', { name: 'Message composer' });
+    fireEvent.click(within(composer).getByRole('button', { name: 'Resume session' }));
     expect(await screen.findByText('Runtime session resumed. You can continue this goal.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open details panel' }));
+    expect(within(screen.getByRole('complementary', { name: 'Session details' })).queryByRole('button', { name: 'Resume session' })).toBeNull();
     expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'resume_native_session', payload: { attemptId: detached.attempt.id } }));
+  });
+
+  it('offers a way back after the only draft is discarded', async () => {
+    const fresh = { ...EMPTY_SNAPSHOT, connection: 'connected' as const, runtimes: DEMO_SNAPSHOT.runtimes };
+    mount(fresh);
+    fireEvent.click(await screen.findByRole('button', { name: 'Discard draft' }));
+    const empty = await screen.findByRole('region', { name: 'No goal yet' });
+    expect(within(empty).getByRole('heading', { name: 'No goal open' })).toBeTruthy();
+    fireEvent.click(within(empty).getByRole('button', { name: 'New goal' }));
+    expect(await screen.findByRole('heading', { name: 'Start a goal' })).toBeTruthy();
   });
 
   it('has no raw fallback when a legacy Core omits the product model', async () => {

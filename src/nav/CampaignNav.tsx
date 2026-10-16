@@ -10,6 +10,8 @@ interface CampaignNavProps {
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
+  runningJob?: { goal: string; stateLabel: string; viewing: boolean } | null;
+  onOpenRunningJob?: () => void;
 }
 
 /**
@@ -22,7 +24,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, onOpenRunningJob }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -73,14 +75,28 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
       <div className="sidebar-section-title">
         <span>Goals</span>
         <span className="count-badge" aria-label={campaignListUnavailable ? "Goal list unavailable" : undefined}>
-          {campaignListUnavailable ? "–" : goalCount}
+          {campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
 
       <div className="campaign-list">
+        {runningJob ? (
+          <button
+            className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
+            type="button"
+            onClick={() => onOpenRunningJob?.()}
+          >
+            <span className="campaign-state campaign-state-active" aria-hidden="true" />
+            <span className="campaign-item-copy">
+              <strong>{runningJob.goal}</strong>
+              <small>{runningJob.stateLabel}</small>
+            </span>
+            {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
+          </button>
+        ) : null}
         {campaignListUnavailable ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
-        ) : goalCount === 0 ? (
+        ) : goalCount === 0 && !runningJob ? (
           <p className="nav-empty">No goals yet. Start one from the top bar.</p>
         ) : overview ? (
           overview.goals.map((goal) => {
