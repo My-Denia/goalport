@@ -715,7 +715,24 @@ async function smoke() {
       assert.equal(race.scenario.goalportRejected ?? false, false, "same-provider rollover is admitted");
       assert.equal(race.scenario.accepted, true);
       assert.equal(race.codex.goalportRejected, true, "cross-provider race request is refused");
-      assert.match(race.codex.error, /already bound to a different Runtime binding/);
+      // Core serializes the two commands but their arrival order is not fixed.
+      // Codex processed after the Scenario replacement is bound hits the
+      // occupied-binding comparison; Codex processed first finds no binding and
+      // hits the synthetic-profile firewall (deliberately checked after the
+      // binding comparison in admit_runtime). Both are exact refusals; anything
+      // else fails.
+      const raceBindingConflict = /already bound to a different Runtime binding/;
+      const raceFirewall = /test profile permits only the in-process Scenario Runtime; native provider codex is refused/;
+      assert.ok(raceBindingConflict.test(race.codex.error) || raceFirewall.test(race.codex.error), `cross-provider race refusal is exact: ${race.codex.error}`);
+      // Whatever the arrival order, the binding-conflict path is then proven
+      // deterministically: a stale Codex request against the same terminal
+      // Attempt, now that the Scenario replacement is bound, must be refused by
+      // the occupied-binding comparison and write nothing.
+      const beforeStaleCodex = counts();
+      const staleCodex = await command("select_runtime", { provider: "codex", campaignId: third.activeCampaignId, taskId: thirdTaskId, attemptId: terminal });
+      assert.equal(staleCodex.goalportRejected, true, "stale cross-provider request is refused");
+      assert.match(staleCodex.error, raceBindingConflict);
+      assert.deepEqual(counts(), beforeStaleCodex, "refused stale cross-provider request writes nothing");
       const live = dbRows("SELECT * FROM attempts WHERE task_id=? AND state IN ('ACTIVE','AWAITING_REVIEW','Active','AwaitingReview')", thirdTaskId);
       assert.equal(live.length, 1, "only one live replacement");
       const replacement = live[0].id;
@@ -726,7 +743,7 @@ async function smoke() {
       assertNoNativeChildren();
       await screen("07-cross-provider-race");
       marker("api+db/concurrent-cross-provider-race-one-replacement-exact-refusal", {
-        terminal, replacement, scenarioAccepted: race.scenario.accepted === true, codexRefusal: race.codex.error, attemptsForTask: 2, nativeChildren: 0,
+        terminal, replacement, scenarioAccepted: race.scenario.accepted === true, codexRefusal: race.codex.error, staleCodexRefusal: staleCodex.error, attemptsForTask: 2, nativeChildren: 0,
         probe: "two concurrent raw select_runtime commands; the UI picker serializes and cannot issue two selections in one task",
         superseded: "old two-button one-task UI race"
       });
