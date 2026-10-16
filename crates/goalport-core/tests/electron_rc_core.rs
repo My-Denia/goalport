@@ -248,6 +248,7 @@ fn terminal_rollover_is_single_and_provider_independent() {
         .to_owned();
     assert_ne!(successor, first_id);
 
+    let before_binding_refusal = store.counts().unwrap();
     let codex = call(
         &server,
         "race-r2-codex",
@@ -268,6 +269,8 @@ fn terminal_rollover_is_single_and_provider_independent() {
             .contains("already bound to a different Runtime binding"),
         "the race must reach binding conflict before the synthetic-only guard: {codex}"
     );
+    assert_eq!(store.counts().unwrap(), before_binding_refusal, "occupied-binding refusal writes nothing");
+    assert_eq!(snapshot(&server, "binding-after")["attempt"]["id"], successor);
 
     let attempts = store.attempts_for_task(&task).unwrap();
     assert_eq!(attempts.len(), 2, "no competing third Attempt may be created");
@@ -287,6 +290,68 @@ fn terminal_rollover_is_single_and_provider_independent() {
     );
     assert_eq!(repeat["ok"], true, "{repeat}");
     assert_eq!(repeat["payload"]["snapshot"]["attempt"]["id"], successor);
+}
+
+#[test]
+fn native_first_terminal_refusal_keeps_rows_and_allows_one_scenario_rollover() {
+    let workspace = tempfile::tempdir().unwrap();
+    let store = Store::memory().unwrap();
+    let server = CoreServer::new_synthetic_only(store.clone());
+    let created = create_campaign(&server, "native-first-create", workspace.path(), "race goal");
+    assert_eq!(created["ok"], true, "{created}");
+    let (campaign, task) = active_ids(&created);
+    let first = call(
+        &server,
+        "native-first-source",
+        "select_runtime",
+        json!({"campaignId": campaign, "taskId": task, "provider": "scenario"}),
+    );
+    assert_eq!(first["ok"], true, "{first}");
+    let source = first["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap().to_owned();
+    fail_attempt(&store, &source, "native-first-terminal");
+
+    let before_native = store.counts().unwrap();
+    let refused = call(
+        &server,
+        "native-first-codex",
+        "select_runtime",
+        json!({
+            "campaignId": campaign,
+            "taskId": task,
+            "attemptId": source,
+            "provider": "codex",
+            "executable": "Z:\\goalport-does-not-exist\\codex.exe"
+        }),
+    );
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("test profile permits only the in-process Scenario Runtime"),
+        "native-first request must hit the synthetic firewall: {refused}"
+    );
+    assert_eq!(store.counts().unwrap(), before_native, "native-first refusal writes nothing");
+    assert_eq!(snapshot(&server, "native-first-after")["attempt"]["id"], source);
+
+    let scenario = call(
+        &server,
+        "native-first-rollover",
+        "select_runtime",
+        json!({"campaignId": campaign, "taskId": task, "attemptId": source, "provider": "scenario"}),
+    );
+    assert_eq!(scenario["ok"], true, "{scenario}");
+    let replacement = scenario["payload"]["snapshot"]["attempt"]["id"].as_str().unwrap().to_owned();
+    assert_ne!(replacement, source);
+    let attempts = store.attempts_for_task(&task).unwrap();
+    assert_eq!(attempts.len(), 2, "native refusal cannot create a competing Attempt");
+    assert_eq!(attempts.iter().filter(|row| !row.state.is_terminal()).count(), 1);
+    assert_eq!(store.get_attempt(&replacement).unwrap().provider, "scenario");
+    assert_eq!(
+        store.list_event_records(&replacement, 0).unwrap().iter()
+            .filter(|record| record.event.kind == "attempt.created"
+                && record.payload.as_ref().and_then(|value| value.get("rolledFrom")) == Some(&json!(source)))
+            .count(),
+        1,
+        "the only replacement records source lineage"
+    );
 }
 
 #[test]

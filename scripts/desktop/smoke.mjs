@@ -706,6 +706,7 @@ async function smoke() {
       const thirdTaskId = third.activeTask.id;
       await send("RC-MARKER-TURN-FAIL isolated terminal Attempt C", { turnFailure: true });
       const terminal = (await snapshot()).attempt.id;
+      const beforeRace = counts();
       const race = await read(`(async () => {
         const request = (provider) => window.goalportCore.command({ protocolVersion: "goalport.ipc.v2", requestId: crypto.randomUUID(), entityVersion: 0, messageType: "select_runtime", payload: { provider, campaignId: ${JSON.stringify(third.activeCampaignId)}, taskId: ${JSON.stringify(thirdTaskId)}, attemptId: ${JSON.stringify(terminal)} } });
         const scenario = request("scenario");
@@ -721,21 +722,29 @@ async function smoke() {
       // hits the synthetic-profile firewall (deliberately checked after the
       // binding comparison in admit_runtime). Both are exact refusals; anything
       // else fails.
-      const raceBindingConflict = /already bound to a different Runtime binding/;
-      const raceFirewall = /test profile permits only the in-process Scenario Runtime; native provider codex is refused/;
+      const raceBindingConflict = /^attempt \S+ is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused$/;
+      const raceFirewall = /^adapter capability unsupported: test profile permits only the in-process Scenario Runtime; native provider codex is refused$/;
       assert.ok(raceBindingConflict.test(race.codex.error) || raceFirewall.test(race.codex.error), `cross-provider race refusal is exact: ${race.codex.error}`);
+      assert.deepEqual(counts(), { ...beforeRace, attempts: beforeRace.attempts + 1 }, "the race writes only the Scenario replacement Attempt");
       // Whatever the arrival order, the binding-conflict path is then proven
       // deterministically: a stale Codex request against the same terminal
       // Attempt, now that the Scenario replacement is bound, must be refused by
       // the occupied-binding comparison and write nothing.
       const beforeStaleCodex = counts();
+      const selectedBeforeStaleCodex = (await snapshot()).attempt.id;
+      const sourceEventsBeforeStaleCodex = events(terminal);
+      const selectedEventsBeforeStaleCodex = events(selectedBeforeStaleCodex);
       const staleCodex = await command("select_runtime", { provider: "codex", campaignId: third.activeCampaignId, taskId: thirdTaskId, attemptId: terminal });
       assert.equal(staleCodex.goalportRejected, true, "stale cross-provider request is refused");
       assert.match(staleCodex.error, raceBindingConflict);
       assert.deepEqual(counts(), beforeStaleCodex, "refused stale cross-provider request writes nothing");
+      assert.deepEqual(events(terminal), sourceEventsBeforeStaleCodex, "refused stale cross-provider request writes no source events");
+      assert.deepEqual(events(selectedBeforeStaleCodex), selectedEventsBeforeStaleCodex, "refused stale cross-provider request writes no replacement events");
+      assert.equal((await snapshot()).attempt.id, selectedBeforeStaleCodex, "refused stale cross-provider request keeps the selected Scenario replacement");
       const live = dbRows("SELECT * FROM attempts WHERE task_id=? AND state IN ('ACTIVE','AWAITING_REVIEW','Active','AwaitingReview')", thirdTaskId);
       assert.equal(live.length, 1, "only one live replacement");
       const replacement = live[0].id;
+      assert.equal(selectedBeforeStaleCodex, replacement, "the selected Attempt is the unique Scenario replacement");
       assert.notEqual(replacement, terminal);
       assert.equal(live[0].provider, "scenario");
       assert.equal(events(replacement).filter((event) => event.kind === "attempt.created" && event.payload?.rolledFrom === terminal).length, 1, "race replacement records lineage");
