@@ -130,8 +130,8 @@ function Get-OwnerChain([long]$ProcessId, [long]$RootPid, $Snapshot) {
     if (-not $Snapshot.ContainsKey($current)) { return $null }
     $child = $Snapshot[$current]
     $parentProcessId = [long]$child.ParentProcessId
-    if (-not $Snapshot.ContainsKey($parentProcessId)
-        -or $Snapshot[$parentProcessId].CreationTicks -gt $child.CreationTicks) { return $null }
+    if (-not $Snapshot.ContainsKey($parentProcessId) -or
+        $Snapshot[$parentProcessId].CreationTicks -gt $child.CreationTicks) { return $null }
     $current = $parentProcessId
   }
   return $null
@@ -203,8 +203,9 @@ function Assert-WindowStillOwned($Window, [long]$RootPid, $InitialSnapshot, [lon
     throw 'owned GoalPort window process ancestry changed before resize'
   }
   foreach ($processId in $InitialChain) {
-    if (-not $fresh.ContainsKey([long]$processId) -or -not $InitialSnapshot.ContainsKey([long]$processId)
-        -or $fresh[[long]$processId].CreationTicks -ne $InitialSnapshot[[long]$processId].CreationTicks) {
+    if (-not $fresh.ContainsKey([long]$processId) -or
+        -not $InitialSnapshot.ContainsKey([long]$processId) -or
+        $fresh[[long]$processId].CreationTicks -ne $InitialSnapshot[[long]$processId].CreationTicks) {
       throw 'owned GoalPort process identity was reused before resize'
     }
   }
@@ -287,9 +288,9 @@ function Invoke-OwnedWindowResize($Request) {
   [void][GoalPortNativeWindow]::GetWindowThreadProcessId($selected.Handle, [ref]$stillOwnedPid)
   if ([long]$stillOwnedPid -ne $selected.ProcessId) { throw 'owned GoalPort HWND was reused before native mutation' }
   $identityImmediatelyBefore = Get-WindowIdentity $selected.Handle
-  if (-not (Test-GoalPortIdentity $identityImmediatelyBefore)
-      -or $identityImmediatelyBefore.title -cne $selected.Identity.title
-      -or $identityImmediatelyBefore.className -cne $selected.Identity.className) {
+  if (-not (Test-GoalPortIdentity $identityImmediatelyBefore) -or
+      $identityImmediatelyBefore.title -cne $selected.Identity.title -or
+      $identityImmediatelyBefore.className -cne $selected.Identity.className) {
     throw 'owned GoalPort HWND identity changed before native mutation'
   }
   if ([GoalPortNativeWindow]::IsIconic($selected.Handle) -or [GoalPortNativeWindow]::IsZoomed($selected.Handle)) {
