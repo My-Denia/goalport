@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { createBackgroundHost } = require('./coordination-background.cjs');
@@ -151,6 +152,74 @@ test('post-admission spawn failure is an unknown result and retains the durable 
   assert.equal(r.host.outstanding(), true);
 });
 
+function listenSilently(endpoint, t) {
+  const sockets = new Set();
+  const server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.on('error', () => {});
+    socket.on('close', () => sockets.delete(socket));
+  });
+  server.unref();
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, () => {
+      t.after(() => new Promise(done => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => done());
+      }));
+      resolve(server);
+    });
+  });
+}
+async function leaveAndRefuseSameFolder(t, r, jobId) {
+  const left = await r.host.acknowledge(jobId);
+  assert.equal(left.live, false);
+  assert.notEqual(left.state, 'completed');
+  assert.notEqual(left.state, 'stopped');
+  assert.notEqual(left.state, 'failed');
+  await assert.rejects(() => r.host.start({ ...r.input, requestId: 'next-send' }), error => error.code === 'background-job-conflict' && /unfinished background goal/.test(error.message));
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+  assert.equal(r.host.outstanding(path.resolve('/tmp/goalport-other-folder')), false);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  assert.equal(store.getStatus(jobId).outcome, null);
+}
+test('an alive owner that does not answer status still holds the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordPendingCommand(started.jobId, { commandId: 'coordinate-plan-send-unknown', role: 'planning' }, claim.ownerToken);
+  await listenSilently(r.options.endpoint(), t);
+  await leaveAndRefuseSameFolder(t, r, started.jobId);
+  assert.equal(store.getStatus(started.jobId).pendingCommand.commandId, 'coordinate-plan-send-unknown');
+});
+test('a dead owner with unknown descendants still holds the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  store.claimWorker(started.jobId);
+  await leaveAndRefuseSameFolder(t, r, started.jobId);
+});
+test('a never-dispatched admission still holds the same folder after it is left', async t => {
+  const r = setup(t, { spawn: () => { throw new Error('spawn failed'); } });
+  await assert.rejects(() => r.host.start(r.input), { code: 'background-admission-unknown' });
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const held = store.getActiveStatus();
+  assert.equal(held.startupClaim, null);
+  await leaveAndRefuseSameFolder(t, r, held.jobId);
+});
+test('a confirmed terminal outcome admits the next send in the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordOutcome(started.jobId, { status: 'completed', summary: 'finished' }, claim.ownerToken);
+  store.releaseAdmission(started.jobId, claim.ownerToken);
+  const next = await r.host.start({ ...r.input, requestId: 'next-send' });
+  assert.equal(next.requestId, 'next-send');
+  assert.notEqual(next.jobId, started.jobId);
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+});
 test('a long derivable Linux endpoint is bounded in worker config before admission', { skip: process.platform !== 'linux' }, async t => {
   const { controlEndpointFor } = require('./coordination-job.cjs');
   const r = setup(t);

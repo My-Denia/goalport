@@ -267,6 +267,7 @@ let lastAttemptProvider = "";
 let lastStopResponsibilityHeld = false;
 let lastHeldAttemptId = "";
 let lastCampaignId = "";
+const campaignWorkspaces = new Map();
 let lastLaunchNonce = "";
 
 function fileSha256(target) {
@@ -674,8 +675,9 @@ const backgroundHost = createBackgroundHost({
     enginePath: path.join(appRoot, "dist", "coordination-engine.cjs"),
   }),
 });
-function refuseCompetingCoordination() {
-  if (backgroundHost.outstanding()) {
+backgroundHost.workspaceForCampaign = (campaignId) => campaignWorkspaces.get(campaignId) || null;
+function refuseCompetingCoordination(workspaceRoot) {
+  if (backgroundHost.outstanding(workspaceRoot)) {
     const error = new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
     error.code = "background-job-outstanding";
     throw error;
@@ -683,8 +685,14 @@ function refuseCompetingCoordination() {
 }
 function guardedCoreCommand(request) {
   if (["create_campaign", "create_campaign_with_task", "select_runtime", "start_conversation", "conversation_send", "send_message", "handoff", "resume_native_session", "request_owner_action", "queue_override", "continue_in_isolated_workspace"].includes(request?.messageType)) {
+    const payload = request?.payload;
+    let workspace;
+    if (payload && typeof payload.workspaceRoot === "string") workspace = payload.workspaceRoot;
+    else if (payload && typeof payload.campaignId === "string" && typeof backgroundHost.workspaceForCampaign === "function") {
+      workspace = backgroundHost.workspaceForCampaign(payload.campaignId) || undefined;
+    }
     let busy;
-    try { busy = backgroundHost.outstanding(); }
+    try { busy = backgroundHost.outstanding(workspace); }
     catch (error) { throw error; }
     if (busy === true) {
       const message = "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
@@ -963,7 +971,19 @@ function closeAttemptTarget(active, selectedId, held, heldId) {
   return active && selectedId ? selectedId : held ? heldId : selectedId;
 }
 
+function rememberCampaignWorkspaces(snapshot) {
+  const goals = snapshot?.goalOverview?.goals || snapshot?.goal_overview?.goals;
+  if (!Array.isArray(goals)) return;
+  for (const goal of goals) {
+    const campaignId = goal?.campaignId || goal?.campaign_id;
+    const root = goal?.workspaceRoot || goal?.workspace_root;
+    if (typeof campaignId === "string" && campaignId && typeof root === "string" && path.isAbsolute(root)) {
+      campaignWorkspaces.set(campaignId, path.resolve(root));
+    }
+  }
+}
 function cacheAttempt(snapshot) {
+  rememberCampaignWorkspaces(snapshot);
   lastProjectionUnavailable = snapshot?.bounds?.projectionUnavailable === true || snapshot?.bounds?.projection_unavailable === true;
   if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");

@@ -515,9 +515,9 @@ test("a real control server round-trips on the derived long Linux socket path", 
   assert.equal(revoked.active, true);
 });
 
-test("leaving a stuck job keeps the unconfirmed command and admits a different send", (t) => {
+test("leaving a stuck job keeps the unconfirmed command, holds the same folder, and admits a different folder", (t) => {
   let n = 0;
-  const ids = [FIXED_JOB_ID, "223e4567-e89b-42d3-a456-426614174001"];
+  const ids = [FIXED_JOB_ID, "223e4567-e89b-42d3-a456-426614174001", "323e4567-e89b-42d3-a456-426614174002"];
   const { profile, store } = fixture(t, { idFactory: () => ids[n++] });
   const admitted = start(store);
   const { ownerToken } = store.claimWorker(admitted.jobId);
@@ -528,11 +528,17 @@ test("leaving a stuck job keeps the unconfirmed command and admits a different s
   assert.equal(left.state, "unconfirmed");
   assert.equal(left.pendingCommand.commandId, "coordinate-plan-send-unknown");
   assert.equal(typeof left.acknowledgedStuckAt, "string");
+  assert.equal(left.outcome?.status, "unconfirmed");
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
   assert.throws(() => start(store), { code: "stuck-acknowledged" });
-  const next = store.startAdmission(admission({ requestId: "send-background-2" }));
-  assert.equal(next.ok, true);
-  assert.equal(next.created, true);
-  assert.notEqual(next.jobId, admitted.jobId);
+  const sameFolder = store.startAdmission(admission({ requestId: "send-background-2" }));
+  assert.equal(sameFolder.ok, false);
+  assert.equal(sameFolder.reason, "workspace-held");
+  assert.equal(sameFolder.existingJobId, admitted.jobId);
+  const otherFolder = store.startAdmission(admission({ requestId: "send-background-3", workspacePath: path.resolve("/tmp/goalport-other-workspace") }));
+  assert.equal(otherFolder.ok, true);
+  assert.equal(otherFolder.created, true);
+  assert.notEqual(otherFolder.jobId, admitted.jobId);
   assert.equal(store.getStatus(admitted.jobId).pendingCommand.commandId, "coordinate-plan-send-unknown");
+  assert.equal(store.getStatus(admitted.jobId).state, "unconfirmed");
 });

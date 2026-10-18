@@ -440,13 +440,18 @@ function createCoordinationJobStore(profileDirectory, {
     };
   }
 
-  function findAdmissionsByRequestId(requestId) {
+  function confirmedTerminal(progress) {
+    return RELEASE_STATES.has(progress.state) && !!progress.outcome && !progress.pendingCommand;
+  }
+
+  function inspectPriorAdmissions(incoming) {
     let entries;
     try { entries = fsApi.readdirSync(jobsRoot, { withFileTypes: true }); } catch (error) {
-      if (error?.code === "ENOENT") return [];
+      if (error?.code === "ENOENT") return { sameRequest: [], holders: [] };
       throw refusal("state-unavailable", "Prior job admissions could not be inspected; no replacement was authorized.");
     }
-    const found = [];
+    const sameRequest = [];
+    const holders = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !isJobId(entry.name)) continue;
       const admission = readJson(fileFor(entry.name, ADMISSION_FILE), "A prior immutable job admission");
@@ -462,23 +467,27 @@ function createCoordinationJobStore(profileDirectory, {
       }
       const progress = readProgress(entry.name);
       readClaim(entry.name);
+      const released = confirmedTerminal(progress);
       // A user left this job unreplayed. Absence of a worker is not that fact;
       // the timestamp is. The same request id cannot be admitted again.
+      // Leaving does not free the same folder while the exit is unconfirmed.
       if (typeof progress.acknowledgedStuckAt === "string") {
-        if (normalized.requestId === requestId) {
+        if (normalized.requestId === incoming.requestId) {
           throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
+        }
+        if (!released && normalized.workspacePath === incoming.workspacePath) {
+          holders.push({ jobId: entry.name, admission });
         }
         continue;
       }
-      const safelyReleased = RELEASE_STATES.has(progress.state) && !!progress.outcome && !progress.pendingCommand;
-      if (!safelyReleased) {
+      if (!released) {
         // A missing profile slot cannot be interpreted as a dead worker or a
         // completed job. Stale/incomplete owners block replacement forever.
         throw refusal("stale-job-state", "A prior job has no confirmed terminal outcome; no replacement was authorized.");
       }
-      if (normalized.requestId === requestId) found.push({ jobId: entry.name, admission });
+      if (normalized.requestId === incoming.requestId) sameRequest.push({ jobId: entry.name, admission });
     }
-    return found;
+    return { sameRequest, holders };
   }
 
   function compareDuplicate(existing, normalized) {
@@ -505,9 +514,13 @@ function createCoordinationJobStore(profileDirectory, {
       return { ok: false, reason: "active-job-exists", existingJobId: active.jobId, status: statusFor(active.jobId) };
     }
 
-    const previous = findAdmissionsByRequestId(normalized.requestId);
-    if (previous.length > 1) throw refusal("duplicate-job-history", "More than one job has this request id; no replacement was authorized.");
-    if (previous.length === 1) return compareDuplicate(previous[0], normalized);
+    const previous = inspectPriorAdmissions(normalized);
+    if (previous.holders.length > 0) {
+      const holder = previous.holders[0];
+      return { ok: false, reason: "workspace-held", existingJobId: holder.jobId, status: statusFor(holder.jobId) };
+    }
+    if (previous.sameRequest.length > 1) throw refusal("duplicate-job-history", "More than one job has this request id; no replacement was authorized.");
+    if (previous.sameRequest.length === 1) return compareDuplicate(previous.sameRequest[0], normalized);
 
     const jobId = idFactory();
     if (!isJobId(jobId)) throw refusal("invalid-job-id", "The job id generator returned an invalid id.");

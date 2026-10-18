@@ -49,17 +49,26 @@ function createBackgroundHost(options) {
     return fs.readdirSync(root).filter(id => /^[0-9a-f-]{36}$/.test(id))
       .sort((a, b) => fs.statSync(path.join(root, b)).mtimeMs - fs.statSync(path.join(root, a)).mtimeMs);
   }
-  function outstanding() {
+  function confirmedTerminal(facts) {
+    return ["completed", "failed", "stopped"].includes(facts.state) && !!facts.outcome && !facts.pendingCommand;
+  }
+  function sameWorkspace(left, right) {
+    return typeof left === "string" && typeof right === "string" && path.resolve(left) === path.resolve(right);
+  }
+  function outstanding(workspaceRoot) {
     const s = store();
     if (starting || s.getActiveStatus()) return true;
     // A missing pointer is not proof that an earlier owner/tools stopped.
-    // Retained nonterminal or pending job facts still block ordinary/native
-    // admission; only confirmed terminal facts permit normal competition.
-    return jobIds().some(id => {
+    // Leaving an unconfirmed job frees the slot pointer only. The same folder
+    // stays held. An unknown caller folder fails closed.
+    const caller = typeof workspaceRoot === "string" && workspaceRoot.trim() ? path.resolve(workspaceRoot) : null;
+    for (const id of jobIds()) {
       const facts = s.getStatus(id);
-      if (facts.acknowledgedStuckAt) return false;
-      return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand;
-    });
+      if (confirmedTerminal(facts)) continue;
+      if (!facts.acknowledgedStuckAt) return true;
+      if (!caller || sameWorkspace(facts.admission?.workspacePath, caller)) return true;
+    }
+    return false;
   }
   async function status(jobId, controlEndpoint) {
     const s = store();
@@ -136,7 +145,12 @@ function createBackgroundHost(options) {
       let admitted;
       try { admitted = s.startAdmission(admissionInput); }
       catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
-      if (!admitted.ok) throw codedRefusal("background-job-conflict", "A background goal is already running. Return to it or stop allowing its access; nothing new was started.");
+      if (!admitted.ok) {
+        const message = admitted.reason === "workspace-held"
+          ? "This folder still has an unfinished background goal, so nothing new was started."
+          : "A background goal is already running. Return to it or stop allowing its access; nothing new was started.";
+        throw codedRefusal("background-job-conflict", message);
+      }
 
       try {
         lastJobId = admitted.jobId;

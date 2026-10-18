@@ -145,6 +145,20 @@ test("main core-command handler returns the exact guard envelope and never invok
   assert.equal(request.requestId, "same-request");
 });
 
+test("main core-command guard passes a known workspace into the background hold", () => {
+  const seen = [];
+  const backgroundHost = {
+    outstanding: (workspace) => { seen.push(workspace); return false; },
+    workspaceForCampaign: (campaignId) => campaignId === "camp-1" ? "/work/mapped" : null,
+  };
+  const invokeCore = request => ({ accepted: true, requestId: request.requestId });
+  const guardedCoreCommand = loadCoreCommandCallback(backgroundHost, invokeCore);
+  guardedCoreCommand({}, { requestId: "start", messageType: "start_conversation", payload: { workspaceRoot: "/work/same" } });
+  guardedCoreCommand({}, { requestId: "send", messageType: "conversation_send", payload: { campaignId: "camp-1" } });
+  guardedCoreCommand({}, { requestId: "unknown", messageType: "conversation_send", payload: { campaignId: "missing" } });
+  assert.deepEqual(seen, ["/work/same", "/work/mapped", undefined]);
+});
+
 test("main core-command guard invokes Core when clear and leaves guard exceptions uncoded and unrelabeled", async () => {
   let coreCalls = 0;
   const request = { requestId: "same-request", messageType: "conversation_send", payload: {} };
