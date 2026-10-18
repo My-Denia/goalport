@@ -17,11 +17,13 @@ const ADMISSION_FILE = "admission.json";
 const PROGRESS_FILE = "progress.json";
 const CLAIM_FILE = "startup-claim.json";
 const REVOCATION_FILE = "revocation.json";
+const STUCK_ACK_FILE = "stuck-ack.json";
 const TOKEN_FILE = "control-token";
 const ADMISSION_SCHEMA = "goalport.coordination-job-admission.v1";
 const PROGRESS_SCHEMA = "goalport.coordination-job-progress.v1";
 const CLAIM_SCHEMA = "goalport.coordination-job-claim.v1";
 const REVOCATION_SCHEMA = "goalport.coordination-job-revocation.v1";
+const STUCK_ACK_SCHEMA = "goalport.coordination-job-stuck-ack.v1";
 const ACTIVE_SCHEMA = "goalport.coordination-job-active.v1";
 const CONTROL_SCHEMA = "goalport.coordination-job-control.v1";
 const OUTCOME_STATES = new Set(["completed", "failed", "stopped", "unconfirmed"]);
@@ -419,17 +421,31 @@ function createCoordinationJobStore(profileDirectory, {
     // process) and no cross-process read-modify-write of this file exists.
     // A terminal outcome the worker recorded always wins over the
     // projection.
-    const marker = readRevocationMarker(jobId);
-    if (marker) {
-      const merged = {
+    const revoked = readRevocationMarker(jobId);
+    let merged = value;
+    if (revoked) {
+      merged = {
         ...value,
         revoked: true,
-        revokeRequestedAt: value.revokeRequestedAt ?? marker.revokedAt,
+        revokeRequestedAt: value.revokeRequestedAt ?? revoked.revokedAt,
       };
-      if (OUTCOME_STATES.has(value.state)) return merged;
-      return { ...merged, state: "revoked", phase: "revoked" };
+      if (!OUTCOME_STATES.has(value.state)) merged = { ...merged, state: "revoked", phase: "revoked" };
     }
-    return value;
+    // The same lost-update guard for leaving an interrupted job: the durable
+    // acknowledgement is its own write-once marker, never a field written
+    // back into worker-owned progress.json. A worker's atomic replacement
+    // from a pre-acknowledge (or pre-outcome) snapshot therefore cannot
+    // erase it, and acknowledging cannot erase a newer outcome. Admission,
+    // status, and outstanding all read through here, so every one of them
+    // sees the marker. A progress field persisted by an older build remains
+    // readable until the marker is created.
+    const acknowledged = readStuckAckMarker(jobId);
+    return {
+      ...merged,
+      acknowledgedStuckAt: acknowledged
+        ? acknowledged.acknowledgedAt
+        : (typeof value.acknowledgedStuckAt === "string" ? value.acknowledgedStuckAt : null),
+    };
   }
 
   function readClaim(jobId) {
@@ -455,6 +471,22 @@ function createCoordinationJobStore(profileDirectory, {
     if (marker.schema !== REVOCATION_SCHEMA || marker.jobId !== jobId
       || typeof marker.revokedAt !== "string" || Number.isNaN(Date.parse(marker.revokedAt))) {
       throw refusal("malformed-revocation", "The durable revocation fact is malformed; the stop stays in force and the admission remains held.");
+    }
+    return marker;
+  }
+
+  // The durable "user left this interrupted job" fact. acknowledgeStuck()
+  // creates this file exclusively and NOTHING ever overwrites or deletes it:
+  // progress.json stays worker-owned, so acknowledging can neither erase a
+  // newer outcome nor be erased by a worker replacement from a stale
+  // snapshot. A malformed marker refuses fail-closed rather than reading as
+  // "still holding the same request id/workspace".
+  function readStuckAckMarker(jobId) {
+    const marker = readJson(fileFor(jobId, STUCK_ACK_FILE), "The durable stuck acknowledgement");
+    if (marker === null) return null;
+    if (marker.schema !== STUCK_ACK_SCHEMA || marker.jobId !== jobId
+      || typeof marker.acknowledgedAt !== "string" || Number.isNaN(Date.parse(marker.acknowledgedAt))) {
+      throw refusal("malformed-stuck-ack", "The durable stuck acknowledgement is malformed; the interrupted job stays unreplayed and the slot remains held.");
     }
     return marker;
   }
@@ -871,10 +903,20 @@ function createCoordinationJobStore(profileDirectory, {
     requireWritable();
     readAdmission(jobId);
     const progress = readProgress(jobId);
-    if (typeof progress.acknowledgedStuckAt === "string") return statusFor(jobId);
     if (RELEASE_STATES.has(progress.state) && progress.outcome && !progress.pendingCommand) return statusFor(jobId);
-    const at = now();
-    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...progress, acknowledgedStuckAt: at, updatedAt: at });
+    // The acknowledgement is ONLY the write-once marker, created before the
+    // active pointer is removed: acknowledgeStuck never writes progress.json,
+    // so a worker's newer outcome can never be rolled back by this
+    // read-modify-write, and this file surviving every worker replacement
+    // means the hold cannot be erased either. A legacy progress-only
+    // acknowledgement seeds the marker with its existing timestamp so it
+    // becomes durable too.
+    const at = typeof progress.acknowledgedStuckAt === "string" ? progress.acknowledgedStuckAt : now();
+    try {
+      writeExclusive(fileFor(jobId, STUCK_ACK_FILE), { schema: STUCK_ACK_SCHEMA, jobId, acknowledgedAt: at });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
     const active = readActive();
     if (active?.jobId === jobId) {
       fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
@@ -1092,4 +1134,6 @@ module.exports = {
   CONTROL_SCHEMA,
   REVOCATION_FILE,
   REVOCATION_SCHEMA,
+  STUCK_ACK_FILE,
+  STUCK_ACK_SCHEMA,
 };

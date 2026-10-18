@@ -15,6 +15,8 @@ const {
   ADMISSION_SCHEMA,
   REVOCATION_FILE,
   REVOCATION_SCHEMA,
+  STUCK_ACK_FILE,
+  STUCK_ACK_SCHEMA,
 } = require("./coordination-job.cjs");
 
 const FIXED_JOB_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -716,4 +718,106 @@ test("leaving a stuck job keeps the unconfirmed command, holds the same folder, 
   assert.notEqual(otherFolder.jobId, admitted.jobId);
   assert.equal(store.getStatus(admitted.jobId).pendingCommand.commandId, "coordinate-plan-send-unknown");
   assert.equal(store.getStatus(admitted.jobId).state, "unconfirmed");
+});
+
+test("a worker-style progress replacement cannot erase the durable stuck acknowledgement", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  store.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-unknown", role: "planning" }, ownerToken);
+  store.recordOutcome(admitted.jobId, { status: "unconfirmed", reason: "Worker outcome was not observed." }, ownerToken);
+  const progressPath = pathFor(profile, admitted.jobId, "progress.json");
+  // The live worker's in-memory snapshot predates the acknowledgement; its
+  // atomic replacement below lands from this snapshot exactly as the race
+  // allows (writeAtomic serializes one replacement, not a transaction).
+  const stale = fs.readFileSync(progressPath, "utf8");
+  assert.equal(JSON.parse(stale).acknowledgedStuckAt ?? null, null);
+
+  const left = store.acknowledgeStuck(admitted.jobId);
+  assert.equal(left.acknowledgedStuckAt, "2026-10-12T13:14:15.000Z");
+  // The acknowledgement is its own write-once marker: it never rewrites
+  // worker-owned progress.json (so it cannot erase a newer outcome), and the
+  // marker survives every progress replacement (so it cannot be erased).
+  assert.equal(fs.readFileSync(progressPath, "utf8"), stale);
+  assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, STUCK_ACK_FILE), "utf8")).schema, STUCK_ACK_SCHEMA);
+  fs.writeFileSync(progressPath, stale);
+
+  const after = store.getStatus(admitted.jobId);
+  assert.equal(after.acknowledgedStuckAt, "2026-10-12T13:14:15.000Z");
+  assert.equal(after.state, "unconfirmed");
+  assert.equal(after.pendingCommand.commandId, "coordinate-plan-send-unknown");
+  assert.equal(after.outcome.reason, "Worker outcome was not observed.");
+  assert.equal(after.active, false);
+
+  // Admission still sees the acknowledgement: the same send is unreplayed and
+  // a later same-folder start stays refused.
+  assert.throws(() => start(store), { code: "stuck-acknowledged" });
+  const sameFolder = store.startAdmission(admission({ requestId: "send-background-2" }));
+  assert.equal(sameFolder.ok, false);
+  assert.equal(sameFolder.reason, "workspace-held");
+  assert.equal(sameFolder.existingJobId, admitted.jobId);
+
+  // Re-acknowledging stays idempotent and still writes no progress bytes.
+  assert.equal(store.acknowledgeStuck(admitted.jobId).acknowledgedStuckAt, "2026-10-12T13:14:15.000Z");
+  assert.equal(fs.readFileSync(progressPath, "utf8"), stale);
+
+  // A malformed marker refuses fail-closed rather than reading unacknowledged.
+  fs.writeFileSync(pathFor(profile, admitted.jobId, STUCK_ACK_FILE), "{not json");
+  assert.throws(() => store.getStatus(admitted.jobId), { code: "malformed-state" });
+});
+
+test("an outcome that lands while acknowledging is not erased by the acknowledgement", (t) => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-ack-race-"));
+  t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const progressPath = pathFor(profile, FIXED_JOB_ID, "progress.json");
+  let armed = false;
+  let injected = false;
+  let injectedFrom = null;
+  const injectNewerOutcome = () => {
+    if (!armed || injected) return;
+    injected = true;
+    const newer = {
+      ...JSON.parse(fs.readFileSync(progressPath, "utf8")),
+      phase: "unconfirmed",
+      outcome: { status: "unconfirmed", reason: "a newer worker outcome", recordedAt: "2026-10-12T13:14:16.000Z" },
+      updatedAt: "2026-10-12T13:14:16.000Z",
+    };
+    fs.writeFileSync(progressPath, `${JSON.stringify(newer, null, 2)}\n`);
+  };
+  // Either commit point triggers the worker's newer outcome once: the legacy
+  // progress rename (before the fix) or the marker create (the fix).
+  const fsApi = new Proxy(fs, {
+    get(target, property) {
+      if (property === "renameSync") return (from, to) => {
+        if (String(to).endsWith("progress.json")) { injectedFrom = "progress"; injectNewerOutcome(); }
+        return target.renameSync(from, to);
+      };
+      if (property === "openSync") return (file, ...args) => {
+        if (String(file).endsWith(STUCK_ACK_FILE)) { injectedFrom = "marker"; injectNewerOutcome(); }
+        return target.openSync(file, ...args);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const store = createCoordinationJobStore(profile, {
+    bootstrapReady: true,
+    fsApi,
+    idFactory: () => FIXED_JOB_ID,
+    tokenFactory: () => FIXED_TOKEN,
+    clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  store.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-unknown", role: "planning" }, ownerToken);
+  store.recordOutcome(admitted.jobId, { status: "unconfirmed", reason: "Worker outcome was not observed." }, ownerToken);
+  armed = true;
+  const left = store.acknowledgeStuck(admitted.jobId);
+  assert.equal(injected, true);
+  assert.equal(injectedFrom, "marker");
+  assert.equal(left.acknowledgedStuckAt, "2026-10-12T13:14:15.000Z");
+  assert.equal(left.outcome.reason, "a newer worker outcome");
+  assert.equal(left.state, "unconfirmed");
+  assert.equal(store.getStatus(admitted.jobId).outcome.recordedAt, "2026-10-12T13:14:16.000Z");
+  assert.equal(store.startAdmission(admission({ requestId: "send-background-2" })).reason, "workspace-held");
 });

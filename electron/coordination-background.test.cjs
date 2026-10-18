@@ -299,3 +299,27 @@ test('an acknowledged job holds the same Windows folder across casing on the win
   assert.equal(posixHost.outstanding('/work/Goal'), true);
   assert.equal(posixHost.outstanding('/work/goal'), false);
 });
+
+test('an acknowledged job still holds its folder and reports the acknowledgement after a worker replaces progress from a stale snapshot', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordPendingCommand(started.jobId, { commandId: 'coordinate-plan-send-unknown', role: 'planning' }, claim.ownerToken);
+  store.recordOutcome(started.jobId, { status: 'unconfirmed', reason: 'Worker outcome was not observed.' }, claim.ownerToken);
+  const progressPath = path.join(r.directory, 'coordination-jobs', 'jobs', started.jobId, 'progress.json');
+  const stale = fs.readFileSync(progressPath, 'utf8');
+  const left = await r.host.acknowledge(started.jobId);
+  assert.equal(typeof left.acknowledgedStuckAt, 'string');
+  // The live worker's atomic replacement lands from a snapshot taken before
+  // the acknowledgement; the marker must survive it.
+  fs.writeFileSync(progressPath, stale);
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+  assert.equal(r.host.outstanding(path.resolve('/tmp/goalport-other-folder')), false);
+  const after = await r.host.status(started.jobId);
+  assert.equal(after.acknowledgedStuckAt, left.acknowledgedStuckAt);
+  assert.equal(after.state, 'unconfirmed');
+  assert.equal(after.pendingCommand.commandId, 'coordinate-plan-send-unknown');
+  await assert.rejects(() => r.host.start({ ...r.input, requestId: 'next-send' }), { code: 'background-job-conflict' });
+  assert.equal(r.launches.length, 1);
+});
