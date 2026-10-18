@@ -1982,8 +1982,8 @@ function App() {
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal ? title : null}
-        workspaceLabel={backgroundJob ? backgroundJob.goal : null}
-        workspaceTitle={backgroundJob?.workspacePath ?? null}
+        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : null}
+        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
@@ -2023,7 +2023,7 @@ function App() {
           runningJob={backgroundJob ? {
             goal: backgroundJob.goal,
             viewing: backgroundView,
-            stateLabel: backgroundJob.live ? "Running" : backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : "Finished",
+            stateLabel: backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : backgroundJob.state === "unconfirmed" ? "Interrupted" : "Finished",
           } : null}
           onOpenRunningJob={() => setBackgroundView(true)}
         />
@@ -2044,10 +2044,18 @@ function App() {
             onReconnect={handleReconnect}
           />
 
-          {backgroundJob && draftError ? (
+          {draftError && ((backgroundView && backgroundJob) || selectedPlan) ? (
             <div className="dialog-note" role="alert">
               <span aria-hidden="true">!</span>
-              <span>{draftError.sentence}</span>
+              <span>
+                {draftError.sentence}
+                {draftError.technical ? (
+                  <details className="technical-details">
+                    <summary>Technical details</summary>
+                    <pre className="technical-details-pre">{draftError.technical}</pre>
+                  </details>
+                ) : null}
+              </span>
             </div>
           ) : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">

@@ -3170,14 +3170,55 @@ describe("one in-window repair", () => {
       expect(await screen.findByRole("region", { name: "Background goal" })).toBeTruthy();
       expect(start).not.toHaveBeenCalled(); expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
     });
-    it("names the returned job in the window and the sidebar", async () => {
+    it("names the workspace folder in the title bar and the goal in the sidebar", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStart = async () => liveJob;
       window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, workspacePath: "/tmp/goalport-execution-fixture-ZOalYm" });
       render(<App />);
       await screen.findByRole("region", { name: "Background goal" });
       expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
-      expect(screen.getAllByTitle("/tmp/goalport-execution-fixture-ZOalYm").some((node) => node.textContent === "One independent goal")).toBe(true);
-      expect(screen.queryByRole("button", { name: "Leave job view" })).toBeNull();
+      const workspace = document.querySelector(".titlebar-workspace");
+      expect(workspace?.textContent).toBe("goalport-execution-fixture-ZOalYm");
+      expect(workspace?.getAttribute("title")).toBe("/tmp/goalport-execution-fixture-ZOalYm");
+      expect(workspace?.textContent).not.toContain("One independent goal");
+      expect(screen.getByRole("button", { name: /One independent goal/ }).textContent).toContain("One independent goal");
+      fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+      await screen.findByRole("region", { name: "New goal draft" });
+      expect(document.querySelector(".titlebar-workspace")?.textContent).not.toContain("One independent goal");
+      expect(screen.getByRole("button", { name: /One independent goal/ }).textContent).toContain("One independent goal");
+    });
+    it("labels a revoked live job Stopped in the sidebar", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: true, revoked: true });
+      render(<App />);
+      const row = await screen.findByRole("button", { name: /One independent goal/ });
+      expect(row.textContent).toContain("Stopped");
+      expect(row.textContent).not.toContain("Running");
+    });
+    it("shows one draft refusal, and keeps its technical detail on the background view", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStart = async () => { throw new Error("the reply never arrived"); };
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, workspacePath: "/work/goal" });
+      render(<App />);
+      await screen.findByRole("region", { name: "Background goal" });
+      fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+      await screen.findByRole("checkbox", { name: "Keep working after closing" });
+      fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
+      typeMessage("One harness is not a check");
+      sendMessage();
+      expect(await screen.findAllByRole("alert")).toHaveLength(1);
+      expect(screen.getByRole("alert").textContent).toContain("select at least two");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      sendMessage();
+      await screen.findByText("the reply never arrived");
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: /One independent goal/ }));
+      await screen.findByRole("region", { name: "Background goal" });
+      const alerts = screen.getAllByRole("alert");
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.textContent).toContain("could not confirm this background start");
+      expect(alerts[0]?.textContent).toContain("the reply never arrived");
     });
     it("an interrupted job opens a new send without replaying the old turn", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
