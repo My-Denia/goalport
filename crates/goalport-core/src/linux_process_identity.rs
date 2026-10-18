@@ -161,6 +161,19 @@ pub(super) fn observe_process(pid: u32) -> ProcessObservation {
             "process {pid} changed identity while it was observed"
         ));
     }
+    // exec keeps the same start time and parent. A path read before the hash
+    // must not be returned after the executable link has moved.
+    let executable_after = match fs::read_link(&exe_link) {
+        Ok(path) => path,
+        Err(error) => {
+            return existence_after_failure(pid, format!("{}: {error}", exe_link.display()));
+        }
+    };
+    if executable_after != executable_path {
+        return ProcessObservation::Unknown(format!(
+            "process {pid} changed executable while it was observed"
+        ));
+    }
     let created_ms = match created_ms(first.start_ticks) {
         Ok(ms) if ms > 0 => ms,
         Ok(_) => return ProcessObservation::Unknown(format!("process {pid} has no creation time")),

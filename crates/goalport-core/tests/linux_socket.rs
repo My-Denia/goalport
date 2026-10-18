@@ -746,16 +746,22 @@ fn linux_child_identity_is_observable_and_exit_is_distinct_from_unknown() {
     let exec_deadline = observation_started + Duration::from_secs(8);
     let first = loop {
         let observed = observe_process(pid);
+        if let ProcessObservation::Live(identity) = &observed {
+            if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
+                break identity.clone();
+            }
+        }
         let proc_exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         let proc_is_sleep = proc_exe.as_ref().ok().and_then(|path| path.file_name()).is_some_and(|name| name == "sleep");
-        let observed_is_sleep = matches!(&observed, ProcessObservation::Live(identity) if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")));
-        assert_eq!(
-            observed_is_sleep, proc_is_sleep,
-            "observe_process and /proc/{pid}/exe disagreed in one iteration: observation={observed:?}, proc_exe={proc_exe:?}"
-        );
-        if let ProcessObservation::Live(identity) = &observed {
-            if observed_is_sleep {
-                break identity.clone();
+        if proc_is_sleep {
+            // Exec finished between or during the first observation. The next
+            // observation must not still report the pre-exec image.
+            let again = observe_process(pid);
+            if let ProcessObservation::Live(identity) = again {
+                if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
+                    break identity;
+                }
+                panic!("observe_process stayed on the pre-exec image after /proc/{pid}/exe was sleep: first={observed:?}, again={identity:?}, proc_exe={proc_exe:?}");
             }
         }
         assert!(
