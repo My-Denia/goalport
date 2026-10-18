@@ -342,6 +342,7 @@ declare global {
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
       backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundReleaseTerminal?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {
         instances: string[];
         maxTurns: number;

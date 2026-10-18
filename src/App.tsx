@@ -1499,6 +1499,24 @@ function App() {
     const job = backgroundJob;
     if (!job) return;
     const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand);
+    const finishedButStillActive = job.active && !job.live && !job.pendingCommand && (job.state === "completed" || job.state === "failed" || job.state === "stopped") && Boolean(job.outcome);
+    if (finishedButStillActive) {
+      const release = window.goalportCore?.backgroundReleaseTerminal;
+      if (!release) {
+        setActiveNotice({ sentence: "This finished goal is still in the way, so a new send was not opened." });
+        return;
+      }
+      try {
+        const next = await release(job.jobId);
+        setBackgroundJob(next);
+      } catch (error) {
+        setActiveNotice({
+          sentence: "This finished goal is still in the way, so a new send was not opened.",
+          technical: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
     if (interrupted && !job.acknowledgedStuckAt) {
       const acknowledge = window.goalportCore?.backgroundAcknowledge;
       if (!acknowledge) {

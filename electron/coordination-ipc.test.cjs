@@ -251,6 +251,21 @@ test("main core-command guard passes a known workspace into the background hold"
   assert.deepEqual(seen, ["/work/same", "/work/mapped", undefined]);
 });
 
+test("main core-command guard resolves attempt-scoped commands to the known workspace", () => {
+  const seen = [];
+  const backgroundHost = {
+    outstanding: (workspace) => { seen.push(workspace); return false; },
+    workspaceForAttempt: (attemptId) => attemptId === "attempt-other" ? "/work/other" : null,
+  };
+  const invokeCore = request => ({ accepted: true, requestId: request.requestId });
+  const guardedCoreCommand = loadCoreCommandCallback(backgroundHost, invokeCore);
+  guardedCoreCommand({}, { requestId: "resume", messageType: "resume_native_session", payload: { attemptId: "attempt-other" } });
+  guardedCoreCommand({}, { requestId: "handoff", messageType: "handoff", payload: { oldAttemptId: "attempt-other" } });
+  guardedCoreCommand({}, { requestId: "continue", messageType: "continue_in_isolated_workspace", payload: { attemptId: "attempt-held", targetWorkspace: "/work/different" } });
+  guardedCoreCommand({}, { requestId: "missing", messageType: "resume_native_session", payload: { attemptId: "attempt-missing" } });
+  assert.deepEqual(seen, ["/work/other", "/work/other", "/work/different", undefined]);
+});
+
 test("main core-command guard invokes Core when clear and leaves guard exceptions uncoded and unrelabeled", async () => {
   let coreCalls = 0;
   const request = { requestId: "same-request", messageType: "conversation_send", payload: {} };

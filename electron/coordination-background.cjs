@@ -180,6 +180,18 @@ function createBackgroundHost(options) {
       }
     } finally { starting = false; }
   }
+  async function releaseConfirmedTerminal(jobId) {
+    let current;
+    try { current = await status(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (!current.active) return current;
+    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so its place was not released.");
+    if (!confirmedTerminal(current)) throw codedRefusal("background-still-live", "This goal is not finished, so its place was not released.");
+    try { store().releaseConfirmedTerminal(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
   async function acknowledge(jobId) {
     const current = await status(jobId);
     if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
@@ -200,7 +212,7 @@ function createBackgroundHost(options) {
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, acknowledge, outstanding };
+  return { start, status, revoke, acknowledge, releaseConfirmedTerminal, outstanding };
 }
 function withControlAck(facts, ack) {
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {

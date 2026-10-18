@@ -263,6 +263,23 @@ test('a long derivable Linux endpoint is bounded in worker config before admissi
   assert.equal(started.live, false);
 });
 
+test('a finished job whose pointer was left behind can be released and the next send starts', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordOutcome(started.jobId, { status: 'completed', summary: 'finished' }, claim.ownerToken);
+  assert.equal(store.getStatus(started.jobId).active, true);
+  await assert.rejects(() => r.host.releaseConfirmedTerminal('missing'), { code: 'background-admission-unknown' });
+  const released = await r.host.releaseConfirmedTerminal(started.jobId);
+  assert.equal(released.active, false);
+  assert.equal(released.state, 'completed');
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), false);
+  const next = await r.host.start({ ...r.input, requestId: 'after-finished' });
+  assert.equal(next.requestId, 'after-finished');
+  assert.notEqual(next.state, 'completed');
+});
+
 test('a different folder gets its own control endpoint while the old one is still listening', async t => {
   const r = setup(t);
   const started = await r.host.start(r.input);

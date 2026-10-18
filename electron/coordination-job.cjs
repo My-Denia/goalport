@@ -908,6 +908,19 @@ function createCoordinationJobStore(profileDirectory, {
     return statusFor(jobId);
   }
 
+  function releaseConfirmedTerminal(jobId) {
+    requireWritable();
+    const progress = readProgress(jobId);
+    if (!RELEASE_STATES.has(progress.state) || !progress.outcome || progress.pendingCommand) {
+      throw refusal("job-not-terminal", "Only a confirmed finished job can be released without its worker.");
+    }
+    const active = readActive();
+    if (!active || active.jobId !== jobId) return statusFor(jobId);
+    fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
+    syncDirectory(storeRoot);
+    return statusFor(jobId);
+  }
+
   /**
    * The user leaves an interrupted job so a different send can be admitted.
    * The pending command and unconfirmed outcome stay on this job. Nothing is
@@ -1071,6 +1084,7 @@ function createCoordinationJobStore(profileDirectory, {
     revoke,
     recordOutcome,
     releaseAdmission,
+    releaseConfirmedTerminal,
     acknowledgeStuck,
     readControlCredential,
     controlEndpointFor: endpointFor,

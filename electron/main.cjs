@@ -269,6 +269,7 @@ let lastStopResponsibilityHeld = false;
 let lastHeldAttemptId = "";
 let lastCampaignId = "";
 const campaignWorkspaces = new Map();
+const attemptWorkspaces = new Map();
 let lastLaunchNonce = "";
 
 function fileSha256(target) {
@@ -681,6 +682,7 @@ const backgroundHost = createBackgroundHost({
   }),
 });
 backgroundHost.workspaceForCampaign = (campaignId) => campaignWorkspaces.get(campaignId) || null;
+backgroundHost.workspaceForAttempt = (attemptId) => attemptWorkspaces.get(attemptId) || null;
 function refuseCompetingCoordination(workspaceRoot) {
   if (backgroundHost.outstanding(workspaceRoot)) {
     const error = new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
@@ -693,8 +695,12 @@ function guardedCoreCommand(request) {
     const payload = request?.payload;
     let workspace;
     if (payload && typeof payload.workspaceRoot === "string") workspace = payload.workspaceRoot;
+    else if (payload && typeof payload.targetWorkspace === "string") workspace = payload.targetWorkspace;
     else if (payload && typeof payload.campaignId === "string" && typeof backgroundHost.workspaceForCampaign === "function") {
       workspace = backgroundHost.workspaceForCampaign(payload.campaignId) || undefined;
+    } else if (payload && typeof backgroundHost.workspaceForAttempt === "function") {
+      const attemptId = typeof payload.attemptId === "string" ? payload.attemptId : (typeof payload.oldAttemptId === "string" ? payload.oldAttemptId : "");
+      if (attemptId) workspace = backgroundHost.workspaceForAttempt(attemptId) || undefined;
     }
     let busy;
     try { busy = backgroundHost.outstanding(workspace); }
@@ -993,6 +999,11 @@ function cacheAttempt(snapshot) {
   if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");
   lastAttemptActive = state === "active" || state === "ACTIVE";
+  const seenAttemptId = String(snapshot?.attempt?.id || "");
+  const attemptRoot = snapshot?.project?.workspaceRoot || snapshot?.project?.workspace_root;
+  if (seenAttemptId && typeof attemptRoot === "string" && path.isAbsolute(attemptRoot)) {
+    attemptWorkspaces.set(seenAttemptId, path.resolve(attemptRoot));
+  }
   lastAttemptId = String(snapshot?.attempt?.id || lastAttemptId || "");
   lastAttemptProvider = String(snapshot?.attempt?.provider || lastAttemptProvider || "").toLowerCase();
   const responsibility = snapshot?.stopResponsibility || snapshot?.stop_responsibility;
@@ -1251,6 +1262,7 @@ app.whenReady().then(() => {
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
   handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
+  handleTrusted("goalport:background-release-terminal", (_, jobId) => backgroundHost.releaseConfirmedTerminal(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });
   handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
   handleTrusted("goalport:request-close", async () => {
