@@ -29,6 +29,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const overview = snapshot.goalOverview;
+  const backgroundOwnsView = runningJob?.viewing === true;
   const campaignListUnavailable = !overview && snapshot.bounds?.projectionUnavailable === true
     && snapshot.campaigns.length === 0;
   const goalCount = overview ? overview.goals.length : snapshot.campaigns.length;
@@ -100,7 +101,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
           <p className="nav-empty">No goals yet. Start one from the top bar.</p>
         ) : overview ? (
           overview.goals.map((goal) => {
-            const active = goal.campaignId === snapshot.activeCampaignId;
+            const active = !backgroundOwnsView && goal.campaignId === snapshot.activeCampaignId;
             const renaming = renamingId === goal.campaignId;
             return (
               <div key={goal.campaignId} className={`campaign-item-wrap${active ? " campaign-active" : ""}`}>
@@ -156,7 +157,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
           })
         ) : (
           snapshot.campaigns.map((campaign) => {
-            const active = campaign.id === snapshot.activeCampaignId;
+            const active = !backgroundOwnsView && campaign.id === snapshot.activeCampaignId;
             const renaming = renamingId === campaign.id;
             return (
               <div key={campaign.id} className={`campaign-item-wrap${active ? " campaign-active" : ""}`}>
