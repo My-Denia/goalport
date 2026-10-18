@@ -16,10 +16,12 @@ const ACTIVE_FILE = "active-admission.json";
 const ADMISSION_FILE = "admission.json";
 const PROGRESS_FILE = "progress.json";
 const CLAIM_FILE = "startup-claim.json";
+const REVOCATION_FILE = "revocation.json";
 const TOKEN_FILE = "control-token";
 const ADMISSION_SCHEMA = "goalport.coordination-job-admission.v1";
 const PROGRESS_SCHEMA = "goalport.coordination-job-progress.v1";
 const CLAIM_SCHEMA = "goalport.coordination-job-claim.v1";
+const REVOCATION_SCHEMA = "goalport.coordination-job-revocation.v1";
 const ACTIVE_SCHEMA = "goalport.coordination-job-active.v1";
 const CONTROL_SCHEMA = "goalport.coordination-job-control.v1";
 const OUTCOME_STATES = new Set(["completed", "failed", "stopped", "unconfirmed"]);
@@ -384,6 +386,25 @@ function createCoordinationJobStore(profileDirectory, {
     } catch {
       throw refusal("malformed-progress", "The progress projection is malformed; the admission slot remains held.");
     }
+    // Cross-process lost-update guard: merge the write-once revocation fact
+    // into every read, so an atomic progress replacement written from a
+    // pre-revoke snapshot can never make the durable stop disappear. The
+    // non-terminal "revoked" projection is DERIVED here exactly as the
+    // revoking process used to persist it — revoke() now creates only the
+    // marker, so progress.json keeps exactly one writer (the worker
+    // process) and no cross-process read-modify-write of this file exists.
+    // A terminal outcome the worker recorded always wins over the
+    // projection.
+    const marker = readRevocationMarker(jobId);
+    if (marker) {
+      const merged = {
+        ...value,
+        revoked: true,
+        revokeRequestedAt: value.revokeRequestedAt ?? marker.revokedAt,
+      };
+      if (OUTCOME_STATES.has(value.state)) return merged;
+      return { ...merged, state: "revoked", phase: "revoked" };
+    }
     return value;
   }
 
@@ -395,6 +416,23 @@ function createCoordinationJobStore(profileDirectory, {
       throw refusal("malformed-startup-claim", "The startup claim is stale or malformed; it was not cleared.");
     }
     return claim;
+  }
+
+  // The durable revocation fact. revoke() creates this file exclusively and
+  // NOTHING ever overwrites or deletes it: progress.json is a
+  // read-modify-write projection that a racing worker process can atomically
+  // replace from a stale snapshot (writeAtomic serializes one replacement,
+  // not a cross-process transaction), but the marker survives every such
+  // replacement and readProgress merges it back into every read. A malformed
+  // marker refuses fail-closed instead of reading as "not revoked".
+  function readRevocationMarker(jobId) {
+    const marker = readJson(fileFor(jobId, REVOCATION_FILE), "The durable revocation fact");
+    if (marker === null) return null;
+    if (marker.schema !== REVOCATION_SCHEMA || marker.jobId !== jobId
+      || typeof marker.revokedAt !== "string" || Number.isNaN(Date.parse(marker.revokedAt))) {
+      throw refusal("malformed-revocation", "The durable revocation fact is malformed; the stop stays in force and the admission remains held.");
+    }
+    return marker;
   }
 
   function assertActive(jobId) {
@@ -581,7 +619,6 @@ function createCoordinationJobStore(profileDirectory, {
     requireWritable();
     const admission = assertActive(jobId);
     const progress = readProgress(jobId);
-    if (progress.revoked) throw refusal("access-revoked", "This job's access was stopped before worker admission.");
     if (OUTCOME_STATES.has(progress.state)) throw refusal("job-terminal", "This job is already terminal and cannot be restarted.");
     if (progress.pendingCommand) throw refusal("pending-command", "A previous command has an unconfirmed launch outcome; this worker cannot resume it.");
     const existing = readClaim(jobId);
@@ -598,6 +635,28 @@ function createCoordinationJobStore(profileDirectory, {
       ownerToken,
       requestId: admission.input.requestId,
     });
+    if (progress.revoked) {
+      // The admission was revoked BEFORE any worker claimed it. No startup
+      // claim existed until the lines above, and recording a command requires
+      // a claimed worker's owner token, so the empty pendingCommand and
+      // completedCommands facts prove no tool call was ever admitted. The
+      // spawning worker claims ownership ONLY to settle that proof. The
+      // claim, the terminal stopped outcome and the admission release are
+      // three SEQUENTIAL durable writes, not one cross-file transaction: a
+      // crash between them leaves the fail-closed blocked state (slot held,
+      // nothing authorized), never an authorized or running one. Nothing
+      // launches on this path.
+      const at = now();
+      writeAtomic(fileFor(jobId, PROGRESS_FILE), {
+        ...progress,
+        state: "stopped",
+        phase: "stopped",
+        outcome: { status: "stopped", reason: "revoked-before-start", recordedAt: at },
+        updatedAt: at,
+      });
+      releaseAdmission(jobId, ownerToken);
+      return { ok: true, jobId, ownerToken, settledPreStartRevocation: true, status: statusFor(jobId) };
+    }
     const next = { ...progress, state: "running", phase: "starting", updatedAt: now() };
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
     return { ok: true, jobId, ownerToken, status: statusFor(jobId) };
@@ -645,8 +704,33 @@ function createCoordinationJobStore(profileDirectory, {
     }
     const pendingCommand = { commandId, role, state: "unconfirmed", recordedAt: now() };
     const next = { ...current, pendingCommand, phase: role || "running", updatedAt: now() };
-    // The caller must not invoke a turn unless this atomic replacement returns.
+    // This atomic replacement is the durable "about to launch" fact, and
+    // the marker re-read below happens strictly after it. That turns the
+    // old check-then-write TOCTOU into a proven order: if the write-once
+    // stop marker is ABSENT at that read, its exclusive create completes
+    // entirely after the read, hence after this admission — the command
+    // provably precedes the stop and is an in-flight turn that may settle.
+    // If the marker is PRESENT, the stop is already durable and nothing
+    // has launched yet: the just-recorded command is settled as never sent
+    // (so the ledger and release semantics stay consistent) and the caller
+    // must not launch. The caller must not invoke a turn unless this
+    // function returns.
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
+    if (readRevocationMarker(jobId)) {
+      const after = readProgress(jobId);
+      if (after.pendingCommand?.commandId === commandId) {
+        completeCommand(jobId, {
+          commandId,
+          facts: {
+            launched: false,
+            dispatched: false,
+            text: "",
+            errorText: "Access was stopped before this command was sent.",
+          },
+        }, ownerToken);
+      }
+      throw refusal("access-revoked", "Access was stopped; the recorded command was settled as never sent and was not launched.");
+    }
     return statusFor(jobId);
   }
 
@@ -688,10 +772,22 @@ function createCoordinationJobStore(profileDirectory, {
     if (OUTCOME_STATES.has(current.state)) return statusFor(jobId);
     if (current.revoked) return statusFor(jobId);
     const at = now();
-    const next = { ...current, revoked: true, revokeRequestedAt: at, state: "revoked", phase: "revoked", updatedAt: at };
-    // Revocation does not remove the startup claim, clear a pending command,
-    // prove process/tool quiescence, or authorize a replacement job.
-    writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
+    // The stop is ONLY the write-once fact file: the exclusive create
+    // either wins or proves a concurrent revoke already did. revoke()
+    // deliberately never writes progress.json — the worker process is that
+    // file's sole writer, so a stop can never read-modify-write over a
+    // concurrent completion and roll a settled ledger back to pending
+    // (the slot-deadlocking lost update). The revoked projection is
+    // derived by readProgress from this marker on every read, and worker
+    // writes spread the merged facts, so the projection persists itself.
+    // Revocation still does not remove the startup claim, clear a pending
+    // command, prove process/tool quiescence, or authorize a replacement.
+    try {
+      writeExclusive(fileFor(jobId, REVOCATION_FILE), { schema: REVOCATION_SCHEMA, jobId, revokedAt: at });
+    } catch (error) {
+      if (error?.code === "EEXIST") return statusFor(jobId);
+      throw error;
+    }
     return { ...statusFor(jobId), requestId: admission.input.requestId };
   }
 
@@ -967,4 +1063,6 @@ module.exports = {
   ADMISSION_SCHEMA,
   PROGRESS_SCHEMA,
   CONTROL_SCHEMA,
+  REVOCATION_FILE,
+  REVOCATION_SCHEMA,
 };

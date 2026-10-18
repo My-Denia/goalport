@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "../coordination/catalogFromProviders";
 import type { SyntheticCatalogInstance } from "../coordination/coordinateGoal";
 
@@ -16,6 +17,8 @@ export interface AuthorizationScopeLine {
 export interface AuthorizationPanelProps {
   /** One discovery remembered from when this runtime-less draft opened. */
   readonly backgroundConsent?: boolean;
+  readonly backgroundConfigured?: boolean;
+  readonly onAllowBackgroundSend?: () => Promise<void>;
   readonly onBackgroundConsentChange?: (enabled: boolean) => void;
   readonly providers: readonly ProviderSnapshot[];
   readonly selected: readonly string[];
@@ -93,8 +96,21 @@ export function AuthorizationPanel({
   onConfirmChange,
   onUseAgain,
   backgroundConsent = false,
+  backgroundConfigured = true,
+  onAllowBackgroundSend,
   onBackgroundConsentChange,
 }: AuthorizationPanelProps) {
+  const [grantBusy, setGrantBusy] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
+  async function allowBackgroundSend() {
+    if (!onAllowBackgroundSend || grantBusy) return;
+    setGrantBusy(true);
+    setGrantError(null);
+    try {
+      await onAllowBackgroundSend(); // Capability grant never selects another goal's checkbox.
+    } catch { setGrantError("Harness turns could not be allowed. Try again; nothing was sent."); }
+    finally { setGrantBusy(false); }
+  }
   const catalog = catalogFromProviderSnapshots(providers);
   const editable = changeMode || scope === null;
   const selectedNames = catalog
@@ -115,9 +131,14 @@ export function AuthorizationPanel({
         If independent verification then finds unfinished work, GoalPort may organize one further
         checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>
-      {onBackgroundConsentChange ? (
-        <p>After you close GoalPort, only this goal keeps running with the access you set here. File changes still follow the workspace section below. Choose that next to Send.</p>
-      ) : null}
+      {onBackgroundConsentChange ? <div className="authorization-background">
+        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes. Choose that next to Send.</p>
+        {!backgroundConfigured ? <>
+          <p>Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.</p>
+          <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run harness turns on this profile</button>
+          {grantError ? <p role="alert">{grantError}</p> : null}
+        </> : null}
+      </div> : null}
       <ul className="authorization-provider-list">
         {catalog.map((instance) => {
           const { state, reason } = rowState(instance);

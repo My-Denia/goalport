@@ -26,6 +26,31 @@ const held = {
   errorText: "",
 };
 
+test("ordinary capability truth table accepts env or consent and preserves pinned paths", async () => {
+  for (const envSet of [false, true]) for (const allowed of [false, true]) {
+    for (const checkout of [false, true]) for (const serverCwd of [false, true]) {
+      const env = { GOALPORT_COORDINATE_SEND: envSet ? "1" : "0",
+        ...(checkout ? { GOALPORT_HARNESS_CHECKOUT: "/pinned" } : {}),
+        ...(serverCwd ? { GOALPORT_HARNESS_SERVER_CWD: "/pinned/server" } : {}) };
+      let runs = 0;
+      const runtime = {
+        discover: async () => ({ ok: true, providers: [] }),
+        prepare: async () => held,
+        run: async () => { runs++; return { ok: true, text: "Bounded plan.", messageDispatched: true }; },
+      };
+      const consent = () => ({ allowed });
+      const discovered = await discoverCoordination(env, runtime, undefined, consent);
+      assert.equal(discovered.sendAuthorized, envSet || allowed);
+      const result = await launchOne(env, runtime, command, undefined, undefined, consent);
+      assert.equal(result.launched, envSet || allowed);
+      assert.equal(runs, envSet || allowed ? 1 : 0);
+      if (!envSet && !allowed) assert.match(result.errorText, /not authorized/);
+    }
+  }
+  const runtime = { discover: async () => ({ ok: true, providers: [] }), prepare: async () => held,
+    run: async () => { throw new Error("must not run"); } };
+  assert.equal((await launchOne({}, runtime, command, undefined, undefined, () => { throw new Error("unreadable"); })).launched, false);
+});
 test("discovery asks the runtime and does not authorize a send", async () => {
   let discovered = 0;
   const result = await discoverCoordination({}, {

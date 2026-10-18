@@ -56,6 +56,8 @@ interface DraftGoalComposerProps {
   connected: boolean;
   busy: boolean;
   blockedFromSending: boolean;
+  /** Non-null holds Send (quiet progress, not an error): harness access for this draft is still resolving. */
+  waitingOn: string | null;
   retryLabel?: string;
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
@@ -76,11 +78,12 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const canSubmit = !busy
+    && !waitingOn
     && (!blockedFromSending || Boolean(retryLabel))
     && connected
     && draft.workspace.trim().length > 0
@@ -148,6 +151,8 @@ export function DraftGoalComposer({
           rows={3}
           disabled={busy}
         />
+
+        {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
 
         {error ? (
           <div className="dialog-note" role="alert">

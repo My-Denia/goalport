@@ -36,6 +36,16 @@ async function scenario(t, options = {}) {
     options.store = { ...store, completeCommand: (...args) => { if (launches.length === 1) throw Error("disk full"); return complete(...args); } };
   }
   if (options.preLaunchFailure) options.store = { ...store, updateProgress: (...args) => { if (store.getStatus(start.jobId).pendingCommand) throw Error("pre-launch disk full"); return store.updateProgress(...args); } };
+  if (options.stopWinsAdmissionRace) {
+    // The durable stop lands between the admission read and its write: the
+    // store settles the command as never sent and refuses the launch.
+    options.store = { ...store, recordPendingCommand: (jobId) => {
+      store.revoke(jobId);
+      const error = new Error("Access was stopped; the recorded command was settled as never sent and was not launched.");
+      error.code = "access-revoked";
+      throw error;
+    } };
+  }
   let backgroundEngineInputValue;
   const workerEngine = options.captureExecutionFeedback ? {
     ...engine,
@@ -48,6 +58,38 @@ async function scenario(t, options = {}) {
   }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
   return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
 }
+test("a revocation before the worker claim settles stopped without contacting anything", async t => {
+  // Windows-safe: the settlement path returns before the control endpoint,
+  // Core, scopes or harnesses are ever touched, so no Unix socket is needed.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-preclaim-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createCoordinationJobStore(directory, { bootstrapReady: true });
+  const admitted = store.startAdmission({ requestId: "pre-claim-stop", goal: "Stopped before starting", workspacePath: directory,
+    allowedInstances: ["codex"], maxTurns: 4, backgroundConsent: true });
+  store.revoke(admitted.jobId);
+  const touched = [];
+  const result = await runWorker({ directory, stateDir: path.join(directory, "unused-state"), jobId: admitted.jobId,
+    controlEndpoint: path.join(directory, "never-bound.sock") }, {
+    store,
+    engine: { backgroundEngineInput: input => input, requestCoordination: async () => { touched.push("engine"); throw Error("must not run"); } },
+    scope: { revoke: () => touched.push("scope"), current: () => ({ remaining: 4 }) },
+    runtime: { stateDir: directory, discover: async () => { touched.push("runtime"); throw Error("must not run"); }, prepare: async () => { touched.push("runtime"); }, run: async () => { touched.push("launch"); throw Error("must not launch"); }, close() { touched.push("runtime-close"); } },
+    core: { invoke: async () => { touched.push("core"); throw Error("must not call core"); }, exchangeVerified: async () => { touched.push("core"); throw Error("must not call core"); } },
+    discover: async () => { touched.push("discover"); throw Error("must not discover"); },
+    env: { GOALPORT_COORDINATE_SEND: "1" },
+    saveRecord: () => { touched.push("save"); throw Error("must not save"); },
+  });
+  assert.deepEqual(touched, []);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.settledPreStartRevocation, true);
+  const status = store.getStatus(admitted.jobId);
+  assert.equal(status.state, "stopped");
+  assert.equal(status.active, false);
+  assert.equal(status.revoked, true);
+  assert.equal(status.outcome.reason, "revoked-before-start");
+  assert.equal(fs.existsSync(path.join(directory, "coordination-jobs", "active-admission.json")), false);
+  assert.deepEqual(readRecords(directory), []);
+});
 test("same engine completes two chains with one authorization, dual budgets and first pass", async t => {
   const r = await scenario(t);
   assert.equal(r.result.status, "completed"); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1);
@@ -61,10 +103,36 @@ test("second revise never runs a third chain", async t => { const r = await scen
 test("default four reads do not reconstruct repair budget", async t => { const r = await scenario(t, { reads: 4 }); assert.equal(r.launches.length, 4); assert.equal(r.status.counters.readTurnsRemaining, 1); assert.match(r.result.report.stopReason, /not enough access/); });
 test("read-only consent never admits a writer", async t => { const r = await scenario(t, { readOnly: true }); assert.equal(r.launches.length, 2); assert.ok(r.launches.every(c => c.sandboxPolicy.type === "readOnly")); });
 test("revocation settles current turn but refuses every subsequent launch", async t => { const r = await scenario(t, { revokeAt: 2 }); assert.equal(r.launches.length, 2); assert.equal(r.status.revoked, true); assert.equal(r.status.completedCommands.length, 2); assert.equal(r.records[0].messageDispatched, true); });
+test("a stop winning the admission race never launches and settles a releasable outcome", async t => {
+  const r = await scenario(t, { stopWinsAdmissionRace: true });
+  assert.equal(r.launches.length, 0);
+  // The refusal is clean, not a storage failure: the run settles an honest
+  // terminal outcome and releases the slot instead of retaining an
+  // unconfirmed admission forever. (On the success-path return the field is
+  // simply absent; the pre-fix code set it to true.)
+  assert.ok(!r.result.storageFailed);
+  assert.equal(r.status.revoked, true);
+  assert.equal(r.status.pendingCommand, null);
+  assert.ok(["stopped", "failed"].includes(r.status.state));
+  assert.equal(r.status.active, false);
+});
 test("literal unknown dispatch retains pending claim and slot, no replay", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "partial writer", errorText: "lost", messageDispatched: null } }); assert.equal(r.launches.length, 3); assert.equal(r.status.state, "unconfirmed"); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.throws(() => r.store.claimWorker(r.jobId)); });
 test("known-not-sent writer stays terminal without repair", async t => { const r = await scenario(t, { resultAt: 3, result: { ok: false, text: "", errorText: "never sent", messageDispatched: false } }); assert.equal(r.launches.length, 3); assert.equal(r.status.pendingCommand, null); assert.equal(r.records[0].messageDispatched, true); });
 test("post-turn persistence failure retains durable uncertainty and known live result", async t => { const r = await scenario(t, { storageFailure: true }); assert.equal(r.launches.length, 1); assert.equal(r.status.active, true); assert.ok(r.status.pendingCommand); assert.equal(r.result.storageFailed, true); });
 test("terminal ordinary record failure does not continue or replenish access", async t => { const r = await scenario(t, { saveFailure: true }); assert.equal(r.launches.length, 8); assert.equal(r.authorizations, 1); assert.equal(r.scope.current(), null); });
+test("a record-save failure still settles the job terminal and releases the slot", async t => {
+  // The plan record and the job outcome are separate durable facts: a
+  // history write failure must not wedge the profile in a running job
+  // forever (the defect: no later goal could start).
+  const r = await scenario(t, { saveFailure: true });
+  assert.equal(r.result.recordSaveFailed, true);
+  assert.equal(r.status.state, "completed");
+  assert.equal(r.status.active, false);
+  assert.equal(typeof r.status.outcome?.error, "string");
+  // The concrete user harm: a NEW goal is admissible in the same profile.
+  const second = r.store.startAdmission({ requestId: "after-save-failure", goal: "Next goal", workspacePath: path.resolve("/tmp/gp-savefail"), allowedInstances: ["codex", "claude"], maxTurns: 4, backgroundConsent: true });
+  assert.equal(second.ok, true);
+});
 test("blank selected workspace cannot clear governing hold", async t => { const r = await scenario(t, { snapshot: { bounds: { projectionUnavailable: false }, project: { workspaceRoot: "" }, stopResponsibility: { writeResponsibility: "held" } } }); assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0); });
 test("Core unavailable/active projections refuse", () => { assert.ok(coreRefusal(null)); assert.ok(coreRefusal({ bounds: { projectionUnavailable: true } })); assert.ok(coreRefusal({ bounds: {}, attempt: { state: "ACTIVE" } })); });
 

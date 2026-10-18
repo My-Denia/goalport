@@ -32,6 +32,15 @@ async function runWorker(config, deps = {}) {
   const core = deps.core ?? workerCore(config);
   const env = deps.env ?? process.env;
   const claim = store.claimWorker(config.jobId);
+  if (claim.settledPreStartRevocation) {
+    // The admission was stopped before this worker started: the store
+    // proved from durable facts (no prior claim, no recorded command) that
+    // no tool call was ever admitted, and the claim itself already settled
+    // the terminal stopped outcome and released the admission slot.
+    // Settling is this run's whole job — no Core, scope, harness or engine
+    // is contacted, and no record is saved for a round that never ran.
+    return { status: "stopped", settledPreStartRevocation: true };
+  }
   const admitted = claim.status.admission;
   const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
@@ -85,7 +94,18 @@ async function runWorker(config, deps = {}) {
       },
     }, discovery, { launch: async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
-      try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) { storageFailed = true; return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` }; }
+      try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
+        if (error?.code === "access-revoked") {
+          // The store proved the durable stop won the admission race and
+          // already settled the recorded command as never sent. That is a
+          // clean refusal, not a storage failure: mark the launch proven
+          // not-sent and let the run settle an honest terminal outcome
+          // instead of retaining an unconfirmed admission forever.
+          return { launched: false, dispatched: false, text: "", errorText: "Access was stopped; this command was not sent." };
+        }
+        storageFailed = true;
+        return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` };
+      }
       const result = await launchOne(env, { ...runtime, run: (admittedCommand, generation) => {
         // launchOne has charged the ORIGINAL scope before this synchronous
         // callback. Publish that observed counter before invoking the CLI.
@@ -105,13 +125,27 @@ async function runWorker(config, deps = {}) {
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
     const pending = store.getStatus(config.jobId).pendingCommand;
     const status = pending || liveResult.verdict === "unconfirmed" ? "unconfirmed" : store.getStatus(config.jobId).revoked ? "stopped" : ["verified", "checked", "revise"].includes(liveResult.verdict) ? "completed" : "failed";
+    // The plan record (history/Plans) and the job's own terminal outcome
+    // are separate durable facts. A record-save failure must not prevent
+    // the honest terminal outcome, the scope revoke, or the admission
+    // release — otherwise one failed history write wedges the profile slot
+    // forever and no later goal can start. The outcome carries an honest
+    // note instead; the success path keeps the audited record-before-
+    // outcome order unchanged.
+    let recordSaveFailed = false;
     try {
       (deps.saveRecord ?? saveRecord)(config.directory, { ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal, savedAt: new Date().toISOString() });
-      store.recordOutcome(config.jobId, { status, report: liveResult }, owner);
-    } catch (error) { storageFailed = true; throw error; }
+    } catch {
+      recordSaveFailed = true;
+    }
+    store.recordOutcome(config.jobId, {
+      status,
+      report: liveResult,
+      ...(recordSaveFailed ? { error: "The saved plan record could not be written; the retained result below is this job's own record." } : {}),
+    }, owner);
     scope.revoke();
     if (status !== "unconfirmed") store.releaseAdmission(config.jobId, owner);
-    return { status, report: liveResult };
+    return { status, report: liveResult, ...(recordSaveFailed ? { recordSaveFailed: true } : {}) };
   } catch (error) {
     scope.revoke();
     if (!storageFailed) {

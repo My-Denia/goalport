@@ -13,6 +13,8 @@ const {
   normalizeAdmissionInput,
   requestControl,
   ADMISSION_SCHEMA,
+  REVOCATION_FILE,
+  REVOCATION_SCHEMA,
 } = require("./coordination-job.cjs");
 
 const FIXED_JOB_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -219,6 +221,179 @@ test("revocation is durable control state, retains an in-flight outcome and bloc
   assert.equal(settled.startupClaim.pid, process.pid);
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), true);
   assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8")).revoked, true);
+});
+
+test("a stale-snapshot progress replacement cannot erase a durable revocation", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  // The worker read its snapshot BEFORE the stop lands (writeAtomic only
+  // serializes one replacement; a cross-process read-modify-write has no
+  // transaction). This is the exact lost-update interleaving.
+  const stale = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8"));
+  assert.equal(stale.revoked, false);
+  const revoked = store.revoke(admitted.jobId);
+  assert.equal(revoked.revoked, true);
+  assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, REVOCATION_FILE), "utf8")).schema, REVOCATION_SCHEMA);
+  // The worker's atomic replace lands from the stale snapshot, overwriting
+  // the revoked progress projection exactly as the race allows.
+  fs.writeFileSync(pathFor(profile, admitted.jobId, "progress.json"), `${JSON.stringify({ ...stale, phase: "running" }, null, 2)}\n`);
+  // Every read merges the write-once marker back in: the stop fact survives.
+  const after = store.getStatus(admitted.jobId);
+  assert.equal(after.revoked, true);
+  assert.equal(after.revokeRequestedAt, "2026-10-12T13:14:15.000Z");
+  assert.throws(() => store.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-9" }, ownerToken), { code: "access-revoked" });
+  // A worker write through the store also carries the merged stop forward.
+  store.updateProgress(admitted.jobId, { detail: "late display update" }, ownerToken);
+  assert.equal(store.getStatus(admitted.jobId).revoked, true);
+  assert.equal(JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8")).revoked, true);
+  // Re-revoking stays idempotent, and a corrupt marker refuses fail-closed.
+  assert.equal(store.revoke(admitted.jobId).revoked, true);
+  fs.writeFileSync(pathFor(profile, admitted.jobId, REVOCATION_FILE), "{not json");
+  assert.throws(() => store.getStatus(admitted.jobId), { code: "malformed-state" });
+});
+
+test("a stop landing between the admission read and its write settles the command as never sent", (t) => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-stop-race-"));
+  t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const mainStore = createCoordinationJobStore(profile, { bootstrapReady: true, clock: () => "2026-10-12T13:14:15.000Z" });
+  let raceOnProgressWrite = false;
+  const fsApi = new Proxy(fs, {
+    get(target, property) {
+      if (property === "renameSync") return (from, to) => {
+        // The user's Stop becomes durable AFTER the worker read its snapshot
+        // but BEFORE the pending-command replacement commits: the exact
+        // admission/revoke interleaving from the PR audit.
+        if (raceOnProgressWrite && String(to).endsWith("progress.json")) {
+          raceOnProgressWrite = false;
+          mainStore.revoke(jobId);
+        }
+        return target.renameSync(from, to);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const workerStore = createCoordinationJobStore(profile, {
+    bootstrapReady: true,
+    fsApi,
+    idFactory: () => FIXED_JOB_ID,
+    tokenFactory: () => FIXED_TOKEN,
+    clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const admitted = workerStore.startAdmission(admission());
+  const jobId = admitted.jobId;
+  const { ownerToken } = workerStore.claimWorker(jobId);
+  raceOnProgressWrite = true;
+  assert.throws(() => workerStore.recordPendingCommand(jobId, { commandId: "coordinate-plan-send-1", role: "planning" }, ownerToken), { code: "access-revoked" });
+  // The launch was refused AND the recorded command was durably settled as
+  // never sent: the ledger keeps the fact and no unconfirmed command remains.
+  const status = mainStore.getStatus(jobId);
+  assert.equal(status.revoked, true);
+  assert.equal(status.state, "revoked");
+  assert.equal(status.pendingCommand, null);
+  assert.equal(status.completedCommands.length, 1);
+  assert.equal(status.completedCommands[0].commandId, "coordinate-plan-send-1");
+  assert.equal(status.completedCommands[0].facts.launched, false);
+  assert.equal(status.completedCommands[0].facts.dispatched, false);
+  const disk = JSON.parse(fs.readFileSync(pathFor(profile, jobId, "progress.json"), "utf8"));
+  assert.equal(disk.pendingCommand, null);
+  assert.equal(disk.revoked, true);
+  assert.equal(disk.state, "revoked");
+  // The settled id is never re-admissible, and the slot is not deadlocked:
+  // an honest terminal outcome still releases the profile.
+  assert.throws(() => workerStore.recordPendingCommand(jobId, { commandId: "coordinate-plan-send-1" }, ownerToken), { code: "access-revoked" });
+  workerStore.recordOutcome(jobId, { status: "stopped", reason: "stopped while admitting" }, ownerToken);
+  workerStore.releaseAdmission(jobId, ownerToken);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+});
+
+test("revoke is marker-only: it never replaces progress.json and cannot roll a settled completion back", (t) => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-marker-only-"));
+  t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  let stopWroteProgress = false;
+  const mainFs = new Proxy(fs, {
+    get(target, property) {
+      if (property === "renameSync") return (from, to) => {
+        if (String(to).endsWith("progress.json")) stopWroteProgress = true;
+        return target.renameSync(from, to);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const mainStore = createCoordinationJobStore(profile, {
+    bootstrapReady: true, fsApi: mainFs, idFactory: () => FIXED_JOB_ID, tokenFactory: () => FIXED_TOKEN, clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const workerStore = createCoordinationJobStore(profile, {
+    bootstrapReady: true, idFactory: () => FIXED_JOB_ID, tokenFactory: () => FIXED_TOKEN, clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const admitted = workerStore.startAdmission(admission());
+  const { ownerToken } = workerStore.claimWorker(admitted.jobId);
+  workerStore.recordPendingCommand(admitted.jobId, { commandId: "coordinate-plan-send-1", role: "planning" }, ownerToken);
+  const progressPath = pathFor(profile, admitted.jobId, "progress.json");
+  const before = fs.readFileSync(progressPath, "utf8");
+  const revoked = mainStore.revoke(admitted.jobId);
+  assert.equal(revoked.revoked, true);
+  assert.equal(revoked.state, "revoked");
+  // The stop replaced no progress bytes: the worker process stays the only
+  // progress.json writer, so no cross-process lost update exists at all.
+  assert.equal(stopWroteProgress, false);
+  assert.equal(fs.readFileSync(progressPath, "utf8"), before);
+  // A completion racing the stop still lands in full, and the merged read
+  // shows both durable facts without any rollback to pending.
+  const settled = workerStore.completeCommand(admitted.jobId, { commandId: "coordinate-plan-send-1", facts: { text: "The turn settled." } }, ownerToken);
+  assert.equal(settled.revoked, true);
+  assert.equal(settled.pendingCommand, null);
+  assert.equal(settled.completedCommands.length, 1);
+  assert.equal(settled.completedCommands[0].facts.text, "The turn settled.");
+  const after = mainStore.getStatus(admitted.jobId);
+  assert.equal(after.revoked, true);
+  assert.equal(after.pendingCommand, null);
+  assert.equal(after.completedCommands.length, 1);
+  workerStore.recordOutcome(admitted.jobId, { status: "stopped", reason: "stopped after settle" }, ownerToken);
+  workerStore.releaseAdmission(admitted.jobId, ownerToken);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+});
+
+test("a revocation before any worker claim is settled by the spawning worker and releases the admission", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  // Stop allowing lands in the window after the admission was persisted
+  // but before the spawned worker claims — no claim file exists yet.
+  const revoked = store.revoke(admitted.jobId);
+  assert.equal(revoked.revoked, true);
+  assert.equal(revoked.state, "revoked");
+  assert.equal(fs.existsSync(pathFor(profile, admitted.jobId, "claim.json")), false);
+  // The spawning worker claims: nothing was ever admitted to launch (no
+  // prior claim means no command could be recorded), so the claim settles
+  // terminal stopped and releases the profile-wide slot in the same step.
+  const claim = store.claimWorker(admitted.jobId);
+  assert.equal(claim.settledPreStartRevocation, true);
+  assert.equal(claim.status.state, "stopped");
+  assert.equal(claim.status.active, false);
+  assert.equal(claim.status.revoked, true);
+  assert.equal(claim.status.outcome.reason, "revoked-before-start");
+  assert.equal(claim.status.pendingCommand, null);
+  assert.equal(claim.status.completedCommands.length, 0);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  const diskSettled = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "progress.json"), "utf8"));
+  assert.equal(diskSettled.state, "stopped");
+  assert.equal(diskSettled.outcome.reason, "revoked-before-start");
+  // No second worker may claim or restart the settled job: with the slot
+  // released, the claim refuses at the admission boundary (the terminal
+  // progress facts back it up behind the same refusal chain).
+  assert.throws(() => store.claimWorker(admitted.jobId), { code: "admission-not-active" });
+  // The profile admits a NEW goal again — the P1 deadlock is gone.
+  const reopened = createCoordinationJobStore(profile, {
+    bootstrapReady: true,
+    idFactory: () => "123e4567-e89b-42d3-a456-426614174999",
+    tokenFactory: () => "b".repeat(64),
+    clock: () => "2026-10-12T13:14:15.000Z",
+  });
+  const second = reopened.startAdmission(admission({ requestId: "send-background-2" }));
+  assert.equal(second.ok, true);
+  assert.equal(second.created, true);
 });
 
 test("an atomic progress persistence failure prevents caller launch and preserves prior durable facts", (t) => {

@@ -11,7 +11,7 @@ GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start 
 
 ![GoalPort showing separate read and workspace-change consent before Send](docs/assets/screenshots/campaign-conversation.png)
 
-<sub>Current built UI in a real WSL/Linux Electron window with Core and offline sentinel stubs, on a disposable fixture. No real vendor CLI or model call; not Windows packaged acceptance. Read consent and workspace changes are separate decisions. See [coordination limits](docs/limitations.md#coordination-execution-evidence).</sub>
+<sub>Read consent and workspace changes are separate decisions.</sub>
 
 ## Why GoalPort
 
@@ -59,9 +59,9 @@ pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 2. Choose **New goal**, select a workspace folder and a Runtime, then describe the task.
 3. Send the message. Permission requests appear in the conversation; Stop is beside the composer. These controls work in narrow windows too.
 
-Data lives in `%APPDATA%\GoalPort\rc`. Electron/Chromium browser shell state (caches, preferences, window geometry) is stored separately under `%APPDATA%\GoalPort\electron\<profile key>`, so the profile directory holds only durable GoalPort data. The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
+Data lives in `%APPDATA%\GoalPort\rc` (browser shell state under `%APPDATA%\GoalPort\electron\<profile key>`). The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
 
-Linux developers can run Core and operate it through the [Unix command client](docs/linux-development.md), including native Codex tasks and diagnostics. This is a backend development entry, separate from the Windows desktop package. The browser preview is synthetic and clearly labelled; it does not send work to a Runtime.
+Linux developers can run Core and operate it through the [Unix command client](docs/linux-development.md), including native Codex tasks and diagnostics. The browser preview uses synthetic data only.
 
 ## How it works
 
@@ -85,12 +85,12 @@ Details: [runtime integration](docs/runtimes.md).
 
 ## Status
 
-GoalPort **1.0.0-rc.1** is a **Stable V1 RC**: a release candidate, not Stable V1.
+GoalPort is at **1.0.0-rc.1**, a release candidate.
 
 - The desktop package targets Windows x64 and is built from source, unsigned. Linux Core has a Unix socket development entry.
-- Current source can reopen compatible profiles and offers supported imports with backups. The previously built RC package retains its original behavior; see [profile continuity](docs/profile-continuity.md).
-- Admission differs per Runtime (Codex partial, Claude Code partially admitted, Grok admitted), recorded for specific builds, not re-checked for builds from current source.
-- After a Claude Code Stop, a hold stays until the recorded process tree and spawn-time domain are gone and the workspace fingerprint is quiet. Missing evidence does not release it. An unrelated process that only shares the workspace directory does not keep the hold.
+- Compatible profiles reopen, and supported imports make a backup first ([profile continuity](docs/profile-continuity.md)).
+- Runtime support: Grok admitted; Codex and Claude Code partial.
+- After a Claude Code Stop, conflicting work stays blocked until its processes have exited and the workspace is quiet.
 
 Full list: [limitations](docs/limitations.md).
 

@@ -134,7 +134,12 @@ Reviewer 只分类，不把当前 PR 接过来自己实现。
 
 Windows GUI、Electron、Claude native path：真实打包的 EXE、真实的鼠标键盘、真实 Runtime 行为，高于 synthetic 和 unit 测试。不得用更多形式验证替换已经定义的产品验收。
 
-已经授权并创建的 PR，在同一分支上为 **成立且属于当前 scope** 的修复做普通 fast-forward commit 和 push，算这条 PR 生命周期里的持续授权。不要为此再向 owner 要一次「继续」或重新授权 push。force-push、扩大 PR scope、新建 PR、merge、tag、release、deploy、签名、版本变更，以及其他不可逆的外部操作，仍要单独明确授权。
+已经授权并创建的 PR，在同一分支上为 **成立且属于当前 scope** 的修复做普通 fast-forward commit 和 push，算这条 PR 生命周期里的持续授权。不要为此再向 owner 要一次「继续」或重新授权 push。merge 在没有违背 owner 的意思、没有添油加醋、没有自作主张的内容时由 agent 直接做，有就先改好再合并；release（含 tag 和版本变更）由 agent 自行判断。force-push、扩大 PR scope、deploy、签名，以及其他不可逆的外部操作，仍要单独明确授权。
+
+
+## 收尾清理工作区
+
+本地 agent 收尾时清理工作区：先把可复用的内容归档，再删掉已合并或过时的本地分支和 worktree。磁盘是多个项目共用的，不清理会被占满。（Denia 2026-10-15：「删分支是项目设置，规则有没有不重要，本地agent整理工作区删分支工作树归档可复用内容很重要，因为我的储存就这么点…不是只有一个项目在占用资源」）
 
 ---
 

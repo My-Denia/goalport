@@ -336,6 +336,7 @@ declare global {
         scopeExhausted?: boolean;
       }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
+      backgroundSendConsent?: (action: "read" | "grant" | "revoke") => Promise<{ allowed: boolean; grantedAt?: string }>;
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;

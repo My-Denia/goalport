@@ -2019,6 +2019,49 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   }
 
+  it("holds Send while harness access is loading and unlocks when the panel lands", async () => {
+    // P1: a fast first Send must not silently spend turns through the
+    // legacy unscoped path while the harness-access panel is still loading.
+    let resolveDiscovery!: (value: { connected: boolean; sendAuthorized: boolean; providers: Array<Record<string, unknown>>; stopReason: string | null }) => void;
+    const pending = new Promise<{ connected: boolean; sendAuthorized: boolean; providers: Array<Record<string, unknown>>; stopReason: string | null }>((resolve) => { resolveDiscovery = resolve; });
+    scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], launch: async command => planOrReview(command) });
+    window.goalportCore!.coordinateDiscover = async () => pending;
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
+    expect(await screen.findByText(/Checking which harnesses can work on this goal/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+    // Even a programmatic submit cannot reach the legacy unscoped launch.
+    fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+    expect(await screen.findByText(/Harness access is still loading, so nothing was sent/)).toBeTruthy();
+    resolveDiscovery({ connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null });
+    await screen.findByText(/Nothing is sent until you press Send\./);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+  });
+
+  it("a failed harness-access load keeps Send held with a retryable error, and retry recovers", async () => {
+    let discoverCalls = 0;
+    scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], launch: async command => planOrReview(command) });
+    window.goalportCore!.coordinateDiscover = async () => {
+      discoverCalls += 1;
+      return discoverCalls === 1
+        ? { connected: false, sendAuthorized: false, providers: [], stopReason: "Send is not enabled." }
+        : { connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null };
+    };
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
+    expect(await screen.findByText(/could not load your harness-access choices/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Send is not enabled.")).toBeTruthy();
+    fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+    expect(await screen.findByText(/could not be loaded, so nothing was sent/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry harness access" }));
+    await screen.findByText(/Nothing is sent until you press Send\./);
+    expect(discoverCalls).toBe(2);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+  });
+
   it("never lands a paid-api scope member in the checked set when echoing a scope", async () => {
     // An impossible-but-defensive case: a scope that somehow names the
     // apiKey login. The checked set stays a subset of subscription logins;
@@ -2268,6 +2311,42 @@ describe("harness access panel and scoped rounds", () => {
     // Nothing was re-authorized or sent by opening change mode.
     expect(bridge.order.filter((step) => step === "authorize").length).toBe(1);
     expect(bridge.launched.length).toBe(2);
+  });
+
+  it("saving harness access keeps the just-saved write selection and consent across the requestId rotation", async () => {
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      launch: async (_command, call) => {
+        if (call === 1) return { text: PLAN_TEXT, errorText: "", turnsRemaining: 1 };
+        return { text: "", errorText: "", stopCode: "scope-exhausted", scopeExhausted: true, turnsRemaining: 0 };
+      },
+    });
+    window.goalportCore!.backgroundStart = async () => { throw new Error("not sent in this test"); };
+    render(<App />);
+    await openDraftWithPanel();
+    typeMessage("plan the helper");
+    sendMessage();
+    expect(await screen.findByText("All authorized model turns were used, so this stopped.", { selector: "dd" })).toBeTruthy();
+    // Enter change mode, make the user's choices: a write harness, non-default
+    // write turns, and keep-working consent.
+    fireEvent.click(screen.getByRole("button", { name: "Allow more turns" }));
+    expect(await screen.findByRole("button", { name: "Save harness access" })).toBeTruthy();
+    const writeBox = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+    fireEvent.click(writeBox);
+    fireEvent.change(await screen.findByRole("spinbutton", { name: /write turns/i }), { target: { value: "3" } });
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Keep working after closing" }));
+    // The save rotates the draft requestId (anti-replay kept); the panel
+    // effect must not wipe the selections the user just saved.
+    fireEvent.click(screen.getByRole("button", { name: "Save harness access" }));
+    await waitFor(async () => {
+      const box = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
+      expect((box as HTMLInputElement).checked).toBe(true);
+    });
+    await waitFor(async () => {
+      expect((await screen.findByRole("spinbutton", { name: /write turns/i }) as HTMLInputElement).value).toBe("3");
+      expect(((await screen.findByRole("checkbox", { name: "Keep working after closing" })) as HTMLInputElement).checked).toBe(true);
+    });
+    expect(bridge.order.filter((step) => step === "authorize").length).toBe(2);
   });
 
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
@@ -3041,6 +3120,99 @@ describe("one in-window repair", () => {
       counters: { readTurnsLeft: 3, writeTurnsLeft: null }, completedCommands: [], pendingCommand: null,
       progress: { activity: "Claude is checking…", failures: [] }, outcome: null,
     };
+    it("ordinary launch explains the profile grant once, unlocks Send and remembers it across panel reloads", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      let allowed = false;
+      const grant = vi.fn(async (action: "read" | "grant" | "revoke") => {
+        if (action === "grant") allowed = true;
+        if (action === "revoke") allowed = false;
+        return { allowed, ...(allowed ? { grantedAt: "2026-10-12T00:00:00Z" } : {}) };
+      });
+      window.goalportCore!.backgroundSendConsent = grant;
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: allowed });
+      const start = vi.fn(async () => liveJob);
+      window.goalportCore!.backgroundStart = start;
+      window.goalportCore!.backgroundStatus = async () => null;
+      const view = render(<App />);
+      await openDraftWithPanel();
+      const sentence = "Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.";
+      expect(screen.getAllByText(sentence)).toHaveLength(1);
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+      typeMessage("Plan this helper");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      expect(start).not.toHaveBeenCalled();
+      expect(bridge.authorizations).toHaveLength(0);
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      await waitFor(() => expect(screen.queryByText(sentence)).toBeNull());
+      expect(grant).toHaveBeenCalledTimes(1);
+      expect(grant).toHaveBeenCalledWith("grant");
+      expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+      // A fresh app/panel reads the durable capability, but no goal consent.
+      view.unmount();
+      render(<App />);
+      await openDraftWithPanel();
+      const checkbox = screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement;
+      expect(checkbox.checked).toBe(false);
+      fireEvent.click(checkbox);
+      expect(checkbox.checked).toBe(true);
+      expect(screen.queryByText(sentence)).toBeNull();
+      expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull();
+      typeMessage("Plan this helper"); sendMessage();
+      await screen.findByRole("region", { name: "Background goal" });
+      expect(start).toHaveBeenCalledTimes(1);
+      expect(grant).toHaveBeenCalledTimes(1);
+      expect(bridge.authorizations).toHaveLength(0);
+      expect(bridge.launchCount()).toBe(0);
+    });
+    it("a pending profile grant never restores per-goal consent that was unchecked", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      let allowed = false;
+      let finishGrant = () => {};
+      const pending = new Promise<void>(resolve => { finishGrant = resolve; });
+      window.goalportCore!.backgroundSendConsent = async () => { await pending; allowed = true; return { allowed }; };
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: allowed });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />); await openDraftWithPanel();
+      const checkbox = screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement;
+      fireEvent.click(checkbox);
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      fireEvent.click(checkbox);
+      finishGrant();
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull());
+      expect(checkbox.checked).toBe(false);
+      expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
+    });
+    it("a failed profile grant leaves all coordinated Send blocked and explains how to retry", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundSendConsent = async () => { throw new Error("disk full"); };
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: false });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />); await openDraftWithPanel(); typeMessage("Plan this helper");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      await screen.findByText("Harness turns could not be allowed. Try again; nothing was sent.");
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      expect(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    });
+    it("a granted profile can send an ordinary scoped goal without after-close consent", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      let allowed = false;
+      window.goalportCore!.backgroundSendConsent = async () => { allowed = true; return { allowed }; };
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: allowed });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />); await openDraftWithPanel();
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull());
+      expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(false);
+      typeMessage("Plan this helper"); sendMessage();
+      await waitFor(() => expect(bridge.launchCount()).toBe(2));
+      expect(bridge.authorizations).toHaveLength(1);
+      expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
+    });
     it("default off Send routes one explicit read-only Start without main authorization or renderer launch", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       let status: typeof liveJob | null = null;
@@ -3159,7 +3331,7 @@ describe("one in-window repair", () => {
       window.goalportCore!.backgroundStatus = async () => liveJob;
       render(<App />);
       await screen.findByRole("region", { name: "Background goal" });
-      expect(screen.getByText(/still running/)).toBeTruthy();
+      expect(screen.getByText(/running on its own/)).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: /new goal/i }));
       await screen.findByRole("checkbox", { name: "Keep working after closing" });
       typeMessage("my untouched draft");
@@ -3241,7 +3413,7 @@ describe("one in-window repair", () => {
       expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("One independent goal");
       expect((screen.getByRole("textbox", { name: "Project folder" }) as HTMLInputElement).value).toBe("/work/goal");
       expect(start).not.toHaveBeenCalled();
-      expect(screen.queryByRole("button", { name: "Send message" })?.hasAttribute("disabled")).toBe(false);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
     });
     it("an active unconfirmed job offers Stop allowing; revoking hides it but keeps the uncertainty wording", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
@@ -3262,16 +3434,113 @@ describe("one in-window repair", () => {
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
       expect(bridge.authorizations).toHaveLength(0); expect(bridge.launchCount()).toBe(0);
     });
-    it.each([
-      ["an inactive finished job", { ...liveJob, active: false, live: false, state: "completed" as const }, /This goal is finished/],
-      ["an active but already revoked job", { ...liveJob, live: false, state: "unconfirmed" as const, revoked: true }, /Progress unavailable or interrupted/],
-    ])("%s offers no Stop allowing", async (_name, job, sentence) => {
-      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
-      window.goalportCore!.backgroundStatus = async () => job;
+    it("a restored finished job never takes the main view; its closeout stays one deliberate click away", async () => {
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        records: async () => [{
+          requestId: "saved-plan", workspacePath: "/work/goal", goal: "Explain the failure.",
+          planningHarness: "Codex", reviewHarness: "Claude",
+          planText: "Bounded plan.", reviewText: "Needs a smaller step.\nVERDICT: revise",
+          result: "Needs a smaller step.\nVERDICT: revise", verdict: "revise",
+          stopReason: "The independent check says the plan needs revision, so this stopped.",
+          planningQuota: "available", reviewQuota: "available", savedAt: "2026-10-08T06:10:00.000Z",
+        }],
+      });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, active: false, live: false, state: "completed" as const });
       render(<App />);
-      expect(await screen.findByText(sentence)).toBeTruthy();
-      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+      expect(await screen.findByText("Bounded plan.")).toBeTruthy();
+      await waitFor(() => expect(window.goalportCore!.backgroundStatus).toBeTruthy());
+      expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /One independent goal/ }));
+      expect(await screen.findByText(/This background job finished/)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    });
+    it("an active but already revoked job offers no Stop allowing", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: false, state: "unconfirmed" as const, revoked: true });
+      render(<App />);
+      expect(await screen.findByText(/Progress unavailable or interrupted/)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    });
+    it("a background round finishing in this session refreshes Plans without a reload", async () => {
+      let finished = false;
+      let lists = 0;
+      const round = {
+        requestId: "bg-round", workspacePath: "/work/goal", goal: "Finish in the background.",
+        planningHarness: "Codex", reviewHarness: "Claude",
+        planText: "Background plan.", reviewText: "Checked in the background.\nVERDICT: carry-out",
+        result: "Checked in the background.\nVERDICT: carry-out", verdict: "checked",
+        stopReason: null, planningQuota: "available", reviewQuota: "available",
+        savedAt: "2026-10-11T12:00:00.000Z",
+      };
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        records: async () => { lists += 1; return finished ? [round] : []; },
+      });
+      window.goalportCore!.backgroundStatus = async () => (
+        finished ? { ...liveJob, active: false, live: false, state: "completed" as const } : { ...liveJob }
+      );
+      render(<App />);
+      // The live job attaches and opens its own view; Plans is still empty.
+      await screen.findByRole("region", { name: "Background goal" });
+      expect(screen.getByRole("button", { name: "Leave job view" })).toBeTruthy();
+      // The worker persists the record BEFORE the store marks the job terminal.
+      finished = true;
+      // The next poll sees the terminal state and re-lists the plans once.
+      expect(await screen.findByText(/This background job finished/, undefined, { timeout: 3000 })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      expect(await screen.findByText("Background plan.", undefined, { timeout: 3000 })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Can be carried out · / })).toBeTruthy();
+      expect(lists).toBe(2);
+      // One re-list per job: later polls never list again.
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      expect(lists).toBe(2);
+    });
+    it("a failed terminal re-list retries on later polls and still lands the finished round", async () => {
+      let finished = false;
+      let lists = 0;
+      const round = {
+        requestId: "bg-round", workspacePath: "/work/goal", goal: "Finish in the background.",
+        planningHarness: "Codex", reviewHarness: "Claude",
+        planText: "Background plan.", reviewText: "Checked in the background.\nVERDICT: carry-out",
+        result: "Checked in the background.\nVERDICT: carry-out", verdict: "checked",
+        stopReason: null, planningQuota: "available", reviewQuota: "available",
+        savedAt: "2026-10-11T12:00:00.000Z",
+      };
+      scopedBridge({
+        providers: repairProviders(), launch: async command => planOrReview(command),
+        // Scripted read sequence: the mount load succeeds on an empty
+        // profile, then the terminal re-list throws once, returns a
+        // non-array once, and only then returns the finished round.
+        records: (async () => {
+          lists += 1;
+          if (lists === 1) return [] as Array<Record<string, unknown>>;
+          if (lists === 2) throw new Error("records read failed");
+          if (lists === 3) return null as unknown as Array<Record<string, unknown>>;
+          return finished ? [round] : ([] as Array<Record<string, unknown>>);
+        }) as unknown as () => Promise<Array<Record<string, unknown>>>,
+      });
+      window.goalportCore!.backgroundStatus = async () => (
+        finished ? { ...liveJob, active: false, live: false, state: "completed" as const } : { ...liveJob }
+      );
+      render(<App />);
+      await screen.findByRole("region", { name: "Background goal" });
+      expect(screen.getByRole("button", { name: "Leave job view" })).toBeTruthy();
+      finished = true;
+      // The first terminal read throws and the second resolves to a
+      // non-array; neither may mark the job as listed. The finished round
+      // must still land through a later poll's retry.
+      expect(await screen.findByText(/This background job finished/, undefined, { timeout: 5000 })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      expect(await screen.findByText("Background plan.", undefined, { timeout: 5000 })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Can be carried out · / })).toBeTruthy();
+      // Mount(1) + throw(2) + non-array(3) + successful retry(4): the two
+      // failures were retried, and no further reads stack afterwards.
+      expect(lists).toBe(4);
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      expect(lists).toBe(4);
     });
     it("Stop allowing uses the acknowledged job connection only and retains current evidence", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
@@ -3328,7 +3597,7 @@ describe("unsuccessful coordination events", () => {
     expect(screen.getByText("Claude took over the planning step.")).toBeTruthy();
   });
 
-  it("shows a stopped background result without reconstructing stop or send controls", () => {
+  it("shows a stopped background result as settled without reconstructing stop or send controls", () => {
     const start = vi.fn();
     render(<BackgroundCoordinationStatus job={{
       jobId: "same-job", requestId: "one-send", goal: "Repair the fixture.", state: "stopped", active: false, live: false, revoked: true,
@@ -3336,7 +3605,13 @@ describe("unsuccessful coordination events", () => {
       progress: null,
       outcome: { status: "stopped", report: { ...base, roundEvents: [{ kind: "failed", role: "execution", instanceId: "codex", harness: "Codex", sentence: "Access stopped; the current turn may finish, but no further turn was sent." }] } },
     }} onStopAllowing={start} />);
-    expect(screen.getByText(/Access stopped. The current turn may finish/)).toBeTruthy();
+    // P2: a settled stop is TOLD as settled — the job status line must not
+    // claim the current turn "may finish" anymore (that copy is only true
+    // while a revocation is still settling). The historical event sentence
+    // below stays as retained evidence.
+    const statuses = screen.getAllByRole("status").map((element) => element.textContent ?? "");
+    expect(statuses.some((text) => text.includes("This goal was stopped and has settled"))).toBe(true);
+    expect(statuses.filter((text) => text.includes("may finish")).length).toBe(0);
     expect(screen.getByText("Step not completed")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();

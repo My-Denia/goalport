@@ -80,6 +80,15 @@ const MESSAGE_TYPE_LABEL: Record<string, string> = {
 const BACKGROUND_JOB_OUTSTANDING_SENTENCE =
   "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
 
+/**
+ * The confirmed-terminal job states. This mirrors the main process's
+ * confirmed-terminal set (electron/coordination-background.cjs `projection`):
+ * only these prove the round ended, and only the main process may decide
+ * that. Every other state (including "revoked" before release and honest
+ * "unconfirmed") is still live-or-unknown and gets no terminal treatment.
+ */
+const BACKGROUND_JOB_TERMINAL_STATES = new Set(["completed", "failed", "stopped"]);
+
 function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice | null {
   const outcome = next.commandOutcome;
   if (outcome?.messageType === messageType) {
@@ -181,6 +190,14 @@ function App() {
   // per draft open, the user's selection, and a mirror of the authorized
   // scope. All of it is window-local and never touches the draft text.
   const [panelProviders, setPanelProviders] = useState<readonly ProviderSnapshot[] | null>(null);
+  // Harness-access panel load phase for the current runtime-less draft:
+  // "idle" before the draft exists, "loading" while discovery runs,
+  // "ready" once the panel can render, "failed" when discovery cannot
+  // connect. A failed load is retryable and NEVER falls back to an
+  // unscoped send: a panel-capable build holds Send until access is seen.
+  const [panelLoad, setPanelLoad] = useState<"idle" | "loading" | "ready" | "failed">("idle");
+  const [panelFailSentence, setPanelFailSentence] = useState<string | null>(null);
+  const [panelAttempt, setPanelAttempt] = useState(0);
   const [panelRequestId, setPanelRequestId] = useState<string | null>(null);
   const [selectedInstances, setSelectedInstances] = useState<readonly string[]>([]);
   const [allowedTurns, setAllowedTurns] = useState(4);
@@ -190,6 +207,13 @@ function App() {
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
   const [backgroundView, setBackgroundView] = useState(false);
   const backgroundAttached = useRef(false);
+  // Job id whose terminal closeout already re-listed the plans in this
+  // session — set only AFTER a valid records array actually replaced the
+  // plans, so failed reads retry on later polls instead of being skipped.
+  const plansListedTerminalRef = useRef<string | null>(null);
+  // True while a terminal-triggered records read is in flight: one read at
+  // a time, so the 700ms poll never stacks concurrent duplicate reads.
+  const terminalListInFlightRef = useRef(false);
   const [scopeMirror, setScopeMirror] = useState<{
     instances: readonly string[];
     maxTurns: number;
@@ -243,7 +267,10 @@ function App() {
   // The full harness-access surface (panel, scoped sends, Use again) needs the
   // whole scope bridge. A build with only the legacy discover/launch pair
   // keeps the pre-panel behavior untouched.
-  const scopeBridgeReady = coordinationAvailable
+  // Discovery can show the grant affordance before any quota-spending Send.
+  const scopeBridgeReady = (coordinationAvailable
+    || (client.mode === "electron" && Boolean(window.goalportCore?.backgroundSendConsent)
+      && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch)))
     && Boolean(window.goalportCore?.coordinationAuthorize)
     && Boolean(window.goalportCore?.coordinationScope)
     && Boolean(window.goalportCore?.coordinationRevoke)
@@ -303,6 +330,10 @@ function App() {
   // Set when a handler opens a fresh draft whose panel must start in change
   // mode; the draft-open effect consumes it exactly once.
   const openPanelInChangeMode = useRef(false);
+  // Set by handleConfirmAccessChange: the access-save rotates the draft's
+  // requestId (anti-replay, unchanged), and the panel effect must NOT wipe
+  // the write/consent selections the user just saved on that rotation.
+  const preservePanelSelections = useRef(false);
   const historyRequest = useRef(0);
 
   useEffect(() => {
@@ -397,7 +428,40 @@ function App() {
         const job = await read();
         if (cancelled) return;
         setBackgroundJob(current => current?.jobId === job?.jobId && ((current?.revoked && !job?.revoked) || (current?.active === false && job?.active === true)) ? current : job);
-        if (job && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        // Only a job that still holds admission may take the main view on
+        // its own: the user's live work (running, or honestly unconfirmed)
+        // reattaches visibly, while a restored TERMINAL job is history and
+        // must not hijack the startup view — its closeout stays one click
+        // away on the background-return button, and its record is already
+        // in Plans through the records load.
+        if (job?.active && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        // A background round persists its plan record BEFORE the job store
+        // records the terminal outcome (electron/coordination-worker.cjs),
+        // so the first poll that sees a confirmed-terminal state can re-list
+        // the plans: without this, a round that finishes in the background
+        // never reaches Plans in this session and Revise cannot continue
+        // from the current view. The send path's own disk re-read keeps
+        // command identity (record count) unchanged.
+        // The per-job mark is set ONLY after a valid records array actually
+        // replaced the plans: a read that throws, resolves to a non-array,
+        // or finds no records port leaves the job unmarked, so the next
+        // poll retries it instead of permanently skipping the finished
+        // round. One read in flight at a time; failures never double-stack.
+        if (job && job.active === false && BACKGROUND_JOB_TERMINAL_STATES.has(job.state)
+          && plansListedTerminalRef.current !== job.jobId && !terminalListInFlightRef.current) {
+          const list = window.goalportCore?.coordinationRecords;
+          if (list) {
+            terminalListInFlightRef.current = true;
+            const listedJobId = job.jobId;
+            void list().then((records) => {
+              if (!cancelled && Array.isArray(records)) {
+                plansListedTerminalRef.current = listedJobId;
+                setPlans(records);
+              }
+            }).catch(() => undefined)
+              .finally(() => { terminalListInFlightRef.current = false; });
+          }
+        }
       } catch {
         if (!cancelled) setBackgroundJob(job => job ? { ...job, state: "unconfirmed", live: false } : null);
       } finally { reading = false; }
@@ -415,12 +479,20 @@ function App() {
     if (!discover || !readScope) return undefined;
     let cancelled = false;
     setPanelProviders(null);
+    setPanelLoad("loading");
+    setPanelFailSentence(null);
     setScopeMirror(null);
     // Each fresh draft starts without file-change consent. Never restore it
-    // from history or from another draft's live scope.
-    setWriteInstances([]);
-    setWriteTurns(2);
-    setBackgroundConsent(false);
+    // from history or from another draft's live scope — except across the
+    // requestId rotation that a Save-harness-access performs, where the
+    // user's just-saved selections are exactly what must survive.
+    const preserveSelections = preservePanelSelections.current;
+    preservePanelSelections.current = false;
+    if (!preserveSelections) {
+      setWriteInstances([]);
+      setWriteTurns(2);
+      setBackgroundConsent(false);
+    }
     setPanelRequestId(runtimeLessDraftKey);
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
@@ -447,9 +519,15 @@ function App() {
       } catch {
         discovery = null;
       }
-      if (cancelled || !discovery || !discovery.connected) return;
+      if (cancelled) return;
+      if (!discovery || !discovery.connected) {
+        setPanelLoad("failed");
+        setPanelFailSentence(discovery?.stopReason ?? null);
+        return;
+      }
       discoveredProvidersRef.current = discovery.providers;
       setPanelProviders(discovery.providers);
+      setPanelLoad("ready");
       // A scope member the current catalog can no longer staff (a paid-api
       // login, a since-blocked harness nobody re-authorized for) never lands
       // in the checked set: rows show reality, and the checked set stays a
@@ -465,7 +543,13 @@ function App() {
         : [...selectable]);
     })();
     return () => { cancelled = true; };
-  }, [runtimeLessDraftKey, scopeBridgeReady]);
+  }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt]);
+  // Send admission for a runtime-less draft in a panel-capable build: the
+  // user must see (or retry loading) their harness-access choices before
+  // any model turn can be spent. Legacy builds without the scope bridge
+  // keep the pre-panel behavior untouched.
+  const panelForDraftLive = draftGoal !== null && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId;
+  const panelHoldsSend = scopeBridgeReady && panelForDraftLive && panelLoad !== "ready";
   const activeSendIntent = sendIntents[draftCampaignId];
   const activeRetryLabel = retryLabel(activeSendIntent);
   const draftRetryLabel = retryLabel(draftGoal?.intent);
@@ -707,6 +791,14 @@ function App() {
       // independent check, so nothing is authorized and nothing is sent.
       const panelForDraft = panelRequestId === draftGoal.requestId ? panelProviders : null;
       const scopedSend = scopeBridgeReady && panelForDraft !== null;
+      if (scopeBridgeReady && panelForDraft === null) {
+        // A panel-capable build never silently falls back to the legacy
+        // unscoped path while harness access is unresolved (P1).
+        setDraftError(panelLoad === "failed"
+          ? { sentence: "Your harness-access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
+          : { sentence: "Harness access is still loading, so nothing was sent. Send unlocks once your harness-access choices are ready." });
+        return;
+      }
       if (scopedSend && writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8)) {
         setDraftError({ sentence: "Choose 1 to 8 write turns before allowing workspace changes." });
         return;
@@ -739,6 +831,7 @@ function App() {
       setDraftBusy(true);
       try {
         if (backgroundConsent) {
+          if (appInfo?.coordinationConfigured !== true) return; // Grant affordance explains the blocked Send.
           const start = window.goalportCore?.backgroundStart;
           if (!scopedSend || !start) { setDraftError({ sentence: "Background Send is unavailable; nothing was admitted." }); return; }
           // Admission is this job's single Send, never a retryable draft or
@@ -1395,7 +1488,10 @@ function App() {
       : current));
     setPanelChangeMode(false);
     // The saved change makes the next Send a new round, never a replay of the
-    // round whose record already carries this draft's old request id.
+    // round whose record already carries this draft's old request id. The
+    // rotation below re-keys the panel effect; flag it to keep the write
+    // instances/turns and background consent the user just saved.
+    preservePanelSelections.current = true;
     setDraftGoal((current) => (current ? { ...current, requestId: freshRequestId(), intent: undefined } : current));
   }
 
@@ -2058,6 +2154,7 @@ function App() {
               </span>
             </div>
           ) : null}
+          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => setBackgroundView(value => !value)}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
             <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
@@ -2197,7 +2294,12 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    waitingOn={panelHoldsSend
+                      ? (panelLoad === "failed"
+                        ? "Send is waiting: your harness-access choices could not be loaded."
+                        : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
+                      : null}
                     retryLabel={draftRetryLabel}
                     error={draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
@@ -2233,6 +2335,14 @@ function App() {
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
                       backgroundConsent={backgroundConsent}
+                      backgroundConfigured={appInfo?.coordinationConfigured === true}
+                      onAllowBackgroundSend={window.goalportCore?.backgroundSendConsent ? async () => {
+                        const consent = await window.goalportCore!.backgroundSendConsent!("grant");
+                        if (!consent.allowed) throw new Error("Background Send consent was not granted.");
+                        const info = await client.appInfo?.();
+                        if (!info?.coordinationConfigured) throw new Error("Background Send capability is not ready.");
+                        setAppInfo(info);
+                      } : undefined}
                       onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
                       providers={panelProviders}
                       selected={selectedInstances}
@@ -2257,6 +2367,20 @@ function App() {
                       onConfirmChange={() => { void handleConfirmAccessChange(); }}
                       onUseAgain={(instanceId) => { void handleUseAgain(instanceId); }}
                     />
+                  ) : draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelLoad === "failed" ? (
+                    <div className="dialog-note" role="alert">
+                      <span aria-hidden="true">!</span>
+                      <span>
+                        GoalPort could not load your harness-access choices, so nothing can be sent from this draft yet.
+                        <button className="button button-small button-outline" type="button" onClick={() => setPanelAttempt((attempt) => attempt + 1)}>Retry harness access</button>
+                        {panelFailSentence ? (
+                          <details className="technical-details">
+                            <summary>Technical details</summary>
+                            <pre className="technical-details-pre">{panelFailSentence}</pre>
+                          </details>
+                        ) : null}
+                      </span>
+                    </div>
                   ) : null}
                 </>
               )}

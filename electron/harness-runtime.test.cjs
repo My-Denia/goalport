@@ -7,11 +7,16 @@ const { spawn } = require("node:child_process");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 const { markBlocked, readHealth } = require("./harness-health.cjs");
 
-test("coordination does not wait for an external checkout", () => {
-  assert.equal(harnessLaunchConfigured(), true);
-  assert.equal(harnessLaunchConfigured({}), true);
-  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_CHECKOUT: "" }), true);
-  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_STATE_DIR: "/state" }), true);
+test("coordination reports only env or profile background capability", () => {
+  assert.equal(harnessLaunchConfigured(), process.env.GOALPORT_COORDINATE_SEND === "1");
+  assert.equal(harnessLaunchConfigured({}), false);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_CHECKOUT: "" }), false);
+  assert.equal(harnessLaunchConfigured({ GOALPORT_HARNESS_STATE_DIR: "/state" }), false);
+  for (const envSet of [false, true]) for (const allowed of [false, true]) {
+    assert.equal(harnessLaunchConfigured({ GOALPORT_COORDINATE_SEND: envSet ? "1" : "0" }, () => ({ allowed })), envSet || allowed);
+  }
+  assert.equal(harnessLaunchConfigured({}, () => ({ allowed: "true" })), false);
+  assert.equal(harnessLaunchConfigured({}, () => { throw new Error("unreadable"); }), false);
 });
 
 const SENTINEL = "goalport-sentinel-do-not-send-9c2e";
@@ -233,7 +238,8 @@ test("an unconfigured runtime reads installed CLIs and does not spawn the checko
   const discovered = await runtime.discover();
   assert.equal(discovered.ok, true);
   assert.deepEqual(discovered.providers, []);
-  assert.equal(probes, 2);
+  // codex, claude, pi — every harness the discovery layer probes.
+  assert.equal(probes, 3);
   const ran = await runtime.run({ commandId: "coordinate-plan-1", type: "goalport.coordinateTurn" });
   assert.match(ran.errorText, /not authorized/);
   assert.equal(spawned, 0);

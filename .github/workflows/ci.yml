@@ -18,26 +18,71 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
+  changes:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    outputs:
+      full: ${{ steps.impact.outputs.full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with:
-          version: 11.22.0
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.19.0
+      - run: node --test scripts/desktop/docs-ci.test.mjs scripts/ci/change-impact.test.mjs
+      - id: impact
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: node scripts/ci/change-impact.mjs
+
+  frontend:
+    needs: changes
+    if: always()
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Require a valid impact result
+        if: always()
+        shell: pwsh
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FULL: ${{ needs.changes.outputs.full }}
+        run: |
+          if ($env:CHANGES_RESULT -ne 'success' -or $env:FULL -notin @('true', 'false')) {
+            throw "CI impact check failed or produced an invalid result"
+          }
+      - name: Documentation-only checks passed
+        if: needs.changes.outputs.full == 'false'
+        run: Write-Host "Documentation contracts passed in changes job."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.full == 'true'
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: needs.changes.outputs.full == 'true'
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.changes.outputs.full == 'true'
+        with:
+          node-version: 22.19.0
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm test:unit
-      - run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs scripts/pnpm-test-entry.test.mjs
+      - if: needs.changes.outputs.full == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: needs.changes.outputs.full == 'true'
+        run: pnpm lint
+      - if: needs.changes.outputs.full == 'true'
+        run: pnpm test:unit
+      - if: needs.changes.outputs.full == 'true'
+        run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs scripts/pnpm-test-entry.test.mjs
 
   core:
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -82,6 +127,8 @@ jobs:
   # Placed before desktop so desktopJob() contract tests still see desktop as
   # the final job whose last step ends at retention-days: 7.
   linux-unix-socket:
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -171,6 +218,8 @@ jobs:
           test "$PIPE_ID" = "$SOCK"
 
   desktop:
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

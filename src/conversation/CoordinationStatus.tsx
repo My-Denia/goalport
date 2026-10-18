@@ -435,11 +435,20 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 /** The user returns to the SAME live job, not a draft or saved permission. */
 export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void }) {
   const report = job.outcome?.report ?? job.progress?.firstRound;
+  // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
+  // > live/finished. A stopped job that has settled must say so — the user
+  // pressing Stop wants to know it finished stopping, not that a turn "may"
+  // still run (that copy is only true while a revocation is still in flight).
+  const settled = job.state === "completed" || job.state === "failed" || job.state === "stopped";
   const sentence = job.state === "unconfirmed"
     ? "Progress unavailable or interrupted; the outcome is unconfirmed. GoalPort did not restart this job and will not replay it."
-    : job.revoked ? "Access stopped. The current turn may finish; no further turn will start. This does not undo edits or confirm tools stopped."
-    : job.live ? "This goal is still running. Close the window and it keeps going."
-    : "This goal is finished. The result is below.";
+    : job.state === "stopped"
+      ? "This goal was stopped and has settled. Whatever completed before the stop is retained below."
+      : settled
+        ? "This background job finished. Its result is retained below."
+        : job.revoked ? "Access stopped. The current turn may finish; no further turn will start. This does not undo edits or confirm tools stopped."
+        : job.live ? "This goal is running on its own. You can close GoalPort and return to this same job."
+        : "This background job finished. Its result is retained below.";
   return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>
     <h2>{job.goal}</h2><p role="status">{sentence}</p>
     {/* Stop allowing stays reachable while the admission is active and not

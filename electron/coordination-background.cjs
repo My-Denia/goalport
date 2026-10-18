@@ -4,6 +4,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createCoordinationJobStore, requestControl, normalizeAdmissionInput } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
+const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const HOST_REFUSAL_CODES = new Set([
   "background-unavailable",
@@ -89,7 +90,7 @@ function createBackgroundHost(options) {
     let ready;
     try { ready = options.ready(); }
     catch (error) { throw preflightRefusal(error); }
-    if (!ready || options.env.GOALPORT_COORDINATE_SEND !== "1" || options.env.GOALPORT_HARNESS_CHECKOUT || options.env.GOALPORT_HARNESS_SERVER_CWD) {
+    if (!ready || !harnessLaunchConfigured(options.env, options.consent) || options.env.GOALPORT_HARNESS_CHECKOUT || options.env.GOALPORT_HARNESS_SERVER_CWD) {
       throw codedRefusal("background-unavailable", "Background Send is not ready in this GoalPort window yet.");
     }
     if (input?.backgroundConsent !== true) throw codedRefusal("background-consent-required", "Keep working after closing must be explicitly selected.");

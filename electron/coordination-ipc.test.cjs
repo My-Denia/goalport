@@ -4,7 +4,11 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const os = require("node:os");
+const path = require("node:path");
+const { CONSENT_FILE, createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { backgroundStartReply } = require("./coordination-background.cjs");
+const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const mainSource = fs.readFileSync(require.resolve("./main.cjs"), "utf8");
 const preloadSource = fs.readFileSync(require.resolve("./preload.cjs"), "utf8");
@@ -80,6 +84,94 @@ function loadCoreCommandCallback(backgroundHost, invokeCore) {
   const guardedCoreCommand = vm.runInNewContext(`(${extractMainFunction("guardedCoreCommand")})`, { backgroundHost, invokeCore });
   return vm.runInNewContext(`(${registration[1]})`, { guardedCoreCommand });
 }
+
+test("trusted consent IPC grants once, reads across reload and deletes on revoke", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-ipc-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const registration = /handleTrusted\("goalport:background-send-consent",\s*(\(_, action\) => \{[\s\S]*?\n  \})\);/.exec(mainSource);
+  assert.ok(registration, "consent handler uses the trusted IPC boundary");
+  let profileReady = true;
+  const context = { profileManager: {}, get profileReady() { return profileReady; },
+    backgroundSendConsent: () => createBackgroundSendConsentStore(directory) };
+  const callback = vm.runInNewContext(`(${registration[1]})`, context);
+  assert.equal(callback({}, "read").allowed, false);
+  const grant = callback({}, "grant");
+  assert.equal(grant.allowed, true);
+  assert.ok(Number.isFinite(Date.parse(grant.grantedAt)));
+  const file = path.join(directory, CONSENT_FILE);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), JSON.parse(JSON.stringify(grant)));
+  assert.deepEqual(Object.keys(grant).sort(), ["allowed", "grantedAt"]);
+  assert.equal(callback({}, "grant").grantedAt, grant.grantedAt);
+  assert.equal(createBackgroundSendConsentStore(directory).read().grantedAt, grant.grantedAt);
+  assert.equal(callback({}, "revoke").allowed, false);
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(callback({}, "revoke").allowed, false);
+  assert.throws(() => callback({}, "unknown"), /Unknown/);
+  profileReady = false;
+  assert.throws(() => callback({}, "grant"), /bootstrap/);
+  assert.equal(callback({}, "read").allowed, false);
+  const { exposed, invocations } = loadPreload(null);
+  for (const action of ["grant", "read", "revoke"]) {
+    await exposed.goalportCore.backgroundSendConsent(action);
+    assert.deepEqual(invocations.at(-1), { channel: "goalport:background-send-consent", args: [action] });
+  }
+});
+
+test("actual app-info reports profile consent and env capability honestly", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-info-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const backgroundSendConsent = vm.runInNewContext(`(${extractMainFunction("backgroundSendConsent")})`, {
+    createBackgroundSendConsentStore, coordinationDirectory: () => directory,
+  });
+  const registration = /handleTrusted\("goalport:app-info",\s*(\(\) => \(\{[\s\S]*?\n  \}\))\);/.exec(mainSource);
+  assert.ok(registration);
+  const env = {};
+  const callback = vm.runInNewContext(`(${registration[1]})`, {
+    profile: { durableDirectory: directory }, app: { isPackaged: false, getPath: () => directory },
+    appVersion: "test", launchChannel: "release", channelLabel: () => "test", isolatedRequired: () => false,
+    process: { env }, harnessLaunchConfigured, backgroundSendConsent,
+  });
+  assert.equal(callback().coordinationConfigured, false);
+  backgroundSendConsent().grant();
+  assert.equal(callback().coordinationConfigured, true);
+  backgroundSendConsent().revoke();
+  assert.equal(callback().coordinationConfigured, false);
+  env.GOALPORT_COORDINATE_SEND = "1";
+  assert.equal(callback().coordinationConfigured, true);
+});
+
+test("grant uses exclusive private file creation and fsync before returning", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-sync-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const calls = [];
+  const fsApi = new Proxy(fs, { get(target, property) {
+    const value = target[property];
+    if (typeof value !== "function") return value;
+    return (...args) => { calls.push([property, ...args]); return value(...args); };
+  } });
+  const store = createBackgroundSendConsentStore(directory, { fs: fsApi, now: () => "2026-10-12T00:00:00Z" });
+  assert.deepEqual(store.grant(), { allowed: true, grantedAt: "2026-10-12T00:00:00Z" });
+  const open = calls.findIndex(call => call[0] === "openSync" && call[1] === path.join(directory, CONSENT_FILE));
+  assert.deepEqual(calls[open].slice(2), ["wx", 0o600]);
+  const write = calls.findIndex(call => call[0] === "writeFileSync");
+  const sync = calls.findIndex(call => call[0] === "fsyncSync");
+  const close = calls.findIndex(call => call[0] === "closeSync");
+  const read = calls.findIndex(call => call[0] === "readFileSync");
+  assert.ok(open < write && write < sync && sync < close && close < read);
+});
+
+test("incomplete consent fails closed and an exclusive grant never overwrites it", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-invalid-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createBackgroundSendConsentStore(directory);
+  for (const invalid of ['{', '{"allowed":true}', '{"allowed":"true","grantedAt":"2026-10-12T00:00:00Z"}']) {
+    fs.writeFileSync(path.join(directory, CONSENT_FILE), invalid);
+    assert.equal(store.read().allowed, false);
+    assert.throws(() => store.grant(), /incomplete/);
+    assert.equal(fs.readFileSync(path.join(directory, CONSENT_FILE), "utf8"), invalid);
+    store.revoke();
+  }
+});
 
 test("backgroundStartReply passes success through and serializes every classified refusal code", async () => {
   const status = { jobId: "job", active: true, live: false };
