@@ -59,7 +59,9 @@ contextBridge.exposeInMainWorld("goalportCore", {
   confirmCloseChoice: (payload) => ipcRenderer.invoke("goalport:confirm-close-choice", payload),
   dismissCloseChoice: () => ipcRenderer.invoke("goalport:dismiss-close-choice"),
   coordinateDiscover: (generation) => ipcRenderer.invoke("goalport:coordinate-discover", generation),
-  coordinateLaunch: (command, generation, scopeGeneration) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration),
+  // The audited command carries no draft folder; the fourth argument passes
+  // the draft workspace to the acknowledged-job guard.
+  coordinateLaunch: (command, generation, scopeGeneration, workspaceRoot) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration, workspaceRoot),
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
   // Optional write: { instances: string[], maxTurns: number, workspaceRoot: string }.
   // Forward unchanged; only the trusted main-process scope grants consent.

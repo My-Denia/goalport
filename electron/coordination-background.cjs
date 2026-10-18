@@ -2,7 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createCoordinationJobStore, requestControl, normalizeAdmissionInput } = require("./coordination-job.cjs");
+const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
@@ -41,7 +41,12 @@ function projection(status, live = false) {
     workerPid: status.startupClaim?.pid ?? null };
 }
 function createBackgroundHost(options) {
-  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready() });
+  // The host admits and compares folders on ONE platform identity (the host's
+  // own by default; tests may pin another). Never resolves against
+  // process.cwd(): a workspace that is missing or not absolute on this
+  // platform has no identity and stays fail-closed.
+  const platform = options.platform ?? process.platform;
+  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready(), platform });
   let starting = false;
   let lastJobId = null;
   function jobIds() {
@@ -54,7 +59,9 @@ function createBackgroundHost(options) {
     return ["completed", "failed", "stopped"].includes(facts.state) && !!facts.outcome && !facts.pendingCommand;
   }
   function sameWorkspace(left, right) {
-    return typeof left === "string" && typeof right === "string" && path.resolve(left) === path.resolve(right);
+    const a = workspaceIdentity(left, platform);
+    const b = workspaceIdentity(right, platform);
+    return a !== null && a === b;
   }
   function outstanding(workspaceRoot) {
     const s = store();
@@ -62,7 +69,7 @@ function createBackgroundHost(options) {
     // A missing pointer is not proof that an earlier owner/tools stopped.
     // Leaving an unconfirmed job frees the slot pointer only. The same folder
     // stays held. An unknown caller folder fails closed.
-    const caller = typeof workspaceRoot === "string" && workspaceRoot.trim() ? path.resolve(workspaceRoot) : null;
+    const caller = workspaceIdentity(workspaceRoot, platform);
     for (const id of jobIds()) {
       const facts = s.getStatus(id);
       if (confirmedTerminal(facts)) continue;
@@ -125,7 +132,7 @@ function createBackgroundHost(options) {
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
         };
-        try { admissionInput = normalizeAdmissionInput(durableInput); }
+        try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {
           if (error?.code === "invalid-admission") throw codedRefusal("background-invalid-admission", error.message, error);
           throw error;

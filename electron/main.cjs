@@ -1358,7 +1358,7 @@ app.whenReady().then(() => {
     }
   });
   handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation, () => backgroundSendConsent().read()));
-  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => { refuseCompetingCoordination(); return launchOne(
+  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration, workspaceRoot) => { refuseCompetingCoordination(workspaceRoot); return launchOne(
     process.env,
     coordinationRuntime(),
     command,
@@ -1372,7 +1372,7 @@ app.whenReady().then(() => {
     coordinationRuntime().cancel(generation);
     return { ok: true };
   });
-  handleTrusted("goalport:coordination-authorize", (_event, payload) => { refuseCompetingCoordination(); return authorizeCoordination(
+  handleTrusted("goalport:coordination-authorize", (_event, payload) => { refuseCompetingCoordination(payload?.workspaceRoot ?? payload?.write?.workspaceRoot); return authorizeCoordination(
     payload,
     coordinationScope,
     // BOTH member lists use this same fresh zero-quota discovery. Validation
@@ -1385,7 +1385,7 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
-  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(); return saveRecord(coordinationDirectory(), record); });
+  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(record?.workspacePath); return saveRecord(coordinationDirectory(), record); });
   handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
     clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
     return { ok: true };

@@ -321,8 +321,9 @@ declare global {
       }>;
       // The launch command is the audited CoordinateTurnCommand; the third
       // argument is the scope generation captured at authorize (a launch
-      // without it stays the legacy two-argument launch).
-      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number) => Promise<{
+      // without it stays the legacy two-argument launch); the fourth is the
+      // draft workspace handed to the acknowledged-job guard.
+      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number, workspaceRoot?: string) => Promise<{
         text: string;
         errorText: string;
         prepared?: boolean;
@@ -344,6 +345,9 @@ declare global {
       coordinationAuthorize?: (scope: {
         instances: string[];
         maxTurns: number;
+        // The draft workspace for the acknowledged-job guard even when no
+        // write authorization is requested.
+        workspaceRoot?: string;
         write?: { instances: string[]; maxTurns: number; workspaceRoot: string };
       }) => Promise<{ ok: boolean; generation: number; remaining: number; writeTurnsRemaining?: number; errorText?: string }>;
       coordinationScope?: () => Promise<{

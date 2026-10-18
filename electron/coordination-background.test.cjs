@@ -9,10 +9,17 @@ const { createCoordinationJobStore } = require('./coordination-job.cjs');
 function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  // One stable control endpoint per fixture. Windows cannot bind a Unix-domain
+  // socket at a filesystem path (CI saw EACCES from listen() on job.sock — a
+  // test-harness error, not a Windows product failure), so the alive-owner
+  // hang there uses a private named pipe instead.
+  const controlEndpoint = process.platform === 'win32'
+    ? `\\\\.\\pipe\\goalport-coord-${process.pid}-${Math.random().toString(16).slice(2)}`
+    : path.join(directory, 'job.sock');
   const launches = [];
   const options = { directory: () => directory, ready: () => true, ordinaryScope: () => null,
     env: { GOALPORT_COORDINATE_SEND: '1' }, snapshot: async () => ({ bounds: { projectionUnavailable: false }, attempt: { state: 'completed' } }),
-    endpoint: () => path.join(directory, 'job.sock'), workerPath: '/app/coordination-worker.cjs', config: () => ({ enginePath: '/app/dist/coordination-engine.cjs' }), startTimeoutMs: 0,
+    endpoint: () => controlEndpoint, workerPath: '/app/coordination-worker.cjs', config: () => ({ enginePath: '/app/dist/coordination-engine.cjs' }), startTimeoutMs: 0,
     spawn: (...args) => { launches.push(args); return { on() {}, unref() {} }; }, ...overrides };
   const host = createBackgroundHost(options);
   const input = { requestId: 'one-send', goal: 'Plan this fixture', workspaceRoot: directory, readInstances: ['codex', 'claude'], readMaxTurns: 4, backgroundConsent: true };
@@ -253,4 +260,42 @@ test('a long derivable Linux endpoint is bounded in worker config before admissi
   assert.equal(workerConfig.controlEndpoint, r.options.endpoint());
   assert.equal(endpointCalls, 2); // One preparation plus this explicit assertion.
   assert.equal(started.live, false);
+});
+
+test('an acknowledged job holds the same Windows folder across casing on the win32 identity only', async t => {
+  // Regression: the folder lookup compared path.resolve results exactly, so a
+  // Windows path arriving with different casing (or a trailing separator, or
+  // forward slashes) did not stay held. The identity function is selected per
+  // platform here; production passes the host platform.
+  const windowsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
+  t.after(() => fs.rmSync(windowsDirectory, { recursive: true, force: true }));
+  const windowsStore = createCoordinationJobStore(windowsDirectory, { bootstrapReady: true, platform: 'win32' });
+  const windowsInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: 'C:\\Users\\Agent\\Work\\Goal',
+    allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
+  const admitted = windowsStore.startAdmission(windowsInput);
+  assert.equal(admitted.ok, true);
+  windowsStore.acknowledgeStuck(admitted.jobId);
+  const windowsHost = createBackgroundHost({ directory: () => windowsDirectory, ready: () => true, platform: 'win32' });
+  assert.equal(windowsHost.outstanding('c:\\users\\agent\\work\\goal'), true);
+  assert.equal(windowsHost.outstanding('C:/USERS/AGENT/WORK/GOAL/'), true);
+  assert.equal(windowsHost.outstanding('C:\\Users\\Agent\\Work\\Other'), false);
+  const recased = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: 'c:\\users\\agent\\work\\goal' });
+  assert.equal(recased.ok, false);
+  assert.equal(recased.reason, 'workspace-held');
+  const different = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: 'C:\\Users\\Agent\\Work\\Other' });
+  assert.equal(different.ok, true);
+
+  // The posix identity compares exactly: a case-different path is a different
+  // folder and must not stay held.
+  const posixDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
+  t.after(() => fs.rmSync(posixDirectory, { recursive: true, force: true }));
+  const posixStore = createCoordinationJobStore(posixDirectory, { bootstrapReady: true, platform: 'linux' });
+  const posixInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: '/work/Goal',
+    allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
+  const posixAdmitted = posixStore.startAdmission(posixInput);
+  assert.equal(posixAdmitted.ok, true);
+  posixStore.acknowledgeStuck(posixAdmitted.jobId);
+  const posixHost = createBackgroundHost({ directory: () => posixDirectory, ready: () => true, platform: 'linux' });
+  assert.equal(posixHost.outstanding('/work/Goal'), true);
+  assert.equal(posixHost.outstanding('/work/goal'), false);
 });

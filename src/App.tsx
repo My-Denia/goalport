@@ -912,7 +912,7 @@ function App() {
           const requestedWrite = writeInstances.length > 0
             ? { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: workspace }
             : undefined;
-          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, ...(requestedWrite ? { write: requestedWrite } : {}) });
+          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, workspaceRoot: workspace, ...(requestedWrite ? { write: requestedWrite } : {}) });
           if (!stillCurrent()) return;
           if (!authorized || authorized.ok !== true) {
             setDraftError({ sentence: authorized?.errorText?.trim() || "Harness access could not be authorized, so nothing was sent." });
@@ -1121,7 +1121,7 @@ function App() {
                   setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
                 }
               }
-              const result = await launch(command, generation, scopeGeneration);
+              const result = await launch(command, generation, scopeGeneration, workspace);
               // Each launch reports the authorized budget it spent from; the
               // mirror (and the in-flight progress line) follow it live.
               if (stillCurrent() && result) {
@@ -1463,7 +1463,7 @@ function App() {
         setDraftError({ sentence: "Choose a workspace and 1 to 8 write turns before allowing changes." });
         return;
       }
-      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns,
+      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns, workspaceRoot: draftGoal?.workspace.trim(),
         ...(writeInstances.length > 0 ? { write: { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: draftGoal!.workspace.trim() } } : {}) });
     } catch (error) {
       setDraftError({

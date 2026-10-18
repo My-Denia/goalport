@@ -57,9 +57,31 @@ function optionalText(value, name, maxLength = 100_000) {
   return value;
 }
 
-function absolutePath(value, name) {
+function absolutePath(value, name, platform = process.platform) {
   const text = requiredText(value, name, 32_768);
-  if (!path.isAbsolute(text)) throw refusal("invalid-admission", `${name} must be an absolute path.`);
+  const paths = platform === "win32" ? path.win32 : path;
+  if (!paths.isAbsolute(text)) throw refusal("invalid-admission", `${name} must be an absolute path.`);
+  return paths.resolve(text);
+}
+
+// Platform workspace identity for the acknowledged-job folder comparison.
+// On win32 the same folder legitimately arrives with different casing (drive
+// letter spelling, tool output), so the identity is path.win32.resolve with
+// trailing separators stripped, case-folded. Other platforms compare the
+// path.resolve result exactly. A missing or non-absolute workspace has NO
+// identity: callers keep the fail-closed hold; identity is never derived from
+// process.cwd().
+function workspaceIdentity(value, platform = process.platform) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text) return null;
+  if (platform === "win32") {
+    if (!path.win32.isAbsolute(text)) return null;
+    let resolved = path.win32.resolve(text);
+    while (resolved.length > 3 && /[\\/]$/.test(resolved)) resolved = resolved.slice(0, -1);
+    return resolved.toLowerCase();
+  }
+  if (!path.isAbsolute(text)) return null;
   return path.resolve(text);
 }
 
@@ -105,15 +127,16 @@ function normalizeExecutionFeedback(value) {
 
 // This whitelist is the immutable caller-provided admission. It is not a live
 // scope and is never reconstructed from coordination-records.json or history.
-function normalizeAdmissionInput(input) {
+function normalizeAdmissionInput(input, platform = process.platform) {
   if (!isPlainObject(input)) throw refusal("invalid-admission", "A background job needs an explicit admission object.");
   if (input.backgroundConsent !== true) {
     throw refusal("background-consent-required", "This goal was not explicitly allowed to continue after closing GoalPort.");
   }
+  const paths = platform === "win32" ? path.win32 : path;
   const requestId = requiredText(input.requestId, "requestId", 256);
   if (!/^[A-Za-z0-9._-]+$/.test(requestId)) throw refusal("invalid-admission", "requestId contains invalid characters.");
   const goal = requiredText(input.goal, "goal", 100_000);
-  const workspacePath = absolutePath(input.workspacePath, "workspacePath");
+  const workspacePath = absolutePath(input.workspacePath, "workspacePath", platform);
   const allowedInstances = instancesOf(input.allowedInstances, "allowedInstances");
   const maxTurns = integerCap(input.maxTurns, 2, 32, "maxTurns");
   const avoidInstances = input.avoidInstances === undefined
@@ -129,8 +152,8 @@ function normalizeAdmissionInput(input) {
     const write = input.writeAuthorization;
     if (!isPlainObject(write)) throw refusal("invalid-admission", "Workspace-change consent must be a complete explicit selection.");
     const instances = instancesOf(write.instances, "writeAuthorization.instances");
-    const workspaceRoot = absolutePath(write.workspaceRoot, "writeAuthorization.workspaceRoot");
-    if (path.resolve(workspaceRoot) !== workspacePath) {
+    const workspaceRoot = absolutePath(write.workspaceRoot, "writeAuthorization.workspaceRoot", platform);
+    if (workspaceIdentity(workspaceRoot, platform) !== workspaceIdentity(workspacePath, platform)) {
       throw refusal("invalid-admission", "Workspace-change consent must be bound to the selected workspace.");
     }
     const writeMaxTurns = integerCap(write.maxTurns, 1, 8, "writeAuthorization.maxTurns");
@@ -208,6 +231,7 @@ function controlEndpointFor(profileEndpoint, { platform = process.platform, env 
 
 function createCoordinationJobStore(profileDirectory, {
   bootstrapReady = false,
+  platform = process.platform,
   fsApi = fs,
   clock = () => new Date().toISOString(),
   idFactory = randomUUID,
@@ -337,7 +361,7 @@ function createCoordinationJobStore(profileDirectory, {
       throw refusal("malformed-admission", "The job admission is missing or malformed; it cannot authorize a worker.");
     }
     let input;
-    try { input = normalizeAdmissionInput(value.input); } catch {
+    try { input = normalizeAdmissionInput(value.input, platform); } catch {
       throw refusal("malformed-admission", "The job admission is invalid; it cannot authorize a worker.");
     }
     if (stableJson(input) !== stableJson(value.input)) {
@@ -497,7 +521,7 @@ function createCoordinationJobStore(profileDirectory, {
         throw refusal("malformed-admission", "A prior job admission is incomplete or malformed; no replacement was authorized.");
       }
       let normalized;
-      try { normalized = normalizeAdmissionInput(admission.input); } catch {
+      try { normalized = normalizeAdmissionInput(admission.input, platform); } catch {
         throw refusal("malformed-admission", "A prior job admission is invalid; no replacement was authorized.");
       }
       if (stableJson(normalized) !== stableJson(admission.input)) {
@@ -509,11 +533,13 @@ function createCoordinationJobStore(profileDirectory, {
       // A user left this job unreplayed. Absence of a worker is not that fact;
       // the timestamp is. The same request id cannot be admitted again.
       // Leaving does not free the same folder while the exit is unconfirmed.
+      // "Same" is the platform workspace identity: on Windows the folder may
+      // arrive re-cased, so the comparison folds case there only.
       if (typeof progress.acknowledgedStuckAt === "string") {
         if (normalized.requestId === incoming.requestId) {
           throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
         }
-        if (!released && normalized.workspacePath === incoming.workspacePath) {
+        if (!released && workspaceIdentity(normalized.workspacePath, platform) === workspaceIdentity(incoming.workspacePath, platform)) {
           holders.push({ jobId: entry.name, admission });
         }
         continue;
@@ -541,7 +567,7 @@ function createCoordinationJobStore(profileDirectory, {
 
   function startAdmission(input) {
     requireWritable();
-    const normalized = normalizeAdmissionInput(input);
+    const normalized = normalizeAdmissionInput(input, platform);
     mkdirStore();
     const active = readActive();
     if (active) {
@@ -1057,6 +1083,7 @@ function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
 module.exports = {
   createCoordinationJobStore,
   normalizeAdmissionInput,
+  workspaceIdentity,
   controlEndpointFor,
   requestControl,
   controlAcknowledgement,
