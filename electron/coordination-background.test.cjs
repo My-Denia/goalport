@@ -5,7 +5,7 @@ const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { createBackgroundHost } = require('./coordination-background.cjs');
-const { createCoordinationJobStore } = require('./coordination-job.cjs');
+const { createCoordinationJobStore, jobControlEndpoint } = require('./coordination-job.cjs');
 function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -95,7 +95,7 @@ test('a long accepted goal does not hide the live stop control', { skip: process
   const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
   const claim = store.claimWorker(started.jobId);
   store.updateProgress(started.jobId, { display: { activity: 'r'.repeat(20_000), failures: [] } }, claim.ownerToken);
-  const server = await store.startControlServer({ jobId: started.jobId, endpoint: r.options.endpoint() });
+  const server = await store.startControlServer({ jobId: started.jobId, endpoint: jobControlEndpoint(r.options.endpoint(), started.jobId) });
   t.after(() => server.close());
   const live = await r.host.status(started.jobId);
   assert.equal(live.live, true);
@@ -216,7 +216,7 @@ test('an alive owner that does not answer status still holds the same folder', a
   const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
   const claim = store.claimWorker(started.jobId);
   store.recordPendingCommand(started.jobId, { commandId: 'coordinate-plan-send-unknown', role: 'planning' }, claim.ownerToken);
-  await listenSilently(r.options.endpoint(), t);
+  await listenSilently(jobControlEndpoint(r.options.endpoint(), started.jobId), t);
   await leaveAndRefuseSameFolder(t, r, started.jobId);
   assert.equal(store.getStatus(started.jobId).pendingCommand.commandId, 'coordinate-plan-send-unknown');
 });
@@ -257,9 +257,26 @@ test('a long derivable Linux endpoint is bounded in worker config before admissi
   const workerConfig = JSON.parse(r.launches[0][1][1]);
   assert.equal(Buffer.byteLength(workerConfig.controlEndpoint, 'utf8') <= 107, true);
   assert.equal(path.dirname(workerConfig.controlEndpoint), r.directory);
-  assert.equal(workerConfig.controlEndpoint, r.options.endpoint());
-  assert.equal(endpointCalls, 2); // One preparation plus this explicit assertion.
+  assert.equal(workerConfig.controlEndpoint, jobControlEndpoint(r.options.endpoint(), started.jobId));
+  assert.notEqual(workerConfig.controlEndpoint, r.options.endpoint());
+  assert.equal(endpointCalls, 3); // One preparation plus the two assertions above.
   assert.equal(started.live, false);
+});
+
+test('a different folder gets its own control endpoint while the old one is still listening', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  store.claimWorker(started.jobId);
+  const oldEndpoint = jobControlEndpoint(r.options.endpoint(), started.jobId);
+  await listenSilently(oldEndpoint, t);
+  await r.host.acknowledge(started.jobId);
+  const next = await r.host.start({ ...r.input, requestId: 'other-send', workspaceRoot: path.resolve('/tmp/goalport-other-folder') });
+  const workerConfig = JSON.parse(r.launches.at(-1)[1][1]);
+  assert.notEqual(workerConfig.controlEndpoint, oldEndpoint);
+  assert.equal(workerConfig.controlEndpoint, jobControlEndpoint(r.options.endpoint(), next.jobId));
+  assert.equal(next.live, false);
+  assert.notEqual(next.state, 'completed');
 });
 
 test('an acknowledged job holds the same Windows folder across casing on the win32 identity only', async t => {

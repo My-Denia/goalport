@@ -2,7 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity } = require("./coordination-job.cjs");
+const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity, jobControlEndpoint } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
@@ -90,7 +90,7 @@ function createBackgroundHost(options) {
     if (!facts) return null;
     lastJobId = facts.jobId;
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
+    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
   async function start(input) {
@@ -163,18 +163,18 @@ function createBackgroundHost(options) {
       try {
         lastJobId = admitted.jobId;
         if (admitted.created) {
-          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint };
+          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint: jobControlEndpoint(controlEndpoint, admitted.jobId) };
           const child = (options.spawn ?? spawn)(process.execPath, [options.workerPath, JSON.stringify(config)], { env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore", windowsHide: true });
           child.on("error", () => {}); // The immutable admission remains unconfirmed; never respawn.
           child.unref();
         }
         const deadline = Date.now() + (options.startTimeoutMs ?? 15000);
         do {
-          const result = await status(admitted.jobId, controlEndpoint);
+          const result = await status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId));
           if (result.live || !result.active) return result;
           await new Promise(resolve => setTimeout(resolve, 50));
         } while (Date.now() < deadline);
-        return status(admitted.jobId, controlEndpoint); // honest unconfirmed projection, not independently running
+        return status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId)); // honest unconfirmed projection, not independently running
       } catch (error) {
         throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error);
       }
@@ -192,7 +192,7 @@ function createBackgroundHost(options) {
     const s = store();
     const facts = s.getStatus(jobId);
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(jobId), "revoke")), true); }
+    try { return projection(withControlAck(facts, await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "revoke")), true); }
     catch {
       // Durable revoke denies future admission if the same owner is still
       // alive. Missing control is NOT proof that tools stopped.

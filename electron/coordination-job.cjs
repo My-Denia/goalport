@@ -7,7 +7,7 @@
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
-const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
+const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { coreConnectEndpoint, endpointSocketLeafName } = require("./launch-config.cjs");
 
 const STORE_DIRECTORY = "coordination-jobs";
@@ -229,6 +229,20 @@ function controlEndpointFor(profileEndpoint, { platform = process.platform, env 
     return coreConnectEndpoint(platform, path.posix.join(parent, leaf), env);
   }
   return coreConnectEndpoint(platform, candidate, env);
+}
+
+function jobControlEndpoint(profileControlEndpoint, jobId, { platform = process.platform, env = process.env } = {}) {
+  const base = typeof profileControlEndpoint === "string" ? profileControlEndpoint.trim() : "";
+  if (!base) throw refusal("invalid-endpoint", "The profile control endpoint is unavailable.");
+  if (typeof jobId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) return base;
+  const leaf = createHash("sha256").update(jobId).digest("hex").slice(0, 12);
+  if (platform === "win32" || base.startsWith("\\\\.\\pipe\\")) return `${base}-${leaf}`;
+  const candidate = `${base}-${leaf}`;
+  if (path.posix.isAbsolute(candidate) && Buffer.byteLength(candidate, "utf8") > 107) {
+    const parent = path.posix.dirname(base);
+    return coreConnectEndpoint(platform, path.posix.join(parent, endpointSocketLeafName(candidate, parent)), env);
+  }
+  return candidate;
 }
 
 function createCoordinationJobStore(profileDirectory, {
@@ -1127,6 +1141,7 @@ module.exports = {
   normalizeAdmissionInput,
   workspaceIdentity,
   controlEndpointFor,
+  jobControlEndpoint,
   requestControl,
   controlAcknowledgement,
   ADMISSION_SCHEMA,
