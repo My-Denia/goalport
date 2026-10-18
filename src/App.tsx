@@ -2306,9 +2306,10 @@ function App() {
                     coordinationAvailable={coordinationAvailable}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     backgroundConsent={backgroundConsent}
-                    onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
+                    onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
+                      if (value.provider.trim()) setBackgroundConsent(false);
                       const current = draftGoal;
                       if (!current) {
                         setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });

@@ -2151,8 +2151,9 @@ describe("harness access panel and scoped rounds", () => {
     expect(order.indexOf("authorize")).toBeLessThan(order.lastIndexOf("discover"));
     expect(order.lastIndexOf("discover")).toBeLessThan(order.indexOf("launch"));
     // Every launch carries the command, the request generation, and the scope generation.
-    expect(bridge.launchArgs[0]).toHaveLength(3);
+    expect(bridge.launchArgs[0]).toHaveLength(4);
     expect(bridge.launchArgs[0]?.[2]).toBe(1);
+    expect(bridge.launchArgs[0]?.[3]).toBe("/tmp/goalport-preview-workspace");
   });
 
   it("Use again clears the harness on this machine and then re-discovers", async () => {
@@ -2474,7 +2475,7 @@ describe("harness access panel and scoped rounds", () => {
     expect((screen.getByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value).toBe("2");
     typeMessage("Only plan."); sendMessage();
     await screen.findByText("Can be carried out", { selector: "dd" });
-    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4 }]);
+    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: "/tmp/goalport-preview-workspace" }]);
     expect(bridge.launchCount()).toBe(2);
     expect(screen.getByText(/No harness is allowed to change files/)).toBeTruthy();
   });
@@ -2492,9 +2493,9 @@ describe("harness access panel and scoped rounds", () => {
     const bridge = scopedBridge({ providers: writeProviders(), launch: async (command, call) => writeRound(command, call) });
     render(<App />); await openDraftWithPanel(); consentToChanges(); sendMessage();
     await screen.findByText("Changes verified", { selector: "dd" });
-    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" } }]);
+    expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: "/work/goal", write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/goal" } }]);
     expect(bridge.launchArgs).toHaveLength(4);
-    expect(bridge.launchArgs.every((args) => args.length === 3 && args[2] === 1)).toBe(true);
+    expect(bridge.launchArgs.every((args) => args.length === 4 && args[2] === 1 && args[3] === "/work/goal")).toBe(true);
     expect(bridge.launched.map((item) => item.commandId.split("-")[1])).toEqual(["plan", "review", "execute", "audit"]);
     expect(bridge.launched[2].instanceId).not.toBe(bridge.launched[3].instanceId);
     expect(bridge.saved[0]).toMatchObject({ verdict: "verified", executionText: "Changed helper.ts and its test.", auditText: "Checked helper.ts independently.\nVERDICT: verified", messageDispatched: true });
@@ -2622,7 +2623,7 @@ describe("harness access panel and scoped rounds", () => {
     expect((screen.getByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(false);
     typeMessage("Only plan again."); sendMessage();
     await waitFor(() => expect(bridge.authorizations).toHaveLength(2));
-    expect(bridge.authorizations[1]).toEqual({ instances: ["codex", "claude"], maxTurns: 4 });
+    expect(bridge.authorizations[1]).toEqual({ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: "/tmp/goalport-preview-workspace" });
   });
 
 // The one in-window corrective pass (C1): one authorization and one Send may
