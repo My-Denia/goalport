@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import App, { coordinationGeneration } from "./App";
+import { clickRuntimeOption } from "./runtime-picker.test-helpers";
 import { BackgroundCoordinationStatus, CoordinationStatus } from "./conversation/CoordinationStatus";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { type CoreCommand } from "./ipc";
@@ -3212,6 +3213,19 @@ describe("one in-window repair", () => {
       typeMessage("Plan this helper"); sendMessage();
       await waitFor(() => expect(bridge.launchCount()).toBe(2));
       expect(bridge.authorizations).toHaveLength(1);
+      expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
+    });
+    it("hides Keep working after closing once a Runtime is selected and does not keep the promise checked", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />);
+      await openDraftWithPanel();
+      const background = screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement;
+      fireEvent.click(background);
+      expect(background.checked).toBe(true);
+      fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+      clickRuntimeOption(await screen.findByRole("option", { name: /Codex/ }));
+      await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull());
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
     });
     it("default off Send routes one explicit read-only Start without main authorization or renderer launch", async () => {
