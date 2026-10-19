@@ -3385,8 +3385,9 @@ describe("one in-window repair", () => {
     it("shows one draft refusal, and keeps its technical detail on the background view", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundStart = async () => { throw new Error("the reply never arrived"); };
-      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, workspacePath: "/work/goal" });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, active: false, live: false, state: "completed" as const, outcome: { status: "completed" }, workspacePath: "/work/goal" });
       render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Return to background goal" }));
       await screen.findByRole("region", { name: "Background goal" });
       fireEvent.click(screen.getByRole("button", { name: "New goal" }));
       await screen.findByRole("checkbox", { name: "Keep working after closing" });
@@ -3488,6 +3489,20 @@ describe("one in-window repair", () => {
       await waitFor(() => expect(bridge.launchCount()).toBeGreaterThan(0));
       expect(bridge.authorizations[0]?.workspaceRoot).toBe("/work/goal");
       expect(bridge.launchArgs[0]?.[3]).toBe("/work/goal");
+    });
+    it("a running background job keeps a new draft unsendable in any folder", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob });
+      render(<App />);
+      await screen.findByRole("region", { name: "Background goal" });
+      fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+      fireEvent.change(await screen.findByRole("textbox", { name: "Project folder" }), { target: { value: "/work/other" } });
+      fireEvent.change(screen.getByRole("textbox", { name: "Message composer" }), { target: { value: "A competing goal" } });
+      expect(await screen.findByText(/A background goal is still active/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.authorizations).toHaveLength(0);
+      expect(bridge.launchCount()).toBe(0);
     });
     it("an active unconfirmed job offers Stop allowing; revoking hides it but keeps the uncertainty wording", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });

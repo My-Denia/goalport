@@ -742,6 +742,13 @@ function App() {
     ? (backgroundJob.workspacePath ?? "")
     : "";
   const draftHeld = Boolean(draftGoal && targetsHeldWorkspace(draftGoal.workspace, heldWorkspace));
+  // The host's profile slot admits no competing send while a background job's
+  // active pointer exists, in any folder. Present that before Send rather than
+  // letting the draft look started and then be refused at admission.
+  const backgroundSlotBlocked = Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
+  const backgroundSlotSentence = backgroundJob && confirmedTerminalJob(backgroundJob)
+    ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
   // harness is possible (an independent check needs two).
@@ -770,6 +777,10 @@ function App() {
     if (!workspace || !message) return;
     if (targetsHeldWorkspace(workspace, heldWorkspace)) {
       setDraftError({ sentence: HELD_FOLDER_SENTENCE });
+      return;
+    }
+    if (backgroundSlotBlocked) {
+      setDraftError({ sentence: backgroundSlotSentence });
       return;
     }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
@@ -2336,14 +2347,14 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
                         : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftHeld ? { sentence: HELD_FOLDER_SENTENCE } : draftError}
+                    error={draftHeld ? { sentence: HELD_FOLDER_SENTENCE } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
