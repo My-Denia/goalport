@@ -1920,7 +1920,7 @@ describe("harness access panel and scoped rounds", () => {
       : { text: CHECK_TEXT, errorText: "" };
   }
 
-  type AccessPayload = { instances: string[]; maxTurns: number; write?: { instances: string[]; maxTurns: number; workspaceRoot: string } };
+  type AccessPayload = { instances: string[]; maxTurns: number; workspaceRoot: string; write?: { instances: string[]; maxTurns: number; workspaceRoot: string } };
   function scopedBridge(options: {
     providers: Array<Record<string, unknown>>;
     scope?: Record<string, unknown> | null;
@@ -3407,8 +3407,8 @@ describe("one in-window repair", () => {
       expect(alerts[0]?.textContent).toContain("could not confirm this background start");
       expect(alerts[0]?.textContent).toContain("the reply never arrived");
     });
-    it("an interrupted job opens a new send without replaying the old turn", async () => {
-      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+    it("an interrupted job opens a new send without the held folder and a different folder actually sends", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       const job = {
         ...liveJob,
         live: false,
@@ -3416,8 +3416,12 @@ describe("one in-window repair", () => {
         workspacePath: "/work/goal",
         pendingCommand: { commandId: "coordinate-plan-stuck", state: "unconfirmed" },
       };
-      const acknowledge = vi.fn(async () => ({ ...job, active: false, acknowledgedStuckAt: "2026-10-16T00:00:00.000Z" }));
-      window.goalportCore!.backgroundStatus = async () => job;
+      let currentJob: typeof job & { acknowledgedStuckAt?: string | null } = job;
+      const acknowledge = vi.fn(async () => {
+        currentJob = { ...job, active: false, acknowledgedStuckAt: "2026-10-16T00:00:00.000Z" };
+        return currentJob;
+      });
+      window.goalportCore!.backgroundStatus = async () => currentJob;
       window.goalportCore!.backgroundAcknowledge = acknowledge;
       const start = vi.fn();
       window.goalportCore!.backgroundStart = start;
@@ -3425,10 +3429,65 @@ describe("one in-window repair", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Continue in a new send" }));
       await waitFor(() => expect(acknowledge).toHaveBeenCalledWith("same-job"));
       expect(await screen.findByText(/was not replayed/)).toBeTruthy();
+      expect(screen.getByText(/stays reserved until its exit is confirmed/)).toBeTruthy();
       expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("One independent goal");
-      expect((screen.getByRole("textbox", { name: "Project folder" }) as HTMLInputElement).value).toBe("/work/goal");
+      // The held folder is not prefilled and is not offered as sendable.
+      expect((screen.getByRole("textbox", { name: "Project folder" }) as HTMLInputElement).value).toBe("");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true));
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/goal" } });
+      expect(await screen.findByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      // A path with no absolute identity is never presented as sendable while
+      // the hold is active; the host fails closed on it too.
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "relative/folder" } });
+      expect(await screen.findByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
       expect(start).not.toHaveBeenCalled();
+      expect(bridge.authorizations).toHaveLength(0);
+      expect(bridge.launchCount()).toBe(0);
+      // Another absolute folder is sendable, and the send is real: authorize
+      // and launch carry that folder rather than merely enabling a button.
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/other" } });
+      const codexBox = await screen.findByRole("checkbox", { name: "Select Codex" }) as HTMLInputElement;
+      fireEvent.change(codexBox, { target: { checked: true } });
+      fireEvent.change(screen.getByRole("checkbox", { name: "Select Claude" }), { target: { checked: true } });
       await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+      expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(bridge.launchCount()).toBeGreaterThan(0));
+      expect(bridge.authorizations[0]?.workspaceRoot).toBe("/work/other");
+      expect(bridge.launchArgs[0]?.[3]).toBe("/work/other");
+      expect(start).not.toHaveBeenCalled();
+    });
+    it("a confirmed finished job keeps its released folder prefilled and sends to it again", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      const finished = {
+        ...liveJob,
+        active: true,
+        live: false,
+        state: "completed" as const,
+        workspacePath: "/work/goal",
+        outcome: { status: "completed" },
+      };
+      let currentJob = finished;
+      const release = vi.fn(async () => {
+        currentJob = { ...finished, active: false };
+        return currentJob;
+      });
+      window.goalportCore!.backgroundStatus = async () => currentJob;
+      window.goalportCore!.backgroundReleaseTerminal = release;
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "New send for this goal" }));
+      await waitFor(() => expect(release).toHaveBeenCalledWith("same-job"));
+      expect((screen.getByRole("textbox", { name: "Project folder" }) as HTMLInputElement).value).toBe("/work/goal");
+      expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+      fireEvent.change(await screen.findByRole("checkbox", { name: "Select Codex" }), { target: { checked: true } });
+      fireEvent.change(screen.getByRole("checkbox", { name: "Select Claude" }), { target: { checked: true } });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(bridge.launchCount()).toBeGreaterThan(0));
+      expect(bridge.authorizations[0]?.workspaceRoot).toBe("/work/goal");
+      expect(bridge.launchArgs[0]?.[3]).toBe("/work/goal");
     });
     it("an active unconfirmed job offers Stop allowing; revoking hides it but keeps the uncertainty wording", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });

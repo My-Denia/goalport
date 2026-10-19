@@ -1,9 +1,11 @@
 const { test } = require("node:test");
+const { randomUUID } = require("node:crypto");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createCoordinationJobStore } = require("./coordination-job.cjs");
+const { launchOne } = require("./coordinate-service.cjs");
 const { runWorker, coreRefusal } = require("./coordination-worker.cjs");
 const { readRecords } = require("./coordination-record.cjs");
 const engine = require("../dist/coordination-engine.cjs");
@@ -12,7 +14,6 @@ const providers = [
   { instanceId: "claude", displayName: "Claude", driver: "claudeAgent", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "claude-opus-5-5", isDefault: true }] },
 ];
 async function scenario(t, options = {}) {
-  if (process.platform !== "linux") t.skip("worker control endpoint binds a real Linux Unix socket");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   delete require.cache[require.resolve("./coordination-scope.cjs")];
@@ -51,11 +52,13 @@ async function scenario(t, options = {}) {
     ...engine,
     backgroundEngineInput: input => { backgroundEngineInputValue = input; return engine.backgroundEngineInput(input); },
   } : engine;
-  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint: path.join(directory, "control.sock") }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
+  const controlEndpoint = process.platform === "win32" ? String.raw`\\.\pipe\goalport-worker-test-` + randomUUID() : path.join(directory, "control.sock");
+  if (options.consentGranted) fs.writeFileSync(path.join(directory, "background-send-consent.json"), JSON.stringify({ allowed: true, grantedAt: new Date().toISOString() }) + "\n");
+  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
     invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
-  }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
+  }, env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
   return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
 }
 test("a revocation before the worker claim settles stopped without contacting anything", async t => {
@@ -219,4 +222,33 @@ test("worker reconstruction passes all five historical feedback fields to backgr
   assert.deepEqual(r.backgroundEngineInputValue.executionFeedback, feedback);
   assert.deepEqual(Object.keys(r.backgroundEngineInputValue.executionFeedback), Object.keys(feedback));
   assert.equal(r.launches.some(command => feedback.previousCommandIds.includes(command.commandId)), false);
+});
+
+// The packaged app has no GOALPORT_COORDINATE_SEND override. The worker must
+// use the durable profile consent the user granted; without it, nothing runs.
+test("worker runs with the durable profile consent when the env override is absent", async t => {
+  const r = await scenario(t, { env: {}, consentGranted: true });
+  assert.equal(r.result.status, "completed");
+  assert.equal(r.launches.length, 8);
+});
+test("worker dispatches nothing without durable consent and without the env override", async t => {
+  const r = await scenario(t, { env: {} });
+  assert.equal(r.launches.length, 0);
+  assert.notEqual(r.result.status, "completed");
+  assert.match(String(r.result.error || r.result.report?.stopReason || ""), /not enabled|consent/i);
+});
+test("a launch re-checks consent and refuses after it is revoked", async () => {
+  let ran = 0;
+  const runtime = { discover: async () => ({ ok: true, providers }), prepare: async () => ({}), run: async () => { ran += 1; return { ok: true, text: "plan", messageDispatched: true }; }, close() {} };
+  const command = () => ({ commandId: "coordinate-plan-codex", type: "goalport.coordinateTurn",
+    modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, runtimeMode: "approval-required",
+    approvalPolicy: "never", sandboxPolicy: { type: "readOnly" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath: "C:\\work\\goal" }, initialMessage: { text: "Plan only." } });
+  const refused = await launchOne({}, runtime, command(), "generation", undefined, () => ({ allowed: false }));
+  assert.equal(refused.launched, false);
+  assert.equal(ran, 0);
+  assert.match(String(refused.errorText), /not authorized|allowed|consent/i);
+  const allowed = await launchOne({}, runtime, command(), "generation", undefined, () => ({ allowed: true }));
+  assert.equal(allowed.launched, true);
+  assert.equal(ran, 1);
 });

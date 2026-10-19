@@ -734,6 +734,14 @@ function App() {
 
   const activeTargetKey = snapshotTargetKey(snapshot);
   const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
+  // The host keeps an acknowledged interrupted job's folder held until a
+  // confirmed terminal outcome. This presentation mirror only disables a
+  // draft aimed at that exact identity; a different absolute folder stays
+  // sendable, and a released (terminal) job clears the hold.
+  const heldWorkspace = backgroundJob && backgroundJob.acknowledgedStuckAt && !confirmedTerminalJob(backgroundJob)
+    ? (backgroundJob.workspacePath ?? "")
+    : "";
+  const draftHeld = Boolean(draftGoal && targetsHeldWorkspace(draftGoal.workspace, heldWorkspace));
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
   // harness is possible (an independent check needs two).
@@ -760,6 +768,10 @@ function App() {
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
+    if (targetsHeldWorkspace(workspace, heldWorkspace)) {
+      setDraftError({ sentence: HELD_FOLDER_SENTENCE });
+      return;
+    }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
       setDraftError({ sentence: "Core confirmed the previous state but could not project enough control data to start new work. Retry a pending request or reconnect first." });
       return;
@@ -1499,6 +1511,7 @@ function App() {
     const job = backgroundJob;
     if (!job) return;
     const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand);
+    let current = job;
     const finishedButStillActive = job.active && !job.live && !job.pendingCommand && (job.state === "completed" || job.state === "failed" || job.state === "stopped") && Boolean(job.outcome);
     if (finishedButStillActive) {
       const release = window.goalportCore?.backgroundReleaseTerminal;
@@ -1508,6 +1521,7 @@ function App() {
       }
       try {
         const next = await release(job.jobId);
+        current = next;
         setBackgroundJob(next);
       } catch (error) {
         setActiveNotice({
@@ -1525,6 +1539,7 @@ function App() {
       }
       try {
         const next = await acknowledge(job.jobId);
+        current = next;
         setBackgroundJob(next);
       } catch (error) {
         setActiveNotice({
@@ -1534,12 +1549,21 @@ function App() {
         return;
       }
     }
+    // A confirmed finished job releases its folder; the SAME folder may be
+    // sent again and is prefilled. An interrupted job only frees the profile
+    // slot: inspectPriorAdmissions keeps its folder held until a confirmed
+    // terminal outcome, so this draft must not offer that folder.
+    const heldFolder = interrupted && !confirmedTerminalJob(current) && Boolean(current.acknowledgedStuckAt)
+      ? (current.workspacePath ?? "")
+      : "";
     openReadyDraft({
-      workspace: job.workspacePath ?? "",
-      message: job.goal,
-      note: interrupted
-        ? "The interrupted turn was not replayed. This is a new send, and nothing goes out until you press Send."
-        : "This is a new send for the same goal. Nothing goes out until you press Send.",
+      workspace: heldFolder ? "" : (current.workspacePath ?? ""),
+      message: current.goal,
+      note: heldFolder
+        ? `The interrupted turn was not replayed. ${workspaceFolder(heldFolder)} stays reserved until its exit is confirmed, so choose a different folder for this new send. Nothing goes out until you press Send.`
+        : interrupted
+          ? "The interrupted turn was not replayed. This is a new send, and nothing goes out until you press Send."
+          : "This is a new send for the same goal. Nothing goes out until you press Send.",
     });
   }
 
@@ -2312,14 +2336,14 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
                         : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftError}
+                    error={draftHeld ? { sentence: HELD_FOLDER_SENTENCE } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
@@ -2566,6 +2590,57 @@ function workspaceFolder(root: string): string {
   const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
+
+/** A terminal outcome with no pending command is the only fact that releases a folder. */
+function confirmedTerminalJob(job: BackgroundStatus): boolean {
+  return (job.state === "completed" || job.state === "failed" || job.state === "stopped")
+    && Boolean(job.outcome) && !job.pendingCommand;
+}
+
+/**
+ * Presentation-only mirror of the host's workspaceIdentity: absolute path,
+ * dot segments resolved, trailing separators gone, Windows spellings folded.
+ * Relative text has no identity (the host fails closed on it too). Admission
+ * stays the host/store authority; this only keeps Send from promising a
+ * folder the acknowledged job still holds.
+ */
+function workspaceIdentityKey(value: string): string | null {
+  const text = value.trim();
+  if (!text) return null;
+  const drive = /^[A-Za-z]:[\\/]/.test(text);
+  const unc = /^[\\/]{2}[^\\/]/.test(text);
+  const rooted = !drive && !unc && /^[\\/]/.test(text);
+  if (!drive && !unc && !rooted) return null;
+  const windowsLike = drive || unc || text.includes("\\")
+    || (typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent));
+  const rest = drive ? text.slice(2) : text.replace(/^[\\/]+/, "");
+  const parts: string[] = [];
+  for (const part of rest.split(/[\\/]+/)) {
+    if (!part || part === ".") continue;
+    if (part === "..") { parts.pop(); continue; }
+    parts.push(part);
+  }
+  const separator = windowsLike ? "\\" : "/";
+  const body = parts.join(separator);
+  const prefix = drive ? text.slice(0, 2) + separator : unc ? separator + separator : separator;
+  const key = prefix + body;
+  return windowsLike ? key.toLowerCase() : key;
+}
+
+function sameWorkspaceIdentity(left: string, right: string): boolean {
+  const a = workspaceIdentityKey(left);
+  const b = workspaceIdentityKey(right);
+  return a !== null && b !== null && a === b;
+}
+
+/** While a folder is held, an unidentifiable path is never presented as sendable. */
+function targetsHeldWorkspace(value: string, held: string): boolean {
+  if (!held) return false;
+  if (workspaceIdentityKey(value) === null) return value.trim().length > 0;
+  return sameWorkspaceIdentity(value, held);
+}
+
+const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {
   const development = appInfo?.testMode === true || appInfo?.distribution === "dev";
