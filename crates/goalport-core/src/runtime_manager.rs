@@ -3502,6 +3502,7 @@ impl GrokAcpProcess {
             .spawn()
             .map_err(|error| native_spawn_error("grok agent stdio", error))?;
         self.spawned = true;
+        #[cfg(windows)]
         if let Some(control) = self.startup_control.as_ref() {
             if let Err(error) = control.publish_child_handle(&child) {
                 let _ = child.kill();
