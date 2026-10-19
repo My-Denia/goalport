@@ -698,7 +698,8 @@ function guardedCoreCommand(request) {
     else if (payload && typeof payload.targetWorkspace === "string") workspace = payload.targetWorkspace;
     else if (payload && typeof payload.campaignId === "string" && typeof backgroundHost.workspaceForCampaign === "function") {
       workspace = backgroundHost.workspaceForCampaign(payload.campaignId) || undefined;
-    } else if (payload && typeof backgroundHost.workspaceForAttempt === "function") {
+    }
+    if (workspace === undefined && payload && typeof backgroundHost.workspaceForAttempt === "function") {
       const attemptId = typeof payload.attemptId === "string" ? payload.attemptId : (typeof payload.oldAttemptId === "string" ? payload.oldAttemptId : "");
       if (attemptId) workspace = backgroundHost.workspaceForAttempt(attemptId) || undefined;
     }
@@ -1260,6 +1261,7 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
+  handleTrusted("goalport:background-held-workspaces", () => backgroundHost.heldWorkspaces());
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
   handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
   handleTrusted("goalport:background-release-terminal", (_, jobId) => backgroundHost.releaseConfirmedTerminal(jobId));

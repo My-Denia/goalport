@@ -40,6 +40,29 @@ export function profileProcessMatch(proc, profilePath, packageRoot, nodeExe) {
   return (root.length > 0 && (exe === root || exe.startsWith(root + '\\') || exe.startsWith(root + '/'))) || (node.length > 0 && exe === node);
 }
 export function stopIsUsable(control) { return control?.visible === true && control.enabled === true && control.hitTestable === true; }
+/** Keep selector data out of executable source, including hostile quotes and
+ * newlines. The fixed function retains the same visibility/hit-test proof. */
+export async function readStopControl(app, selector) {
+  const context = await app.cdp('Runtime.evaluate', { expression: 'globalThis' });
+  if (context.exceptionDetails || !context.result?.objectId) throw new Error('Stop control context unavailable');
+  const objectId = context.result.objectId;
+  try {
+    const response = await app.cdp('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: `function(selector) {
+        const b = document.querySelector(selector);
+        if (!b) return { visible: false, enabled: false, hitTestable: false };
+        b.scrollIntoView({ block: 'center' });
+        const r = b.getBoundingClientRect(), t = document.elementFromPoint(r.x + r.width/2, r.y + r.height/2);
+        return { visible: r.width > 0 && r.height > 0 && getComputedStyle(b).visibility !== 'hidden', enabled: !b.disabled, hitTestable: t === b || b.contains(t) };
+      }`,
+      arguments: [{ value: selector }],
+      returnByValue: true,
+    });
+    if (response.exceptionDetails) throw new Error('Stop control inspection failed');
+    return response.result?.value;
+  } finally { await app.cdp('Runtime.releaseObject', { objectId }); }
+}
 export function liveEvidenceIsValid(e) {
   const s = e?.statusFacts, a = e?.admission, d = e?.dispatch;
   // A pending reservation alone is NOT dispatch. It needs the actual owned
@@ -385,7 +408,7 @@ export async function runPackagedJourney(options) {
   }
   async function stopJob(live) {
     const selector = '.background-job button[aria-label="Stop"]';
-    const control = await session.app.evaluate(`(() => { const b=document.querySelector(${JSON.stringify(selector)}); if(!b)return {visible:false,enabled:false,hitTestable:false}; b.scrollIntoView({block:'center'}); const r=b.getBoundingClientRect(), t=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2); return {visible:r.width>0&&r.height>0&&getComputedStyle(b).visibility!=='hidden',enabled:!b.disabled,hitTestable:t===b||b.contains(t)}; })()`);
+    const control = await readStopControl(session.app, selector);
     invariant(stopIsUsable(control), `Stop absent, disabled or not hit-testable: ${JSON.stringify(control)}`);
     const before = await status(live.statusFacts.jobId); invariant(before.live && !terminal(before), 'Job terminated before Stop');
     await session.app.click(selector);

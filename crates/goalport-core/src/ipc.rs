@@ -555,27 +555,38 @@ impl CoreServer {
         response
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn execute_ui_request(&self, request: &UiCommandRequest) -> Result<UiCommandResult, String> {
         self.ui.lock().expect("ui projection poisoned").handle(request.clone())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn execute_ui_request(&self, request: &UiCommandRequest) -> Result<UiCommandResult, String> {
         if matches!(request.message_type.as_str(), "interrupt" | "safe_stop" | "cancel") {
             let control = self.ui.lock().expect("ui projection poisoned").startup_control_for(request);
             if let Some((attempt_id, control)) = control {
-                let requested = control.request_cancel();
+                let requested = control.request_cancel(None);
                 if requested == Ok(false) {
                     return Err("Runtime startup already passed the no-send boundary; check the turn before stopping it.".into());
                 }
                 let mut detail = requested.err();
                 let mut confirmed = control.wait_finished(Duration::from_millis(650));
+                #[cfg(target_os = "linux")]
                 if !confirmed {
                     if let Err(error) = control.force_if_stalled() { detail = Some(error); }
                     confirmed = control.wait_finished(Duration::from_millis(650));
                 }
+                #[cfg(windows)]
+                if !confirmed {
+                    confirmed = control.wait_finished(Duration::from_millis(650));
+                }
+                // If the deadline won, this Stop did not cause cancellation.
+                // The startup worker owns timeout persistence after merge; do
+                // not manufacture a user-cancel event or receipt for it.
+                if let Some(reason) = control.cancellation_detail() { return Err(reason); }
                 let mut ui = self.ui.lock().expect("ui projection poisoned");
+                // Merge may have completed between the bounded wait and lock.
+                confirmed |= control.wait_finished(Duration::ZERO);
                 return ui.record_startup_cancel(request, &attempt_id, confirmed, detail.as_deref());
             }
         }
@@ -594,9 +605,21 @@ impl CoreServer {
         // Native initialization and its protocol waits run on this connection
         // worker, outside the shared projection lock. Other connections can
         // still snapshot and operate on different sessions.
+        #[cfg(windows)]
+        let startup = plan.startup_target.as_deref().and_then(|target| {
+            self.ui.lock().expect("ui projection poisoned").startup_control_for_attempt(target)
+                .map(|control| (target.to_owned(), control))
+        });
         let outcome = worker.handle(request.clone());
         let mut ui = self.ui.lock().expect("ui projection poisoned");
         ui.merge_native_worker(&plan, worker, baseline)?;
+        #[cfg(windows)]
+        if let Some((attempt_id, control)) = startup {
+            if let Some(detail) = control.cancellation_detail() {
+                ui.record_startup_timeout(&attempt_id, control.wait_finished(Duration::ZERO), &detail)?;
+                return Err(detail);
+            }
+        }
         outcome.map(|mut result| {
             // Rebuild from the merged controller. A named send, stop or
             // approval shows that goal and leaves the shared selection as it
@@ -844,6 +867,11 @@ impl CoreServer {
     pub fn serve_named_pipe(&self, name: &str) -> Result<(), IpcError> {
         self.start_runtime_flusher();
         let mut server = NamedPipeServer::bind(name)?;
+        // Only this thread accepts and creates the next secured pipe instance.
+        // Slow/invalid clients own a bounded connection slot, not the listener.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const MAX_CLIENTS: usize = 32;
+        let active = Arc::new(AtomicUsize::new(0));
         loop {
             let mut connection = match server.accept() {
                 Ok(connection) => connection,
@@ -861,11 +889,16 @@ impl CoreServer {
                 }
                 Err(error) => return Err(error),
             };
-            match self.serve_duplex(&mut connection) {
-                Ok(()) => {}
-                Err(IpcError::Io(_)) => {}
-                Err(error) => return Err(error),
-            }
+            if active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_CLIENTS).then_some(count + 1)
+            }).is_err() { continue; }
+            let worker = self.clone();
+            let workers = active.clone();
+            if thread::Builder::new().name("goalport-pipe-client".into()).spawn(move || {
+                let _permit = ConnectionPermit(workers);
+                // Protocol and disconnect failures are connection-local.
+                let _ = worker.serve_duplex(&mut connection);
+            }).is_err() { active.fetch_sub(1, Ordering::AcqRel); }
         }
     }
 
@@ -944,7 +977,7 @@ impl CoreServer {
             if thread::Builder::new()
                 .name("goalport-unix-client".into())
                 .spawn(move || {
-                    let _permit = UnixConnectionPermit(workers);
+                    let _permit = ConnectionPermit(workers);
                     if stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT)).is_err()
                         || stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT)).is_err()
                     {
@@ -2170,11 +2203,11 @@ fn ensure_socket_parent(path: &std::path::Path, tighten_managed: bool) -> Result
 /// Exclusive ownership of a Linux Unix-socket endpoint for the server lifetime.
 /// The flock on `_lock` is held until this value is dropped; the sock file is
 /// not unlinked on drop (marked stale files are recovered on the next bind).
-#[cfg(target_os = "linux")]
-struct UnixConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
+#[cfg(any(target_os = "linux", windows))]
+struct ConnectionPermit(Arc<std::sync::atomic::AtomicUsize>);
 
-#[cfg(target_os = "linux")]
-impl Drop for UnixConnectionPermit {
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }

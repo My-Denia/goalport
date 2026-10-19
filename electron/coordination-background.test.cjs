@@ -357,3 +357,53 @@ test('an acknowledged job still holds its folder and reports the acknowledgement
   await assert.rejects(() => r.host.start({ ...r.input, requestId: 'next-send' }), { code: 'background-job-conflict' });
   assert.equal(r.launches.length, 1);
 });
+
+test('held workspace projection keeps older A and multiple holds when current B finishes; refresh releases only terminal holds', async t => {
+  const r = setup(t);
+  assert.deepEqual(r.host.heldWorkspaces(), { holds: [], complete: true, globalBlock: false });
+  const a = await r.host.start(r.input);
+  const s = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  await r.host.acknowledge(a.jobId);
+  const c = await r.host.start({ ...r.input, requestId: 'c', workspaceRoot: path.join(r.directory, 'c') });
+  await r.host.acknowledge(c.jobId);
+  const b = await r.host.start({ ...r.input, requestId: 'b', workspaceRoot: path.join(r.directory, 'b') });
+  assert.equal(r.host.heldWorkspaces().globalBlock, true);
+  const ownerB = s.claimWorker(b.jobId);
+  s.recordOutcome(b.jobId, { status: 'completed' }, ownerB.ownerToken);
+  s.releaseAdmission(b.jobId, ownerB.ownerToken);
+  const reopened = createBackgroundHost(r.options);
+  assert.deepEqual(reopened.heldWorkspaces(), { holds: [
+    { jobId: a.jobId, workspacePath: r.directory },
+    { jobId: c.jobId, workspacePath: path.join(r.directory, 'c') },
+  ].sort((a,b) => a.jobId.localeCompare(b.jobId)), complete: true, globalBlock: false });
+  // Restore a newer confirmed-terminal retained snapshot, without treating
+  // acknowledgement as worker authority (the old owner cannot write now).
+  const progressPath = path.join(r.directory, 'coordination-jobs', 'jobs', a.jobId, 'progress.json');
+  const retained = JSON.parse(fs.readFileSync(progressPath, 'utf8'));
+  fs.writeFileSync(progressPath, JSON.stringify({ ...retained, state: 'stopped', phase: 'stopped', outcome: { status: 'stopped' } }));
+  assert.deepEqual(reopened.heldWorkspaces().holds, [{ jobId: c.jobId, workspacePath: path.join(r.directory, 'c') }]);
+  assert.equal(r.launches.length, 3);
+});
+test('held workspace projection fails closed for corrupt, incomplete and overflowing job inventories', async t => {
+  for (const problem of ['corrupt', 'incomplete', 'overflow']) {
+    const r = setup(t); const a = await r.host.start(r.input); await r.host.acknowledge(a.jobId);
+    const root = path.join(r.directory, 'coordination-jobs', 'jobs');
+    if (problem === 'corrupt') fs.writeFileSync(path.join(root, a.jobId, 'progress.json'), '{bad');
+    if (problem === 'incomplete') fs.mkdirSync(path.join(root, 'unexpected-job'));
+    if (problem === 'overflow') {
+      // Real, individually valid retained admissions, not merely malformed
+      // directories: the 257th hold must never disappear as complete facts.
+      const s = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+      for (let i = 0; i < 256; i++) {
+        const next = s.startAdmission({ requestId: 'overflow-' + i, goal: 'Retained hold',
+          workspacePath: path.join(r.directory, 'folder-' + i), allowedInstances: ['codex', 'claude'], maxTurns: 4, backgroundConsent: true });
+        assert.equal(next.ok, true);
+        s.acknowledgeStuck(next.jobId);
+      }
+    }
+    const result = r.host.heldWorkspaces();
+    assert.equal(result.complete, false); assert.equal(result.globalBlock, true);
+    assert.ok(result.holds.length <= 256);
+    if (problem === 'overflow') assert.equal(result.holds.length, 256);
+  }
+});

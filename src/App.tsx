@@ -1,4 +1,4 @@
-import type { BackgroundStatus } from "./coordination/backgroundStatus";
+import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import {
   BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE,
   backgroundStartOutcome,
@@ -205,6 +205,10 @@ function App() {
   const [writeTurns, setWriteTurns] = useState(2);
   const [backgroundConsent, setBackgroundConsent] = useState(false);
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
+  const [backgroundHolds, setBackgroundHolds] = useState<BackgroundHeldWorkspaces>(() => ({
+    holds: [], complete: !window.goalportCore?.backgroundHeldWorkspaces,
+    globalBlock: Boolean(window.goalportCore?.backgroundHeldWorkspaces),
+  }));
   const [backgroundView, setBackgroundView] = useState(false);
   const backgroundAttached = useRef(false);
   // Job id whose terminal closeout already re-listed the plans in this
@@ -464,6 +468,38 @@ function App() {
         }
       } catch {
         if (!cancelled) setBackgroundJob(job => job ? { ...job, state: "unconfirmed", live: false } : null);
+      } finally { reading = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 700);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [coreReady]);
+  useEffect(() => {
+    if (!coreReady) return;
+    const read = window.goalportCore?.backgroundHeldWorkspaces;
+    if (!read) return;
+    let cancelled = false;
+    let reading = false;
+    const poll = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const facts = await read();
+        if (cancelled) return;
+        if (!facts || !Array.isArray(facts.holds) || facts.holds.length > 256
+          || typeof facts.complete !== "boolean" || typeof facts.globalBlock !== "boolean"
+          || facts.holds.some(hold => !hold || typeof hold.jobId !== "string"
+            || typeof hold.workspacePath !== "string" || !workspaceIdentityKey(hold.workspacePath))) {
+          throw new Error("Incomplete workspace reservations");
+        }
+        setBackgroundHolds(current => facts.complete ? facts : {
+          holds: [...new Map([...current.holds, ...facts.holds].map(hold => [hold.jobId, hold])).values()].slice(0, 256),
+          complete: false, globalBlock: true,
+        });
+      } catch {
+        // A failed read cannot release a known hold. Until complete facts
+        // return, do not promise a new send in any folder.
+        if (!cancelled) setBackgroundHolds(current => ({ ...current, complete: false, globalBlock: true }));
       } finally { reading = false; }
     };
     void poll();
@@ -734,19 +770,27 @@ function App() {
 
   const activeTargetKey = snapshotTargetKey(snapshot);
   const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
-  // The host keeps an acknowledged interrupted job's folder held until a
-  // confirmed terminal outcome. This presentation mirror only disables a
-  // draft aimed at that exact identity; a different absolute folder stays
-  // sendable, and a released (terminal) job clears the hold.
+  // The read-only host inventory includes older acknowledged reservations,
+  // not just the currently displayed job. Mirror the current job too so an
+  // acknowledgement is visible immediately, before the next inventory poll.
+  // Only complete refreshed facts can release an older reservation.
   const heldWorkspace = backgroundJob && backgroundJob.acknowledgedStuckAt && !confirmedTerminalJob(backgroundJob)
     ? (backgroundJob.workspacePath ?? "")
     : "";
-  const draftHeld = Boolean(draftGoal && targetsHeldWorkspace(draftGoal.workspace, heldWorkspace));
+  const heldWorkspaces = [...backgroundHolds.holds.map(hold => hold.workspacePath), ...(heldWorkspace ? [heldWorkspace] : [])];
+  const targetsAnyHeldWorkspace = (workspace: string) => heldWorkspaces.some(held => targetsHeldWorkspace(workspace, held));
+  const draftHeld = Boolean(draftGoal && targetsAnyHeldWorkspace(draftGoal.workspace));
+  useEffect(() => {
+    if (!draftHeld) setDraftError(current => current?.sentence === HELD_FOLDER_SENTENCE ? null : current);
+  }, [draftHeld]);
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
-  const backgroundSlotBlocked = Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
-  const backgroundSlotSentence = backgroundJob && confirmedTerminalJob(backgroundJob)
+  const backgroundSlotBlocked = backgroundHolds.globalBlock || !backgroundHolds.complete
+    || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
+  const backgroundSlotSentence = !backgroundHolds.complete
+    ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
+    : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
@@ -775,7 +819,7 @@ function App() {
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
-    if (targetsHeldWorkspace(workspace, heldWorkspace)) {
+    if (targetsAnyHeldWorkspace(workspace)) {
       setDraftError({ sentence: HELD_FOLDER_SENTENCE });
       return;
     }
@@ -2615,7 +2659,7 @@ function confirmedTerminalJob(job: BackgroundStatus): boolean {
  * stays the host/store authority; this only keeps Send from promising a
  * folder the acknowledged job still holds.
  */
-function workspaceIdentityKey(value: string): string | null {
+export function workspaceIdentityKey(value: string): string | null {
   const text = value.trim();
   if (!text) return null;
   const drive = /^[A-Za-z]:[\\/]/.test(text);
@@ -2628,7 +2672,7 @@ function workspaceIdentityKey(value: string): string | null {
   const parts: string[] = [];
   for (const part of rest.split(/[\\/]+/)) {
     if (!part || part === ".") continue;
-    if (part === "..") { parts.pop(); continue; }
+    if (part === "..") { if (parts.length > (unc ? 2 : 0)) parts.pop(); continue; }
     parts.push(part);
   }
   const separator = windowsLike ? "\\" : "/";

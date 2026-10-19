@@ -78,6 +78,32 @@ function createBackgroundHost(options) {
     }
     return false;
   }
+  // Read-only presentation facts from the existing store, not an admission
+  // authority. Never silently drop a malformed entry or truncate a reservation.
+  function heldWorkspaces() {
+    const holds = [];
+    let complete = true;
+    let globalBlock = starting;
+    try {
+      const s = store();
+      if (s.getActiveStatus()) globalBlock = true;
+      const root = path.join(options.directory(), "coordination-jobs", "jobs");
+      const entries = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }) : [];
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) { complete = false; continue; }
+        try {
+          const facts = s.getStatus(entry.name);
+          if (confirmedTerminal(facts)) continue;
+          if (!facts.acknowledgedStuckAt) { globalBlock = true; continue; }
+          const workspacePath = facts.admission?.workspacePath;
+          if (!workspaceIdentity(workspacePath, platform)) { complete = false; continue; }
+          if (holds.length === 256) { complete = false; continue; }
+          holds.push({ jobId: facts.jobId, workspacePath });
+        } catch { complete = false; }
+      }
+    } catch { complete = false; }
+    return { holds, complete, globalBlock: globalBlock || !complete };
+  }
   async function status(jobId, controlEndpoint) {
     const s = store();
     let facts = jobId ? s.getStatus(jobId) : s.getActiveStatus();
@@ -212,7 +238,7 @@ function createBackgroundHost(options) {
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, acknowledge, releaseConfirmedTerminal, outstanding };
+  return { start, status, revoke, acknowledge, releaseConfirmedTerminal, outstanding, heldWorkspaces };
 }
 function withControlAck(facts, ack) {
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {

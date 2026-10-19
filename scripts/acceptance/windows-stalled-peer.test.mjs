@@ -28,6 +28,7 @@ import {
   parseArgs,
   planProbe,
   resolveCoreCodex,
+  responsiveAcceptanceProblems,
   scoreControlSample,
   validateFixtureInstances,
 } from './windows-stalled-peer.mjs';
@@ -85,6 +86,64 @@ test('CLI requires one --core and one --out and rejects anything else', () => {
   assert.throws(() => parseArgs(['--core', 'a.exe', '--out', 'dir', '--force']), /unknown argument/);
   assert.throws(() => parseArgs(['--core', 'a.exe', '--core', 'b.exe', '--out', 'dir']), /more than once/);
   assert.deepEqual(parseArgs(['--out', 'dir', '--core', 'core.exe']), { core: 'core.exe', out: 'dir' });
+});
+
+test('CLI identifies fix acceptance separately and rejects duplicate mode flags', () => {
+  assert.deepEqual(parseArgs(['--expect-responsive', '--core', 'core.exe', '--out', 'dir']),
+    { core: 'core.exe', out: 'dir', expectResponsive: true });
+  assert.throws(() => parseArgs(['--core','core.exe','--out','dir','--expect-responsive','--expect-responsive']), /more than once/);
+});
+
+function responsiveFixture() {
+  const stop = makeSample({ messageType: 'safe_stop', response: {
+    ok: true, requestId: 'stop', payload: { receipt: { attemptId: 'attempt-x', startupCancel: 'confirmed', nativePromptSent: false } },
+  } });
+  return {
+    preControl: { timely: true, runtimeState: 'starting', attemptId: 'attempt-x', startOutstanding: true, fixtureAlive: true, replyWithheld: true },
+    fixture: { initializePid: 123 },
+    start: { requestId: 'start', expectedAttemptId: 'attempt-x', response: { ok: false, requestId: 'start' }, error: null, timedOut: false },
+    controlWindow: { startOutstandingWhenIssued: true, fixtureAliveAtIssue: true, coreAliveAtIssue: true,
+      startOutstandingAtWindowEnd: false, fixtureAliveAtWindowEnd: false, coreAliveAtWindowEnd: true,
+      releaseObserved: false, releaseWrittenAt: null, initializeReplyStillWithheld: true, noPromptAtWindowEnd: true },
+    control: { safeStop: stop, snapshot: makeSample(), requests: { safeStop: { requestId: 'stop' } } },
+    terminal: { ok: true, attemptId: 'attempt-x', noLongerStarting: true, cancelledEvent: true, noPrompt: true },
+    explicitRecovery: { ok: true, newAttempt: true, requestId: 'next', responseRequestId: 'next', promptPid: 456,
+      matchingPrompt: true, originalPeerNoPrompt: true, releaseStillAbsent: true },
+  };
+}
+
+test('fix acceptance requires live stall, matching cancellation, exit, no release/prompt, terminal and explicit next send', () => {
+  assert.deepEqual(responsiveAcceptanceProblems(responsiveFixture()), []);
+  const negatives = [
+    value => { value.preControl.runtimeState = 'ready'; },
+    value => { value.preControl.startOutstanding = false; },
+    value => { value.preControl.fixtureAlive = false; },
+    value => { value.controlWindow.fixtureAliveAtIssue = false; },
+    value => { value.controlWindow.startOutstandingAtWindowEnd = true; },
+    value => { value.controlWindow.fixtureAliveAtWindowEnd = true; },
+    value => { value.controlWindow.coreAliveAtWindowEnd = false; },
+    value => { value.controlWindow.releaseObserved = true; },
+    value => { value.controlWindow.initializeReplyStillWithheld = false; },
+    value => { value.controlWindow.noPromptAtWindowEnd = false; },
+    value => { value.control.safeStop.response.payload.receipt.startupCancel = 'pending'; },
+    value => { value.control.safeStop.response.payload.receipt.attemptId = 'wrong-target'; },
+    value => { value.control.safeStop.response.payload.receipt.nativePromptSent = true; },
+    value => { value.control.safeStop.response.requestId = 'wrong-request'; },
+    value => { value.control.safeStop.respondedAt = 4001; },
+    value => { value.control.snapshot.respondedAt = 4001; },
+    value => { value.start.response.ok = true; },
+    value => { value.start.error = 'disconnect'; },
+    value => { value.terminal.cancelledEvent = false; },
+    value => { value.terminal.noPrompt = false; },
+    value => { value.explicitRecovery.ok = false; },
+    value => { value.explicitRecovery.originalPeerNoPrompt = false; },
+    value => { value.explicitRecovery.releaseStillAbsent = false; },
+    value => { value.explicitRecovery.requestId = 'start'; },
+  ];
+  for (const mutate of negatives) {
+    const value = responsiveFixture(); mutate(value);
+    assert.notDeepEqual(responsiveAcceptanceProblems(value), [], String(mutate));
+  }
 });
 
 test('attemptId is "attempt-" plus the lowercase sha256 of the raw request id (UTF-8)', () => {

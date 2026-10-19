@@ -53,7 +53,7 @@ const UNASSIGNED_ATTEMPT_ID: &str = "attempt-unassigned";
 #[derive(Debug, Clone)]
 pub(crate) struct NativeWorkerPlan {
     attempt_ids: Vec<String>,
-    startup_target: Option<String>,
+    pub(crate) startup_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -834,6 +834,30 @@ impl UiController {
             .map(|control| (attempt_id.to_owned(), control))
     }
 
+    #[cfg(windows)]
+    pub(crate) fn startup_control_for_attempt(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
+        self.runtime_manager.startup_control(attempt_id)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn record_startup_timeout(&mut self, attempt_id: &str, confirmed: bool, detail: &str) -> Result<(), String> {
+        let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
+        // Timeout is never a synthetic user Stop. Only the same proven unsent
+        // boundary permits terminal settlement; otherwise retain uncertainty.
+        let settled = confirmed && attempt.state == AttemptState::Queued;
+        if settled {
+            self.persist_event(attempt_id, "attempt.cancelled", json!({
+                "confirmed": true, "requested": false, "nativePromptSent": false,
+                "reason": detail, "cause": "startup-timeout",
+            }), Some(AttemptState::Cancelled))?;
+        }
+        self.persist_event(attempt_id, "attempt.start.timeout", json!({
+            "confirmed": settled,
+            "nativePromptSent": if settled { json!(false) } else { Value::Null },
+            "detail": detail,
+        }), None)
+    }
+
     pub(crate) fn record_startup_cancel(
         &mut self,
         request: &UiCommandRequest,
@@ -851,11 +875,18 @@ impl UiController {
             if attempt.state != AttemptState::Queued {
                 return Err("Startup completion raced with Cancel; no unsent claim was recorded.".into());
             }
+            // Reuse the existing durable cancellation event so explicit next
+            // Send uses the existing confirmed-stop successor transaction.
+            self.persist_event(attempt_id, "attempt.cancelled", json!({
+                "confirmed":true,"nativePromptSent":false,
+                "reason":detail.unwrap_or("user cancelled startup"),
+                "requestId":request.request_id,
+            }), Some(AttemptState::Cancelled))?;
             self.persist_event(
                 attempt_id,
                 "attempt.start.cancelled",
-                json!({"confirmed":true,"nativePromptSent":false,"reason":"user cancelled startup"}),
-                Some(AttemptState::Cancelled),
+                json!({"confirmed":true,"nativePromptSent":false,"reason":detail.unwrap_or("user cancelled startup")}),
+                None,
             )?;
         } else if !confirmed && !duplicate {
             self.persist_event(
@@ -871,6 +902,7 @@ impl UiController {
             accepted: true,
             snapshot: self.snapshot(None)?,
             receipt: Some(json!({
+                "attemptId": attempt_id,
                 "startupCancel": if confirmed { "confirmed" } else { "pending" },
                 "nativePromptSent": if confirmed { json!(false) } else { Value::Null },
                 "detail": detail,

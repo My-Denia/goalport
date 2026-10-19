@@ -117,6 +117,18 @@ test("trusted consent IPC grants once, reads across reload and deletes on revoke
   }
 });
 
+test("retained-holds IPC is trusted, read-only, and carries no workspace or permission input", async () => {
+  const facts = { holds: [{ jobId: "older", workspacePath: "/work/a" }], complete: true, globalBlock: false };
+  const registration = /handleTrusted\("goalport:background-held-workspaces",\s*(\(\) => backgroundHost.heldWorkspaces\(\))\);/.exec(mainSource);
+  assert.ok(registration, "all-holds read uses the trusted main-frame boundary");
+  let reads = 0;
+  const callback = vm.runInNewContext(`(${registration[1]})`, { backgroundHost: { heldWorkspaces() { reads++; return facts; } } });
+  assert.equal(callback(), facts); assert.equal(reads, 1);
+  const { exposed, invocations } = loadPreload(null);
+  await exposed.goalportCore.backgroundHeldWorkspaces();
+  assert.deepEqual(invocations.at(-1), { channel: "goalport:background-held-workspaces", args: [] });
+});
+
 test("actual app-info reports profile consent and env capability honestly", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-info-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -285,4 +297,23 @@ test("main core-command guard invokes Core when clear and leaves guard exception
   const coreError = Object.assign(new Error("Core transport failed"), { code: "transport-error" });
   const coreFailureGuard = loadCoreCommandCallback({ outstanding: () => false }, () => Promise.reject(coreError));
   await assert.rejects(coreFailureGuard({}, request), error => error === coreError && error.code === "transport-error");
+});
+
+test("uncached campaign falls back to attempt without overriding explicit or cached folders", () => {
+  const seen = [], invoked = [];
+  const guard = loadCoreCommandCallback({
+    workspaceForCampaign: id => id === "cached" ? "/work/campaign" : null,
+    workspaceForAttempt: id => id === "other" ? "/work/other" : id === "held" ? "/work/held" : null,
+    outstanding: folder => { seen.push(folder); return !folder || folder === "/work/held"; },
+  }, request => { invoked.push(request.requestId); return { accepted: true }; });
+  const send = (requestId, payload) => guard({}, { requestId, messageType: "conversation_send", payload });
+  assert.equal(send("other", { campaignId: "uncached", attemptId: "other" }).accepted, true);
+  assert.equal(send("old", { campaignId: "uncached", oldAttemptId: "other" }).accepted, true);
+  assert.equal(send("held", { campaignId: "uncached", attemptId: "held" }).rejection.code, "background-job-outstanding");
+  assert.equal(send("unknown", { campaignId: "uncached", attemptId: "unknown" }).rejection.code, "background-job-outstanding");
+  send("cached", { campaignId: "cached", attemptId: "held" });
+  send("explicit", { workspaceRoot: "/work/explicit", campaignId: "cached", attemptId: "held" });
+  send("target", { targetWorkspace: "/work/target", campaignId: "cached", attemptId: "held" });
+  assert.deepEqual(seen, ["/work/other", "/work/other", "/work/held", undefined, "/work/campaign", "/work/explicit", "/work/target"]);
+  assert.deepEqual(invoked, ["other", "old", "cached", "explicit", "target"]);
 });

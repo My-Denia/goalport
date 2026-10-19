@@ -80,7 +80,7 @@ export const RELEASE_MARKER = '.fake-codex-release';
 export const STOP_MARKER = '.fake-codex-stop.marker';
 
 const USAGE =
-  'usage: node scripts/acceptance/windows-stalled-peer.mjs --core <goalport-core.exe> --out <fresh evidence directory>';
+  'usage: node scripts/acceptance/windows-stalled-peer.mjs --core <goalport-core.exe> --out <fresh evidence directory> [--expect-responsive]';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const now = () => performance.now();
@@ -134,6 +134,12 @@ export function parseArgs(argv) {
   if (!Array.isArray(argv)) throw new Error(USAGE);
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
+    if (flag === '--expect-responsive') {
+      if (result.expectResponsive) throw new Error('--expect-responsive was provided more than once');
+      result.expectResponsive = true;
+      index -= 1;
+      continue;
+    }
     const value = argv[index + 1];
     if (!['--core', '--out'].includes(flag)) throw new Error(`unknown argument ${flag}; ${USAGE}`);
     if (typeof value !== 'string' || value === '' || value.startsWith('--')) {
@@ -492,7 +498,9 @@ export function classifyStopEffectiveness(score) {
     (typeof response?.error === 'string' && response.error) ||
     (typeof response?.payload?.rejection?.message === 'string' && response.payload.rejection.message) ||
     '';
-  if (response?.ok === true && receipt && receipt.confirmed === true) {
+  if (response?.ok === true && receipt && (receipt.confirmed === true ||
+      (receipt.startupCancel === 'confirmed' && receipt.nativePromptSent === false &&
+       receipt.attemptId === score.sample?.payload?.attemptId))) {
     return { responsiveInWindow: true, effective: true, classification: 'confirmed', detail: receipt };
   }
   if (/no proven cancellable live turn/i.test(errorText)) {
@@ -606,6 +614,44 @@ export function computeVerdict({
     snapshot: snapshotScore,
     safeStop: safeStopScore,
   };
+}
+
+/** Fix acceptance is intentionally stricter than the historical reproduction
+ * verdict. Every field below is captured before fixture cleanup/recovery. */
+export function responsiveAcceptanceProblems(stall) {
+  const problems = [];
+  const pre = stall?.preControl;
+  const target = stall?.start?.expectedAttemptId;
+  if (!pre?.timely || pre.runtimeState !== 'starting' || pre.attemptId !== target ||
+      !pre.startOutstanding || !pre.fixtureAlive || !pre.replyWithheld) problems.push('no_live_starting_snapshot_before_stop');
+  const window = stall?.controlWindow;
+  if (!window?.startOutstandingWhenIssued || !window.fixtureAliveAtIssue || !window.coreAliveAtIssue)
+    problems.push('stall_not_live_before_controls');
+  if (window?.startOutstandingAtWindowEnd !== false || window?.fixtureAliveAtWindowEnd !== false ||
+      window?.coreAliveAtWindowEnd !== true) problems.push('invalid_fix_window_end');
+  if (window?.releaseObserved !== false || window?.releaseWrittenAt != null ||
+      window?.initializeReplyStillWithheld !== true) problems.push('initialize_released_before_cancel');
+  if (window?.noPromptAtWindowEnd !== true) problems.push('prompt_written_in_stall_window');
+  const stop = stall?.control?.safeStop;
+  const score = scoreControlSample(stop);
+  const receipt = stop?.response?.payload?.receipt;
+  if (!score.timely || !score.responseValid || stop?.response?.ok !== true ||
+      stop?.response?.requestId !== stall?.control?.requests?.safeStop?.requestId ||
+      receipt?.attemptId !== target || receipt?.startupCancel !== 'confirmed' || receipt?.nativePromptSent !== false)
+    problems.push('missing_matching_startup_cancellation_receipt');
+  const snapshot = scoreControlSample(stall?.control?.snapshot);
+  if (!snapshot.timely || !snapshot.responseValid) problems.push('snapshot_not_responsive');
+  if (stall?.start?.response?.ok !== false || stall.start.response.requestId !== stall.start.requestId ||
+      stall.start.error || stall.start.timedOut) problems.push('startup_did_not_return_cancelled');
+  const terminal = stall?.terminal;
+  if (!terminal?.ok || terminal.attemptId !== target || !terminal.noLongerStarting ||
+      !terminal.cancelledEvent || !terminal.noPrompt) problems.push('missing_terminal_projection');
+  const next = stall?.explicitRecovery;
+  if (!next?.ok || !next.newAttempt || next.requestId === stall?.start?.requestId ||
+      next.responseRequestId !== next.requestId || next.promptPid === stall?.fixture?.initializePid ||
+      !next.matchingPrompt || !next.originalPeerNoPrompt || !next.releaseStillAbsent)
+    problems.push('explicit_recovery_not_proven');
+  return problems;
 }
 
 function readJsonIfPresent(file) {
@@ -999,6 +1045,14 @@ async function runBaselinePhase({ plan, coreExe, token }) {
       fixedMarker: readJsonIfPresent(path.join(plan.workspace, '.fake-codex-app-server.json')),
     };
 
+    const promptDeadline = now() + OBSERVATION_WINDOW_MS;
+    while (!fs.existsSync(path.join(plan.workspace, '.fake-codex-turn.marker')) && now() < promptDeadline) await sleep(20);
+    const prompt = readJsonIfPresent(path.join(plan.workspace, '.fake-codex-turn.marker'));
+    result.prompt = prompt;
+    if (!prompt || !fixture.instances.some(instance => instance.pid === prompt.pid) ||
+        !prompt.params?.input?.some(item => item.text === request.payload.message)) {
+      result.reasons.push('baseline_no_proven_turn');
+    }
     if (!result.start.responseOk) result.reasons.push('baseline_start_not_ok');
     if (result.start.attemptId !== expectedAttemptId) result.reasons.push('baseline_attempt_identity_mismatch');
     if (result.start.provider !== 'codex') result.reasons.push('baseline_attempt_provider_not_codex');
@@ -1016,7 +1070,7 @@ async function runBaselinePhase({ plan, coreExe, token }) {
   return result;
 }
 
-async function runStallPhase({ plan, coreExe, token }) {
+async function runStallPhase({ plan, coreExe, token, expectResponsive = false }) {
   const result = {
     phase: 'stall',
     scenario: STALL_SCENARIO,
@@ -1181,6 +1235,22 @@ async function runStallPhase({ plan, coreExe, token }) {
     };
     if (!outstandingBeforeControls) result.reasons.push('start_answered_before_control_window');
 
+    if (expectResponsive) {
+      // A snapshot must answer while the peer is STILL alive and withheld,
+      // before Stop is even issued; post-cancel responsiveness is not status proof.
+      const pre = await issueControlSample(plan.pipe, {
+        requestId: `my116-stall-${token}-pre-control`, messageType: 'snapshot', payload: {},
+      }, { windowMs: OBSERVATION_WINDOW_MS });
+      writeRaw(plan.raw, 'stall-pre-control-snapshot', pre);
+      result.preControl = {
+        timely: scoreControlSample(pre).timely,
+        runtimeState: pre.response?.payload?.snapshot?.productConversation?.runtime?.state ?? null,
+        attemptId: pre.response?.payload?.snapshot?.attempt?.id ?? null,
+        startOutstanding: startFrame == null && startFailure == null,
+        fixtureAlive: initializePid != null && isProcessAlive(initializePid),
+        replyWithheld: !fs.existsSync(path.join(plan.workspace, '.fake-codex-initialize-released.marker')),
+      };
+    }
     const controlIssuedAt = now();
     result.controlWindow.issuedAt = roundMs(controlIssuedAt);
     const snapshotRequest = {
@@ -1198,25 +1268,45 @@ async function runStallPhase({ plan, coreExe, token }) {
       issueControlSample(plan.pipe, snapshotRequest, { windowMs: OBSERVATION_WINDOW_MS }),
       issueControlSample(plan.pipe, stopRequest, { windowMs: OBSERVATION_WINDOW_MS }),
     ]);
+    if (expectResponsive) await sleep(Math.max(0, OBSERVATION_WINDOW_MS - (now() - controlIssuedAt)));
     result.controlWindow.startOutstandingAtWindowEnd = startFrame == null;
     result.controlWindow.fixtureAliveAtWindowEnd = initializePid != null && isProcessAlive(initializePid);
     result.controlWindow.coreAliveAtWindowEnd = !session.exited;
     result.controlWindow.initializeReplyStillWithheld =
       !fs.existsSync(path.join(plan.workspace, '.fake-codex-initialize-released.marker'));
-    if (!result.controlWindow.startOutstandingAtWindowEnd) {
-      result.reasons.push('start_request_settled_inside_control_window');
-    }
-    if (!result.controlWindow.fixtureAliveAtWindowEnd) {
-      result.reasons.push('fixture_not_alive_at_window_end');
+    if (expectResponsive) {
+      // Keep end-of-window assertions: early settlement/exit is valid ONLY
+      // with a matching confirmed pre-dispatch cancellation receipt.
+      const receipt = stopSample.response?.payload?.receipt;
+      const matched = stopSample.response?.ok === true &&
+        stopSample.response?.requestId === stopRequest.requestId &&
+        receipt?.attemptId === expectedAttemptId && receipt?.startupCancel === 'confirmed' &&
+        receipt?.nativePromptSent === false;
+      if (!matched) result.reasons.push('missing_matching_startup_cancellation_receipt');
+      if (result.controlWindow.startOutstandingAtWindowEnd) result.reasons.push('start_still_outstanding_at_window_end');
+      if (result.controlWindow.fixtureAliveAtWindowEnd) result.reasons.push('owned_fixture_alive_at_window_end');
+      if (!result.controlWindow.coreAliveAtWindowEnd) result.reasons.push('core_exited_at_window_end');
+    } else {
+      if (!result.controlWindow.startOutstandingAtWindowEnd) {
+        result.reasons.push('start_request_settled_inside_control_window');
+      }
+      if (!result.controlWindow.fixtureAliveAtWindowEnd) {
+        result.reasons.push('fixture_not_alive_at_window_end');
+      }
     }
     if (!result.controlWindow.initializeReplyStillWithheld) {
       result.reasons.push('initialize_reply_was_not_withheld');
     }
-    const releaseAt = now();
-    result.controlWindow.releaseWrittenAt = roundMs(releaseAt);
-    result.controlWindow.releaseWrittenAtMono = releaseAt;
-    fs.writeFileSync(path.join(plan.workspace, RELEASE_MARKER), `${new Date().toISOString()}\n`);
-    result.controlWindow.releaseObserved = true;
+    if (!expectResponsive) {
+      const releaseAt = now();
+      result.controlWindow.releaseWrittenAt = roundMs(releaseAt);
+      result.controlWindow.releaseWrittenAtMono = releaseAt;
+      fs.writeFileSync(path.join(plan.workspace, RELEASE_MARKER), `${new Date().toISOString()}\n`);
+      result.controlWindow.releaseObserved = true;
+    } else {
+      result.controlWindow.releaseObserved = fs.existsSync(path.join(plan.workspace, RELEASE_MARKER));
+      result.controlWindow.noPromptAtWindowEnd = !fs.existsSync(path.join(plan.workspace, '.fake-codex-turn.marker'));
+    }
 
     result.control.snapshot = snapshotSample;
     result.control.safeStop = stopSample;
@@ -1261,6 +1351,42 @@ async function runStallPhase({ plan, coreExe, token }) {
       result.recovery = { snapshotOk: false, skipped: 'start_conversation did not settle after release' };
     }
     if (!result.start.response) result.reasons.push('start_conversation_did_not_settle_after_release');
+    if (expectResponsive) {
+      const post = await issueControlSample(plan.pipe, {
+        requestId: `my116-stall-${token}-terminal`, messageType: 'snapshot', payload: {},
+      }, { windowMs: OBSERVATION_WINDOW_MS });
+      writeRaw(plan.raw, 'stall-terminal-snapshot', post);
+      const view = post.response?.payload?.snapshot;
+      result.terminal = {
+        ok: post.response?.ok === true,
+        attemptId: view?.attempt?.id ?? null,
+        noLongerStarting: view?.productConversation?.runtime?.state !== 'starting',
+        cancelledEvent: view?.timeline?.some(event => event.eventKind === 'attempt.start.cancelled') === true,
+        noPrompt: !fs.existsSync(path.join(plan.workspace, '.fake-codex-turn.marker')),
+      };
+      // Preserve the original peer's no-prompt evidence after explicit recovery
+      // creates new processes and a separate, new-request-id prompt.
+      fs.writeFileSync(path.join(plan.workspace, '.fake-codex-scenario'), BASELINE_SCENARIO);
+      const recoveryId = `my116-stall-${token}-explicit-next`;
+      const recoveryText = `Explicit recovery only ${token}`;
+      const next = await issueControlSample(plan.pipe, {
+        requestId: recoveryId, messageType: 'conversation_send',
+        payload: { campaignId: `campaign-${sha256Bytes(Buffer.from(requestId, 'utf8'))}`, attemptId: expectedAttemptId, message: recoveryText },
+      }, { windowMs: 30000 });
+      writeRaw(plan.raw, 'stall-explicit-recovery', next);
+      const prompt = readJsonIfPresent(path.join(plan.workspace, '.fake-codex-turn.marker'));
+      result.explicitRecovery = {
+        requestId: recoveryId, responseRequestId: next.response?.requestId ?? null,
+        ok: next.response?.ok === true,
+        newAttempt: next.response?.payload?.snapshot?.attempt?.id !== expectedAttemptId,
+        promptPid: prompt?.pid ?? null,
+        matchingPrompt: prompt?.params?.input?.some(item => item.text === recoveryText) === true,
+        originalPeerNoPrompt: !fs.existsSync(path.join(plan.workspace, `.fake-codex-turn.${initializePid}.marker`)),
+        releaseStillAbsent: !fs.existsSync(path.join(plan.workspace, RELEASE_MARKER)) &&
+          !fs.existsSync(path.join(plan.workspace, '.fake-codex-initialize-released.marker')),
+      };
+      result.reasons.push(...responsiveAcceptanceProblems(result));
+    }
     result.proven = result.reasons.length === 0;
   } catch (error) {
     result.error = error.message;
@@ -1289,7 +1415,7 @@ function probeRevision() {
   return sha256File(SCRIPT_PATH);
 }
 
-export async function runStalledPeerProbe({ coreExe, outDir }) {
+export async function runStalledPeerProbe({ coreExe, outDir, expectResponsive = false }) {
   const startedAt = new Date().toISOString();
   const outRoot = path.resolve(outDir);
   assertFreshOutDir(outRoot);
@@ -1298,6 +1424,7 @@ export async function runStalledPeerProbe({ coreExe, outDir }) {
   const corePath = path.resolve(coreExe);
   const report = {
     probe: PROBE_NAME,
+    mode: expectResponsive ? 'fix-acceptance' : 'negative-reproduction',
     schema: PROBE_SCHEMA,
     probeRevision: probeRevision(),
     startedAt,
@@ -1346,7 +1473,7 @@ export async function runStalledPeerProbe({ coreExe, outDir }) {
   let releaseAt = null;
   try {
     baseline = await runBaselinePhase({ plan: plan.baseline, coreExe: corePath, token: plan.token });
-    stall = await runStallPhase({ plan: plan.stall, coreExe: corePath, token: plan.token });
+    stall = await runStallPhase({ plan: plan.stall, coreExe: corePath, token: plan.token, expectResponsive });
     snapshotSample = stall?.control?.snapshot ?? null;
     stopSample = stall?.control?.safeStop ?? null;
     releaseAt = stall?.controlWindow?.releaseWrittenAtMono ?? null;
@@ -1373,7 +1500,10 @@ export async function runStalledPeerProbe({ coreExe, outDir }) {
       verdict.snapshot.invalid.length === 0 &&
       verdict.safeStop.invalid.length === 0;
     report.measurementValid = measurementValid;
-    report.exitCode = measurementValid && report.cleanup.verified && verdict.verdict !== 'inconclusive' ? 0 : 1;
+    report.fixAccepted = expectResponsive && measurementValid && report.cleanup.verified &&
+      verdict.verdict === 'not_reproduced' && responsiveAcceptanceProblems(stall).length === 0;
+    report.exitCode = expectResponsive ? (report.fixAccepted ? 0 : 1) :
+      (measurementValid && report.cleanup.verified && verdict.verdict !== 'inconclusive' ? 0 : 1);
     report.finishedAt = new Date().toISOString();
     fs.writeFileSync(plan.reportPath, `${JSON.stringify(report, null, 2)}\n`);
   }
@@ -1388,7 +1518,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (!fs.existsSync(coreExe) || !fs.statSync(coreExe).isFile()) {
     throw new Error(`--core must name an existing goalport-core.exe: ${coreExe}`);
   }
-  const report = await runStalledPeerProbe({ coreExe, outDir });
+  const report = await runStalledPeerProbe({ coreExe, outDir, expectResponsive: args.expectResponsive === true });
   console.log(
     `[MY-116] verdict=${report.verdict} reasons=${report.verdictReasons.join(',') || 'none'} measurementValid=${report.measurementValid} cleanupVerified=${report.cleanup.verified}`,
   );

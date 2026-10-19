@@ -7,7 +7,7 @@ import { Script } from 'node:vm';
 import {
   REQUIRED_STAGES, REQUIRED_SCREENSHOTS, FORBIDDEN_ENV, validateJourney,
   liveEvidenceIsValid, stopIsUsable, exitCodeForStatus, parseCli, profileProcessMatch,
-  journeyEnvironment, validatePrerequisites,
+  journeyEnvironment, validatePrerequisites, readStopControl,
 } from './windows-packaged-journey.mjs';
 
 const A = 'C:\\owned\\workspace-a', B = 'C:\\owned\\workspace-b';
@@ -57,6 +57,40 @@ function rejected(change, pattern) {
   assert.equal(exitCodeForStatus(result.status), 1);
   if (pattern) assert.match(result.failures.join('\n'), pattern);
 }
+
+test('Stop control passes hostile selector values as CDP arguments, never executable source', async () => {
+  const selectors = [`.background-job button[aria-label="Stop"]`, `quote'\"; globalThis.injected=true; //`, 'C:\\host\\path\\', 'line1\nline2\rline3', '\u2028\u2029'];
+  let source;
+  for (const selector of selectors) {
+    const calls = [];
+    const app = { async cdp(method, args) {
+      calls.push([method, args]);
+      if (method === 'Runtime.evaluate') { assert.equal(args.expression, 'globalThis'); return { result: { objectId: 'context' } }; }
+      if (method === 'Runtime.releaseObject') return {};
+      assert.equal(method, 'Runtime.callFunctionOn');
+      assert.deepEqual(args.arguments, [{ value: selector }]);
+      source ??= args.functionDeclaration;
+      assert.equal(args.functionDeclaration, source);
+      const control = { disabled: false, scrollIntoView() {}, getBoundingClientRect: () => ({ x: 0, y: 0, width: 12, height: 8 }) };
+      const inspect = new Script('(' + args.functionDeclaration + ')').runInNewContext({
+        document: { querySelector(value) { assert.equal(value, selector); return control; }, elementFromPoint: () => control },
+        getComputedStyle: () => ({ visibility: 'visible' }),
+      });
+      return { result: { value: inspect(args.arguments[0].value) } };
+    } };
+    assert.equal(stopIsUsable(await readStopControl(app, selector)), true);
+    assert.equal(calls.at(-1)[0], 'Runtime.releaseObject');
+  }
+});
+test('Stop control inspection errors stay failures and release the remote object', async () => {
+  let released = false;
+  await assert.rejects(readStopControl({ async cdp(method) {
+    if (method === 'Runtime.evaluate') return { result: { objectId: 'context' } };
+    if (method === 'Runtime.releaseObject') { released = true; return {}; }
+    return { exceptionDetails: { text: 'invalid selector' } };
+  } }, 'bad selector'), /inspection failed/);
+  assert.equal(released, true);
+});
 
 test('a profile-named Core is adopted even after its parent app exits', () => {
   const pkg = 'C:/owned/package';

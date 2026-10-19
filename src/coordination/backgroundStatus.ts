@@ -1,4 +1,11 @@
 import type { CoordinationView } from "./requestCoordination";
+/** Read-only presentation facts. The host/store still decides admission. */
+export interface BackgroundHeldWorkspaces {
+  holds: readonly { jobId: string; workspacePath: string }[];
+  complete: boolean;
+  globalBlock: boolean;
+}
+
 /** Permission-free IPC projection. Controls require a fresh acknowledged connection. */
 export interface BackgroundStatus {
   jobId: string;

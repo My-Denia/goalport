@@ -18,6 +18,8 @@ export interface CoordinationStatusProps {
   executionHarness?: string | null;
   auditHarness?: string | null;
   verdict: CoordinationVerdict | null;
+  /** Presentation only: a background Stop with a proven settled outcome. */
+  stoppedOutcome?: boolean;
   stopReason: string;
   planningQuota: CoordinationQuotaWord | null;
   reviewQuota: CoordinationQuotaWord | null;
@@ -222,6 +224,7 @@ export function CoordinationStatus({
   onChangeAccess,
   onStopAllowing,
   plain = false,
+  stoppedOutcome = false,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
   // An assigned writer alone is not evidence it launched: the read-budget
@@ -231,7 +234,7 @@ export function CoordinationStatus({
   return (
     <section className="coordination-status" aria-label="Plan and check">
       <dl className="coordination-outcome">
-        <dt>Outcome</dt><dd>{outcomeLabel(verdict)}</dd>
+        <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
       </dl>
       {feedbackHistory && feedbackHistory.length > 0 ? (
@@ -439,10 +442,13 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
   // > live/finished. A stopped job that has settled must say so — the user
   // pressing Stop wants to know it finished stopping, not that a turn "may"
   // still run (that copy is only true while a revocation is still in flight).
-  const settled = job.state === "completed" || job.state === "failed" || job.state === "stopped";
+  const stoppedOutcome = job.state === "stopped" && job.outcome?.status === "stopped"
+    && !job.live && !job.active && !job.pendingCommand;
+  const settled = (job.state === "completed" || job.state === "failed" || stoppedOutcome)
+    && !!job.outcome && !job.live && !job.active && !job.pendingCommand;
   const sentence = job.state === "unconfirmed"
     ? "Progress unavailable or interrupted; the outcome is unconfirmed. GoalPort did not restart this job and will not replay it."
-    : job.state === "stopped"
+    : stoppedOutcome
       ? "This goal was stopped and has settled. Whatever completed before the stop is retained below."
       : settled
         ? "This background job finished. Its result is retained below."
@@ -472,7 +478,7 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
       repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={null} maxTurns={null}
       writeRemaining={null} maxWriteTurns={null} /> : null}
-    {report ? <CoordinationStatus plain {...report} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
+    {report ? <CoordinationStatus plain {...report} stoppedOutcome={stoppedOutcome} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
     {!report && job.completedCommands.map(command => command.facts.text ? <article className="coordination-result" key={command.commandId}><h3>Completed {command.commandId.startsWith("coordinate-plan-") ? "plan" : command.commandId.startsWith("coordinate-review-") ? "check" : command.commandId.startsWith("coordinate-execute-") ? "changes" : "verification"}</h3><p>{command.facts.text}</p></article> : null)}
     {job.outcome?.error ? <p>{job.outcome.error}</p> : null}
     <details className="technical-details"><summary>Technical details</summary><p>Job: {job.jobId}; worker: {job.workerPid ?? "unconfirmed"}</p>

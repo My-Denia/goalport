@@ -307,6 +307,17 @@ struct Registration {
     identity: String,
 }
 
+// Measured Windows Codex 0.163.0 cold initialize + thread/start: 1.990 s.
+// Ample headroom; this bounds pre-dispatch startup, never provider turn work.
+#[cfg(windows)]
+const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+}
+
 const STARTUP_WAITING: u8 = 0;
 const STARTUP_DISPATCHING: u8 = 1;
 const STARTUP_CANCELLING: u8 = 2;
@@ -321,6 +332,13 @@ pub(crate) struct StartupControl {
     binding: Mutex<Option<RuntimeProcessBinding>>,
     done: Mutex<bool>,
     changed: Condvar,
+    cancellation_detail: Mutex<Option<String>>,
+    #[cfg(windows)]
+    child_handle: Mutex<Option<std::os::windows::io::OwnedHandle>>,
+    #[cfg(windows)]
+    owned_exit_observed: AtomicBool,
+    #[cfg(windows)]
+    watchdog_armed: AtomicBool,
 }
 
 impl Default for StartupControl {
@@ -330,6 +348,13 @@ impl Default for StartupControl {
             binding: Mutex::new(None),
             done: Mutex::new(false),
             changed: Condvar::new(),
+            cancellation_detail: Mutex::new(None),
+            #[cfg(windows)]
+            child_handle: Mutex::new(None),
+            #[cfg(windows)]
+            owned_exit_observed: AtomicBool::new(false),
+            #[cfg(windows)]
+            watchdog_armed: AtomicBool::new(false),
         }
     }
 }
@@ -354,6 +379,8 @@ impl StartupControl {
     }
 
     fn mark_dispatching(&self) -> Result<(), AdapterError> {
+        // Pair phase changes with the watchdog condition lock: no lost wake.
+        let _done = self.done.lock().expect("startup completion poisoned");
         if self.phase.load(Ordering::Acquire) == STARTUP_DISPATCHING {
             return Ok(());
         }
@@ -364,13 +391,18 @@ impl StartupControl {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map(|_| ())
-            .map_err(|_| AdapterError::Connection("native start was cancelled before prompt dispatch".into()))
+            .map_err(|_| AdapterError::Connection(self.cancellation_detail()
+                .unwrap_or_else(|| "native start was cancelled before prompt dispatch".into())))?;
+        #[cfg(windows)]
+        self.child_handle.lock().expect("startup handle poisoned").take();
+        self.changed.notify_all();
+        Ok(())
     }
 
     /// Returns false if native initialization already passed the pre-dispatch
     /// boundary. That result must not be described as a stopped or unsent turn.
-    pub(crate) fn request_cancel(&self) -> Result<bool, String> {
+    pub(crate) fn request_cancel(&self, detail: Option<&str>) -> Result<bool, String> {
+        let _done = self.done.lock().expect("startup completion poisoned");
         match self.phase.compare_exchange(
             STARTUP_WAITING,
             STARTUP_CANCELLING,
@@ -378,9 +410,13 @@ impl StartupControl {
             Ordering::Acquire,
         ) {
             Ok(_) => {
+                *self.cancellation_detail.lock().expect("startup reason poisoned") = detail.map(str::to_owned);
+                self.changed.notify_all();
                 #[cfg(target_os = "linux")]
                 self.signal_exact(libc::SIGTERM)?;
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(windows)]
+                self.terminate_owned_startup()?;
+                #[cfg(not(any(target_os = "linux", windows)))]
                 return Err("startup cancellation is unavailable on this platform".into());
                 Ok(true)
             }
@@ -425,15 +461,86 @@ impl StartupControl {
         }
     }
 
+    pub(crate) fn cancellation_detail(&self) -> Option<String> {
+        self.cancellation_detail.lock().expect("startup reason poisoned").clone()
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle(&self, child: &Child) -> Result<(), AdapterError> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use winapi::um::{handleapi::DuplicateHandle, processthreadsapi::GetCurrentProcess,
+            winnt::{PROCESS_TERMINATE, SYNCHRONIZE}};
+        let mut duplicate = std::ptr::null_mut();
+        let current = unsafe { GetCurrentProcess() };
+        // The Child's process object, never a later PID lookup. FALSE prevents
+        // this duplicate from escaping into a provider/grandchild.
+        if unsafe { DuplicateHandle(current, child.as_raw_handle().cast(), current, &mut duplicate,
+            PROCESS_TERMINATE | SYNCHRONIZE, 0, 0) } == 0 {
+            return Err(AdapterError::Connection(format!("unable to duplicate startup child handle: {}", std::io::Error::last_os_error())));
+        }
+        *self.child_handle.lock().expect("startup handle poisoned") = Some(unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) });
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn terminate_owned_startup(&self) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        if !self.cancelled() { return Err("startup is no longer cancellable".into()); }
+        let handle = self.child_handle.lock().expect("startup handle poisoned");
+        let Some(handle) = handle.as_ref() else { return Ok(()); };
+        if unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == 0 { return Ok(()); }
+        if unsafe { winapi::um::processthreadsapi::TerminateProcess(handle.as_raw_handle().cast(), 1) } == 0 {
+            return Err(format!("unable to terminate owned startup child: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn arm_watchdog(self: &Arc<Self>, timeout: Duration) -> Option<std::thread::JoinHandle<()>> {
+        let done = self.done.lock().expect("startup completion poisoned");
+        if self.phase.load(Ordering::Acquire) != STARTUP_WAITING
+            || self.watchdog_armed.swap(true, Ordering::AcqRel) { return None; }
+        drop(done);
+        let control = self.clone();
+        Some(std::thread::spawn(move || {
+            let done = control.done.lock().expect("startup completion poisoned");
+            let (done, elapsed) = control.changed.wait_timeout_while(done, timeout, |_| {
+                control.phase.load(Ordering::Acquire) == STARTUP_WAITING
+            }).expect("startup completion poisoned");
+            let expired = elapsed.timed_out() && control.phase.load(Ordering::Acquire) == STARTUP_WAITING;
+            drop(done);
+            if expired {
+                let _ = control.request_cancel(Some("Codex startup timed out before prompt dispatch"));
+            }
+        }))
+    }
+
     pub(crate) fn wait_finished(&self, timeout: Duration) -> bool {
         let done = self.done.lock().expect("startup completion poisoned");
-        *self.changed.wait_timeout_while(done, timeout, |done| !*done)
-            .expect("startup completion poisoned").0
+        let finished = *self.changed.wait_timeout_while(done, timeout, |done| !*done)
+            .expect("startup completion poisoned").0;
+        #[cfg(windows)]
+        { finished && self.owned_exit_observed.load(Ordering::Acquire) }
+        #[cfg(not(windows))]
+        { finished }
     }
 
     fn finish(&self) {
+        let mut done = self.done.lock().expect("startup completion poisoned");
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // Merge/return follows read completion. TerminateProcess alone is
+            // not proof. Inherited-pipe blockage never gets here.
+            let mut handle = self.child_handle.lock().expect("startup handle poisoned");
+            let exited = self.cancelled() && handle.as_ref().is_some_and(|h| unsafe {
+                WaitForSingleObject(h.as_raw_handle(), 100) == 0
+            });
+            self.owned_exit_observed.store(exited, Ordering::Release);
+            handle.take();
+        }
         self.phase.store(STARTUP_FINISHED, Ordering::Release);
-        *self.done.lock().expect("startup completion poisoned") = true;
+        *done = true;
         self.changed.notify_all();
     }
 }
@@ -1155,7 +1262,17 @@ impl RuntimeManager {
             }
             ManagedRuntime::Codex(process) => {
                 process.startup_control = startup_control.clone();
+                #[cfg(windows)]
+                if let Some(control) = startup_control.as_ref() {
+                    control.arm_watchdog(CODEX_STARTUP_TIMEOUT);
+                }
                 let result = process.create_session(request);
+                #[cfg(windows)]
+                if result.is_err() && let Some(detail) = startup_control.as_ref().and_then(|control| control.cancellation_detail()) {
+                    // Preserve the timeout in the existing admission-failure
+                    // projection, not merely in the now-returned IPC error.
+                    return Err(AdapterError::Connection(detail));
+                }
                 if result.is_ok() && let Some(control) = startup_control {
                     control.mark_dispatching()?;
                 }
@@ -2070,6 +2187,14 @@ impl CodexProcess {
             .spawn()
             .map_err(|error| native_spawn_error("Codex app-server", error))?;
         self.spawned = true;
+        #[cfg(windows)]
+        if let Some(control) = self.startup_control.as_ref() {
+            if let Err(error) = control.publish_child_handle(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let stdin = child
             .stdin
             .take()
@@ -8765,16 +8890,62 @@ fn native_approval_policy() -> Result<String, AdapterError> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(windows)]
+    #[test]
+    fn startup_watchdog_short_deadline_uses_owned_handle_and_exit_proof() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe")).find(|p| p.is_file()).expect("node.exe required");
+        let mut child = Command::new(node).args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let control = Arc::new(StartupControl::default());
+        control.publish_child_handle(&child).unwrap();
+        // Duration is injected directly, never through a product env hook.
+        control.arm_watchdog(Duration::from_millis(25)).unwrap().join().unwrap();
+        assert!(control.cancelled());
+        assert!(control.cancellation_detail().unwrap().contains("timed out"));
+        assert!(!control.wait_finished(Duration::ZERO), "kill success is not confirmation");
+        child.wait().unwrap();
+        assert!(!control.wait_finished(Duration::ZERO), "exit without return is not confirmation");
+        control.finish();
+        assert!(control.wait_finished(Duration::ZERO));
+        assert!(control.child_handle.lock().unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_watchdog_wakes_at_dispatch_and_finish_and_cancel_dispatch_race_is_exclusive() {
+        for finish in [false, true] {
+            let control = Arc::new(StartupControl::default());
+            let started = Instant::now();
+            let watchdog = control.arm_watchdog(Duration::from_secs(10)).unwrap();
+            if finish { control.finish(); } else { control.mark_dispatching().unwrap(); }
+            watchdog.join().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(1), "left a watchdog sleeper");
+            assert_eq!(control.request_cancel(None), Ok(false));
+            assert!(control.cancellation_detail().is_none());
+        }
+        for _ in 0..100 {
+            let control = Arc::new(StartupControl::default());
+            let other = control.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2)); let gate = barrier.clone();
+            let cancel = std::thread::spawn(move || { gate.wait(); other.request_cancel(None).unwrap() });
+            barrier.wait(); let dispatch = control.mark_dispatching().is_ok();
+            assert_ne!(dispatch, cancel.join().unwrap());
+            control.finish();
+            assert!(!control.wait_finished(Duration::ZERO), "no child exit was proved");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn startup_cancel_cannot_claim_unsent_after_dispatch_boundary() {
         let before_dispatch = StartupControl::default();
-        assert_eq!(before_dispatch.request_cancel().unwrap(), true);
+        assert_eq!(before_dispatch.request_cancel(None).unwrap(), true);
         assert!(before_dispatch.mark_dispatching().is_err());
 
         let after_dispatch = StartupControl::default();
         after_dispatch.mark_dispatching().unwrap();
-        assert_eq!(after_dispatch.request_cancel().unwrap(), false);
+        assert_eq!(after_dispatch.request_cancel(None).unwrap(), false);
     }
 
     #[test]
