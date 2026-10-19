@@ -112,6 +112,7 @@ jobs:
           # recovery_classification stay excluded: real assertion failure, external
           # app-server binary dependency and a live-probe timeout respectively.
           cargo test --locked -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p goalport-core --test windows_responsiveness -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p goalport-core-launcher -- --nocapture
