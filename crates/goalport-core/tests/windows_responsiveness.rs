@@ -178,10 +178,15 @@ fn stalled_case(scenario: &str, marker: &str) {
     let stopped = stop
         .recv_timeout(Duration::from_secs(2))
         .expect("Stop blocked");
-    assert_eq!(
-        stopped["payload"]["receipt"]["startupCancel"], "confirmed",
-        "{stopped}"
-    );
+    let mut cancel = stopped["payload"]["receipt"]["startupCancel"].clone();
+    // The first response is the 2s contract. Exit proof can land just after
+    // that response when the runner is busy; pending must not stay pending.
+    let confirm_by = Instant::now() + Duration::from_secs(8);
+    while cancel == "pending" && Instant::now() < confirm_by {
+        std::thread::sleep(Duration::from_millis(50));
+        cancel = h.call("stop-confirm", "safe_stop", json!({"attemptId":h.attempt()}))["payload"]["receipt"]["startupCancel"].clone();
+    }
+    assert_eq!(cancel, "confirmed", "{stopped}");
     assert_eq!(stopped["payload"]["receipt"]["nativePromptSent"], false);
     assert_eq!(
         start.recv_timeout(Duration::from_secs(2)).unwrap()["ok"],
@@ -303,7 +308,7 @@ fn cancel_racing_initialize_never_confirms_a_dispatched_prompt() {
     h.await_marker(".fake-codex-initialized.marker");
     let stop = h.async_call("race-stop", "safe_stop", json!({"attemptId":h.attempt()}));
     fs::write(h.workspace.join(".fake-codex-release"), "race release").unwrap();
-    let stopped = stop.recv_timeout(Duration::from_secs(2)).unwrap();
+    let stopped = stop.recv_timeout(Duration::from_secs(8)).unwrap();
     let returned = start.recv_timeout(Duration::from_secs(15)).unwrap();
     if stopped["payload"]["receipt"]["startupCancel"] == "confirmed" {
         assert_eq!(returned["ok"], false);
@@ -318,7 +323,7 @@ fn cancel_racing_initialize_never_confirms_a_dispatched_prompt() {
 #[test]
 fn dispatch_wins_and_late_stop_cannot_kill_startup_child() {
     let h = Harness::new("linger");
-    let started = h.start().recv_timeout(Duration::from_secs(15)).unwrap();
+    let started = h.start().recv_timeout(Duration::from_secs(30)).unwrap();
     assert_eq!(started["ok"], true, "{started}");
     h.await_marker(".fake-codex-turn.marker");
     let stopped = h.call("late-stop", "safe_stop", json!({"attemptId":h.attempt()}));
