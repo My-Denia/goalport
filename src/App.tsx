@@ -478,6 +478,11 @@ function App() {
     const timer = window.setInterval(() => { void poll(); }, 700);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [coreReady]);
+  // Retry intents retain their original workspace even if the draft text changes.
+  const candidateWorkspace = draftGoal?.intent?.workspaceRoot ?? draftGoal?.workspace.trim()
+    ?? snapshot.project.workspaceRoot ?? "";
+  const holdRevision = `${backgroundJob?.jobId ?? ""}:${backgroundJob?.acknowledgedStuckAt ?? ""}:${backgroundJob?.state ?? ""}:${backgroundJob?.active ?? ""}`;
+  const [checkedHoldRevision, setCheckedHoldRevision] = useState<string | null>(null);
   useEffect(() => {
     if (!coreReady) return;
     const read = window.goalportCore?.backgroundHeldWorkspaces;
@@ -488,14 +493,16 @@ function App() {
       if (reading) return;
       reading = true;
       try {
-        const facts = await read();
+        const facts = await read(candidateWorkspace);
         if (cancelled) return;
         if (!facts || !Array.isArray(facts.holds) || facts.holds.length > 256
+          || facts.candidate !== candidateWorkspace || typeof facts.candidateBlocked !== "boolean"
           || typeof facts.complete !== "boolean" || typeof facts.globalBlock !== "boolean"
           || facts.holds.some(hold => !hold || typeof hold.jobId !== "string"
             || typeof hold.workspacePath !== "string" || !workspaceIdentityKey(hold.workspacePath))) {
           throw new Error("Incomplete workspace reservations");
         }
+        setCheckedHoldRevision(holdRevision);
         setBackgroundHolds(current => facts.complete ? facts : {
           holds: [...new Map([...current.holds, ...facts.holds].map(hold => [hold.jobId, hold])).values()].slice(0, 256),
           complete: false, globalBlock: true,
@@ -509,7 +516,7 @@ function App() {
     void poll();
     const timer = window.setInterval(() => { void poll(); }, 700);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [coreReady]);
+  }, [coreReady, candidateWorkspace, holdRevision]);
   const runtimeLessDraftKey = draftGoal && draftGoal.provider.trim() === "" ? draftGoal.requestId : null;
   useEffect(() => {
     if (!runtimeLessDraftKey || !scopeBridgeReady) return undefined;
@@ -783,16 +790,20 @@ function App() {
     : "";
   const heldWorkspaces = [...backgroundHolds.holds.map(hold => hold.workspacePath), ...(heldWorkspace ? [heldWorkspace] : [])];
   const targetsAnyHeldWorkspace = (workspace: string) => heldWorkspaces.some(held => targetsHeldWorkspace(workspace, held));
-  const draftHeld = Boolean(draftGoal && targetsAnyHeldWorkspace(draftGoal.workspace));
+  const candidateChecked = !window.goalportCore?.backgroundHeldWorkspaces
+    || (backgroundHolds.candidate === candidateWorkspace && checkedHoldRevision === holdRevision
+      && backgroundHolds.complete && typeof backgroundHolds.candidateBlocked === "boolean");
+  const draftHeld = targetsAnyHeldWorkspace(candidateWorkspace)
+    || (candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock);
   useEffect(() => {
     if (!draftHeld) setDraftError(current => current?.sentence === HELD_FOLDER_SENTENCE ? null : current);
   }, [draftHeld]);
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
-  const backgroundSlotBlocked = backgroundHolds.globalBlock || !backgroundHolds.complete
+  const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
-  const backgroundSlotSentence = !backgroundHolds.complete
+  const backgroundSlotSentence = !candidateChecked || !backgroundHolds.complete
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
@@ -823,7 +834,7 @@ function App() {
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
-    if (targetsAnyHeldWorkspace(workspace)) {
+    if (targetsAnyHeldWorkspace(workspace) || (candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock)) {
       setDraftError({ sentence: HELD_FOLDER_SENTENCE });
       return;
     }
@@ -2657,11 +2668,9 @@ function confirmedTerminalJob(job: BackgroundStatus): boolean {
 }
 
 /**
- * Presentation-only mirror of the host's workspaceIdentity: absolute path,
- * dot segments resolved, trailing separators gone, Windows spellings folded.
- * Relative text has no identity (the host fails closed on it too). Admission
- * stays the host/store authority; this only keeps Send from promising a
- * folder the acknowledged job still holds.
+ * Conservative lexical warning only, never proof that an alias is safe.
+ * Physical identity belongs to the candidate-bound host query and admission.
+ * Relative text has no identity (the host fails closed on it too).
  */
 export function workspaceIdentityKey(value: string): string | null {
   const text = value.trim();

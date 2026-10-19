@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld("goalportCore", {
   backgroundSendConsent: (action) => ipcRenderer.invoke("goalport:background-send-consent", action),
   backgroundStart: (input) => ipcRenderer.invoke("goalport:background-start", input),
   backgroundStatus: (jobId) => ipcRenderer.invoke("goalport:background-status", jobId),
-  backgroundHeldWorkspaces: () => ipcRenderer.invoke("goalport:background-held-workspaces"),
+  backgroundHeldWorkspaces: (...args) => ipcRenderer.invoke("goalport:background-held-workspaces", ...args),
   backgroundRevoke: (jobId) => ipcRenderer.invoke("goalport:background-revoke", jobId),
   backgroundAcknowledge: (jobId) => ipcRenderer.invoke("goalport:background-acknowledge", jobId),
   backgroundReleaseTerminal: (jobId) => ipcRenderer.invoke("goalport:background-release-terminal", jobId),

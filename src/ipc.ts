@@ -340,7 +340,7 @@ declare global {
       backgroundSendConsent?: (action: "read" | "grant" | "revoke") => Promise<{ allowed: boolean; grantedAt?: string }>;
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
-      backgroundHeldWorkspaces?: () => Promise<BackgroundHeldWorkspaces>;
+      backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
       backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
       backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
       backgroundReleaseTerminal?: (jobId: string) => Promise<BackgroundStatus>;

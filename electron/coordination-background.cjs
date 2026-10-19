@@ -58,11 +58,6 @@ function createBackgroundHost(options) {
   function confirmedTerminal(facts) {
     return ["completed", "failed", "stopped"].includes(facts.state) && !!facts.outcome && !facts.pendingCommand;
   }
-  function sameWorkspace(left, right) {
-    const a = workspaceIdentity(left, platform);
-    const b = workspaceIdentity(right, platform);
-    return a !== null && a === b;
-  }
   function outstanding(workspaceRoot) {
     const s = store();
     if (starting || s.getActiveStatus()) return true;
@@ -74,13 +69,14 @@ function createBackgroundHost(options) {
       const facts = s.getStatus(id);
       if (confirmedTerminal(facts)) continue;
       if (!facts.acknowledgedStuckAt) return true;
-      if (!caller || sameWorkspace(facts.admission?.workspacePath, caller)) return true;
+      const held = workspaceIdentity(facts.admission?.workspacePath, platform);
+      if (caller === null || held === null || held === caller) return true;
     }
     return false;
   }
   // Read-only presentation facts from the existing store, not an admission
   // authority. Never silently drop a malformed entry or truncate a reservation.
-  function heldWorkspaces() {
+  function heldWorkspaces(candidate) {
     const holds = [];
     let complete = true;
     let globalBlock = starting;
@@ -102,7 +98,14 @@ function createBackgroundHost(options) {
         } catch { complete = false; }
       }
     } catch { complete = false; }
-    return { holds, complete, globalBlock: globalBlock || !complete };
+    const inventory = { holds, complete, globalBlock: globalBlock || !complete };
+    if (candidate === undefined) return inventory; // Preserve the inventory-only wire shape.
+    const identity = workspaceIdentity(candidate, platform);
+    return { ...inventory, candidate, candidateBlocked: inventory.globalBlock || identity === null
+      || holds.some(hold => {
+        const held = workspaceIdentity(hold.workspacePath, platform);
+        return held === null || held === identity;
+      }) };
   }
   async function status(jobId, controlEndpoint) {
     const s = store();

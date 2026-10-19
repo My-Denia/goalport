@@ -62,29 +62,71 @@ function optionalText(value, name, maxLength = 100_000) {
 function absolutePath(value, name, platform = process.platform) {
   const text = requiredText(value, name, 32_768);
   const paths = platform === "win32" ? path.win32 : path;
-  if (!paths.isAbsolute(text)) throw refusal("invalid-admission", `${name} must be an absolute path.`);
-  return paths.resolve(text);
+  if (!paths.isAbsolute(text) || text.includes("\0")
+    || (platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/])/i.test(text))) {
+    throw refusal("invalid-admission", `${name} must be an absolute path.`);
+  }
+  // Preserve kernel traversal through aliases before any `..` component.
+  return text;
 }
 
-// Platform workspace identity for the acknowledged-job folder comparison.
-// On win32 the same folder legitimately arrives with different casing (drive
-// letter spelling, tool output), so the identity is path.win32.resolve with
-// trailing separators stripped, case-folded. Other platforms compare the
-// path.resolve result exactly. A missing or non-absolute workspace has NO
-// identity: callers keep the fail-closed hold; identity is never derived from
-// process.cwd().
+// Same ancestor algorithm as acpCanonicalPathForContainment. Never normalize
+// before native realpath: the kernel follows link/.., not its lexical parent.
+// Only absent suffix components may be appended to a known physical ancestor.
 function workspaceIdentity(value, platform = process.platform) {
   if (typeof value !== "string") return null;
   const text = value.trim();
-  if (!text) return null;
-  if (platform === "win32") {
-    if (!path.win32.isAbsolute(text)) return null;
-    let resolved = path.win32.resolve(text);
-    while (resolved.length > 3 && /[\\/]$/.test(resolved)) resolved = resolved.slice(0, -1);
-    return resolved.toLowerCase();
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  if (!text || text.includes("\0") || !paths.isAbsolute(text)
+    || (platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/])/i.test(text))) return null;
+  // Node's Windows native realpath pre-collapses dot segments even with a
+  // namespaced path. Resolve each preceding component first on that platform,
+  // so alias/.. traverses the physical directory, not the alias's parent.
+  function nativeRealpath(candidate) {
+    if (platform !== "win32" || !candidate.split(/[\\/]/).some(part => part === "." || part === "..")) {
+      return fs.realpathSync.native(candidate);
+    }
+    const root = paths.parse(candidate).root;
+    let current = fs.realpathSync.native(root);
+    for (const component of candidate.slice(root.length).split(/[\\/]/).filter(Boolean)) {
+      if (!fs.statSync(current).isDirectory()) {
+        throw Object.assign(new Error("Workspace ancestor is not a directory."), { code: "ENOTDIR" });
+      }
+      current = fs.realpathSync.native(current + paths.sep + component);
+    }
+    return current;
   }
-  if (!path.isAbsolute(text)) return null;
-  return path.resolve(text);
+  let candidate = text;
+  const missingSuffix = [];
+  while (true) {
+    try {
+      const canonical = nativeRealpath(candidate);
+      if (!paths.isAbsolute(canonical)) return null; // Never resolve a foreign-platform spelling against cwd.
+      // Windows can report ENOENT rather than ENOTDIR for file/child.
+      // A missing suffix is valid only below a directory ancestor.
+      if (missingSuffix.length && !fs.statSync(canonical).isDirectory()) return null;
+      let resolved = paths.resolve(canonical, ...missingSuffix);
+      if (platform === "win32") {
+        resolved = resolved.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+        resolved = resolved.replace(/\//g, "\\").toLowerCase();
+      }
+      const root = paths.parse(resolved).root;
+      while (resolved.length > root.length && /[\\/]$/.test(resolved)) resolved = resolved.slice(0, -1);
+      return resolved;
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+    }
+    try {
+      fs.lstatSync(candidate);
+      return null; // Existing but unresolvable entry, including a broken link.
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+    }
+    const parent = paths.dirname(candidate);
+    if (parent === candidate) return null;
+    missingSuffix.unshift(paths.basename(candidate));
+    candidate = parent;
+  }
 }
 
 function instancesOf(value, name) {
@@ -155,7 +197,9 @@ function normalizeAdmissionInput(input, platform = process.platform) {
     if (!isPlainObject(write)) throw refusal("invalid-admission", "Workspace-change consent must be a complete explicit selection.");
     const instances = instancesOf(write.instances, "writeAuthorization.instances");
     const workspaceRoot = absolutePath(write.workspaceRoot, "writeAuthorization.workspaceRoot", platform);
-    if (workspaceIdentity(workspaceRoot, platform) !== workspaceIdentity(workspacePath, platform)) {
+    const writeIdentity = workspaceIdentity(workspaceRoot, platform);
+    const selectedIdentity = workspaceIdentity(workspacePath, platform);
+    if (writeIdentity === null || selectedIdentity === null || writeIdentity !== selectedIdentity) {
       throw refusal("invalid-admission", "Workspace-change consent must be bound to the selected workspace.");
     }
     const writeMaxTurns = integerCap(write.maxTurns, 1, 8, "writeAuthorization.maxTurns");
@@ -585,8 +629,10 @@ function createCoordinationJobStore(profileDirectory, {
         if (normalized.requestId === incoming.requestId) {
           throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
         }
-        if (!released && workspaceIdentity(normalized.workspacePath, platform) === workspaceIdentity(incoming.workspacePath, platform)) {
-          holders.push({ jobId: entry.name, admission });
+        if (!released) {
+          const held = workspaceIdentity(normalized.workspacePath, platform);
+          const candidate = workspaceIdentity(incoming.workspacePath, platform);
+          if (held === null || candidate === null || held === candidate) holders.push({ jobId: entry.name, admission });
         }
         continue;
       }

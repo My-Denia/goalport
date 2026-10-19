@@ -117,16 +117,21 @@ test("trusted consent IPC grants once, reads across reload and deletes on revoke
   }
 });
 
-test("retained-holds IPC is trusted, read-only, and carries no workspace or permission input", async () => {
+test("retained-holds IPC is trusted, read-only, and accepts only an optional candidate, not permission input", async () => {
   const facts = { holds: [{ jobId: "older", workspacePath: "/work/a" }], complete: true, globalBlock: false };
-  const registration = /handleTrusted\("goalport:background-held-workspaces",\s*(\(\) => backgroundHost.heldWorkspaces\(\))\);/.exec(mainSource);
+  const registration = /handleTrusted\("goalport:background-held-workspaces",\s*(\(_, candidate\) => \{[\s\S]*?\n  \})\);/.exec(mainSource);
   assert.ok(registration, "all-holds read uses the trusted main-frame boundary");
-  let reads = 0;
-  const callback = vm.runInNewContext(`(${registration[1]})`, { backgroundHost: { heldWorkspaces() { reads++; return facts; } } });
+  let reads = 0; let received;
+  const callback = vm.runInNewContext(`(${registration[1]})`, { backgroundHost: { heldWorkspaces(candidate) { reads++; received = candidate; return facts; } } });
   assert.equal(callback(), facts); assert.equal(reads, 1);
+  assert.equal(callback({}, "/work/alias"), facts); assert.equal(received, "/work/alias");
+  for (const value of [null, {}, 42, "x".repeat(32769)]) assert.throws(() => callback({}, value), /Candidate workspace/);
+  assert.equal(reads, 2);
   const { exposed, invocations } = loadPreload(null);
   await exposed.goalportCore.backgroundHeldWorkspaces();
   assert.deepEqual(invocations.at(-1), { channel: "goalport:background-held-workspaces", args: [] });
+  await exposed.goalportCore.backgroundHeldWorkspaces("/work/alias");
+  assert.deepEqual(invocations.at(-1), { channel: "goalport:background-held-workspaces", args: ["/work/alias"] });
 });
 
 test("actual app-info reports profile consent and env capability honestly", t => {

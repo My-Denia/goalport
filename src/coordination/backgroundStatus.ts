@@ -4,6 +4,9 @@ export interface BackgroundHeldWorkspaces {
   holds: readonly { jobId: string; workspacePath: string }[];
   complete: boolean;
   globalBlock: boolean;
+  /** Present only for a candidate-bound host check; echoed without normalization. */
+  candidate?: string;
+  candidateBlocked?: boolean;
 }
 
 /** Permission-free IPC projection. Controls require a fresh acknowledged connection. */

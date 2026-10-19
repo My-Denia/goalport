@@ -1261,7 +1261,12 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
-  handleTrusted("goalport:background-held-workspaces", () => backgroundHost.heldWorkspaces());
+  handleTrusted("goalport:background-held-workspaces", (_, candidate) => {
+    if (candidate !== undefined && (typeof candidate !== "string" || candidate.length > 32_768)) {
+      throw new TypeError("Candidate workspace must be text of at most 32768 characters.");
+    }
+    return backgroundHost.heldWorkspaces(candidate);
+  });
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
   handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
   handleTrusted("goalport:background-release-terminal", (_, jobId) => backgroundHost.releaseConfirmedTerminal(jobId));

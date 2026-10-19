@@ -3413,9 +3413,10 @@ describe("one in-window repair", () => {
       window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, jobId: "b", active: false, live: false, state: "completed", outcome: { status: "completed" }, workspacePath: "/work/b" });
       let holds = [{ jobId: "a", workspacePath: "/work/a" }, { jobId: "c", workspacePath: "/work/c" }];
       let fail = false;
-      const read = vi.fn(async () => {
+      const read = vi.fn(async (candidate?: string) => {
         if (fail) throw new Error("poll disconnected");
-        return { holds, complete: true, globalBlock: false };
+        return { holds, complete: true, globalBlock: false, candidate,
+          candidateBlocked: holds.some(hold => hold.workspacePath === candidate) };
       });
       window.goalportCore!.backgroundHeldWorkspaces = read;
       render(<App />);
@@ -3451,16 +3452,64 @@ describe("one in-window repair", () => {
     ])("blocks Send and its handler on incomplete or globally blocked retained facts (%j)", async facts => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundStatus = async () => null;
-      window.goalportCore!.backgroundHeldWorkspaces = async () => facts;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({ ...facts, candidate, candidateBlocked: true });
       render(<App />); await openDraftWithPanel(); typeMessage("Do not promise an unchecked send");
       expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
       fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
       expect(bridge.launchCount()).toBe(0); expect(bridge.authorizations).toHaveLength(0);
     });
+    it("blocks aliases until the exact host candidate check completes and ignores stale replies", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => null;
+      type Facts = import("./coordination/backgroundStatus").BackgroundHeldWorkspaces;
+      const pending = new Map<string, (facts: Facts) => void>();
+      const holds = [{ jobId: "held", workspacePath: "/physical/held" }];
+      const read = vi.fn((candidate?: string): Promise<Facts> => {
+        if (candidate?.startsWith("/alias/")) return new Promise(resolve => { pending.set(candidate, resolve); });
+        return Promise.resolve({ holds, complete: true, globalBlock: false, candidate, candidateBlocked: false });
+      });
+      window.goalportCore!.backgroundHeldWorkspaces = read;
+      render(<App />); await openDraftWithPanel(); typeMessage("Keep this draft until checked");
+      const folder = screen.getByRole("textbox", { name: "Project folder" });
+      const send = () => screen.getByRole("button", { name: "Send message" });
+      fireEvent.change(folder, { target: { value: "/alias/one" } });
+      expect(send().hasAttribute("disabled")).toBe(true);
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.launchCount()).toBe(0); expect(bridge.authorizations).toHaveLength(0);
+      await waitFor(() => expect(pending.has("/alias/one")).toBe(true));
+      fireEvent.change(folder, { target: { value: "/alias/two" } });
+      await waitFor(() => expect(pending.has("/alias/two")).toBe(true));
+      // Even a successful old response cannot clear the exact new candidate.
+      pending.get("/alias/one")!({ holds, complete: true, globalBlock: false, candidate: "/alias/one", candidateBlocked: false });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(send().hasAttribute("disabled")).toBe(true);
+      pending.get("/alias/two")!({ holds, complete: true, globalBlock: false, candidate: "/alias/two", candidateBlocked: true });
+      expect(await screen.findByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeTruthy();
+      expect(send().hasAttribute("disabled")).toBe(true);
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.launchCount()).toBe(0); expect(bridge.authorizations).toHaveLength(0);
+      expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("Keep this draft until checked");
+    });
+    it("does not treat a wrong candidate echo or missing candidate verdict as safe", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => null;
+      window.goalportCore!.backgroundHeldWorkspaces = async () => ({ holds: [], complete: true, globalBlock: false, candidate: "/not-the-draft", candidateBlocked: false });
+      render(<App />); await openDraftWithPanel(); typeMessage("No unchecked aliases");
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/candidate" } });
+      expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.launchCount()).toBe(0); expect(bridge.authorizations).toHaveLength(0);
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({ holds: [], complete: true, globalBlock: false, candidate });
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/next" } });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.launchCount()).toBe(0);
+    });
     it("a complete retained-holds read permits a real send to a different absolute folder", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundStatus = async () => null;
-      window.goalportCore!.backgroundHeldWorkspaces = async () => ({ holds: [{ jobId: "older-a", workspacePath: "/work/a" }], complete: true, globalBlock: false });
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({ holds: [{ jobId: "older-a", workspacePath: "/work/a" }], complete: true, globalBlock: false, candidate, candidateBlocked: candidate === "/work/a" });
       render(<App />); await openDraftWithPanel(); typeMessage("Work in another folder");
       fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/work/other" } });
       await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));

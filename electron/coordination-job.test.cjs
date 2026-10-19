@@ -821,3 +821,61 @@ test("an outcome that lands while acknowledging is not erased by the acknowledge
   assert.equal(store.getStatus(admitted.jobId).outcome.recordedAt, "2026-10-12T13:14:16.000Z");
   assert.equal(store.startAdmission(admission({ requestId: "send-background-2" })).reason, "workspace-held");
 });
+const { workspaceIdentity } = require('./coordination-job.cjs');
+for (const kind of ['junction', 'symlink']) test(`native ${kind} identity and alias/.. retain acknowledged holds`, { skip: kind === 'junction' && process.platform !== 'win32' }, async t => {
+  const { profile, store } = fixture(t);
+  const held = path.join(profile, 'physical', 'held');
+  const child = path.join(held, 'child');
+  const aliasParent = path.join(profile, 'separate-alias-parent');
+  fs.mkdirSync(child, { recursive: true }); fs.mkdirSync(aliasParent);
+  const alias = path.join(aliasParent, 'alias');
+  try { fs.symlinkSync(child, alias, kind === 'junction' ? 'junction' : 'dir'); }
+  catch (error) { assert.fail(`MISSING COVERAGE: ${kind} creation failed: ${error.code}`); }
+  t.diagnostic(`${kind} actually created on ${process.platform}`);
+  const traversal = alias + path.sep + '..'; // Never path.join: it erases the regression.
+  assert.equal(workspaceIdentity(traversal), workspaceIdentity(held));
+  assert.notEqual(workspaceIdentity(traversal), workspaceIdentity(aliasParent));
+  const directAlias = path.join(aliasParent, 'held-alias');
+  fs.symlinkSync(held, directAlias, kind === 'junction' ? 'junction' : 'dir');
+  assert.equal(workspaceIdentity(directAlias), workspaceIdentity(held));
+  assert.equal(workspaceIdentity(directAlias + path.sep), workspaceIdentity(held));
+  const first = start(store, { workspacePath: held }); store.acknowledgeStuck(first.jobId);
+  assert.equal(start(store, { requestId: 'alias-replacement', workspacePath: traversal }).reason, 'workspace-held');
+  assert.equal(start(store, { requestId: 'direct-alias-replacement', workspacePath: directAlias }).reason, 'workspace-held');
+  const missing = alias + path.sep + 'new' + path.sep + 'leaf';
+  assert.equal(workspaceIdentity(missing), workspaceIdentity(path.join(child, 'new', 'leaf')));
+  const broken = path.join(aliasParent, 'broken');
+  fs.symlinkSync(path.join(profile, 'absent-target'), broken, kind === 'junction' ? 'junction' : 'dir');
+  assert.equal(workspaceIdentity(broken), null);
+  assert.equal(workspaceIdentity(broken + path.sep + 'missing'), null);
+  assert.equal(start(store, { requestId: 'broken-replacement', workspacePath: broken }).reason, 'workspace-held');
+  assert.throws(() => normalizeAdmissionInput(admission({ workspacePath: broken, writeAuthorization: { workspaceRoot: broken, instances: ['reader-a'], maxTurns: 1 } })), { code: 'invalid-admission' });
+  assert.equal(workspaceIdentity('relative'), null);
+  assert.equal(workspaceIdentity(held + '\u0000'), null);
+  const file = path.join(profile, 'file'); fs.writeFileSync(file, 'x');
+  assert.equal(workspaceIdentity(file + path.sep + 'child'), null);
+  assert.equal(workspaceIdentity(file + path.sep + '..'), null);
+  const loop = path.join(aliasParent, 'loop');
+  fs.symlinkSync(loop, loop, kind === 'junction' ? 'junction' : 'dir');
+  assert.equal(workspaceIdentity(loop), null);
+  assert.equal(store.getStatus(first.jobId).admission.workspacePath, held);
+  // Existing serialized admissions stay byte-for-byte immutable on re-read.
+  const admissionFile = pathFor(profile, first.jobId, 'admission.json');
+  const before = fs.readFileSync(admissionFile, 'utf8');
+  const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
+  assert.equal(reopened.getStatus(first.jobId).admission.workspacePath, held);
+  assert.equal(fs.readFileSync(admissionFile, 'utf8'), before);
+});
+test('identity rejects filesystem permission and loop errors without a lexical or cwd fallback', () => {
+  const original = fs.realpathSync.native;
+  try {
+    for (const code of ['EACCES', 'EPERM', 'ENOTDIR', 'ELOOP', 'EIO']) {
+      fs.realpathSync.native = () => { throw Object.assign(new Error('injected native error'), { code }); };
+      assert.equal(workspaceIdentity(path.resolve('unresolvable-workspace')), null, code);
+    }
+  } finally { fs.realpathSync.native = original; }
+  if (process.platform === 'win32') {
+    assert.equal(workspaceIdentity('\\rooted-without-drive'), null);
+    assert.equal(workspaceIdentity('/rooted-without-drive'), null);
+  }
+});

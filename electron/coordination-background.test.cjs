@@ -296,42 +296,47 @@ test('a different folder gets its own control endpoint while the old one is stil
   assert.notEqual(next.state, 'completed');
 });
 
-test('an acknowledged job holds the same Windows folder across casing on the win32 identity only', async t => {
+test('an acknowledged job holds the same Windows folder across casing on the win32 identity only', { skip: process.platform !== 'win32' }, async t => {
   // Regression: the folder lookup compared path.resolve results exactly, so a
   // Windows path arriving with different casing (or a trailing separator, or
   // forward slashes) did not stay held. The identity function is selected per
   // platform here; production passes the host platform.
   const windowsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
   t.after(() => fs.rmSync(windowsDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(windowsDirectory, 'Goal')); fs.mkdirSync(path.join(windowsDirectory, 'Other'));
   const windowsStore = createCoordinationJobStore(windowsDirectory, { bootstrapReady: true, platform: 'win32' });
-  const windowsInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: 'C:\\Users\\Agent\\Work\\Goal',
+  const windowsInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: path.join(windowsDirectory, 'Goal'),
     allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
   const admitted = windowsStore.startAdmission(windowsInput);
   assert.equal(admitted.ok, true);
   windowsStore.acknowledgeStuck(admitted.jobId);
   const windowsHost = createBackgroundHost({ directory: () => windowsDirectory, ready: () => true, platform: 'win32' });
-  assert.equal(windowsHost.outstanding('c:\\users\\agent\\work\\goal'), true);
-  assert.equal(windowsHost.outstanding('C:/USERS/AGENT/WORK/GOAL/'), true);
-  assert.equal(windowsHost.outstanding('C:\\Users\\Agent\\Work\\Other'), false);
-  const recased = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: 'c:\\users\\agent\\work\\goal' });
+  assert.equal(windowsHost.outstanding(windowsInput.workspacePath.toLowerCase()), true);
+  assert.equal(windowsHost.outstanding(windowsInput.workspacePath.toUpperCase().replaceAll('\\', '/') + '/'), true);
+  assert.equal(windowsHost.outstanding(path.join(windowsDirectory, 'Other')), false);
+  const recased = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: windowsInput.workspacePath.toLowerCase() });
   assert.equal(recased.ok, false);
   assert.equal(recased.reason, 'workspace-held');
-  const different = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: 'C:\\Users\\Agent\\Work\\Other' });
+  const different = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: path.join(windowsDirectory, 'Other') });
   assert.equal(different.ok, true);
 
+});
+
+test('POSIX identity retains case-sensitive physical folder comparison', { skip: process.platform === 'win32' }, async t => {
   // The posix identity compares exactly: a case-different path is a different
   // folder and must not stay held.
   const posixDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
   t.after(() => fs.rmSync(posixDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(posixDirectory, 'Goal')); fs.mkdirSync(path.join(posixDirectory, 'goal'));
   const posixStore = createCoordinationJobStore(posixDirectory, { bootstrapReady: true, platform: 'linux' });
-  const posixInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: '/work/Goal',
+  const posixInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: path.join(posixDirectory, 'Goal'),
     allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
   const posixAdmitted = posixStore.startAdmission(posixInput);
   assert.equal(posixAdmitted.ok, true);
   posixStore.acknowledgeStuck(posixAdmitted.jobId);
   const posixHost = createBackgroundHost({ directory: () => posixDirectory, ready: () => true, platform: 'linux' });
-  assert.equal(posixHost.outstanding('/work/Goal'), true);
-  assert.equal(posixHost.outstanding('/work/goal'), false);
+  assert.equal(posixHost.outstanding(posixInput.workspacePath), true);
+  assert.equal(posixHost.outstanding(path.join(posixDirectory, 'goal')), false);
 });
 
 test('an acknowledged job still holds its folder and reports the acknowledgement after a worker replaces progress from a stale snapshot', async t => {
@@ -361,6 +366,8 @@ test('an acknowledged job still holds its folder and reports the acknowledgement
 test('held workspace projection keeps older A and multiple holds when current B finishes; refresh releases only terminal holds', async t => {
   const r = setup(t);
   assert.deepEqual(r.host.heldWorkspaces(), { holds: [], complete: true, globalBlock: false });
+  assert.equal(r.host.outstanding(), false); // No inventory must not invent a hold.
+  assert.equal(r.host.heldWorkspaces('relative').candidateBlocked, true);
   const a = await r.host.start(r.input);
   const s = createCoordinationJobStore(r.directory, { bootstrapReady: true });
   await r.host.acknowledge(a.jobId);
@@ -405,5 +412,48 @@ test('held workspace projection fails closed for corrupt, incomplete and overflo
     assert.equal(result.complete, false); assert.equal(result.globalBlock, true);
     assert.ok(result.holds.length <= 256);
     if (problem === 'overflow') assert.equal(result.holds.length, 256);
+  }
+});
+for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block both directions and candidate query`, { skip: kind === 'junction' && process.platform !== 'win32' }, async t => {
+  for (const reverse of [false, true]) {
+    const r = setup(t);
+    const held = path.join(r.directory, 'physical', 'held');
+    fs.mkdirSync(path.join(held, 'child'), { recursive: true });
+    const elsewhere = path.join(r.directory, 'elsewhere'); fs.mkdirSync(elsewhere);
+    const alias = path.join(elsewhere, 'alias');
+    try { fs.symlinkSync(path.join(held, 'child'), alias, kind === 'junction' ? 'junction' : 'dir'); }
+    catch (error) { assert.fail(`MISSING COVERAGE: ${kind} creation failed: ${error.code}`); }
+    t.diagnostic(`${kind} actually created on ${process.platform}; reverse=${reverse}`);
+    const traversal = alias + path.sep + '..';
+    const source = reverse ? traversal : held, candidate = reverse ? held : traversal;
+    const first = await r.host.start({ ...r.input, workspaceRoot: source });
+    await r.host.acknowledge(first.jobId);
+    assert.equal(r.host.outstanding(candidate), true);
+    const directAlias = path.join(elsewhere, 'held-alias');
+    fs.symlinkSync(held, directAlias, kind === 'junction' ? 'junction' : 'dir');
+    assert.equal(r.host.outstanding(directAlias), true);
+    assert.equal(r.host.heldWorkspaces(directAlias).candidateBlocked, true);
+    const facts = r.host.heldWorkspaces(candidate);
+    assert.equal(facts.candidate, candidate); assert.equal(facts.candidateBlocked, true);
+    await assert.rejects(() => r.host.start({ ...r.input, requestId: 'replacement', workspaceRoot: candidate }), { code: 'background-job-conflict' });
+    assert.equal(r.launches.length, 1);
+    const stored = createCoordinationJobStore(r.directory, { bootstrapReady: true }).getStatus(first.jobId);
+    assert.equal(stored.admission.workspacePath, source); // Raw alias/.. survives persistence and re-read.
+    assert.equal(r.host.heldWorkspaces(elsewhere).candidateBlocked, false);
+    assert.equal(r.host.heldWorkspaces('relative').candidateBlocked, true);
+    assert.equal(r.host.heldWorkspaces(alias + path.sep + 'new' + path.sep + 'leaf').candidateBlocked, false);
+    const broken = path.join(elsewhere, 'broken'); fs.symlinkSync(path.join(r.directory, 'absent'), broken, kind === 'junction' ? 'junction' : 'dir');
+    assert.equal(r.host.outstanding(broken), true);
+    assert.equal(r.host.heldWorkspaces(broken).candidateBlocked, true);
+    // An unresolved unreleased held identity must also block a known different folder.
+    fs.unlinkSync(alias); fs.symlinkSync(path.join(r.directory, 'absent'), alias, kind === 'junction' ? 'junction' : 'dir');
+    if (reverse) {
+      assert.equal(r.host.outstanding(elsewhere), true);
+      const unknownHeld = r.host.heldWorkspaces(elsewhere);
+      assert.equal(unknownHeld.candidateBlocked, true);
+      assert.equal(unknownHeld.complete, false); assert.equal(unknownHeld.globalBlock, true);
+      await assert.rejects(() => r.host.start({ ...r.input, requestId: 'different', workspaceRoot: elsewhere }), { code: 'background-job-conflict' });
+      assert.equal(r.launches.length, 1);
+    }
   }
 });
