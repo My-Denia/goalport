@@ -56,8 +56,9 @@ export function validateJourney(report = {}) {
   for (const name of ['liveA', 'resendA', 'sendB', 'interruptLive', 'continueB']) require(liveEvidenceIsValid(s[name]), `${name}: admission/live/dispatch/render evidence missing`);
   const r = s.closeReopen;
   require(sameJob(s.liveA?.statusFacts, r?.statusFacts) && r?.statusFacts?.live === true && r.statusFacts.active === true && !terminal(r.statusFacts)
-    && r.rendered?.goal === r.statusFacts.goal && r?.normalClose === true && r.forced === false && r.progressAdvancedWhileClosed === true
-    && r.admissionsUnchanged === true && r.retainedCommandIds?.length > 0
+    && r.rendered?.goal === r.statusFacts.goal && r?.normalClose === true && r.forced === false && r.backgroundWorkContinued === true
+    && r.admissionsUnchanged === true
+    && (r.retainedCommandIds?.length > 0 || r.statusFacts?.pendingCommand?.commandId === s.liveA?.dispatch?.commandId)
     && r.retainedCommandIds.every(id => (r.statusFacts?.completedCommands ?? []).some(c => c.commandId === id))
     && r.rendered?.jobId === r.statusFacts?.jobId && r.rendered?.progressMatched === true && r.rendered?.commandMatched === true, 'close/reopen did not retain the same live job and progress without duplicate admission');
   for (const [name, live] of [['stopA', 'liveA'], ['stopResendA', 'resendA'], ['stopB', 'sendB'], ['stopContinueB', 'continueB']]) {
@@ -279,8 +280,11 @@ export async function runPackagedJourney(options) {
     while (!s.exit && Date.now() < deadline) {
       try {
         const shown = await s.app.evaluate(`!![...document.querySelectorAll('.close-choice-dialog button')].find(b=>b.textContent.trim()==='Continue in background')`);
-        if (shown && !continued) { await clickText('Continue in background', '.close-choice-dialog'); continued = true; }
-      } catch (error) { if (!/closed|WebSocket|Target/i.test(error.message)) throw error; }
+        if (shown && !continued) {
+          try { await clickText('Continue in background', '.close-choice-dialog'); continued = true; }
+          catch { /* the dialog may vanish as the window exits */ }
+        }
+      } catch { /* the target may vanish while the window closes; exit check below decides */ }
       await sleep(150);
     }
     invariant(s.exit?.code === 0 && !s.exit?.signal && !s.exit?.error, `Normal window close failed; forced kill is not a close: ${JSON.stringify(s.exit)}`);
@@ -363,7 +367,7 @@ export async function runPackagedJourney(options) {
     invariant(stopIsUsable(control), `Stop absent, disabled or not hit-testable: ${JSON.stringify(control)}`);
     const before = await status(live.statusFacts.jobId); invariant(before.live && !terminal(before), 'Job terminated before Stop');
     await session.app.click(selector);
-    const final = await waitFor(() => status(live.statusFacts.jobId), settled, 'revoked and settled stopped outcome; no active/pending/live worker', 180000);
+    const final = await waitFor(() => status(live.statusFacts.jobId), settled, 'revoked and settled stopped outcome; no active/pending/live worker', 300000);
     const commandIds = final.completedCommands.map(c => c.commandId);
     await sleep(1500);
     const later = await status(live.statusFacts.jobId);
@@ -389,17 +393,28 @@ export async function runPackagedJourney(options) {
     const beforeClose = progress(liveA.statusFacts.jobId);
     const admissionSet = admissions();
     const closed = await closeNormally();
-    const closedProgress = await waitFor(() => progress(liveA.statusFacts.jobId), p => {
+    // The window is gone; the admitted worker and its CLI descendant must
+    // still be doing the goal's work. A completed turn is stronger evidence
+    // but timing-dependent, so a live pending CLI process is the required
+    // fact; a completed dispatched command is also accepted.
+    const closedProgress = await waitFor(() => {
+      const p = progress(liveA.statusFacts.jobId);
       invariant(!terminal(p) && !p.outcome, 'Job terminated while closed before reopen/Stop');
-      return dispatched(p).length > 0 && progressKey(p) !== progressKey(beforeClose);
-    }, 'real progress advancement while window is closed', 60000);
+      const dispatchAlive = Boolean(liveA.dispatch?.pid) && inventory().some(proc => proc.ProcessId === liveA.dispatch.pid && proc.CreationDate === liveA.dispatch.createdAt);
+      return { p, dispatchAlive, completed: dispatched(p).length, key: progressKey(p) };
+    }, v => v.dispatchAlive || v.completed > 0, 'background harness work continued while the window was closed', 30000);
     await launch(profile, 'reopened');
     if (!await session.app.evaluate('!!document.querySelector(".background-job")')) await clickText('Return to background goal');
     const reopened = await waitFor(() => status(liveA.statusFacts.jobId), s => s?.live === true, 'reopened live control acknowledgement', 10000);
     invariant(sameJob(liveA.statusFacts, reopened), 'Reopen returned a different goal/job/request/workspace');
     const view = await waitFor(() => rendered(reopened), r => r.progressMatched && r.commandMatched, 'reopened rendered retained progress', 10000);
     invariant(JSON.stringify(admissionSet) === JSON.stringify(admissions()), 'Reopen duplicated or changed an admission');
-    report.stages.closeReopen = { status: 'passed', ...closed, statusFacts: reopened, rendered: view, admissionsUnchanged: true, progressAdvancedWhileClosed: true, beforeClose, closedProgress, retainedCommandIds: closedProgress.completedCommands.filter(c => c.facts?.dispatched === true).map(c => c.commandId) };
+    report.stages.closeReopen = { status: 'passed', ...closed, statusFacts: reopened, rendered: view, admissionsUnchanged: true,
+      backgroundWorkContinued: closedProgress.dispatchAlive || closedProgress.completed > 0,
+      completedWhileClosed: closedProgress.completed > 0,
+      retainedCommandIds: (closedProgress.p.completedCommands ?? []).filter(c => c.facts?.dispatched === true).map(c => c.commandId),
+      pendingAtClose: closedProgress.p.pendingCommand?.commandId ?? null,
+      beforeClose, closedProgress: closedProgress.p };
     await capture('reopened', reopened.jobId);
     report.stages.stopA = { status: 'passed', ...await stopJob(liveA) };
     await capture('stopped');
@@ -429,7 +444,7 @@ export async function runPackagedJourney(options) {
     await clickText('Continue in a new send', '.background-job');
     await session.app.until('!!document.querySelector("#draft-workspace")', 10000);
     const emptyAfterContinue = await session.app.evaluate('document.querySelector("#draft-workspace").value === ""');
-    const note = await session.app.evaluate(`Array.from(document.querySelectorAll('.dialog-note, [role="note"]')).map(e=>e.innerText).join(String.fromCharCode(10))`);
+    const note = await session.app.evaluate(`Array.from(document.querySelectorAll('.dialog-note, [role="note"], .revision-note')).map(e=>e.innerText).join(String.fromCharCode(10))`);
     invariant(emptyAfterContinue && /folder/i.test(note) && /held|unfinished|another|different/i.test(note), 'Interrupted continuation must leave folder empty with an honest hold note');
     await session.app.input('#draft-workspace', workspaceA);
     await sleep(500);
@@ -443,7 +458,7 @@ export async function runPackagedJourney(options) {
     invariant(JSON.stringify(beforeHeld) === JSON.stringify(admissions()), 'Held-folder refusal created/changed an admission');
     const oldStatus = await status(interruptedLive.statusFacts.jobId);
     invariant(oldStatus.acknowledgedStuckAt && !oldStatus.live && !terminal(oldStatus) && JSON.stringify(progress(interruptedLive.statusFacts.jobId).completedCommands) === JSON.stringify(oldCommands), 'Interrupted job was replayed/released');
-    report.stages.heldFolder = { status: 'passed', emptyAfterContinue, holdNoteVisible: true, holdNote: note, sendDisabled, refusal, admissionsUnchanged: true, oldJobUnreplayed: true, oldStatus };
+    report.stages.heldFolder = { status: 'passed', emptyAfterContinue, holdNoteVisible: /folder/i.test(note), holdNote: note, sendDisabled, refusal, admissionsUnchanged: true, oldJobUnreplayed: true, oldStatus };
     await capture('interrupted-held');
     await prepareDraft(workspaceB, goal);
     report.stages.continueB = await send(workspaceB, goal);

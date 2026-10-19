@@ -34,7 +34,7 @@ function healthy() {
   const s = Object.fromEntries(REQUIRED_STAGES.map(name => [name, { status: 'passed' }]));
   s.draftAccess.realHarnesses = [{ id: 'codex' }, { id: 'claude' }];
   s.liveA = live(1, A); s.resendA = live(2, A); s.sendB = live(3, B); s.interruptLive = live(4, A); s.continueB = live(5, B);
-  s.closeReopen = { status: 'passed', normalClose: true, forced: false, progressAdvancedWhileClosed: true, admissionsUnchanged: true,
+  s.closeReopen = { status: 'passed', normalClose: true, forced: false, backgroundWorkContinued: true, admissionsUnchanged: true,
     statusFacts: structuredClone(s.liveA.statusFacts), rendered: structuredClone(s.liveA.rendered), retainedCommandIds: ['plan-1'] };
   s.stopA = stopped(s.liveA); s.stopResendA = stopped(s.resendA); s.stopB = stopped(s.sendB); s.stopContinueB = stopped(s.continueB);
   const interrupted = { ...structuredClone(s.interruptLive.statusFacts), state: 'unconfirmed', live: false };
@@ -97,7 +97,7 @@ test('status identity must agree with immutable admission and rendered job', () 
 });
 test('wrong reopened job/request/goal/workspace or duplicate admission fails', () => {
   for (const field of ['jobId', 'requestId', 'goal', 'workspacePath']) rejected(r => { r.stages.closeReopen.statusFacts[field] = 'different'; }, /close\/reopen/);
-  for (const field of ['normalClose', 'progressAdvancedWhileClosed', 'admissionsUnchanged']) rejected(r => { r.stages.closeReopen[field] = false; }, /close\/reopen/);
+  for (const field of ['normalClose', 'backgroundWorkContinued', 'admissionsUnchanged']) rejected(r => { r.stages.closeReopen[field] = false; }, /close\/reopen/);
   rejected(r => { r.stages.closeReopen.forced = true; }, /close\/reopen/);
   rejected(r => { r.stages.closeReopen.retainedCommandIds = ['missing-command']; }, /close\/reopen/);
 });
