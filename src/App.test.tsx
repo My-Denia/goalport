@@ -717,6 +717,23 @@ describe("GoalPort preview", () => {
     expect(composer.value).toBe("Do not lose this input");
   });
 
+  it("says the Runtime did not start when the program is not a Windows application", async () => {
+    window.__GOALPORT_ELECTRON__ = true;
+    const base = { ...DEMO_SNAPSHOT, preview: false };
+    const command = vi.fn(async (request: CoreCommand) => ({
+      goalportRejected: true,
+      requestId: request.requestId,
+      error: "Codex app-server (C:\\bad\\codex.exe) is not a valid Windows application"
+    }));
+    window.goalportCore = { snapshot: async () => base, command, startCore: async () => base, openInVsCode: async () => undefined };
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "Start anyway" } });
+    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+    expect(await screen.findByText("That Runtime didn't start. Nothing was sent.")).toBeTruthy();
+    expect(document.body.textContent).toContain("C:\\bad\\codex.exe");
+  });
+
   it("binds a send to captured ids and does not clear a later draft", async () => {
     window.__GOALPORT_ELECTRON__ = true;
     const base = { ...DEMO_SNAPSHOT, preview: false };

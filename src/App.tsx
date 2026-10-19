@@ -101,11 +101,15 @@ function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice |
         technical: outcome.rejection.message || outcome.error || "background-job-outstanding"
       };
     }
+    const technical = outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable");
+    const runtimeDidNotStart = /not a valid Windows application|unable to start|os error 193/i.test(technical);
     return {
       sentence: outcome.kind === "refused"
-        ? "GoalPort could not complete that action."
+        ? (runtimeDidNotStart
+          ? "That Runtime didn't start. Nothing was sent."
+          : "GoalPort could not complete that action.")
         : "GoalPort could not reach Core for that action.",
-      technical: outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable")
+      technical
     };
   }
   const notices = next.notices ?? [];

@@ -67,7 +67,12 @@ impl Harness {
             pipe,
             workspace,
         };
-        assert_eq!(harness.call("ready", "snapshot", json!({}))["ok"], true);
+        // Cold process start is not the 2s stall contract. A loaded CI
+        // runner misses that bound when several cores spawn together.
+        assert_eq!(
+            harness.call_within("ready", "snapshot", json!({}), Duration::from_secs(20))["ok"],
+            true
+        );
         harness
     }
     fn async_call(&self, id: &str, kind: &str, payload: Value) -> mpsc::Receiver<Value> {
@@ -82,9 +87,12 @@ impl Harness {
         rx
     }
     fn call(&self, id: &str, kind: &str, payload: Value) -> Value {
+        self.call_within(id, kind, payload, Duration::from_secs(2))
+    }
+    fn call_within(&self, id: &str, kind: &str, payload: Value, timeout: Duration) -> Value {
         self.async_call(id, kind, payload)
-            .recv_timeout(Duration::from_secs(2))
-            .expect("control request blocked beyond 2 s")
+            .recv_timeout(timeout)
+            .unwrap_or_else(|_| panic!("control request blocked beyond {}s", timeout.as_secs()))
     }
     fn await_marker(&self, marker: &str) {
         let end = Instant::now() + Duration::from_secs(15);

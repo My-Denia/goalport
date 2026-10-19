@@ -2185,7 +2185,12 @@ impl CodexProcess {
         ));
         let mut child = command
             .spawn()
-            .map_err(|error| native_spawn_error("Codex app-server", error))?;
+            .map_err(|error| {
+                native_spawn_error(
+                    &format!("Codex app-server ({})", self.executable.display()),
+                    error,
+                )
+            })?;
         self.spawned = true;
         #[cfg(windows)]
         if let Some(control) = self.startup_control.as_ref() {
@@ -8832,7 +8837,11 @@ fn close_owned_child(child: &mut Option<Child>) -> Result<(), AdapterError> {
 }
 
 fn native_spawn_error(label: &str, error: std::io::Error) -> AdapterError {
-    let message = format!("unable to start {label}: {error}");
+    let message = if error.raw_os_error() == Some(193) {
+        format!("{label} is not a valid Windows application")
+    } else {
+        format!("unable to start {label}: {error}")
+    };
     if error.kind() == std::io::ErrorKind::NotFound {
         AdapterError::ExecutableMissing(message)
     } else {
@@ -8847,7 +8856,7 @@ fn debug_runtime(message: &str) {
 }
 
 fn resolve_native_executable(provider: &str) -> PathBuf {
-    let candidates = match provider {
+    let mut candidates = match provider {
         "codex" => {
             let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
             app_data
@@ -8870,10 +8879,48 @@ fn resolve_native_executable(provider: &str) -> PathBuf {
             .collect(),
         _ => Vec::new(),
     };
+    // A file that exists but is not a loadable image must not win. The npm
+    // vendor copy on this machine is one of those: CreateProcess returns
+    // error 193 while the official install is a normal executable.
+    #[cfg(windows)]
+    if provider == "codex" {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local).join(r"Programs\OpenAI\Codex\bin\codex.exe"));
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("codex.exe")));
+        }
+    }
     candidates
         .into_iter()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| loadable_executable(candidate))
         .unwrap_or_else(|| PathBuf::from(provider))
+}
+
+fn loadable_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetBinaryTypeW(application: *const u16, binary_type: *mut u32) -> i32;
+        }
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut kind = 0u32;
+        let ok = unsafe { GetBinaryTypeW(wide.as_ptr(), &mut kind) != 0 };
+        // Type 1 is SCS_DOS_BINARY. GetBinaryType reports that for a text
+        // file, and error 193 for the unloadable npm vendor image. Neither
+        // can be CreateProcess'd as the Codex CLI.
+        ok && matches!(kind, 0 | 2 | 6)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 fn native_approval_policy() -> Result<String, AdapterError> {
@@ -8889,6 +8936,27 @@ fn native_approval_policy() -> Result<String, AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn unloadable_npm_codex_does_not_win_over_a_real_install() {
+        let root = std::env::temp_dir().join(format!("goalport-codex-resolve-{}", std::process::id()));
+        let bad = root.join("npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, b"not a windows application").unwrap();
+        let previous = std::env::var_os("APPDATA");
+        unsafe { std::env::set_var("APPDATA", &root) };
+        let resolved = resolve_native_executable("codex");
+        match previous {
+            Some(value) => unsafe { std::env::set_var("APPDATA", value) },
+            None => unsafe { std::env::remove_var("APPDATA") },
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(resolved, bad, "an existing but unloadable npm codex.exe must not be launched");
+        if resolved != std::path::PathBuf::from("codex") {
+            assert!(loadable_executable(&resolved), "{}", resolved.display());
+        }
+    }
 
     #[cfg(windows)]
     #[test]
