@@ -268,8 +268,12 @@ export async function runPackagedJourney(options) {
   }
   async function closeNormally(s = session) {
     invariant(s.app && !s.exit, 'Cannot close an absent/exited app'); inventory();
-    try { await s.app.evaluate('window.goalportCore.requestClose()', true); }
-    catch (error) { if (!/closed|WebSocket|Target/i.test(error.message)) throw error; }
+    // The real user closes the window; the main process decides from its
+    // cached attempt facts and prompts if a foreground attempt is active.
+    // requestClose() refreshes that cache from Core first, which can block
+    // behind a harness turn (the MY-116 risk); the window control does not.
+    try { await s.app.evaluate('window.close()', true); }
+    catch { /* the target may disappear before the CDP reply; exit decides */ }
     const deadline = Date.now() + 15000;
     let continued = false;
     while (!s.exit && Date.now() < deadline) {
