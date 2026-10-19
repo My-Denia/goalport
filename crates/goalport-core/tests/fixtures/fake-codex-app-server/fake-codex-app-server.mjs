@@ -15,6 +15,12 @@
 //   thread_start_without_id  answer thread/start with {id, result: {}} (no thread id) and stay alive
 //   resume_ok                like linger; thread/resume is accepted
 //   resume_rejected          like linger; thread/resume is answered with an error
+//   stall_initialize         like linger, but the initialize request is RECORDED in
+//                            `.fake-codex-initialized.marker` and its reply is WITHHELD until a test
+//                            writes `.fake-codex-release` in the cwd (polled every 100 ms).
+//                            `.fake-codex-initialize-released.marker` is written when the withheld
+//                            reply is finally sent. The default initialize reply, every other
+//                            scenario, the 90 s watchdog and the stop-marker cleanup are unchanged.
 // Every scenario exits 0 after 90 s at the latest (unconditional watchdog), so no node process
 // outlives a test binary, and every scenario also ends as soon as `.fake-codex-stop.marker` appears
 // in the cwd (polled every 100 ms) so a test can end a lingering fixture without any product kill
@@ -48,6 +54,55 @@ function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
+function writeMarker(names, payload) {
+  const record = `${JSON.stringify(payload, null, 2)}\n`;
+  for (const name of names) {
+    try {
+      writeFileSync(resolve(process.cwd(), name), record);
+    } catch {
+      // markers are diagnostic; the protocol behaviour is what matters
+    }
+  }
+}
+
+// stall_initialize: record that initialize arrived, then withhold its (otherwise unchanged) reply
+// until the test writes the release marker. Returns true when the caller must not answer now.
+function withholdInitialize(message) {
+  writeMarker(
+    [".fake-codex-initialized.marker", `.fake-codex-initialized.${process.pid}.marker`],
+    {
+      kind: "initialize.received",
+      requestId: message.id,
+      pid: process.pid,
+      cwd: process.cwd(),
+      scenario,
+      elapsedMs: Date.now() - startedAt,
+      released: false,
+    },
+  );
+  let releasePoll = null;
+  const reply = () => {
+    if (!existsSync(resolve(process.cwd(), ".fake-codex-release"))) {
+      return;
+    }
+    if (releasePoll !== null) clearInterval(releasePoll);
+    writeMarker(
+      [".fake-codex-initialize-released.marker", `.fake-codex-initialize-released.${process.pid}.marker`],
+      {
+        kind: "initialize.released",
+        requestId: message.id,
+        pid: process.pid,
+        elapsedMs: Date.now() - startedAt,
+      },
+    );
+    // The default initialize reply, exactly as the non-stall scenarios send it.
+    send({ id: message.id, result: {} });
+  };
+  releasePoll = setInterval(reply, 100);
+  reply();
+  return true;
+}
+
 function exitNow(reason) {
   const marker = `${JSON.stringify({ reason, pid: process.pid, elapsedMs: Date.now() - startedAt })}\n`;
   try {
@@ -78,6 +133,9 @@ reader.on("line", (line) => {
     return;
   }
   if (message.method === "initialize" && message.id !== undefined) {
+    if (scenario === "stall_initialize" && withholdInitialize(message)) {
+      return;
+    }
     send({ id: message.id, result: {} });
     return;
   }
