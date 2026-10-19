@@ -420,7 +420,13 @@ impl StartupControl {
                 return Err("startup cancellation is unavailable on this platform".into());
                 Ok(true)
             }
-            Err(STARTUP_CANCELLING) => Ok(true),
+            Err(STARTUP_CANCELLING) => {
+                // A handle may have been published after the first cancel saw
+                // an empty slot. Retry the owned handle; do not start a wait.
+                #[cfg(windows)]
+                self.terminate_owned_startup()?;
+                Ok(true)
+            }
             Err(_) => Ok(false),
         }
     }
@@ -478,7 +484,22 @@ impl StartupControl {
             PROCESS_TERMINATE | SYNCHRONIZE, 0, 0) } == 0 {
             return Err(AdapterError::Connection(format!("unable to duplicate startup child handle: {}", std::io::Error::last_os_error())));
         }
-        *self.child_handle.lock().expect("startup handle poisoned") = Some(unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) });
+        let owned = unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) };
+        let done = self.done.lock().expect("startup completion poisoned");
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == STARTUP_DISPATCHING || phase == STARTUP_FINISHED {
+            drop(owned);
+            return Ok(());
+        }
+        {
+            let mut slot = self.child_handle.lock().expect("startup handle poisoned");
+            *slot = Some(owned);
+        }
+        if phase == STARTUP_CANCELLING {
+            self.terminate_owned_startup()
+                .map_err(AdapterError::Connection)?;
+        }
+        drop(done);
         Ok(())
     }
 
@@ -3481,6 +3502,13 @@ impl GrokAcpProcess {
             .spawn()
             .map_err(|error| native_spawn_error("grok agent stdio", error))?;
         self.spawned = true;
+        if let Some(control) = self.startup_control.as_ref() {
+            if let Err(error) = control.publish_child_handle(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let stdin = child
             .stdin
             .take()
@@ -8955,6 +8983,30 @@ mod tests {
         assert_ne!(resolved, bad, "an existing but unloadable npm codex.exe must not be launched");
         if resolved != std::path::PathBuf::from("codex") {
             assert!(loadable_executable(&resolved), "{}", resolved.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancel_before_publish_still_terminates_the_owned_child() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe"))
+            .find(|path| path.is_file())
+            .expect("node.exe required");
+        let control = StartupControl::default();
+        assert_eq!(control.request_cancel(Some("before publish")), Ok(true));
+        let mut child = std::process::Command::new(node)
+            .args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        control.publish_child_handle(&child).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "published child survived cancel");
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 
