@@ -5123,6 +5123,10 @@ struct ClaudeStreamProcess {
     baseline_window: BaselineWindow,
     baseline_refresh_due: bool,
     startup_control: Option<Arc<StartupControl>>,
+    /// A cancel during Claude startup ended the retained domain, if the
+    /// kill succeeded, and must stay Incomplete. An authorizing startup
+    /// snapshot does not turn that death into a release.
+    startup_cancel_held: bool,
     /// Checked at the start of ensure_started, before the child.is_some()
     /// success return. Refuses another spawn while set.
     resume_hold: bool,
@@ -5209,6 +5213,7 @@ impl ClaudeStreamProcess {
             baseline_window: BaselineWindow::BeforeFirstMessage,
             baseline_refresh_due: false,
             startup_control: None,
+            startup_cancel_held: false,
             resume_hold: false,
             close_disarmed: false,
             close_snapshot: None,
@@ -5384,11 +5389,7 @@ impl ClaudeStreamProcess {
         {
             control.publish_binding(binding.clone());
             if control.cancelled() {
-                // A pid exists. Do not close(); the caller runs the proof rule.
-                self.latch_resume_hold();
-                return Err(AdapterError::Connection(
-                    "native start was cancelled before prompt dispatch".into(),
-                ));
+                return Err(self.hold_cancelled_startup());
             }
         }
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
@@ -5686,6 +5687,18 @@ impl ClaudeStreamProcess {
         // Do not signal.
     }
 
+    /// Stop the retained Claude domain after a startup cancel. This is not a
+    /// release: the child, registration fields, and authorizing snapshot stay,
+    /// and later classification remains Incomplete.
+    fn hold_cancelled_startup(&mut self) -> AdapterError {
+        self.latch_resume_hold();
+        self.startup_cancel_held = true;
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+        AdapterError::Connection("native start was cancelled before prompt dispatch".into())
+    }
+
     /// Verification failure: snapshot while the original Child is alive, after
     /// the failed first send, before any signal. A startup snapshot does not
     /// authorize this marker. `None` does not signal and does not authorize.
@@ -5778,6 +5791,10 @@ impl ClaudeStreamProcess {
     /// Child::kill on the original handle, before wait, and never after wait.
     /// Does not bare-pid kill. A broker is incomplete.
     fn attempt_stored_proof(&mut self) -> ResumeContainment {
+        if self.startup_cancel_held {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
         if self.broker.is_some() || !self.resume_proof_authorizes {
             self.latch_resume_hold();
             return ResumeContainment::Incomplete;
@@ -5864,6 +5881,10 @@ impl ClaudeStreamProcess {
     }
 
     fn classify_spawn_containment(&mut self) -> ResumeContainment {
+        if self.startup_cancel_held {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
         if self.broker.is_some() {
             self.latch_resume_hold();
             return ResumeContainment::Incomplete;
@@ -7870,6 +7891,9 @@ fn waited_pid_was_reused(
     ) -> Result<Value, AdapterError> {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
+            if self.startup_control.as_ref().is_some_and(|control| control.cancelled()) {
+                return Err(self.hold_cancelled_startup());
+            }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(AdapterError::Connection(format!(
                     "Claude initialize did not answer within {timeout_ms} ms"
@@ -7879,9 +7903,10 @@ fn waited_pid_was_reused(
                 let receiver = self.event_rx.as_ref().ok_or_else(|| {
                     AdapterError::Connection("Claude reader is not active".into())
                 })?;
-                receiver.recv_timeout(remaining)
+                receiver.recv_timeout(remaining.min(Duration::from_millis(200)))
             };
             match message {
+                Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
                 Ok(NativeMessage::Json(value)) => {
                     if claude_control_response_id(&value).as_deref() == Some(request_id) {
                         return Ok(value);
@@ -9007,6 +9032,54 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while child.try_wait().unwrap().is_none() {
             assert!(std::time::Instant::now() < deadline, "published child survived cancel");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_startup_cancel_ends_the_domain_and_stays_incomplete() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe"))
+            .find(|path| path.is_file())
+            .expect("node.exe required");
+        let cwd = std::env::temp_dir();
+        let spawned = crate::runtime_containment::spawn_contained(
+            &node,
+            &["-e".into(), "setInterval(()=>{},1000)".into()],
+            &cwd,
+            &[],
+        )
+        .expect("contained sleeper");
+        let pid = spawned.child.id();
+        let mut process = ClaudeStreamProcess::new(node, "test".into(), cwd);
+        process.child = Some(spawned.child);
+        process.spawned = true;
+        process.resume_proof_authorizes = true;
+        process.resume_proof_snapshot = Some(Vec::new());
+        process.process_binding = Some(RuntimeProcessBinding {
+            process_epoch: "runtime-epoch:startup-cancel".into(),
+            pid,
+            parent_pid: 0,
+            creation_date: "test".into(),
+            executable_path: "node.exe".into(),
+            executable_sha256: "a".repeat(64),
+        });
+        let error = process.hold_cancelled_startup();
+        assert!(error.to_string().contains("cancelled before prompt dispatch"));
+        assert!(process.resume_hold);
+        assert!(process.startup_cancel_held);
+        assert!(process.resume_proof_authorizes, "authorizing snapshot must not be cleared");
+        assert!(process.child.is_some(), "the contained child stays owned");
+        assert!(process.process_binding.is_some(), "registration binding stays");
+        assert_eq!(process.classify_spawn_containment(), ResumeContainment::Incomplete);
+        assert_eq!(process.attempt_stored_proof(), ResumeContainment::Incomplete);
+        assert!(process.resume_hold);
+        let again = process.ensure_started(None);
+        assert!(again.is_err(), "a held startup must not spawn again");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while process.child.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "contained child survived startup cancel");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
