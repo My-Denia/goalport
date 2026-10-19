@@ -29,6 +29,20 @@ function desktopJob(text) {
   return { body: body.join("\n"), commands };
 }
 
+// Read the core job's `run: |` script lines. Only the `--test` whitelist and the
+// fail-fast shape are claimed here; this is not a general YAML parser.
+function coreJob(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === "  core:");
+  assert.ok(start >= 0, "core job is required");
+  const following = lines.slice(start + 1);
+  const end = following.findIndex((line) => /^  \S+:/.test(line));
+  const body = end < 0 ? following : following.slice(0, end);
+  const script = body.flatMap((line, index) => (/^ {10}cargo /.test(line) ? [{ index, command: line.trim() }] : []));
+  const tests = script.flatMap(({ command }) => [...command.matchAll(/--test (\w+)/g)].map((match) => match[1]));
+  return { body: body.join("\n"), lines: body, script, tests };
+}
+
 test("README current entry points resolve and RC versions agree", () => {
   assert.match(readme, new RegExp(pkg.version.replaceAll(".", "\\.")));
   assert.match(readme, /release candidate/i);
@@ -133,6 +147,44 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
     assert.doesNotMatch(command, /verify:runtime|--live|goal-runs\/|\b(?:push|publish|release|deploy)\b/);
   }
   assert.ok(commands.includes("node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup"));
+});
+
+test("Windows Core CI runs the deterministic contract tranche and keeps red suites out", () => {
+  const { body, lines, script, tests } = coreJob(workflow);
+  assert.match(body, /runs-on: windows-latest/);
+  assert.match(body, /node-version: 22\.19\.0/);
+  assert.match(body, /toolchain: 1\.96\.1/);
+  // Inherited GOALPORT_* stays scrubbed before any cargo command runs.
+  assert.ok(lines.findIndex((line) => /Where-Object \{ \$_\.Name -like 'GOALPORT_\*' \}/.test(line)) > 0);
+  assert.ok(script.some(({ command }) => command === "cargo test -p goalport-core --lib"));
+  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker"]) {
+    assert.ok(tests.includes(name), `core CI runs --test ${name}`);
+  }
+  // Real failures and non-hermetic suites stay opt-in; never whitelisted to look green.
+  for (const name of ["claude_stream", "admission_failure", "recovery_classification"]) {
+    assert.ok(!tests.includes(name), `core CI must not whitelist --test ${name}`);
+  }
+  for (const { index, command } of script) {
+    assert.match(command, /^cargo test /);
+    assert.equal(lines[index + 1]?.trim(), "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", `${command} keeps the fail-fast guard`);
+  }
+});
+
+test("Desktop JS step runs the offline driver units but never a live driver", () => {
+  const desktop = pkg.scripts["test:desktop"].split(/\s+/);
+  for (const unit of ["background-native", "feedback-native", "plan-revision-native"]) {
+    assert.ok(desktop.includes(`scripts/acceptance/${unit}.test.mjs`), `${unit} unit suite runs in the desktop job`);
+  }
+  // Drivers need a display, Electron and a fresh evidence directory; only their
+  // unit files belong in CI, never a driver (the Linux background driver included).
+  for (const file of desktop.filter((entry) => entry.startsWith("scripts/acceptance/"))) {
+    assert.match(file, /\.test\.mjs$/, `${file} is a unit file, not a driver`);
+  }
+  assert.ok(!desktop.includes("scripts/acceptance/background-native.mjs"), "the Linux background driver never runs in CI");
+  // The three unit files accept both child reporter formats while still
+  // asserting the failure count, so they are not Node-pin sensitive.
+  const { commands } = desktopJob(workflow);
+  assert.ok(commands.includes("pnpm test:desktop"));
 });
 
 test("Desktop CI retains only redacted failure summaries and never tolerates a failed step", () => {
