@@ -13,7 +13,7 @@ import launchConfig from "../../electron/launch-config.cjs";
 import { boundedFailureSummary, collectFailureDiagnostics, collectStartupDiagnostics, sanitizeDiagnostic } from "./diagnostics.mjs";
 import { browserStateContainedIn, durableStorageEntryAllowed } from "./storage-boundary.mjs";
 import { connectedUiExpression } from "./connect-probe.mjs";
-import { clickPointFor } from "./click-target.mjs";
+import { clickPointFor, firstVisible } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
 
@@ -215,7 +215,7 @@ async function smoke() {
     await click(`${root} button[aria-label='Select Runtime']`);
     // The picker popup is portaled to document.body (Base UI), so options are
     // looked up document-wide under the open list, not under the trigger root.
-    const finder = `Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).find(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)})`;
+    const finder = `(${firstVisible.toString()})(Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).filter(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)}))`;
     await until(`${name} runtime option visible`, () => read(`Boolean(${finder})`));
     await clickFound(finder);
   };
