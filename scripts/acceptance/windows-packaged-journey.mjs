@@ -25,6 +25,20 @@ const sameJob = (a, b) => !!a && !!b && a.jobId === b.jobId && a.requestId === b
 
 /** Pure decision functions: no Electron, filesystem or environment access. */
 export function exitCodeForStatus(status) { return status === 'passed' ? 0 : 1; }
+/** A process whose command line names this profile and whose image is the
+ * package or the node runtime belongs to the run even after its parent app
+ * has exited (Windows keeps the dead parent pid, so the parent chain no
+ * longer links it). */
+export function profileProcessMatch(proc, profilePath, packageRoot, nodeExe) {
+  if (!proc || typeof profilePath !== 'string' || !profilePath) return false;
+  const cmd = String(proc.CommandLine || '').toLowerCase();
+  if (!cmd.includes(profilePath.toLowerCase())) return false;
+  const exe = String(proc.ExecutablePath || '').toLowerCase();
+  if (!exe) return false;
+  const root = String(packageRoot || '').toLowerCase().replace(/[\/]+$/, '');
+  const node = String(nodeExe || '').toLowerCase();
+  return (root.length > 0 && (exe === root || exe.startsWith(root + '\\') || exe.startsWith(root + '/'))) || (node.length > 0 && exe === node);
+}
 export function stopIsUsable(control) { return control?.visible === true && control.enabled === true && control.hitTestable === true; }
 export function liveEvidenceIsValid(e) {
   const s = e?.statusFacts, a = e?.admission, d = e?.dispatch;
@@ -199,6 +213,14 @@ export async function runPackagedJourney(options) {
       }
     }
     return all.filter(p => owned.has(fingerprint(p)));
+  }
+  function adoptProfileProcesses() {
+    for (const s of sessions) {
+      if (!s.dataPath) continue;
+      for (const p of processes()) {
+        if (!owned.has(fingerprint(p)) && profileProcessMatch(p, s.dataPath, packageRoot, process.execPath)) owned.set(fingerprint(p), p);
+      }
+    }
   }
   function killIdentified(p, reason) {
     const current = processes().find(c => fingerprint(c) === fingerprint(p));
@@ -488,6 +510,9 @@ export async function runPackagedJourney(options) {
     try {
       // Owned residual tools/Core may remain after the deliberately killed
       // worker. End ONLY previously fingerprinted descendants, no name kills.
+      // The app that parented Core may already be gone; adopt by the profile
+      // path recorded in the process command line before deciding nothing is left.
+      adoptProfileProcesses();
       const remaining = inventory();
       for (const p of remaining.reverse()) killIdentified(p, 'owned final cleanup; profile and unconfirmed facts retained');
       await sleep(1000);

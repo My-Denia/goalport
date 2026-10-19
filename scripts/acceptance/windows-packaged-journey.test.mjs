@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { Script } from 'node:vm';
 import {
   REQUIRED_STAGES, REQUIRED_SCREENSHOTS, FORBIDDEN_ENV, validateJourney,
-  liveEvidenceIsValid, stopIsUsable, exitCodeForStatus, parseCli,
+  liveEvidenceIsValid, stopIsUsable, exitCodeForStatus, parseCli, profileProcessMatch,
   journeyEnvironment, validatePrerequisites,
 } from './windows-packaged-journey.mjs';
 
@@ -57,6 +57,16 @@ function rejected(change, pattern) {
   assert.equal(exitCodeForStatus(result.status), 1);
   if (pattern) assert.match(result.failures.join('\n'), pattern);
 }
+
+test('a profile-named Core is adopted even after its parent app exits', () => {
+  const pkg = 'C:/owned/package';
+  const node = 'C:/Program Files/nodejs/node.exe';
+  const profile = 'C:/profiles/p1';
+  assert.equal(profileProcessMatch({ CommandLine: `${pkg}/resources/goalport-core.exe serve --db ${profile}/goalport.sqlite`, ExecutablePath: `${pkg}/resources/goalport-core.exe` }, profile, pkg, node), true);
+  assert.equal(profileProcessMatch({ CommandLine: `node worker ${profile}`, ExecutablePath: node }, profile, pkg, node), true);
+  assert.equal(profileProcessMatch({ CommandLine: `${pkg}/resources/goalport-core.exe serve --db C:/profiles/other/goalport.sqlite`, ExecutablePath: `${pkg}/resources/goalport-core.exe` }, profile, pkg, node), false);
+  assert.equal(profileProcessMatch({ CommandLine: 'codex exec --cd C:/workspace', ExecutablePath: 'C:/codex.exe' }, profile, pkg, node), false);
+});
 
 test('a complete healthy real stage set passes; only pass maps to exit zero', () => {
   assert.deepEqual(validateJourney(healthy()), { status: 'passed', failures: [] });
