@@ -3689,6 +3689,186 @@ describe("one in-window repair", () => {
         expect(sends[0].payload.message).toBe("A new turn in existing conversation");
       });
     });
+    it("existing conversation Composer disables Send and shows slot sentence when profile slot is blocked by globalBlock", async () => {
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/work/clean-convo" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "idle",
+            canSend: true,
+            canStop: false,
+            reason: "",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      let simulatedGlobalBlock = true;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [{ jobId: "held-job", workspacePath: "/work/held-other" }],
+        complete: true,
+        globalBlock: simulatedGlobalBlock,
+        candidate,
+        candidateBlocked: false,
+      });
+
+      render(<App />);
+
+      const composer = await screen.findByRole("textbox", { name: "Message composer" });
+      const sendButton = screen.getByRole("button", { name: "Send message" });
+
+      fireEvent.change(composer, { target: { value: "Turn while slot is globally blocked" } });
+
+      // Send disabled and shows background goal active sentence
+      await waitFor(() => {
+        expect(sendButton.hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("A background goal is still active");
+      });
+
+      // Submit via real form submission exercises handleSend's slot guard
+      const form = document.querySelector("form.composer")!;
+      fireEvent.submit(form);
+      expect(dispatchedCommands.filter(c => c.messageType === "conversation_send" || c.messageType === "send_message")).toHaveLength(0);
+
+      // Status banner shows background slot sentence
+      await waitFor(() => {
+        const notice = document.querySelector(".banner-notice");
+        expect(notice?.textContent).toContain("A background goal is still active");
+      });
+
+      // Now clear globalBlock
+      simulatedGlobalBlock = false;
+
+      // Re-enabled and dispatches real command
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false), { timeout: 3000 });
+      fireEvent.submit(form);
+      await waitFor(() => {
+        const sends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+        expect(sends.length).toBeGreaterThan(0);
+        expect(sends[0].payload.message).toBe("Turn while slot is globally blocked");
+      });
+    });
+    it("existing conversation Composer disables Send and suppresses retryLabel while an un-acknowledged background job owns the slot", async () => {
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/work/clean-convo" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "idle",
+            canSend: true,
+            canStop: false,
+            reason: "",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      let simulateFirstFailure = true;
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        if (cmd.messageType === "conversation_send" && simulateFirstFailure) {
+          simulateFirstFailure = false;
+          // Uncoded failure creates a retained reconcile/retry intent
+          throw Object.assign(new Error("transport glitch"), { goalportRejected: true, error: "network fail" });
+        }
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+
+      let currentJob: any = null; // start with no background job
+      window.goalportCore!.backgroundStatus = async () => currentJob;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: currentJob ? [{ jobId: "live-job", workspacePath: "/work/bg-work" }] : [],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: false,
+      });
+
+      render(<App />);
+
+      const composer = await screen.findByRole("textbox", { name: "Message composer" });
+      const form = document.querySelector("form.composer")!;
+
+      fireEvent.change(composer, { target: { value: "A retryable turn" } });
+      fireEvent.submit(form);
+
+      // Wait for retry intent to establish with activeRetryLabel visible
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).not.toBeNull();
+      });
+      const initialSends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+      expect(initialSends).toHaveLength(1);
+      const originalRequestId = initialSends[0].requestId;
+
+      // Now background job starts and owns the slot
+      currentJob = { ...liveJob }; // active, no acknowledgedStuckAt
+
+      // Because an active background job auto-attaches the job view, wait for it and leave
+      // so we return to the existing conversation to observe Composer
+      await screen.findByRole("region", { name: "Background goal" });
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+
+      // Re-query fresh form and buttons after transition
+      await waitFor(() => {
+        expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
+      });
+      const currentForm = document.querySelector("form.composer")!;
+
+      // Once backgroundSlotBlocked takes effect in the existing conversation:
+      // retryLabel is SUPPRESSED (Check result button is gone), Send is disabled, and slot sentence is shown
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).toBeNull();
+        expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("A background goal is still active");
+      }, { timeout: 3000 });
+
+      // Form submit on the freshly queried form while slot is owned is blocked by handleSend
+      fireEvent.submit(currentForm);
+      expect(dispatchedCommands.filter(c => c.messageType === "conversation_send")).toHaveLength(1); // still only the first failed attempt
+
+      // Now complete the background job and release the slot
+      currentJob = { ...liveJob, active: false, live: false, state: "completed", outcome: { status: "completed" } };
+
+      // After slot releases: retryLabel is RESTORED and dispatching retry succeeds with the SAME message and SAME requestId
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).not.toBeNull();
+      }, { timeout: 3000 });
+
+      const retryBtn = screen.getByRole("button", { name: /Check result|Retry/i })!;
+      fireEvent.click(retryBtn);
+
+      await waitFor(() => {
+        const sends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+        expect(sends.length).toBe(2);
+        expect(sends[1].payload.message).toBe("A retryable turn");
+        expect(sends[1].requestId).toBe(originalRequestId); // genuine retry identity preserved!
+      });
+    });
     it("a confirmed finished job keeps its released folder prefilled and sends to it again", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       const finished = {

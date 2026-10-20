@@ -1685,6 +1685,10 @@ function App() {
       setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
       return;
     }
+    if (backgroundSlotBlocked) {
+      setActiveNotice({ sentence: backgroundSlotSentence });
+      return;
+    }
     const turn = product?.turn;
     if (!retrying && !turn?.canSend) {
       setActiveNotice({ sentence: turn?.reason || "Sending is not available for this conversation right now." });
@@ -2595,12 +2599,14 @@ function App() {
                 runtime={product.runtime}
                 turn={targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "")
                   ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
-                  : snapshot.bounds?.projectionUnavailable && !activeRetryLabel
-                    ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
-                    : product.turn}
+                  : backgroundSlotBlocked
+                    ? { ...product.turn, canSend: false, reason: backgroundSlotSentence, reasonCode: undefined }
+                    : snapshot.bounds?.projectionUnavailable && !activeRetryLabel
+                      ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
+                      : product.turn}
                 busy={sendBusy}
                 closingSession={closingSession}
-                retryLabel={targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") ? undefined : activeRetryLabel}
+                retryLabel={(targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") || backgroundSlotBlocked) ? undefined : activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}
