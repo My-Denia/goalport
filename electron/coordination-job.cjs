@@ -781,10 +781,15 @@ function createCoordinationJobStore(profileDirectory, {
   }
 
   function assertOwner(jobId, ownerToken) {
-    assertActive(jobId);
     const claim = readClaim(jobId);
     if (!claim || !equalSecret(claim.ownerToken, ownerToken)) {
       throw refusal("not-worker-owner", "Only the claimed worker may update job progress.");
+    }
+    try {
+      assertActive(jobId);
+    } catch (error) {
+      if (error?.code !== "admission-not-active") throw error;
+      if (!readStuckAckMarker(jobId)) throw error;
     }
     return claim;
   }
@@ -816,6 +821,9 @@ function createCoordinationJobStore(profileDirectory, {
     const current = readProgress(jobId);
     if (current.revoked) throw refusal("access-revoked", "Access was stopped; no subsequent command may be admitted.");
     if (OUTCOME_STATES.has(current.state)) throw refusal("job-terminal", "The job is terminal; no command may be admitted.");
+    if (typeof current.acknowledgedStuckAt === "string" || readStuckAckMarker(jobId)) {
+      throw refusal("stuck-acknowledged", "This goal was left unreplayed; no new command may be admitted on it.");
+    }
     if (current.pendingCommand) throw refusal("pending-command", "A previous command is still unconfirmed; no next command may be admitted.");
     if (current.completedCommands.some((item) => item.commandId === commandId)) {
       throw refusal("duplicate-command-id", "This command id already has a durable result; it cannot be replayed.");
@@ -834,7 +842,7 @@ function createCoordinationJobStore(profileDirectory, {
     // must not launch. The caller must not invoke a turn unless this
     // function returns.
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
-    if (readRevocationMarker(jobId)) {
+    if (readRevocationMarker(jobId) || readStuckAckMarker(jobId)) {
       const after = readProgress(jobId);
       if (after.pendingCommand?.commandId === commandId) {
         completeCommand(jobId, {
@@ -847,7 +855,10 @@ function createCoordinationJobStore(profileDirectory, {
           },
         }, ownerToken);
       }
-      throw refusal("access-revoked", "Access was stopped; the recorded command was settled as never sent and was not launched.");
+      if (readRevocationMarker(jobId)) {
+        throw refusal("access-revoked", "Access was stopped; the recorded command was settled as never sent and was not launched.");
+      }
+      throw refusal("stuck-acknowledged", "This goal was left unreplayed; no new command may be admitted on it.");
     }
     return statusFor(jobId);
   }
@@ -944,6 +955,7 @@ function createCoordinationJobStore(profileDirectory, {
     }
     const active = readActive();
     if (!active || active.jobId !== jobId) {
+      if (readStuckAckMarker(jobId)) return statusFor(jobId);
       throw refusal("admission-not-active", "The profile admission slot is missing or stale; it was not replaced.");
     }
     // The outcome was atomically persisted above this step. Removing the one

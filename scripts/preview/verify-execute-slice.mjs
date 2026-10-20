@@ -195,7 +195,7 @@ try {
   const log = await evaluate("window.__ex.log");
   const authorize = log.find((entry) => entry.authorize)?.authorize;
   check("write authorize payload is the exact separate authorization",
-    JSON.stringify(authorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: EXECUTE_WORKSPACE } }),
+    JSON.stringify(authorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: EXECUTE_WORKSPACE, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: EXECUTE_WORKSPACE } }),
     JSON.stringify(authorize));
   const launches = log.filter((entry) => entry.role);
   check("four launches: plan, review, execute, audit",
@@ -284,7 +284,7 @@ try {
   const noWriteLog = await evaluate("window.__ex.log");
   const noWriteAuthorize = noWriteLog.find((entry) => entry.authorize)?.authorize;
   check("read-only authorize payload has NO write key",
-    JSON.stringify(noWriteAuthorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 4 }), JSON.stringify(noWriteAuthorize));
+    JSON.stringify(noWriteAuthorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: EXECUTE_WORKSPACE }), JSON.stringify(noWriteAuthorize));
   check("no-write stop launches only plan and review",
     JSON.stringify(noWriteLog.filter((e) => e.role).map((l) => l.role)) === JSON.stringify(["plan", "review"]));
   const noWriteFacts = await evaluate(`(() => ({
@@ -304,7 +304,7 @@ try {
   const budget2Log = await evaluate("window.__ex.log");
   const budget2Authorize = budget2Log.find((entry) => entry.authorize)?.authorize;
   check("read-budget-2 authorize carries read 2 plus the separate write authorization",
-    JSON.stringify(budget2Authorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 2, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: EXECUTE_WORKSPACE } }),
+    JSON.stringify(budget2Authorize) === JSON.stringify({ instances: ["codex", "claude"], maxTurns: 2, workspaceRoot: EXECUTE_WORKSPACE, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: EXECUTE_WORKSPACE } }),
     JSON.stringify(budget2Authorize));
   check("read-budget-2 stops before execution: only plan and review launched",
     JSON.stringify(budget2Log.filter((e) => e.role).map((l) => l.role)) === JSON.stringify(["plan", "review"]),

@@ -880,3 +880,71 @@ test('identity rejects filesystem permission and loop errors without a lexical o
     assert.equal(workspaceIdentity('/rooted-without-drive'), null);
   }
 });
+
+test("an acknowledged job allows its claimed worker to complete and record outcome without reclaiming slot", (t) => {
+  let n = 0;
+  const ids = [FIXED_JOB_ID, "223e4567-e89b-42d3-a456-426614174001", "323e4567-e89b-42d3-a456-426614174002"];
+  const { profile, store } = fixture(t, { idFactory: () => ids[n++] });
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  store.recordPendingCommand(admitted.jobId, { commandId: "cmd-1", role: "planning" }, ownerToken);
+  
+  const left = store.acknowledgeStuck(admitted.jobId);
+  assert.equal(left.active, false);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  
+  // Wrong token is still rejected
+  assert.throws(() => store.completeCommand(admitted.jobId, { commandId: "cmd-1", facts: { done: true } }, "0".repeat(64)), { code: "not-worker-owner" });
+  
+  // Real owner token succeeds to complete command
+  const completedStatus = store.completeCommand(admitted.jobId, { commandId: "cmd-1", facts: { done: true } }, ownerToken);
+  assert.equal(completedStatus.pendingCommand, null);
+  assert.equal(completedStatus.completedCommands.length, 1);
+  assert.equal(completedStatus.active, false);
+  
+  // Settle-only: cannot admit new commands
+  assert.throws(() => store.recordPendingCommand(admitted.jobId, { commandId: "cmd-2", role: "execution" }, ownerToken), { code: "stuck-acknowledged" });
+  
+  // Record outcome succeeds and reaches terminal
+  const outcomeStatus = store.recordOutcome(admitted.jobId, { status: "completed", reason: "Done" }, ownerToken);
+  assert.equal(outcomeStatus.state, "completed");
+  assert.equal(outcomeStatus.active, false);
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  
+  // releaseAdmission is an idempotent no-op
+  const releaseStatus = store.releaseAdmission(admitted.jobId, ownerToken);
+  assert.equal(releaseStatus.state, "completed");
+  assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
+  
+  // Hold is now freed on the same folder
+  const nextSameFolder = store.startAdmission(admission({ requestId: "send-next" }));
+  assert.equal(nextSameFolder.ok, true);
+  assert.equal(nextSameFolder.created, true);
+});
+
+test("an acknowledged job settling does not touch or clear another job's re-occupied slot", (t) => {
+  let n = 0;
+  const ids = ["423e4567-e89b-42d3-a456-426614174001", "523e4567-e89b-42d3-a456-426614174002", "623e4567-e89b-42d3-a456-426614174003"];
+  const { profile, store } = fixture(t, { idFactory: () => ids[n++] });
+  const jobA = store.startAdmission(admission({ requestId: "req-A", workspacePath: path.resolve("/tmp/ws-A") }));
+  const { ownerToken: tokenA } = store.claimWorker(jobA.jobId);
+  store.recordPendingCommand(jobA.jobId, { commandId: "cmd-A1", role: "planning" }, tokenA);
+  
+  store.acknowledgeStuck(jobA.jobId);
+  
+  // Job B starts on another workspace, re-occupying the active slot
+  const jobB = store.startAdmission(admission({ requestId: "req-B", workspacePath: path.resolve("/tmp/ws-B") }));
+  assert.equal(jobB.ok, true);
+  assert.equal(store.getActiveStatus().jobId, jobB.jobId);
+  
+  // Job A's worker settles in the background
+  store.completeCommand(jobA.jobId, { commandId: "cmd-A1", facts: { done: true } }, tokenA);
+  store.recordOutcome(jobA.jobId, { status: "completed", reason: "Done A" }, tokenA);
+  store.releaseAdmission(jobA.jobId, tokenA);
+  
+  // Job A is terminal
+  assert.equal(store.getStatus(jobA.jobId).state, "completed");
+  
+  // Job B's active slot is completely untouched!
+  assert.equal(store.getActiveStatus().jobId, jobB.jobId);
+});
