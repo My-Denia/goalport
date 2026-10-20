@@ -322,3 +322,99 @@ test("uncached campaign falls back to attempt without overriding explicit or cac
   assert.deepEqual(seen, ["/work/other", "/work/other", "/work/held", undefined, "/work/campaign", "/work/explicit", "/work/target"]);
   assert.deepEqual(invoked, ["other", "old", "cached", "explicit", "target"]);
 });
+
+test("attempt-less campaign selects runtime by resolving workspace from selected campaign fallback", () => {
+  // 1. VM extraction of the real cacheAttempt and rememberCampaignWorkspaces from mainSource
+  const campaignWorkspaces = new Map();
+  const selectedCampaignWorkspaces = new Map();
+  const attemptWorkspaces = new Map();
+  let lastProjectionUnavailable = false;
+  let lastAttemptActive = false;
+  let lastAttemptId = "";
+  let lastAttemptProvider = "";
+  let lastStopResponsibilityHeld = false;
+  let lastHeldAttemptId = "";
+  let lastCampaignId = "";
+
+  const sandbox = {
+    path,
+    campaignWorkspaces,
+    selectedCampaignWorkspaces,
+    attemptWorkspaces,
+    get lastProjectionUnavailable() { return lastProjectionUnavailable; },
+    set lastProjectionUnavailable(v) { lastProjectionUnavailable = v; },
+    get lastAttemptActive() { return lastAttemptActive; },
+    set lastAttemptActive(v) { lastAttemptActive = v; },
+    get lastAttemptId() { return lastAttemptId; },
+    set lastAttemptId(v) { lastAttemptId = v; },
+    get lastAttemptProvider() { return lastAttemptProvider; },
+    set lastAttemptProvider(v) { lastAttemptProvider = v; },
+    get lastStopResponsibilityHeld() { return lastStopResponsibilityHeld; },
+    set lastStopResponsibilityHeld(v) { lastStopResponsibilityHeld = v; },
+    get lastHeldAttemptId() { return lastHeldAttemptId; },
+    set lastHeldAttemptId(v) { lastHeldAttemptId = v; },
+    get lastCampaignId() { return lastCampaignId; },
+    set lastCampaignId(v) { lastCampaignId = v; },
+  };
+
+  const rememberFn = vm.runInNewContext(`(${extractMainFunction("rememberCampaignWorkspaces")})`, sandbox);
+  const cacheFn = vm.runInNewContext(`(${extractMainFunction("cacheAttempt")})`, { ...sandbox, rememberCampaignWorkspaces: rememberFn });
+
+  // (a) Test caching from real cacheAttempt: snapshot without goalOverview populates selectedCampaignWorkspaces
+  cacheFn({
+    activeCampaignId: "camp-selected",
+    project: { workspaceRoot: "/work/selected-campaign" },
+  });
+  assert.equal(selectedCampaignWorkspaces.get("camp-selected"), path.resolve("/work/selected-campaign"));
+  assert.equal(campaignWorkspaces.has("camp-selected"), false);
+
+  // (b) goalOverview precedence over selectedCampaignWorkspaces
+  cacheFn({
+    activeCampaignId: "camp-selected",
+    project: { workspaceRoot: "/work/selected-campaign" },
+    goalOverview: {
+      goals: [{ campaignId: "camp-selected", workspaceRoot: "/work/overview-precedence" }],
+    },
+  });
+  assert.equal(campaignWorkspaces.get("camp-selected"), path.resolve("/work/overview-precedence"));
+
+  // (c) Invalid relative workspace root fails closed (not cached)
+  cacheFn({
+    activeCampaignId: "camp-relative",
+    project: { workspaceRoot: "relative/path" },
+  });
+  assert.equal(selectedCampaignWorkspaces.has("camp-relative"), false);
+
+  // 2. Real assignment line extraction from mainSource for workspaceForCampaign
+  const assignMatch = /backgroundHost\.workspaceForCampaign\s*=\s*(.+);/.exec(mainSource);
+  assert.ok(assignMatch, "backgroundHost.workspaceForCampaign assignment found in main.cjs");
+  const realWorkspaceForCampaign = vm.runInNewContext(assignMatch[1], sandbox);
+
+  // 3. Connect to loadCoreCommandCallback
+  const seen = [], invoked = [];
+  const guard = loadCoreCommandCallback({
+    workspaceForCampaign: realWorkspaceForCampaign,
+    workspaceForAttempt: () => null,
+    outstanding: folder => { seen.push(folder); return folder === undefined || folder === path.resolve("/work/held"); },
+  }, request => { invoked.push(request.requestId); return { accepted: true }; });
+
+  const select = (requestId, payload) => guard({}, { requestId, messageType: "select_runtime", payload });
+
+  // (1) Overview precedence returns overview path
+  assert.equal(realWorkspaceForCampaign("camp-selected"), path.resolve("/work/overview-precedence"));
+
+  // (2) Attempt-less campaign with only selected fallback resolves to its workspace and is admitted
+  sandbox.campaignWorkspaces.delete("camp-selected");
+  assert.equal(realWorkspaceForCampaign("camp-selected"), path.resolve("/work/selected-campaign"));
+  const resAllowed = select("req-selected", { campaignId: "camp-selected", provider: "scenario" });
+  assert.equal(resAllowed.accepted, true);
+
+  // (3) Unknown campaign fails closed: returns null -> undefined -> rejected
+  assert.equal(realWorkspaceForCampaign("camp-unknown"), null);
+  const resUnknown = select("req-unknown", { campaignId: "camp-unknown", provider: "scenario" });
+  assert.equal(resUnknown.goalportRejected, true);
+  assert.equal(resUnknown.rejection.code, "background-job-outstanding");
+
+  assert.deepEqual(seen, [path.resolve("/work/selected-campaign"), undefined]);
+  assert.deepEqual(invoked, ["req-selected"]);
+});

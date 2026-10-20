@@ -793,8 +793,16 @@ function App() {
   const candidateChecked = !window.goalportCore?.backgroundHeldWorkspaces
     || (backgroundHolds.candidate === candidateWorkspace && checkedHoldRevision === holdRevision
       && backgroundHolds.complete && typeof backgroundHolds.candidateBlocked === "boolean");
-  const draftHeld = targetsAnyHeldWorkspace(candidateWorkspace)
-    || (candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock);
+  const workspaceHeldByBackground = (workspace: string): boolean => {
+    if (targetsAnyHeldWorkspace(workspace)) {
+      if (candidateChecked && backgroundHolds.candidateBlocked === false && !backgroundHolds.globalBlock) {
+        return false;
+      }
+      return true;
+    }
+    return candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock;
+  };
+  const draftHeld = workspaceHeldByBackground(candidateWorkspace);
   useEffect(() => {
     if (!draftHeld) setDraftError(current => current?.sentence === HELD_FOLDER_SENTENCE ? null : current);
   }, [draftHeld]);
@@ -834,7 +842,7 @@ function App() {
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
-    if (targetsAnyHeldWorkspace(workspace) || (candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock)) {
+    if (workspaceHeldByBackground(workspace)) {
       setDraftError({ sentence: HELD_FOLDER_SENTENCE });
       return;
     }

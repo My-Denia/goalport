@@ -3543,6 +3543,29 @@ describe("one in-window repair", () => {
       expect(bridge.authorizations[0]?.workspaceRoot).toBe("/work/other");
       expect(bridge.launchArgs[0]?.[3]).toBe("/work/other");
     });
+    it("lets the host candidate verdict clear a conservative lexical held-folder match", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => null;
+      // Renderer lexical keys collide ("/tmp/link/.." normalizes to "/tmp"), but
+      // the host physically resolves the link target and rules the candidate free.
+      const holds = [{ jobId: "held", workspacePath: "/tmp/link/.." }];
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds,
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: false,
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      typeMessage("Work in the physical folder");
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "/tmp" } });
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
+      expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => expect(bridge.launchCount()).toBeGreaterThan(0));
+      expect(bridge.authorizations[0]?.workspaceRoot).toBe("/tmp");
+    });
     it("an interrupted job opens a new send without the held folder and a different folder actually sends", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       const job = {

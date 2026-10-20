@@ -269,6 +269,7 @@ let lastStopResponsibilityHeld = false;
 let lastHeldAttemptId = "";
 let lastCampaignId = "";
 const campaignWorkspaces = new Map();
+const selectedCampaignWorkspaces = new Map();
 const attemptWorkspaces = new Map();
 let lastLaunchNonce = "";
 
@@ -681,7 +682,7 @@ const backgroundHost = createBackgroundHost({
     enginePath: path.join(appRoot, "dist", "coordination-engine.cjs"),
   }),
 });
-backgroundHost.workspaceForCampaign = (campaignId) => campaignWorkspaces.get(campaignId) || null;
+backgroundHost.workspaceForCampaign = (campaignId) => campaignWorkspaces.get(campaignId) || selectedCampaignWorkspaces.get(campaignId) || null;
 backgroundHost.workspaceForAttempt = (attemptId) => attemptWorkspaces.get(attemptId) || null;
 function refuseCompetingCoordination(workspaceRoot) {
   if (backgroundHost.outstanding(workspaceRoot)) {
@@ -996,6 +997,11 @@ function rememberCampaignWorkspaces(snapshot) {
 }
 function cacheAttempt(snapshot) {
   rememberCampaignWorkspaces(snapshot);
+  const selectedCampaignId = String(snapshot?.activeCampaignId || "");
+  const selectedRoot = snapshot?.project?.workspaceRoot || snapshot?.project?.workspace_root;
+  if (selectedCampaignId && typeof selectedRoot === "string" && path.isAbsolute(selectedRoot)) {
+    selectedCampaignWorkspaces.set(selectedCampaignId, path.resolve(selectedRoot));
+  }
   lastProjectionUnavailable = snapshot?.bounds?.projectionUnavailable === true || snapshot?.bounds?.projection_unavailable === true;
   if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");
