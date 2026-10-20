@@ -3869,6 +3869,60 @@ describe("one in-window repair", () => {
         expect(sends[1].requestId).toBe(originalRequestId); // genuine retry identity preserved!
       });
     });
+    it("existing conversation Composer suppresses Resume session and displays slot sentence while slot is blocked", async () => {
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/work/resume-convo" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "completed",
+            canSend: false,
+            canStop: false,
+            reason: "Resume this session to continue with earlier context.",
+            reasonCode: "session-closed",
+            actions: ["resume-session"],
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      let simulatedGlobalBlock = true;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [],
+        complete: true,
+        globalBlock: simulatedGlobalBlock,
+        candidate,
+        candidateBlocked: false,
+      });
+
+      render(<App />);
+
+      const form = await screen.findByRole("form", { name: "Message composer" });
+
+      // While slot is blocked, Resume session button is suppressed in Composer
+      await waitFor(() => {
+        expect(within(form).queryByRole("button", { name: "Resume session" })).toBeNull();
+        expect(within(form).getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("A background goal is still active");
+      }, { timeout: 3000 });
+
+      // Clear the slot block
+      simulatedGlobalBlock = false;
+
+      // Resume session button is restored once slot is clear
+      await waitFor(() => {
+        expect(within(form).queryByRole("button", { name: "Resume session" })).not.toBeNull();
+      }, { timeout: 3000 });
+    });
     it("a confirmed finished job keeps its released folder prefilled and sends to it again", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       const finished = {

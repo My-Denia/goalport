@@ -1956,6 +1956,14 @@ function App() {
   }
 
   async function handleResumeSession() {
+    if (targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "")) {
+      setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
+      return;
+    }
+    if (backgroundSlotBlocked) {
+      setActiveNotice({ sentence: backgroundSlotSentence });
+      return;
+    }
     const attemptId = persistedAttemptId(snapshot.attempt.id);
     if (!client.resumeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
       || !attemptId || !product?.turn.actions?.includes("resume-session")) {
@@ -2612,7 +2620,9 @@ function App() {
                 onSubmit={handleSend}
                 onSelectRuntime={(provider) => { void selectRuntime(provider); }}
                 onStop={() => { void handleStop(); }}
-                onResume={() => { void handleResumeSession(); }}
+                onResume={(targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") || backgroundSlotBlocked)
+                  ? undefined
+                  : () => { void handleResumeSession(); }}
               />
             </>
           )}
