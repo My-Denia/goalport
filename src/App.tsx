@@ -803,8 +803,9 @@ function App() {
     return candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock;
   };
   const draftHeld = workspaceHeldByBackground(candidateWorkspace);
+  const draftHeldSentence = heldWorkspaces.length > 0 ? HELD_FOLDER_SENTENCE : UNIDENTIFIABLE_FOLDER_SENTENCE;
   useEffect(() => {
-    if (!draftHeld) setDraftError(current => current?.sentence === HELD_FOLDER_SENTENCE ? null : current);
+    if (!draftHeld) setDraftError(current => (current?.sentence === HELD_FOLDER_SENTENCE || current?.sentence === UNIDENTIFIABLE_FOLDER_SENTENCE) ? null : current);
   }, [draftHeld]);
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
@@ -843,7 +844,7 @@ function App() {
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
     if (workspaceHeldByBackground(workspace)) {
-      setDraftError({ sentence: HELD_FOLDER_SENTENCE });
+      setDraftError({ sentence: draftHeldSentence });
       return;
     }
     if (backgroundSlotBlocked) {
@@ -2438,7 +2439,7 @@ function App() {
                         : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftHeld ? { sentence: HELD_FOLDER_SENTENCE } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
+                    error={draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
@@ -2742,6 +2743,7 @@ function targetsHeldWorkspace(value: string, held: string): boolean {
 
 const HELD_CONVERSATION_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Return to the background goal to release it; nothing was sent.";
 const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
+const UNIDENTIFIABLE_FOLDER_SENTENCE = "GoalPort needs an absolute folder path (for example C:\\workspace\\your-project) before it can check this folder or start work; nothing was sent.";
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {
   const development = appInfo?.testMode === true || appInfo?.distribution === "dev";

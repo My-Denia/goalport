@@ -3566,6 +3566,48 @@ describe("one in-window repair", () => {
       await waitFor(() => expect(bridge.launchCount()).toBeGreaterThan(0));
       expect(bridge.authorizations[0]?.workspaceRoot).toBe("/tmp");
     });
+    it("empty or relative candidate with zero holds shows unidentifiable folder error instead of held folder copy", async () => {
+      const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => null;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: !candidate || candidate === "relative/path",
+      });
+      render(<App />);
+      await openDraftWithPanel();
+      typeMessage("Draft for path validation");
+      const folderInput = screen.getByRole("textbox", { name: "Project folder" });
+
+      // 1. Empty candidate
+      fireEvent.change(folderInput, { target: { value: "" } });
+      await waitFor(() => {
+        expect(screen.getByText(/needs an absolute folder path/)).toBeTruthy();
+        expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+        expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      });
+
+      // 2. Relative candidate with submit
+      fireEvent.change(folderInput, { target: { value: "relative/path" } });
+      await waitFor(() => {
+        expect(screen.getByText(/needs an absolute folder path/)).toBeTruthy();
+        expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+        expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+      });
+      fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
+      expect(bridge.launchCount()).toBe(0);
+
+      // 3. Switch to clean absolute folder: unidentifiable sentence clears and Send enables
+      fireEvent.change(folderInput, { target: { value: "/work/clean-absolute" } });
+      await waitFor(() => {
+        expect(screen.queryByText(/needs an absolute folder path/)).toBeNull();
+        expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+        expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false);
+      });
+      expect(bridge.launchCount()).toBe(0);
+    });
     it("an interrupted job opens a new send without the held folder and a different folder actually sends", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       const job = {
