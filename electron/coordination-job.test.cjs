@@ -948,3 +948,47 @@ test("an acknowledged job settling does not touch or clear another job's re-occu
   // Job B's active slot is completely untouched!
   assert.equal(store.getActiveStatus().jobId, jobB.jobId);
 });
+
+test("revoke writes revocation marker on active unconfirmed job while keeping state unconfirmed and slot held", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store);
+  const { ownerToken } = store.claimWorker(admitted.jobId);
+  store.recordPendingCommand(admitted.jobId, { commandId: "cmd-u1", role: "planning" }, ownerToken);
+  store.recordOutcome(admitted.jobId, { status: "unconfirmed", reason: "Unconfirmed outcome" }, ownerToken);
+
+  const beforeRevoke = store.getStatus(admitted.jobId);
+  assert.equal(beforeRevoke.state, "unconfirmed");
+  assert.equal(beforeRevoke.active, true);
+  assert.equal(beforeRevoke.revoked, false);
+
+  const revokedStatus = store.revoke(admitted.jobId);
+  assert.equal(revokedStatus.state, "unconfirmed");
+  assert.equal(revokedStatus.revoked, true);
+  assert.equal(fs.existsSync(pathFor(profile, admitted.jobId, "revocation.json")), true);
+
+  // Profile slot stays held: cannot release an unconfirmed job
+  assert.throws(() => store.releaseAdmission(admitted.jobId, ownerToken), { code: "job-not-terminal" });
+  assert.equal(store.getActiveStatus().jobId, admitted.jobId);
+
+  // Terminal jobs (completed/failed/stopped) without unconfirmed state still refuse to create new revocation markers while actively admitted
+  const termProfile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-term-revoke-"));
+  t.after(() => fs.rmSync(termProfile, { recursive: true, force: true }));
+  const termStore = createCoordinationJobStore(termProfile, { bootstrapReady: true });
+  for (const terminalStatus of ["completed", "failed", "stopped"]) {
+    const job = termStore.startAdmission(admission({ requestId: `req-${terminalStatus}`, workspacePath: path.resolve(`/tmp/ws-${terminalStatus}`) }));
+    const { ownerToken: tok } = termStore.claimWorker(job.jobId);
+    termStore.recordPendingCommand(job.jobId, { commandId: `cmd-${terminalStatus}`, role: "planning" }, tok);
+    termStore.completeCommand(job.jobId, { commandId: `cmd-${terminalStatus}`, facts: { ok: true } }, tok);
+    termStore.recordOutcome(job.jobId, { status: terminalStatus, reason: "done" }, tok);
+
+    // Verify while still actively admitted in slot:
+    const statusBefore = termStore.getStatus(job.jobId);
+    assert.equal(statusBefore.state, terminalStatus);
+    const res = termStore.revoke(job.jobId);
+    assert.equal(res.state, terminalStatus);
+    assert.equal(fs.existsSync(pathFor(termProfile, job.jobId, "revocation.json")), false);
+
+    // Release after check
+    termStore.releaseAdmission(job.jobId, tok);
+  }
+});

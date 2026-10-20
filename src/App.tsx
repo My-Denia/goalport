@@ -1672,6 +1672,11 @@ function App() {
       setActiveNotice({ sentence: "Core refused new work while residual execution is unknown and write responsibility is held." });
       return;
     }
+    const heldByResidualBackground = targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "");
+    if (heldByResidualBackground) {
+      setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
+      return;
+    }
     const turn = product?.turn;
     if (!retrying && !turn?.canSend) {
       setActiveNotice({ sentence: turn?.reason || "Sending is not available for this conversation right now." });
@@ -2189,7 +2194,7 @@ function App() {
       <TitleBar
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
-        campaignTitle={hasGoal ? title : null}
+        campaignTitle={hasGoal && !(backgroundView && backgroundJob) ? title : null}
         workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : null}
         workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : null}
         appInfo={appInfo}
@@ -2580,12 +2585,14 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
-                turn={snapshot.bounds?.projectionUnavailable && !activeRetryLabel
-                  ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
-                  : product.turn}
+                turn={targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "")
+                  ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
+                  : snapshot.bounds?.projectionUnavailable && !activeRetryLabel
+                    ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
+                    : product.turn}
                 busy={sendBusy}
                 closingSession={closingSession}
-                retryLabel={activeRetryLabel}
+                retryLabel={targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") ? undefined : activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}
@@ -2679,11 +2686,12 @@ export function workspaceIdentityKey(value: string): string | null {
   const unc = /^[\\/]{2}[^\\/]/.test(text);
   const rooted = !drive && !unc && /^[\\/]/.test(text);
   if (!drive && !unc && !rooted) return null;
-  const windowsLike = drive || unc || text.includes("\\")
-    || (typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent));
+  const windowsHost = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+  const windowsLike = drive || unc || windowsHost;
   const rest = drive ? text.slice(2) : text.replace(/^[\\/]+/, "");
   const parts: string[] = [];
-  for (const part of rest.split(/[\\/]+/)) {
+  const segments = windowsLike ? rest.split(/[\\/]+/) : rest.split("/");
+  for (const part of segments) {
     if (!part || part === ".") continue;
     if (part === "..") { if (parts.length > (unc ? 2 : 0)) parts.pop(); continue; }
     parts.push(part);
@@ -2708,6 +2716,7 @@ function targetsHeldWorkspace(value: string, held: string): boolean {
   return sameWorkspaceIdentity(value, held);
 }
 
+const HELD_CONVERSATION_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Return to the background goal to release it; nothing was sent.";
 const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {

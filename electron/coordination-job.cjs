@@ -898,7 +898,7 @@ function createCoordinationJobStore(profileDirectory, {
     requireWritable();
     const admission = assertActive(jobId);
     const current = readProgress(jobId);
-    if (OUTCOME_STATES.has(current.state)) return statusFor(jobId);
+    if (RELEASE_STATES.has(current.state)) return statusFor(jobId);
     if (current.revoked) return statusFor(jobId);
     const at = now();
     // The stop is ONLY the write-once fact file: the exclusive create

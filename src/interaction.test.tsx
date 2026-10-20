@@ -3374,6 +3374,31 @@ describe("one in-window repair", () => {
       expect(document.querySelector(".titlebar-workspace")?.textContent).not.toContain("One independent goal");
       expect(screen.getByRole("button", { name: /One independent goal/ }).textContent).toContain("One independent goal");
     });
+    it("T1: decouples title bar campaignTitle in background view and restores it on leaving", async () => {
+      // Mount with DEMO_SNAPSHOT which has a non-empty campaign and title ("Build a durable preview")
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+      window.goalportCore!.snapshot = async () => DEMO_SNAPSHOT;
+      window.goalportCore!.backgroundStatus = async () => ({
+        ...liveJob,
+        workspacePath: "/tmp/goalport-execution-fixture-ZOalYm",
+      });
+
+      render(<App />);
+      await screen.findByRole("region", { name: "Background goal" });
+
+      // In background view: workspace folder is displayed, but campaign title ("Build a durable preview") is decoupled/suppressed
+      const workspace = document.querySelector(".titlebar-workspace");
+      expect(workspace?.textContent).toBe("goalport-execution-fixture-ZOalYm");
+      expect(document.querySelector(".titlebar-campaign")).toBeNull();
+
+      // Leaving background view returns to the existing Core conversation view
+      fireEvent.click(screen.getByRole("button", { name: "Leave job view" }));
+      await waitFor(() => expect(document.querySelector(".titlebar-campaign")).not.toBeNull());
+      expect(document.querySelector(".titlebar-campaign")?.textContent).toContain("Build a durable preview");
+    });
     it("labels a revoked live job Stopped in the sidebar", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: true, revoked: true });
@@ -3569,6 +3594,77 @@ describe("one in-window repair", () => {
       expect(bridge.authorizations[0]?.workspaceRoot).toBe("/work/other");
       expect(bridge.launchArgs[0]?.[3]).toBe("/work/other");
       expect(start).not.toHaveBeenCalled();
+    });
+    it("T4: existing conversation Composer disables Send and shows reason when its workspace is in retained holds", async () => {
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/work/held-convo" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "idle",
+            canSend: true,
+            canStop: false,
+            reason: "",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      // Spy on native goalportCore.command which handles conversation_send
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+      let simulatedHostHolds = [{ jobId: "held-job", workspacePath: "/work/held-convo" }];
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: simulatedHostHolds,
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: simulatedHostHolds.some(h => h.workspacePath === candidate),
+      });
+
+      render(<App />);
+
+      // Wait for existing conversation composer to render
+      const composer = await screen.findByRole("textbox", { name: "Message composer" });
+      const sendButton = screen.getByRole("button", { name: "Send message" });
+
+      // Type non-empty draft
+      fireEvent.change(composer, { target: { value: "A new turn in existing conversation" } });
+
+      // Because workspaceRoot is held, Send must be disabled and show reason
+      await waitFor(() => {
+        expect(sendButton.hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      });
+
+      // Submit via form or click does NOT dispatch conversation_send
+      fireEvent.click(sendButton);
+      const conversationSends = dispatchedCommands.filter(c => c.messageType === "conversation_send" || c.messageType === "send_message");
+      expect(conversationSends).toHaveLength(0);
+
+      // Now mutate simulatedHostHolds to unblock this workspace
+      simulatedHostHolds = [{ jobId: "other-job", workspacePath: "/work/different" }];
+
+      // Polled update re-enables send and permits dispatching real conversation_send
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false), { timeout: 3000 });
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+      await waitFor(() => {
+        const sends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+        expect(sends.length).toBeGreaterThan(0);
+        expect(sends[0].payload.message).toBe("A new turn in existing conversation");
+      });
     });
     it("a confirmed finished job keeps its released folder prefilled and sends to it again", async () => {
       const bridge = scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
@@ -3827,6 +3923,26 @@ describe("workspace presentation matches host Windows identity", () => {
     let host = win32.resolve(value);
     while (host.length > 3 && /[\\\\/]$/.test(host)) host = host.slice(0,-1);
     expect(workspaceIdentityKey(value)).toBe(host.toLowerCase());
+  });
+
+  it("T2: distinguishes POSIX backslash paths from Windows-split paths under explicit UAs", () => {
+    const originalUA = window.navigator.userAgent;
+    try {
+      // 1. Explicit POSIX UA (Linux/Mac): backslashes are NOT separators, not case-folded
+      Object.defineProperty(window.navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux x86_64)", configurable: true });
+      expect(workspaceIdentityKey("/tmp/a\\b")).toBe("/tmp/a\\b");
+      expect(workspaceIdentityKey("/tmp/a\\b")).not.toBe(workspaceIdentityKey("/tmp/a/b"));
+      expect(workspaceIdentityKey("/tmp/A\\B")).toBe("/tmp/A\\B"); // case-preserved
+      expect(workspaceIdentityKey("/tmp/a/../b")).toBe("/tmp/b"); // dotdot normalized on slash
+
+      // 2. Explicit Windows UA: backslashes ARE separators and case-folded
+      Object.defineProperty(window.navigator, "userAgent", { value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", configurable: true });
+      expect(workspaceIdentityKey("/tmp/a\\b")).toBe("\\tmp\\a\\b");
+      expect(workspaceIdentityKey("/TMP/A\\B")).toBe("\\tmp\\a\\b"); // case-folded
+      expect(workspaceIdentityKey("/work/goal")).toBe("\\work\\goal"); // forward slash rooted folds to Windows
+    } finally {
+      Object.defineProperty(window.navigator, "userAgent", { value: originalUA, configurable: true });
+    }
   });
 });
 describe("retained background Stop outcome presentation", () => {
