@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createBackgroundHost } = require('./coordination-background.cjs');
 const { createCoordinationJobStore, jobControlEndpoint } = require('./coordination-job.cjs');
+const { skipAliasKind } = require('./test-symlink-support.cjs');
 function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -414,7 +415,7 @@ test('held workspace projection fails closed for corrupt, incomplete and overflo
     if (problem === 'overflow') assert.equal(result.holds.length, 256);
   }
 });
-for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block both directions and candidate query`, { skip: kind === 'junction' && process.platform !== 'win32' }, async t => {
+for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block both directions and candidate query`, { skip: skipAliasKind(kind) }, async t => {
   for (const reverse of [false, true]) {
     const r = setup(t);
     const held = path.join(r.directory, 'physical', 'held');

@@ -822,7 +822,8 @@ test("an outcome that lands while acknowledging is not erased by the acknowledge
   assert.equal(store.startAdmission(admission({ requestId: "send-background-2" })).reason, "workspace-held");
 });
 const { workspaceIdentity } = require('./coordination-job.cjs');
-for (const kind of ['junction', 'symlink']) test(`native ${kind} identity and alias/.. retain acknowledged holds`, { skip: kind === 'junction' && process.platform !== 'win32' }, async t => {
+const { skipAliasKind } = require('./test-symlink-support.cjs');
+for (const kind of ['junction', 'symlink']) test(`native ${kind} identity and alias/.. retain acknowledged holds`, { skip: skipAliasKind(kind) }, async t => {
   const { profile, store } = fixture(t);
   const held = path.join(profile, 'physical', 'held');
   const child = path.join(held, 'child');
