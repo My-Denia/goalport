@@ -103,13 +103,16 @@ async function runWorker(config, deps = {}) {
     }, discovery, { launch: async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
       try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
-        if (error?.code === "access-revoked") {
+        if (error?.code === "access-revoked" || error?.code === "stuck-acknowledged") {
           // The store proved the durable stop won the admission race and
           // already settled the recorded command as never sent. That is a
           // clean refusal, not a storage failure: mark the launch proven
           // not-sent and let the run settle an honest terminal outcome
           // instead of retaining an unconfirmed admission forever.
-          return { launched: false, dispatched: false, text: "", errorText: "Access was stopped; this command was not sent." };
+          const msg = error.code === "access-revoked"
+            ? "Access was stopped; this command was not sent."
+            : "This goal was left unreplayed; this command was not sent.";
+          return { launched: false, dispatched: false, text: "", errorText: msg };
         }
         storageFailed = true;
         return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` };
@@ -132,7 +135,14 @@ async function runWorker(config, deps = {}) {
     } }, () => true);
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
     const pending = store.getStatus(config.jobId).pendingCommand;
-    const status = pending || liveResult.verdict === "unconfirmed" ? "unconfirmed" : store.getStatus(config.jobId).revoked ? "stopped" : ["verified", "checked", "revise"].includes(liveResult.verdict) ? "completed" : "failed";
+    const currentStatus = store.getStatus(config.jobId);
+    const status = pending || liveResult.verdict === "unconfirmed"
+      ? "unconfirmed"
+      : currentStatus.revoked || currentStatus.acknowledgedStuckAt
+        ? "stopped"
+        : ["verified", "checked", "revise"].includes(liveResult.verdict)
+          ? "completed"
+          : "failed";
     // The plan record (history/Plans) and the job's own terminal outcome
     // are separate durable facts. A record-save failure must not prevent
     // the honest terminal outcome, the scope revoke, or the admission

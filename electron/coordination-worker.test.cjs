@@ -22,9 +22,13 @@ async function scenario(t, options = {}) {
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
   const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
+  if (options.storeDecorator) {
+    options.store = options.storeDecorator(options.store ?? store, start);
+  }
   const launches = [];
   const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers }), prepare: async () => ({}), close() {}, run: async command => {
     launches.push(command);
+    if (options.onLaunch) options.onLaunch(command, launches.length);
     if (options.revokeAt === launches.length) store.revoke(start.jobId);
     const n = launches.length;
     const role = command.commandId.split("-")[1];
@@ -251,4 +255,49 @@ test("a launch re-checks consent and refuses after it is revoked", async () => {
   const allowed = await launchOne({}, runtime, command(), "generation", undefined, () => ({ allowed: true }));
   assert.equal(allowed.launched, true);
   assert.equal(ran, 1);
+});
+
+test("a worker encountering stuck-acknowledged between turns settles stopped and releases workspace hold", async (t) => {
+  let ackAt = 2; // acknowledge before the second command (review) is recorded
+  let calls = 0;
+  let acknowledgedCalled = false;
+  const r = await scenario(t, {
+    reads: 4,
+    readOnly: false,
+    storeDecorator: (st, start) => {
+      const orig = st.recordPendingCommand;
+      return {
+        ...st,
+        recordPendingCommand: (jobId, ...args) => {
+          calls++;
+          if (calls === ackAt) {
+            acknowledgedCalled = true;
+            st.acknowledgeStuck(jobId);
+          }
+          return orig.call(st, jobId, ...args);
+        }
+      };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(acknowledgedCalled, true);
+  assert.equal(r.result.status, "stopped");
+  assert.equal(r.result.storageFailed, undefined);
+  assert.equal(r.launches.length, 1);
+
+  // Terminal state persisted
+  assert.equal(r.status.state, "stopped");
+  assert.equal(r.status.outcome?.status, "stopped");
+
+  // Same workspace hold is freed!
+  const nextSameFolder = r.store.startAdmission({
+    requestId: "second-send",
+    goal: "New attempt",
+    workspacePath: r.status.admission.workspacePath,
+    allowedInstances: ["codex"],
+    maxTurns: 2,
+    backgroundConsent: true,
+  });
+  assert.equal(nextSameFolder.ok, true);
+  assert.equal(nextSameFolder.created, true);
 });
