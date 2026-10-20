@@ -16,6 +16,7 @@ import { connectedUiExpression } from "./connect-probe.mjs";
 import { clickPointFor, firstVisible } from "./click-target.mjs";
 import { cleanupOwnedCore } from "./owned-core-cleanup.mjs";
 import { observeProcess } from "./process-observer.mjs";
+import { isExpectedCloseTeardownError, performCloseWindow } from "./close-window-helper.mjs";
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const normalize = launchConfig.normalizedPath;
@@ -196,14 +197,21 @@ async function smoke() {
     writeFileSync(resolve(out, `${name}.png`), Buffer.from(image.data, "base64"));
     writeFileSync(resolve(out, `${name}.txt`), await body());
   };
-  const clickFound = async (finderJs) => {
+  const clickFound = async (finderJs, { allowCloseTeardown = false } = {}) => {
     await read(`(() => { const el = ${finderJs}; if (!el) throw Error('control missing'); if (el.disabled) throw Error('control disabled'); el.scrollIntoView({block:'center',inline:'center'}); return true; })()`);
     await sleep(50);
     const point = await read(`(${clickPointFor.toString()})(${finderJs})`);
     await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
-    await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    try {
+      await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    } catch (error) {
+      if (allowCloseTeardown && isExpectedCloseTeardownError(error)) {
+        return;
+      }
+      throw error;
+    }
   };
-  const click = (selector, exactText) => clickFound(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"})`);
+  const click = (selector, exactText, options) => clickFound(`Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(e => ${exactText ? `e.textContent.trim() === ${JSON.stringify(exactText)}` : "true"})`, options);
   const fill = async (selector, text) => {
     await click(selector);
     await page.cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2 });
@@ -495,19 +503,15 @@ async function smoke() {
     report.appInfo = info; report.coreIdentity = coreIdentity; report.startupReceipt = receipt.receipt; save();
   };
   const closeWindow = async () => {
-    // The app close entry lives in the title-bar application menu; the native
-    // overlay X is the other close path and requestClose shares the controlled flow.
-    // The menu item is portaled after the click. Clicking it in the same turn
-    // races the open and fails the packaged smoke with "control missing".
-    await click("button[aria-label='Application menu']");
-    await until("close window menu item", () => read("Boolean(document.querySelector(\"div[role='menu'] button[aria-label='Close window']\"))"));
-    await click("div[role='menu'] button[aria-label='Close window']");
-    await sleep(150);
-    if (child.exitCode === null) {
-      const text = await body().catch(() => "");
-      if (text.includes("Continue running in the background?")) await click(".close-choice-dialog button", "Continue in background");
-    }
-    await until("Electron close", () => child.exitCode !== null, 15000);
+    await performCloseWindow({
+      click,
+      until,
+      read,
+      body,
+      child,
+      sleep,
+      timeoutMs: 15000,
+    });
     page?.close(); page = null;
     closeSync(logFd); logFd = undefined;
   };
