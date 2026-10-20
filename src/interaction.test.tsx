@@ -3731,6 +3731,323 @@ describe("one in-window repair", () => {
         expect(sends[0].payload.message).toBe("A new turn in existing conversation");
       });
     });
+    it("MOCKED HOST VERDICT: existing conversation respects host alias hold verdict for Send and unblocking", async () => {
+      // Finding 4330831647: simulated host physically resolves /alias/held-convo to a held folder.
+      // Assert lexical mismatch up-front (lexical false, host true).
+      expect(workspaceIdentityKey("/alias/held-convo")).not.toBe(workspaceIdentityKey("/physical/held-folder"));
+
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/alias/held-convo" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "idle",
+            canSend: true,
+            canStop: false,
+            reason: "",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      let simulatedBlocked = true;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [{ jobId: "held-job", workspacePath: "/physical/held-folder" }],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: candidate === "/alias/held-convo" && simulatedBlocked,
+      });
+
+      render(<App />);
+
+      const composer = await screen.findByRole("textbox", { name: "Message composer" });
+      const sendButton = screen.getByRole("button", { name: "Send message" });
+      const form = document.querySelector("form.composer")!;
+
+      fireEvent.change(composer, { target: { value: "Turn in alias held workspace" } });
+
+      // 1. Causal Send test: Send is disabled, hint shows HELD_CONVERSATION_SENTENCE
+      await waitFor(() => {
+        expect(sendButton.hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      });
+
+      // Forced form submit is intercepted by handleSend; 0 commands dispatched, banner notice displayed
+      fireEvent.submit(form);
+      expect(dispatchedCommands.filter(c => c.messageType === "conversation_send")).toHaveLength(0);
+      await waitFor(() => {
+        expect(document.querySelector(".banner-notice")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      });
+
+      // 2. Unblock alias: Send re-enables and dispatches real command
+      simulatedBlocked = false;
+      await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false), { timeout: 3000 });
+      fireEvent.submit(form);
+      await waitFor(() => {
+        const sends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+        expect(sends.length).toBe(1);
+        expect(sends[0].payload.message).toBe("Turn in alias held workspace");
+      });
+    });
+    it("MOCKED HOST VERDICT: alias hold suppresses retryLabel and restores identical retry intent upon release", async () => {
+      expect(workspaceIdentityKey("/alias/held-retry")).not.toBe(workspaceIdentityKey("/physical/held-folder"));
+
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/alias/held-retry" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "idle",
+            canSend: true,
+            canStop: false,
+            reason: "",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      let simulateFirstFailure = true;
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        if (cmd.messageType === "conversation_send" && simulateFirstFailure) {
+          simulateFirstFailure = false;
+          throw Object.assign(new Error("transport glitch"), { goalportRejected: true, error: "network fail" });
+        }
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      // Start with alias candidate unblocked so initial send can establish reconcile intent
+      let simulatedBlocked = false;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [{ jobId: "held-job", workspacePath: "/physical/held-folder" }],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: candidate === "/alias/held-retry" && simulatedBlocked,
+      });
+
+      render(<App />);
+
+      const composer = await screen.findByRole("textbox", { name: "Message composer" });
+      const form = document.querySelector("form.composer")!;
+
+      fireEvent.change(composer, { target: { value: "A retryable alias turn" } });
+      fireEvent.submit(form);
+
+      // Wait for retry intent to establish with activeRetryLabel visible
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).not.toBeNull();
+      });
+      const initialSends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+      expect(initialSends).toHaveLength(1);
+      const originalRequestId = initialSends[0].requestId;
+
+      // Now host detects physical alias hold
+      simulatedBlocked = true;
+
+      // retryLabel is SUPPRESSED, Send is disabled, and HELD_CONVERSATION_SENTENCE is shown
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).toBeNull();
+        expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      }, { timeout: 3000 });
+
+      // Form submit while alias is held is blocked; 0 additional dispatches
+      fireEvent.submit(form);
+      expect(dispatchedCommands.filter(c => c.messageType === "conversation_send")).toHaveLength(1);
+
+      // Now release the alias hold
+      simulatedBlocked = false;
+
+      // retryLabel is RESTORED and dispatching retry succeeds with the SAME message and SAME requestId
+      await waitFor(() => {
+        expect(screen.queryByRole("button", { name: /Check result|Retry/i })).not.toBeNull();
+      }, { timeout: 3000 });
+
+      const retryBtn = screen.getByRole("button", { name: /Check result|Retry/i })!;
+      fireEvent.click(retryBtn);
+
+      await waitFor(() => {
+        const sends = dispatchedCommands.filter(c => c.messageType === "conversation_send");
+        expect(sends.length).toBe(2);
+        expect(sends[1].payload.message).toBe("A retryable alias turn");
+        expect(sends[1].requestId).toBe(originalRequestId);
+      });
+    });
+    it("MOCKED HOST VERDICT: alias hold suppresses Composer onResume and handleResumeSession blocks dispatch", async () => {
+      expect(workspaceIdentityKey("/alias/held-resume")).not.toBe(workspaceIdentityKey("/physical/held-folder"));
+
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/alias/held-resume" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "completed",
+            canSend: false,
+            canStop: false,
+            reason: "Resume this session to continue.",
+            reasonCode: "session-closed",
+            actions: ["resume-session"],
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      let simulatedBlocked = true;
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [{ jobId: "held-job", workspacePath: "/physical/held-folder" }],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: candidate === "/alias/held-resume" && simulatedBlocked,
+      });
+
+      render(<App />);
+
+      const form = await screen.findByRole("form", { name: "Message composer" });
+
+      // While alias is blocked, Resume session is suppressed in Composer and Send is disabled with held hint
+      await waitFor(() => {
+        expect(within(form).queryByRole("button", { name: "Resume session" })).toBeNull();
+        expect(within(form).getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
+        expect(document.querySelector(".composer-hint")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      }, { timeout: 3000 });
+
+      // Open SessionDetails: clicking its Resume button is intercepted by handleResumeSession (0 dispatches, banner notice)
+      fireEvent.click(screen.getByRole("button", { name: "Open details panel" }));
+      const detailsResume = await screen.findByRole("button", { name: "Resume session" });
+      fireEvent.click(detailsResume);
+      expect(dispatchedCommands.filter(c => c.messageType === "resume_native_session")).toHaveLength(0);
+      await waitFor(() => {
+        expect(document.querySelector(".banner-notice")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      });
+
+      // Close details panel to avoid two-button ambiguity
+      fireEvent.click(screen.getAllByRole("button", { name: "Close details panel" })[0]);
+
+      // Unblock alias: Resume session restores in Composer and dispatches real resume_native_session
+      simulatedBlocked = false;
+      await waitFor(() => {
+        expect(within(form).queryByRole("button", { name: "Resume session" })).not.toBeNull();
+      }, { timeout: 3000 });
+
+      fireEvent.click(within(form).getByRole("button", { name: "Resume session" }));
+      await waitFor(() => {
+        const resumes = dispatchedCommands.filter(c => c.messageType === "resume_native_session");
+        expect(resumes.length).toBe(1);
+      });
+    });
+    it("MOCKED HOST VERDICT: candidate-matching invariant preserves conversation when another folder is held or free", async () => {
+      // Counterexample check:
+      // (a) Held OTHER draft (/work/other-draft) does NOT block clean conversation (/work/clean-convo)
+      // (b) Free OTHER draft (/work/free-draft) does NOT erase lexical hold on held conversation (/work/held-lexical)
+      const dispatchedCommands: CoreCommand[] = [];
+      const testSnapshot = {
+        ...DEMO_SNAPSHOT,
+        project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/work/held-lexical" },
+        productConversation: {
+          ...DEMO_SNAPSHOT.productConversation!,
+          turn: {
+            ...DEMO_SNAPSHOT.productConversation!.turn,
+            state: "completed",
+            canSend: false,
+            canStop: false,
+            actions: ["resume-session"],
+            reasonCode: "session-closed",
+            reason: "Resume this session.",
+          },
+        },
+      };
+
+      scopedBridge({
+        providers: repairProviders(),
+        launch: async command => planOrReview(command),
+      });
+
+      const origCommand = window.goalportCore!.command;
+      window.goalportCore!.command = async (cmd: CoreCommand) => {
+        dispatchedCommands.push(cmd);
+        return origCommand(cmd);
+      };
+      window.goalportCore!.snapshot = async () => testSnapshot;
+      window.goalportCore!.backgroundStatus = async () => null;
+
+      // Conversation (/work/held-lexical) is lexically in holds!
+      // But user opens draft for /work/free-draft which has candidateBlocked: false.
+      window.goalportCore!.backgroundHeldWorkspaces = async candidate => ({
+        holds: [{ jobId: "other-job", workspacePath: "/work/held-lexical" }],
+        complete: true,
+        globalBlock: false,
+        candidate,
+        candidateBlocked: false,
+      });
+
+      render(<App />);
+
+      // Open draft with different folder (/work/free-draft)
+      await openDraftWithPanel();
+      const folderInput = screen.getByRole("textbox", { name: "Project folder" });
+      fireEvent.change(folderInput, { target: { value: "/work/free-draft" } });
+
+      // Draft is free
+      await waitFor(() => {
+        expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
+      });
+
+      // While draft is still open with /work/free-draft, open SessionDetails and click Resume session
+      // The conservative fallback ensures that even though candidateWorkspace (/work/free-draft) has candidateBlocked: false,
+      // the conversation (/work/held-lexical) falls back to targetsAnyHeldWorkspace and stays HELD!
+      fireEvent.click(screen.getByRole("button", { name: "Open details panel" }));
+      const detailsResume = await screen.findByRole("button", { name: "Resume session" });
+
+      fireEvent.click(detailsResume);
+      // 0 commands dispatched, banner notice shows held sentence!
+      expect(dispatchedCommands.filter(c => c.messageType === "resume_native_session")).toHaveLength(0);
+      await waitFor(() => {
+        expect(document.querySelector(".banner-notice")?.textContent).toContain("interrupted goal's exit is unconfirmed");
+      });
+    });
     it("existing conversation Composer disables Send and shows slot sentence when profile slot is blocked by globalBlock", async () => {
       const dispatchedCommands: CoreCommand[] = [];
       const testSnapshot = {

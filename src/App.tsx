@@ -807,6 +807,12 @@ function App() {
   useEffect(() => {
     if (!draftHeld) setDraftError(current => (current?.sentence === HELD_FOLDER_SENTENCE || current?.sentence === UNIDENTIFIABLE_FOLDER_SENTENCE) ? null : current);
   }, [draftHeld]);
+  const conversationWorkspace = snapshot.project?.workspaceRoot ?? "";
+  const conversationHeldByBackground = conversationWorkspace !== "" && (
+    candidateWorkspace === conversationWorkspace
+      ? workspaceHeldByBackground(conversationWorkspace)
+      : targetsAnyHeldWorkspace(conversationWorkspace)
+  );
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
@@ -1681,7 +1687,7 @@ function App() {
       setActiveNotice({ sentence: "Core refused new work while residual execution is unknown and write responsibility is held." });
       return;
     }
-    const heldByResidualBackground = targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "");
+    const heldByResidualBackground = conversationHeldByBackground;
     if (heldByResidualBackground) {
       setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
       return;
@@ -1957,7 +1963,7 @@ function App() {
   }
 
   async function handleResumeSession() {
-    if (targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "")) {
+    if (conversationHeldByBackground) {
       setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
       return;
     }
@@ -2606,7 +2612,7 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
-                turn={targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "")
+                turn={conversationHeldByBackground
                   ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
                   : backgroundSlotBlocked
                     ? { ...product.turn, canSend: false, reason: backgroundSlotSentence, reasonCode: undefined }
@@ -2615,13 +2621,13 @@ function App() {
                       : product.turn}
                 busy={sendBusy}
                 closingSession={closingSession}
-                retryLabel={(targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") || backgroundSlotBlocked) ? undefined : activeRetryLabel}
+                retryLabel={(conversationHeldByBackground || backgroundSlotBlocked) ? undefined : activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}
                 onSelectRuntime={(provider) => { void selectRuntime(provider); }}
                 onStop={() => { void handleStop(); }}
-                onResume={(targetsAnyHeldWorkspace(snapshot.project?.workspaceRoot ?? "") || backgroundSlotBlocked)
+                onResume={(conversationHeldByBackground || backgroundSlotBlocked)
                   ? undefined
                   : () => { void handleResumeSession(); }}
               />
