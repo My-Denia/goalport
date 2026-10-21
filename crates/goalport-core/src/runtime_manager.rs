@@ -327,7 +327,7 @@ const STARTUP_FINISHED: u8 = 3;
 /// session initialization returns; a prompt send after that boundary is never
 /// represented as an unstarted operation.
 #[derive(Debug)]
-pub(crate) struct StartupControl {
+pub struct StartupControl {
     phase: AtomicU8,
     binding: Mutex<Option<RuntimeProcessBinding>>,
     done: Mutex<bool>,
@@ -401,7 +401,7 @@ impl StartupControl {
 
     /// Returns false if native initialization already passed the pre-dispatch
     /// boundary. That result must not be described as a stopped or unsent turn.
-    pub(crate) fn request_cancel(&self, detail: Option<&str>) -> Result<bool, String> {
+    pub fn request_cancel(&self, detail: Option<&str>) -> Result<bool, String> {
         let _done = self.done.lock().expect("startup completion poisoned");
         match self.phase.compare_exchange(
             STARTUP_WAITING,
@@ -472,15 +472,18 @@ impl StartupControl {
     }
 
     #[cfg(windows)]
-    fn publish_child_handle(&self, child: &Child) -> Result<(), AdapterError> {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    pub fn has_child_handle(&self) -> bool {
+        self.child_handle.lock().expect("startup handle poisoned").is_some()
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle_raw(&self, raw: *mut winapi::ctypes::c_void) -> Result<(), AdapterError> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
         use winapi::um::{handleapi::DuplicateHandle, processthreadsapi::GetCurrentProcess,
             winnt::{PROCESS_TERMINATE, SYNCHRONIZE}};
         let mut duplicate = std::ptr::null_mut();
         let current = unsafe { GetCurrentProcess() };
-        // The Child's process object, never a later PID lookup. FALSE prevents
-        // this duplicate from escaping into a provider/grandchild.
-        if unsafe { DuplicateHandle(current, child.as_raw_handle().cast(), current, &mut duplicate,
+        if unsafe { DuplicateHandle(current, raw, current, &mut duplicate,
             PROCESS_TERMINATE | SYNCHRONIZE, 0, 0) } == 0 {
             return Err(AdapterError::Connection(format!("unable to duplicate startup child handle: {}", std::io::Error::last_os_error())));
         }
@@ -501,6 +504,17 @@ impl StartupControl {
         }
         drop(done);
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle(&self, child: &Child) -> Result<(), AdapterError> {
+        use std::os::windows::io::AsRawHandle;
+        self.publish_child_handle_raw(child.as_raw_handle() as _)
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle_contained(&self, child: &crate::runtime_containment::ContainedChild) -> Result<(), AdapterError> {
+        self.publish_child_handle_raw(child.raw_process_handle() as _)
     }
 
     #[cfg(windows)]
@@ -536,7 +550,7 @@ impl StartupControl {
         }))
     }
 
-    pub(crate) fn wait_finished(&self, timeout: Duration) -> bool {
+    pub fn wait_finished(&self, timeout: Duration) -> bool {
         let done = self.done.lock().expect("startup completion poisoned");
         let finished = *self.changed.wait_timeout_while(done, timeout, |done| !*done)
             .expect("startup completion poisoned").0;
@@ -788,7 +802,7 @@ impl RuntimeManager {
         format!("{}|{}|{}", self.instance, busy.join("|"), live.join("|"))
     }
 
-    pub(crate) fn startup_control(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
+    pub fn startup_control(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
         self.busy_attempts.get(attempt_id).cloned()
     }
 
@@ -1302,9 +1316,11 @@ impl RuntimeManager {
             ManagedRuntime::CodexExec(process) => process.create_session(request),
             ManagedRuntime::Claude(process) => {
                 process.startup_control = startup_control.clone();
-                let result = process.create_session(request);
+                let mut result = process.create_session(request);
                 if result.is_ok() && let Some(control) = startup_control.clone() {
-                    control.mark_dispatching()?;
+                    if let Err(err) = control.mark_dispatching() {
+                        result = Err(process.hold_cancelled_startup());
+                    }
                 }
                 result
             }
@@ -5330,6 +5346,14 @@ impl ClaudeStreamProcess {
                 let pid = spawned.child.id();
                 let stdin = spawned.stdin;
                 let stdout = spawned.stdout;
+                #[cfg(windows)]
+                if let Some(control) = self.startup_control.as_ref() {
+                    control.publish_child_handle_contained(&spawned.child)?;
+                    if control.cancelled() {
+                        self.child = Some(spawned.child);
+                        return Err(self.hold_cancelled_startup());
+                    }
+                }
                 self.child = Some(spawned.child);
                 (pid, Box::new(stdin) as Box<dyn Write + Send>, Box::new(stdout) as Box<dyn Read + Send>)
             };
@@ -5353,6 +5377,9 @@ impl ClaudeStreamProcess {
         let observed = match process_identity::observe_process(pid) {
             ProcessObservation::Live(identity) => identity,
             ProcessObservation::NotRunning => {
+                if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                    return Err(self.hold_cancelled_startup());
+                }
                 // A pid exists. Do not close(); the caller runs the proof rule.
                 self.latch_resume_hold();
                 return Err(AdapterError::Connection(
@@ -5360,6 +5387,9 @@ impl ClaudeStreamProcess {
                 ));
             }
             ProcessObservation::Unknown(reason) => {
+                if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                    return Err(self.hold_cancelled_startup());
+                }
                 self.latch_resume_hold();
                 return Err(AdapterError::Connection(format!(
                     "claude stream-json process identity is unknown: {reason}"
@@ -5394,14 +5424,29 @@ impl ClaudeStreamProcess {
         }
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
         self.stdout = Some(BufReader::new(stdout));
-        self.start_reader()?;
+        if let Err(err) = self.start_reader() {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
         let init_id = self.next_control_id();
-        self.send_json(&json!({
+        if let Err(err) = self.send_json(&json!({
             "type": "control_request",
             "request_id": init_id,
             "request": { "subtype": "initialize", "hooks": null }
-        }))?;
-        self.await_control_response(&init_id, CLAUDE_INIT_TIMEOUT_MS)?;
+        })) {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
+        if let Err(err) = self.await_control_response(&init_id, CLAUDE_INIT_TIMEOUT_MS) {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
         self.initialized = true;
         Ok(())
     }
@@ -5694,7 +5739,7 @@ impl ClaudeStreamProcess {
         self.latch_resume_hold();
         self.startup_cancel_held = true;
         if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
+            let _ = child.end_domain();
         }
         AdapterError::Connection("native start was cancelled before prompt dispatch".into())
     }
@@ -7915,6 +7960,11 @@ fn waited_pid_was_reused(
                 }
                 Ok(NativeMessage::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.stream_closed = true;
+                    if let Some(control) = self.startup_control.as_ref() {
+                        if control.cancelled() {
+                            return Err(self.hold_cancelled_startup());
+                        }
+                    }
                     return Err(AdapterError::Connection(
                         "native Runtime closed the Claude stream".into(),
                     ));

@@ -1377,6 +1377,61 @@ fn assert_honest_stop_payload(payload: &Value) {
 }
 
 #[test]
+#[cfg(windows)]
+fn claude_startup_cancel_before_dispatch_observes_owned_exit_and_confirms_stop() {
+    let workspace = fixture_workspace("claude-startup-cancel-confirm", "stall_initialize");
+    let mut manager = RuntimeManager::new();
+    let summary = manager
+        .select_runtime("attempt-claude-confirm", "claude", Some(fake_cli()), "2.1.259", &workspace)
+        .expect("claude runtime should be selectable");
+    assert_eq!(summary.provider, "claude");
+
+    // Lend worker with attempt-claude-confirm as startup target
+    let mut worker = manager.lend_attempts(&["attempt-claude-confirm".into()], Some("attempt-claude-confirm")).expect("lend worker");
+    let control = manager.startup_control("attempt-claude-confirm").expect("startup control");
+
+    let (tx_send, rx_send) = std::sync::mpsc::channel();
+    let req = session_request("attempt-claude-confirm", &workspace);
+    let worker_handle = std::thread::spawn(move || {
+        let res = worker.create_session("attempt-claude-confirm", &req);
+        let _ = tx_send.send(res);
+        worker
+    });
+
+    // 1. Wait until initialize is reached and handle is published to control
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        if control.has_child_handle() {
+            break;
+        }
+    }
+    assert!(control.has_child_handle(), "child process handle must be published to StartupControl on Windows");
+
+    // 2. Request cancel while stalled in initialize before prompt dispatch
+    let cancel_res = control.request_cancel(None);
+    assert_eq!(cancel_res, Ok(true), "cancellation must be accepted pre-dispatch");
+
+    // 3. The create_session thread returns with connection cancelled error
+    let send_res = rx_send.recv_timeout(Duration::from_secs(10)).expect("create_session must return");
+    assert!(send_res.is_err(), "create_session must fail on cancel: {send_res:?}");
+    let err_str = format!("{send_res:?}");
+    assert!(err_str.contains("native start was cancelled before prompt dispatch"), "error must state pre-dispatch cancel: {err_str}");
+
+    let returned_worker = worker_handle.join().expect("join worker thread");
+    manager.return_attempts(&["attempt-claude-confirm".into()], returned_worker).expect("return attempts");
+
+    // 4. wait_finished must observe the child process exit and return true
+    let confirmed = control.wait_finished(Duration::from_secs(5));
+    assert!(confirmed, "StartupControl::wait_finished must observe owned child exit on Windows");
+
+    // 5. Registration remains held and another start into the attempt is refused
+    let req2 = session_request("attempt-claude-confirm", &workspace);
+    let second_res = manager.create_session("attempt-claude-confirm", &req2);
+    assert!(second_res.is_err(), "second start into cancelled attempt must be refused");
+}
+
+#[test]
 fn deny_resolve_decision_inserts_bound_notice_in_snapshot() {
     let workspace = fixture_workspace("ac6e-notices", "deny");
     let store = Store::memory().expect("in-memory store");

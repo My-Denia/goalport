@@ -754,6 +754,10 @@ rl.on("line", (line) => {
   persistStdin();
     if (obj.type === "control_request" && obj.request?.subtype === "initialize") {
       initializeSeen = true;
+      if (scenario === "stall_initialize") {
+        // Stalls on initialize request, simulating cold startup before prompt dispatch
+        return;
+      }
       send({
         type: "control_response",
         response: {
