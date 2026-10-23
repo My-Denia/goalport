@@ -57,7 +57,7 @@
     "preview:shot-execution": "node scripts/preview/shot-execute-slice.mjs",
     "acceptance:background-native": "node scripts/acceptance/background-native.mjs",
     "test:acceptance-background": "vite build --config vite.coordination.config.ts && node --test electron/coordination-job.test.cjs electron/coordination-worker.test.cjs electron/coordination-background.test.cjs scripts/acceptance/background-native.test.mjs",
-    "test:coordination": "vite build --config vite.coordination.config.ts && node --test electron/coordination-job.test.cjs electron/coordination-background.test.cjs electron/coordination-worker.test.cjs electron/coordination-ipc.test.cjs"
+    "test:coordination": "vite build --config vite.coordination.config.ts && node --test electron/coordination-job.test.cjs electron/coordination-background.test.cjs electron/coordination-worker.test.cjs electron/coordination-ipc.test.cjs scripts/connected/linux-coordinate.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

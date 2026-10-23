@@ -72,6 +72,86 @@ automatically. Read diagnostics and reconcile before deciding what to do next.
 `watch` echoes Core's opaque revision; unchanged polls return a small response without retransmitting the conversation. `--timeout` sets a whole-exchange deadline. `command TYPE --payload-file file.json`
 is available for the same production commands, without bypassing validation.
 
+## Coordinated goals
+
+The operator client `scripts/connected/linux-coordinate.mjs` runs the same
+coordination stack as the desktop window: the detached worker is
+`electron/coordination-worker.cjs` and the plan/review scheduler is
+`dist/coordination-engine.cjs`, built from the renderer's own
+`src/coordination/requestCoordination.ts`. It is not a second scheduler or a
+budget authority, and it never starts or recovers Core. Build the engine bundle
+before admitting a goal; the client refuses before writing anything when it is
+missing:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build   # or: vite build --config vite.coordination.config.ts
+```
+
+Start Core with the launcher, keeping the absolute socket and database paths.
+The admission check compares the Core startup receipt against the resolved
+socket path, the executable hash and the database path, so pass the same
+absolute `--pipe`/`--db` here:
+
+```sh
+target/debug/goalport-core-launcher "$PWD/target/debug/goalport-core" serve \
+  --pipe /tmp/goalport-dev/core.sock --db /tmp/goalport-dev/core.sqlite
+```
+
+Then, from the repository root:
+
+```sh
+CLI="node scripts/connected/linux-coordinate.mjs"
+GLOBAL="--data-dir /tmp/goalport-dev --pipe /tmp/goalport-dev/core.sock --core-binary $PWD/target/debug/goalport-core"
+
+$CLI $GLOBAL discover
+$CLI $GLOBAL grant-access      # durable consent to spend subscription quota
+$CLI $GLOBAL revoke-access     # withdraw that consent; existing jobs keep their honesty state
+$CLI $GLOBAL run --goal 'Plan the failing check' --workspace "$PWD" \
+  --instances codex,claude --turns 4 --background
+$CLI $GLOBAL status --job JOB_ID
+$CLI $GLOBAL result --request-id REQUEST_ID
+$CLI $GLOBAL continue --from REQUEST_ID --goal 'Revise the plan' --background
+$CLI $GLOBAL stop --job JOB_ID
+$CLI $GLOBAL acknowledge --job JOB_ID   # leave an interrupted job, never replayed
+$CLI $GLOBAL release --job JOB_ID       # free the profile slot after a confirmed finish
+```
+
+`--database` defaults to `<data-dir>/core.sqlite`, and `status`/`stop`/
+`acknowledge`/`release` default `--job` to the active or newest job. `discover`
+prints installed and authenticated harnesses with their auth type, model list
+and recorded environment health. Consent and capability are separate lines:
+granting access never claims a harness is signed in, and a signed-in harness
+never grants access to spend quota.
+
+Honesty rules the client keeps:
+
+- `--background` is required for `run` and `continue` and is never defaulted;
+  the durable grant (`grant-access`) is a separate profile capability. Without
+  the flag the client prints `Keep working after closing must be explicitly
+  selected.`; without the grant it prints `Background Send is not ready in this
+  GoalPort window yet.` Ambient `GOALPORT_COORDINATE_SEND`,
+  `GOALPORT_HARNESS_CHECKOUT` and `GOALPORT_HARNESS_SERVER_CWD` are ignored and
+  stripped before the host or the detached worker sees an environment.
+- Only harnesses signed in with their own subscription can be authorized. An
+  apiKey login is refused with `Only harnesses signed in with their own
+  subscription can be authorized.` and never enters a turn budget.
+- A lost start reply stays `unconfirmed`. The admitted job keeps its durable
+  slot and is not spawned again; `status` keeps printing `unconfirmed`.
+  `acknowledge` is how you leave that job without replaying it, and its request
+  id can then never be admitted again. An unknown quota is printed as `unknown`,
+  never as a subscription guarantee.
+- `stop` prints the stored projection verbatim. When the live control socket is
+  unreachable it records the durable revoke and prints `state: unconfirmed`
+  with `revoked: true`; it never prints `stopped` for those, and the turn is
+  not replayed. A worker that is still alive settles its own terminal outcome
+  later.
+- This stack has no process-group kill on Linux. A forced timeout kills only
+  the direct harness CLI child (SIGKILL), so tools that child already started,
+  and its grandchildren, are not proven quiescent. The coordinated slice is
+  read-only planning and independent review; workspace changes still need the
+  desktop's explicit write authorization.
+
 ## Native acceptance
 
 The opt-in driver creates a disposable repository with a broken addition
