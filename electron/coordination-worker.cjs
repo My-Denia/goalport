@@ -4,6 +4,7 @@ const net = require("node:net");
 const { execFile } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { createCoordinationJobStore } = require("./coordination-job.cjs");
+const { createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { createCoreConnection } = require("./core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy } = require("./launch-config.cjs");
 const { createHarnessRuntime } = require("./harness-runtime.cjs");
@@ -41,6 +42,13 @@ async function runWorker(config, deps = {}) {
     // is contacted, and no record is saved for a round that never ran.
     return { status: "stopped", settledPreStartRevocation: true };
   }
+  // The packaged app has no GOALPORT_COORDINATE_SEND override: discovery and
+  // every launch must consult the durable profile consent the user granted.
+  // The reader is created after the pre-start return so a job stopped before
+  // it ever started still contacts nothing; each call re-reads, so a revoke
+  // between discovery and launch refuses that launch.
+  const consentStore = deps.consentStore ?? createBackgroundSendConsentStore(config.directory);
+  const consentReader = deps.consentReader ?? (() => consentStore.read());
   const admitted = claim.status.admission;
   const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
@@ -62,7 +70,7 @@ async function runWorker(config, deps = {}) {
     await gate();
     const authorization = await authorizeCoordination({ instances: input.readInstances, maxTurns: input.readMaxTurns, ...(input.write ? { write: input.write } : {}) }, scope, () => (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir }));
     if (!authorization.ok) throw new Error(authorization.errorText);
-    const discovery = await discoverCoordination(env, runtime, input.requestId);
+    const discovery = await discoverCoordination(env, runtime, input.requestId, consentReader);
     if (!discovery.connected || !discovery.sendAuthorized) throw new Error(discovery.stopReason || "Background Send is not enabled.");
     persist({ phase: "running", counters: counters(), display: { activity: "Organizing this goal…", failures: [] } });
     control = await store.startControlServer({ jobId: config.jobId, endpoint: config.controlEndpoint });
@@ -95,13 +103,16 @@ async function runWorker(config, deps = {}) {
     }, discovery, { launch: async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
       try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
-        if (error?.code === "access-revoked") {
+        if (error?.code === "access-revoked" || error?.code === "stuck-acknowledged") {
           // The store proved the durable stop won the admission race and
           // already settled the recorded command as never sent. That is a
           // clean refusal, not a storage failure: mark the launch proven
           // not-sent and let the run settle an honest terminal outcome
           // instead of retaining an unconfirmed admission forever.
-          return { launched: false, dispatched: false, text: "", errorText: "Access was stopped; this command was not sent." };
+          const msg = error.code === "access-revoked"
+            ? "Access was stopped; this command was not sent."
+            : "This goal was left unreplayed; this command was not sent.";
+          return { launched: false, dispatched: false, text: "", errorText: msg };
         }
         storageFailed = true;
         return { launched: false, dispatched: false, text: "", errorText: `The command could not be recorded; nothing was sent. ${error.message}` };
@@ -113,7 +124,7 @@ async function runWorker(config, deps = {}) {
         // never-started settlement applies; no runtime call happens.
         persist({ counters: counters() });
         return runtime.run(admittedCommand, generation);
-      } }, command, input.requestId, { scope, scopeGeneration: authorization.generation });
+      } }, command, input.requestId, { scope, scopeGeneration: authorization.generation }, consentReader);
       // Live evidence remains in memory even when the completion write fails.
       liveResult = result;
       try {
@@ -124,7 +135,14 @@ async function runWorker(config, deps = {}) {
     } }, () => true);
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
     const pending = store.getStatus(config.jobId).pendingCommand;
-    const status = pending || liveResult.verdict === "unconfirmed" ? "unconfirmed" : store.getStatus(config.jobId).revoked ? "stopped" : ["verified", "checked", "revise"].includes(liveResult.verdict) ? "completed" : "failed";
+    const currentStatus = store.getStatus(config.jobId);
+    const status = pending || liveResult.verdict === "unconfirmed"
+      ? "unconfirmed"
+      : currentStatus.revoked || currentStatus.acknowledgedStuckAt
+        ? "stopped"
+        : ["verified", "checked", "revise"].includes(liveResult.verdict)
+          ? "completed"
+          : "failed";
     // The plan record (history/Plans) and the job's own terminal outcome
     // are separate durable facts. A record-save failure must not prevent
     // the honest terminal outcome, the scope revoke, or the admission

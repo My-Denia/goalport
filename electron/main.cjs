@@ -268,6 +268,9 @@ let lastAttemptProvider = "";
 let lastStopResponsibilityHeld = false;
 let lastHeldAttemptId = "";
 let lastCampaignId = "";
+const campaignWorkspaces = new Map();
+const selectedCampaignWorkspaces = new Map();
+const attemptWorkspaces = new Map();
 let lastLaunchNonce = "";
 
 function fileSha256(target) {
@@ -679,8 +682,10 @@ const backgroundHost = createBackgroundHost({
     enginePath: path.join(appRoot, "dist", "coordination-engine.cjs"),
   }),
 });
-function refuseCompetingCoordination() {
-  if (backgroundHost.outstanding()) {
+backgroundHost.workspaceForCampaign = (campaignId) => campaignWorkspaces.get(campaignId) || selectedCampaignWorkspaces.get(campaignId) || null;
+backgroundHost.workspaceForAttempt = (attemptId) => attemptWorkspaces.get(attemptId) || null;
+function refuseCompetingCoordination(workspaceRoot) {
+  if (backgroundHost.outstanding(workspaceRoot)) {
     const error = new Error("This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.");
     error.code = "background-job-outstanding";
     throw error;
@@ -688,8 +693,19 @@ function refuseCompetingCoordination() {
 }
 function guardedCoreCommand(request) {
   if (["create_campaign", "create_campaign_with_task", "select_runtime", "start_conversation", "conversation_send", "send_message", "handoff", "resume_native_session", "request_owner_action", "queue_override", "continue_in_isolated_workspace"].includes(request?.messageType)) {
+    const payload = request?.payload;
+    let workspace;
+    if (payload && typeof payload.workspaceRoot === "string") workspace = payload.workspaceRoot;
+    else if (payload && typeof payload.targetWorkspace === "string") workspace = payload.targetWorkspace;
+    else if (payload && typeof payload.campaignId === "string" && typeof backgroundHost.workspaceForCampaign === "function") {
+      workspace = backgroundHost.workspaceForCampaign(payload.campaignId) || undefined;
+    }
+    if (workspace === undefined && payload && typeof backgroundHost.workspaceForAttempt === "function") {
+      const attemptId = typeof payload.attemptId === "string" ? payload.attemptId : (typeof payload.oldAttemptId === "string" ? payload.oldAttemptId : "");
+      if (attemptId) workspace = backgroundHost.workspaceForAttempt(attemptId) || undefined;
+    }
     let busy;
-    try { busy = backgroundHost.outstanding(); }
+    try { busy = backgroundHost.outstanding(workspace); }
     catch (error) { throw error; }
     if (busy === true) {
       const message = "This profile has an outstanding background goal. Return to that job or stop allowing its access; no competing work was admitted.";
@@ -968,11 +984,33 @@ function closeAttemptTarget(active, selectedId, held, heldId) {
   return active && selectedId ? selectedId : held ? heldId : selectedId;
 }
 
+function rememberCampaignWorkspaces(snapshot) {
+  const goals = snapshot?.goalOverview?.goals || snapshot?.goal_overview?.goals;
+  if (!Array.isArray(goals)) return;
+  for (const goal of goals) {
+    const campaignId = goal?.campaignId || goal?.campaign_id;
+    const root = goal?.workspaceRoot || goal?.workspace_root;
+    if (typeof campaignId === "string" && campaignId && typeof root === "string" && path.isAbsolute(root)) {
+      campaignWorkspaces.set(campaignId, path.resolve(root));
+    }
+  }
+}
 function cacheAttempt(snapshot) {
+  rememberCampaignWorkspaces(snapshot);
+  const selectedCampaignId = String(snapshot?.activeCampaignId || "");
+  const selectedRoot = snapshot?.project?.workspaceRoot || snapshot?.project?.workspace_root;
+  if (selectedCampaignId && typeof selectedRoot === "string" && path.isAbsolute(selectedRoot)) {
+    selectedCampaignWorkspaces.set(selectedCampaignId, path.resolve(selectedRoot));
+  }
   lastProjectionUnavailable = snapshot?.bounds?.projectionUnavailable === true || snapshot?.bounds?.projection_unavailable === true;
   if (lastProjectionUnavailable) return; // Capacity acknowledgement is not evidence that held/active work ended.
   const state = String(snapshot?.attempt?.state || "");
   lastAttemptActive = state === "active" || state === "ACTIVE";
+  const seenAttemptId = String(snapshot?.attempt?.id || "");
+  const attemptRoot = snapshot?.project?.workspaceRoot || snapshot?.project?.workspace_root;
+  if (seenAttemptId && typeof attemptRoot === "string" && path.isAbsolute(attemptRoot)) {
+    attemptWorkspaces.set(seenAttemptId, path.resolve(attemptRoot));
+  }
   lastAttemptId = String(snapshot?.attempt?.id || lastAttemptId || "");
   lastAttemptProvider = String(snapshot?.attempt?.provider || lastAttemptProvider || "").toLowerCase();
   const responsibility = snapshot?.stopResponsibility || snapshot?.stop_responsibility;
@@ -1229,7 +1267,15 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
+  handleTrusted("goalport:background-held-workspaces", (_, candidate) => {
+    if (candidate !== undefined && (typeof candidate !== "string" || candidate.length > 32_768)) {
+      throw new TypeError("Candidate workspace must be text of at most 32768 characters.");
+    }
+    return backgroundHost.heldWorkspaces(candidate);
+  });
   handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
+  handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
+  handleTrusted("goalport:background-release-terminal", (_, jobId) => backgroundHost.releaseConfirmedTerminal(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });
   handleTrusted("goalport:open-vscode", (_, workspaceRoot) => shell.openPath(workspaceRoot));
   handleTrusted("goalport:request-close", async () => {
@@ -1337,7 +1383,7 @@ app.whenReady().then(() => {
     }
   });
   handleTrusted("goalport:coordinate-discover", (_event, generation) => discoverCoordination(process.env, coordinationRuntime(), generation, () => backgroundSendConsent().read()));
-  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration) => { refuseCompetingCoordination(); return launchOne(
+  handleTrusted("goalport:coordinate-launch", (_event, command, generation, scopeGeneration, workspaceRoot) => { refuseCompetingCoordination(workspaceRoot); return launchOne(
     process.env,
     coordinationRuntime(),
     command,
@@ -1351,7 +1397,7 @@ app.whenReady().then(() => {
     coordinationRuntime().cancel(generation);
     return { ok: true };
   });
-  handleTrusted("goalport:coordination-authorize", (_event, payload) => { refuseCompetingCoordination(); return authorizeCoordination(
+  handleTrusted("goalport:coordination-authorize", (_event, payload) => { refuseCompetingCoordination(payload?.workspaceRoot ?? payload?.write?.workspaceRoot); return authorizeCoordination(
     payload,
     coordinationScope,
     // BOTH member lists use this same fresh zero-quota discovery. Validation
@@ -1364,7 +1410,7 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
-  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(); return saveRecord(coordinationDirectory(), record); });
+  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(record?.workspacePath); return saveRecord(coordinationDirectory(), record); });
   handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
     clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
     return { ok: true };

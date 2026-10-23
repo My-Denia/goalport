@@ -1,4 +1,4 @@
-import type { BackgroundStatus } from "./coordination/backgroundStatus";
+import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import {
   BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE,
   backgroundStartOutcome,
@@ -101,11 +101,15 @@ function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice |
         technical: outcome.rejection.message || outcome.error || "background-job-outstanding"
       };
     }
+    const technical = outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable");
+    const runtimeDidNotStart = /not a valid Windows application|unable to start|os error 193/i.test(technical);
     return {
       sentence: outcome.kind === "refused"
-        ? "GoalPort could not complete that action."
+        ? (runtimeDidNotStart
+          ? "That Runtime didn't start. Nothing was sent."
+          : "GoalPort could not complete that action.")
         : "GoalPort could not reach Core for that action.",
-      technical: outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable")
+      technical
     };
   }
   const notices = next.notices ?? [];
@@ -171,6 +175,8 @@ interface GoalDraft extends GoalDraftValue {
    * Draft-only, never persisted as harness health.
    */
   avoid?: { instanceId: string; harness: string; startedAt: string | null };
+  /** Shown on a fresh draft opened from Use again or an interrupted job. Nothing has been sent. */
+  readyNote?: string;
 }
 
 function App() {
@@ -203,6 +209,10 @@ function App() {
   const [writeTurns, setWriteTurns] = useState(2);
   const [backgroundConsent, setBackgroundConsent] = useState(false);
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
+  const [backgroundHolds, setBackgroundHolds] = useState<BackgroundHeldWorkspaces>(() => ({
+    holds: [], complete: !window.goalportCore?.backgroundHeldWorkspaces,
+    globalBlock: Boolean(window.goalportCore?.backgroundHeldWorkspaces),
+  }));
   const [backgroundView, setBackgroundView] = useState(false);
   const backgroundAttached = useRef(false);
   // Job id whose terminal closeout already re-listed the plans in this
@@ -432,7 +442,12 @@ function App() {
         // must not hijack the startup view — its closeout stays one click
         // away on the background-return button, and its record is already
         // in Plans through the records load.
-        if (job?.active && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        if (job?.active && !backgroundAttached.current) {
+          backgroundAttached.current = true;
+          // Narrow widths: the job view must not sit under the drawer mask.
+          if (window.innerWidth <= 860) setNavCollapsed(true);
+          setBackgroundView(true);
+        }
         // A background round persists its plan record BEFORE the job store
         // records the terminal outcome (electron/coordination-worker.cjs),
         // so the first poll that sees a confirmed-terminal state can re-list
@@ -468,6 +483,45 @@ function App() {
     const timer = window.setInterval(() => { void poll(); }, 700);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [coreReady]);
+  // Retry intents retain their original workspace even if the draft text changes.
+  const candidateWorkspace = draftGoal?.intent?.workspaceRoot ?? draftGoal?.workspace.trim()
+    ?? snapshot.project.workspaceRoot ?? "";
+  const holdRevision = `${backgroundJob?.jobId ?? ""}:${backgroundJob?.acknowledgedStuckAt ?? ""}:${backgroundJob?.state ?? ""}:${backgroundJob?.active ?? ""}`;
+  const [checkedHoldRevision, setCheckedHoldRevision] = useState<string | null>(null);
+  useEffect(() => {
+    if (!coreReady) return;
+    const read = window.goalportCore?.backgroundHeldWorkspaces;
+    if (!read) return;
+    let cancelled = false;
+    let reading = false;
+    const poll = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const facts = await read(candidateWorkspace);
+        if (cancelled) return;
+        if (!facts || !Array.isArray(facts.holds) || facts.holds.length > 256
+          || facts.candidate !== candidateWorkspace || typeof facts.candidateBlocked !== "boolean"
+          || typeof facts.complete !== "boolean" || typeof facts.globalBlock !== "boolean"
+          || facts.holds.some(hold => !hold || typeof hold.jobId !== "string"
+            || typeof hold.workspacePath !== "string" || !workspaceIdentityKey(hold.workspacePath))) {
+          throw new Error("Incomplete workspace reservations");
+        }
+        setCheckedHoldRevision(holdRevision);
+        setBackgroundHolds(current => facts.complete ? facts : {
+          holds: [...new Map([...current.holds, ...facts.holds].map(hold => [hold.jobId, hold])).values()].slice(0, 256),
+          complete: false, globalBlock: true,
+        });
+      } catch {
+        // A failed read cannot release a known hold. Until complete facts
+        // return, do not promise a new send in any folder.
+        if (!cancelled) setBackgroundHolds(current => ({ ...current, complete: false, globalBlock: true }));
+      } finally { reading = false; }
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 700);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [coreReady, candidateWorkspace, holdRevision]);
   const runtimeLessDraftKey = draftGoal && draftGoal.provider.trim() === "" ? draftGoal.requestId : null;
   useEffect(() => {
     if (!runtimeLessDraftKey || !scopeBridgeReady) return undefined;
@@ -732,6 +786,48 @@ function App() {
 
   const activeTargetKey = snapshotTargetKey(snapshot);
   const displayedNotice = activeNotice ?? targetNotices[activeTargetKey] ?? null;
+  // The read-only host inventory includes older acknowledged reservations,
+  // not just the currently displayed job. Mirror the current job too so an
+  // acknowledgement is visible immediately, before the next inventory poll.
+  // Only complete refreshed facts can release an older reservation.
+  const heldWorkspace = backgroundJob && backgroundJob.acknowledgedStuckAt && !confirmedTerminalJob(backgroundJob)
+    ? (backgroundJob.workspacePath ?? "")
+    : "";
+  const heldWorkspaces = [...backgroundHolds.holds.map(hold => hold.workspacePath), ...(heldWorkspace ? [heldWorkspace] : [])];
+  const targetsAnyHeldWorkspace = (workspace: string) => heldWorkspaces.some(held => targetsHeldWorkspace(workspace, held));
+  const candidateChecked = !window.goalportCore?.backgroundHeldWorkspaces
+    || (backgroundHolds.candidate === candidateWorkspace && checkedHoldRevision === holdRevision
+      && backgroundHolds.complete && typeof backgroundHolds.candidateBlocked === "boolean");
+  const workspaceHeldByBackground = (workspace: string): boolean => {
+    if (targetsAnyHeldWorkspace(workspace)) {
+      if (candidateChecked && backgroundHolds.candidateBlocked === false && !backgroundHolds.globalBlock) {
+        return false;
+      }
+      return true;
+    }
+    return candidateChecked && backgroundHolds.candidateBlocked === true && !backgroundHolds.globalBlock;
+  };
+  const draftHeld = workspaceHeldByBackground(candidateWorkspace);
+  const draftHeldSentence = heldWorkspaces.length > 0 ? HELD_FOLDER_SENTENCE : UNIDENTIFIABLE_FOLDER_SENTENCE;
+  useEffect(() => {
+    if (!draftHeld) setDraftError(current => (current?.sentence === HELD_FOLDER_SENTENCE || current?.sentence === UNIDENTIFIABLE_FOLDER_SENTENCE) ? null : current);
+  }, [draftHeld]);
+  const conversationWorkspace = snapshot.project?.workspaceRoot ?? "";
+  const conversationHeldByBackground = conversationWorkspace !== "" && (
+    candidateWorkspace === conversationWorkspace
+      ? workspaceHeldByBackground(conversationWorkspace)
+      : targetsAnyHeldWorkspace(conversationWorkspace)
+  );
+  // The host's profile slot admits no competing send while a background job's
+  // active pointer exists, in any folder. Present that before Send rather than
+  // letting the draft look started and then be refused at admission.
+  const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
+    || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
+  const backgroundSlotSentence = !candidateChecked || !backgroundHolds.complete
+    ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
+    : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
+    ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
   // harness is possible (an independent check needs two).
@@ -758,6 +854,14 @@ function App() {
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
     if (!workspace || !message) return;
+    if (workspaceHeldByBackground(workspace)) {
+      setDraftError({ sentence: draftHeldSentence });
+      return;
+    }
+    if (backgroundSlotBlocked) {
+      setDraftError({ sentence: backgroundSlotSentence });
+      return;
+    }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
       setDraftError({ sentence: "Core confirmed the previous state but could not project enough control data to start new work. Retry a pending request or reconnect first." });
       return;
@@ -851,7 +955,11 @@ function App() {
               const job = await probe();
               if (!stillCurrent() || draftGoalRef.current?.requestId !== submittedRequestId) return;
               if (job && job.requestId === submittedRequestId) {
-                setBackgroundJob(job); backgroundAttached.current = true; setBackgroundView(true);
+                setBackgroundJob(job); backgroundAttached.current = true;
+                // Narrow widths: entering the job view closes the drawer so
+                // its backdrop cannot cover the Stop control.
+                if (window.innerWidth <= 860) setNavCollapsed(true);
+                setBackgroundView(true);
               }
             } catch {
               // A failed status read proves nothing; the draft stays blocked.
@@ -895,7 +1003,11 @@ function App() {
               : "The reply about this background start was not a recognizable result.");
             return;
           }
-          setBackgroundJob(outcome.status); backgroundAttached.current = true; setBackgroundView(true);
+          setBackgroundJob(outcome.status); backgroundAttached.current = true;
+          // Narrow widths: entering the job view closes the drawer so its
+          // backdrop cannot cover the Stop control.
+          if (window.innerWidth <= 860) setNavCollapsed(true);
+          setBackgroundView(true);
           setBackgroundConsent(false);
           return;
         }
@@ -910,7 +1022,7 @@ function App() {
           const requestedWrite = writeInstances.length > 0
             ? { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: workspace }
             : undefined;
-          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, ...(requestedWrite ? { write: requestedWrite } : {}) });
+          const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, workspaceRoot: workspace, ...(requestedWrite ? { write: requestedWrite } : {}) });
           if (!stillCurrent()) return;
           if (!authorized || authorized.ok !== true) {
             setDraftError({ sentence: authorized?.errorText?.trim() || "Harness access could not be authorized, so nothing was sent." });
@@ -1119,7 +1231,7 @@ function App() {
                   setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
                 }
               }
-              const result = await launch(command, generation, scopeGeneration);
+              const result = await launch(command, generation, scopeGeneration, workspace);
               // Each launch reports the authorized budget it spent from; the
               // mirror (and the in-flight progress line) follow it live.
               if (stillCurrent() && result) {
@@ -1347,15 +1459,40 @@ function App() {
     });
   }
 
-  // Forget that this machine could not run the harness's tools, then discover
-  // again: the panel row becomes selectable when the health memory is gone.
-  async function handleUseAgain(instanceId: string) {
+  function openReadyDraft(source: { workspace: string; message: string; note: string }) {
+    if (window.innerWidth <= 860) setNavCollapsed(true);
+    setSelectedPlanId(null);
+    closeDraft(false);
+    setBackgroundView(false);
+    setDraftGoal({
+      requestId: freshRequestId(),
+      baselineCampaignId: snapshot.activeCampaignId,
+      workspace: source.workspace,
+      provider: "",
+      message: source.message,
+      readyNote: source.note,
+    });
+  }
+
+  // Forget that this machine could not run the harness's tools. From a finished
+  // result this also opens a new draft of the same goal; the failed round is
+  // not replayed, and nothing is sent until Send. From the access panel the
+  // draft already open stays put and the row becomes selectable.
+  async function handleUseAgain(instanceId: string, continueFrom?: { workspacePath: string; goal: string; harness: string }) {
     const bridge = window.goalportCore;
     if (!bridge?.coordinationUnblock) return;
     try {
       await bridge.coordinationUnblock(instanceId);
     } catch {
       setActiveNotice({ sentence: "GoalPort could not forget that this harness was blocked. Try again in a moment." });
+      return;
+    }
+    if (continueFrom) {
+      openReadyDraft({
+        workspace: continueFrom.workspacePath,
+        message: continueFrom.goal,
+        note: `${continueFrom.harness} can be used again. Nothing is sent until you press Send.`,
+      });
       return;
     }
     if (!bridge.coordinateDiscover) return;
@@ -1436,7 +1573,7 @@ function App() {
         setDraftError({ sentence: "Choose a workspace and 1 to 8 write turns before allowing changes." });
         return;
       }
-      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns,
+      authorized = await bridge.coordinationAuthorize({ instances: [...selectedInstances], maxTurns: allowedTurns, workspaceRoot: draftGoal?.workspace.trim(),
         ...(writeInstances.length > 0 ? { write: { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: draftGoal!.workspace.trim() } } : {}) });
     } catch (error) {
       setDraftError({
@@ -1466,6 +1603,66 @@ function App() {
     // instances/turns and background consent the user just saved.
     preservePanelSelections.current = true;
     setDraftGoal((current) => (current ? { ...current, requestId: freshRequestId(), intent: undefined } : current));
+  }
+
+  async function handleContinueBackgroundJob() {
+    const job = backgroundJob;
+    if (!job) return;
+    const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand);
+    let current = job;
+    const finishedButStillActive = job.active && !job.live && !job.pendingCommand && (job.state === "completed" || job.state === "failed" || job.state === "stopped") && Boolean(job.outcome);
+    if (finishedButStillActive) {
+      const release = window.goalportCore?.backgroundReleaseTerminal;
+      if (!release) {
+        setActiveNotice({ sentence: "This finished goal is still in the way, so a new send was not opened." });
+        return;
+      }
+      try {
+        const next = await release(job.jobId);
+        current = next;
+        setBackgroundJob(next);
+      } catch (error) {
+        setActiveNotice({
+          sentence: "This finished goal is still in the way, so a new send was not opened.",
+          technical: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+    if (interrupted && !job.acknowledgedStuckAt) {
+      const acknowledge = window.goalportCore?.backgroundAcknowledge;
+      if (!acknowledge) {
+        setActiveNotice({ sentence: "This build cannot leave the interrupted job, so a new send was not opened." });
+        return;
+      }
+      try {
+        const next = await acknowledge(job.jobId);
+        current = next;
+        setBackgroundJob(next);
+      } catch (error) {
+        setActiveNotice({
+          sentence: "The interrupted job is still in the way, so no new send was opened.",
+          technical: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+    // A confirmed finished job releases its folder; the SAME folder may be
+    // sent again and is prefilled. An interrupted job only frees the profile
+    // slot: inspectPriorAdmissions keeps its folder held until a confirmed
+    // terminal outcome, so this draft must not offer that folder.
+    const heldFolder = interrupted && !confirmedTerminalJob(current) && Boolean(current.acknowledgedStuckAt)
+      ? (current.workspacePath ?? "")
+      : "";
+    openReadyDraft({
+      workspace: heldFolder ? "" : (current.workspacePath ?? ""),
+      message: current.goal,
+      note: heldFolder
+        ? `The interrupted turn was not replayed. ${workspaceFolder(heldFolder)} stays reserved until its exit is confirmed, so choose a different folder for this new send. Nothing goes out until you press Send.`
+        : interrupted
+          ? "The interrupted turn was not replayed. This is a new send, and nothing goes out until you press Send."
+          : "This is a new send for the same goal. Nothing goes out until you press Send.",
+    });
   }
 
   function handleNewGoal() {
@@ -1501,6 +1698,15 @@ function App() {
     }
     if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held") {
       setActiveNotice({ sentence: "Core refused new work while residual execution is unknown and write responsibility is held." });
+      return;
+    }
+    const heldByResidualBackground = conversationHeldByBackground;
+    if (heldByResidualBackground) {
+      setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
+      return;
+    }
+    if (backgroundSlotBlocked) {
+      setActiveNotice({ sentence: backgroundSlotSentence });
       return;
     }
     const turn = product?.turn;
@@ -1770,6 +1976,14 @@ function App() {
   }
 
   async function handleResumeSession() {
+    if (conversationHeldByBackground) {
+      setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
+      return;
+    }
+    if (backgroundSlotBlocked) {
+      setActiveNotice({ sentence: backgroundSlotSentence });
+      return;
+    }
     const attemptId = persistedAttemptId(snapshot.attempt.id);
     if (!client.resumeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
       || !attemptId || !product?.turn.actions?.includes("resume-session")) {
@@ -1780,7 +1994,9 @@ function App() {
     const next = await client.resumeSession(attemptId);
     if (viewIntent !== selectionIntent.current) return;
     setSnapshot(next);
-    const failure = commandFailure(next, "resume_native_session");
+    // Preview has no Core command receipt. A missing receipt there is not a
+    // failed resume; the session state below is the result.
+    const failure = client.mode === "browser-preview" ? null : commandFailure(next, "resume_native_session");
     const turn = next.productConversation?.turn;
     // A retry can reuse the same attempt. The pending reason, not a new id,
     // is what means verification has not finished.
@@ -2018,7 +2234,9 @@ function App() {
       <TitleBar
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
-        campaignTitle={hasGoal ? title : null}
+        campaignTitle={hasGoal && !(backgroundView && backgroundJob) ? title : null}
+        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : null}
+        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
@@ -2055,6 +2273,12 @@ function App() {
           }}
           onSelectProject={(projectId) => { void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
+          runningJob={backgroundJob ? {
+            goal: backgroundJob.goal,
+            viewing: backgroundView,
+            stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
+          } : null}
+          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(true); }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
@@ -2073,9 +2297,23 @@ function App() {
             onReconnect={handleReconnect}
           />
 
-          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => setBackgroundView(value => !value)}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
+          {draftError && ((backgroundView && backgroundJob) || selectedPlan) ? (
+            <div className="dialog-note" role="alert">
+              <span aria-hidden="true">!</span>
+              <span>
+                {draftError.sentence}
+                {draftError.technical ? (
+                  <details className="technical-details">
+                    <summary>Technical details</summary>
+                    <pre className="technical-details-pre">{draftError.technical}</pre>
+                  </details>
+                ) : null}
+              </span>
+            </div>
+          ) : null}
+          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => { if (!backgroundView && window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(value => !value); }}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
-            <BackgroundCoordinationStatus job={backgroundJob} onStopAllowing={() => {
+            <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
             }} />
           </div> : selectedPlan ? (
@@ -2103,7 +2341,11 @@ function App() {
                 feedbackHistory={selectedPlan.feedbackHistory ?? []}
                 planRevisionHistory={selectedPlan.planRevisionHistory ?? []}
                 onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
-                  ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId); }
+                  ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId, {
+                    workspacePath: selectedPlan.workspacePath,
+                    goal: selectedPlan.goal,
+                    harness: selectedPlan.environmentBlocked!.harness ?? selectedPlan.environmentBlocked!.instanceId,
+                  }); }
                   : undefined}
                 roundSummary={selectedPlanOverlay
                   ? roundSummaryLine(selectedPlan.planningHarness, selectedPlan.reviewHarness, selectedPlan.planText, selectedPlan.reviewText)
@@ -2149,7 +2391,11 @@ function App() {
                   feedbackHistory={coordination.feedbackHistory ?? []}
                   planRevisionHistory={coordination.planRevisionHistory ?? []}
                   onUseAgain={coordination.environmentBlocked && unblockAvailable
-                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId); }
+                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId, {
+                      workspacePath: draftGoal?.workspace ?? "",
+                      goal: draftGoal?.message ?? "",
+                      harness: coordination.environmentBlocked!.harness ?? coordination.environmentBlocked!.instanceId,
+                    }); }
                     : undefined}
                   roundSummary={draftOverlay
                     ? roundSummaryLine(coordination.planningHarness, coordination.reviewHarness, coordination.planText, coordination.reviewText)
@@ -2177,6 +2423,9 @@ function App() {
                       : ""}
                 </p>
               ) : null}
+              {draftGoal?.readyNote ? (
+                <p className="revision-note">{draftGoal.readyNote}</p>
+              ) : null}
               {draftGoal?.avoid ? (
                 <p className="revision-note">
                   This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
@@ -2197,6 +2446,50 @@ function App() {
                 />
               ) : (
                 <>
+                  <DraftGoalComposer
+                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
+                    runtimes={snapshot.runtimes}
+                    connected={snapshot.connection === "connected"}
+                    busy={draftBusy}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    waitingOn={panelHoldsSend
+                      ? (panelLoad === "failed"
+                        ? "Send is waiting: your harness-access choices could not be loaded."
+                        : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
+                      : null}
+                    retryLabel={draftRetryLabel}
+                    error={draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
+                    canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
+                    coordinationAvailable={coordinationAvailable}
+                    workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
+                    backgroundConsent={backgroundConsent}
+                    onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
+                    onBrowse={() => { void chooseWorkspace(); }}
+                    onChange={(value) => {
+                      if (value.provider.trim()) setBackgroundConsent(false);
+                      const current = draftGoal;
+                      if (!current) {
+                        setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
+                        return;
+                      }
+                      const changed = current.workspace !== value.workspace
+                        || current.provider !== value.provider
+                        || current.message !== value.message;
+                      if (current.workspace !== value.workspace) {
+                        setWriteInstances([]);
+                        setScopeMirror((scope) => scope ? { instances: scope.instances, generation: scope.generation, maxTurns: scope.maxTurns, remaining: scope.remaining } : null);
+                      }
+                      if (changed) abandonCoordination();
+                      const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
+                      setDraftGoal({
+                        ...current,
+                        ...value,
+                        ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
+                      });
+                    }}
+                    onSubmit={handleDraftSend}
+                    onDiscard={handleDiscardDraft}
+                  />
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
                       backgroundConsent={backgroundConsent}
@@ -2247,50 +2540,21 @@ function App() {
                       </span>
                     </div>
                   ) : null}
-                  <DraftGoalComposer
-                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
-                    runtimes={snapshot.runtimes}
-                    connected={snapshot.connection === "connected"}
-                    busy={draftBusy}
-                    blockedFromSending={draftBlocked || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
-                    waitingOn={panelHoldsSend
-                      ? (panelLoad === "failed"
-                        ? "Send is waiting: your harness-access choices could not be loaded."
-                        : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
-                      : null}
-                    retryLabel={draftRetryLabel}
-                    error={draftError}
-                    canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
-                    coordinationAvailable={coordinationAvailable}
-                    workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
-                    onBrowse={() => { void chooseWorkspace(); }}
-                    onChange={(value) => {
-                      const current = draftGoal;
-                      if (!current) {
-                        setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
-                        return;
-                      }
-                      const changed = current.workspace !== value.workspace
-                        || current.provider !== value.provider
-                        || current.message !== value.message;
-                      if (current.workspace !== value.workspace) {
-                        setWriteInstances([]);
-                        setScopeMirror((scope) => scope ? { instances: scope.instances, generation: scope.generation, maxTurns: scope.maxTurns, remaining: scope.remaining } : null);
-                      }
-                      if (changed) abandonCoordination();
-                      const savedForDraft = plans.some((plan) => plan.requestId === current.requestId);
-                      setDraftGoal({
-                        ...current,
-                        ...value,
-                        ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
-                      });
-                    }}
-                    onSubmit={handleDraftSend}
-                    onDiscard={handleDiscardDraft}
-                  />
                 </>
               )}
             </div>
+          ) : confirmedEmptyProfile && !hasGoal ? (
+            <section className="empty-goal" aria-label="No goal yet">
+              <h2>No goal open</h2>
+              <p>Start one when you are ready. Nothing is saved until you send it.</p>
+              <button
+                className="button button-primary empty-goal-cta"
+                type="button"
+                onClick={() => { backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
+              >
+                New goal
+              </button>
+            </section>
           ) : !hasGoal ? null : product === null ? (
             <div className="compatibility-notice" role="status">
               <h2>Conversation view unavailable</h2>
@@ -2361,17 +2625,24 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
-                turn={snapshot.bounds?.projectionUnavailable && !activeRetryLabel
-                  ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
-                  : product.turn}
+                turn={conversationHeldByBackground
+                  ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
+                  : backgroundSlotBlocked
+                    ? { ...product.turn, canSend: false, reason: backgroundSlotSentence, reasonCode: undefined }
+                    : snapshot.bounds?.projectionUnavailable && !activeRetryLabel
+                      ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
+                      : product.turn}
                 busy={sendBusy}
                 closingSession={closingSession}
-                retryLabel={activeRetryLabel}
+                retryLabel={(conversationHeldByBackground || backgroundSlotBlocked) ? undefined : activeRetryLabel}
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}
                 onSelectRuntime={(provider) => { void selectRuntime(provider); }}
                 onStop={() => { void handleStop(); }}
+                onResume={(conversationHeldByBackground || backgroundSlotBlocked)
+                  ? undefined
+                  : () => { void handleResumeSession(); }}
               />
             </>
           )}
@@ -2434,6 +2705,64 @@ function App() {
     </div>
   );
 }
+
+function workspaceFolder(root: string): string {
+  const trimmed = root.replace(/[\\/]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+}
+
+/** A terminal outcome with no pending command is the only fact that releases a folder. */
+function confirmedTerminalJob(job: BackgroundStatus): boolean {
+  return (job.state === "completed" || job.state === "failed" || job.state === "stopped")
+    && Boolean(job.outcome) && !job.pendingCommand;
+}
+
+/**
+ * Conservative lexical warning only, never proof that an alias is safe.
+ * Physical identity belongs to the candidate-bound host query and admission.
+ * Relative text has no identity (the host fails closed on it too).
+ */
+export function workspaceIdentityKey(value: string): string | null {
+  const text = value.trim();
+  if (!text) return null;
+  const drive = /^[A-Za-z]:[\\/]/.test(text);
+  const unc = /^[\\/]{2}[^\\/]/.test(text);
+  const rooted = !drive && !unc && /^[\\/]/.test(text);
+  if (!drive && !unc && !rooted) return null;
+  const windowsHost = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+  const windowsLike = drive || unc || windowsHost;
+  const rest = drive ? text.slice(2) : text.replace(/^[\\/]+/, "");
+  const parts: string[] = [];
+  const segments = windowsLike ? rest.split(/[\\/]+/) : rest.split("/");
+  for (const part of segments) {
+    if (!part || part === ".") continue;
+    if (part === "..") { if (parts.length > (unc ? 2 : 0)) parts.pop(); continue; }
+    parts.push(part);
+  }
+  const separator = windowsLike ? "\\" : "/";
+  const body = parts.join(separator);
+  const prefix = drive ? text.slice(0, 2) + separator : unc ? separator + separator : separator;
+  const key = prefix + body;
+  return windowsLike ? key.toLowerCase() : key;
+}
+
+function sameWorkspaceIdentity(left: string, right: string): boolean {
+  const a = workspaceIdentityKey(left);
+  const b = workspaceIdentityKey(right);
+  return a !== null && b !== null && a === b;
+}
+
+/** While a folder is held, an unidentifiable path is never presented as sendable. */
+function targetsHeldWorkspace(value: string, held: string): boolean {
+  if (!held) return false;
+  if (workspaceIdentityKey(value) === null) return value.trim().length > 0;
+  return sameWorkspaceIdentity(value, held);
+}
+
+const HELD_CONVERSATION_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Return to the background goal to release it; nothing was sent.";
+const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
+const UNIDENTIFIABLE_FOLDER_SENTENCE = "GoalPort needs an absolute folder path (for example C:\\workspace\\your-project) before it can check this folder or start work; nothing was sent.";
 
 function AboutDialog({ appInfo, onClose }: { appInfo: AppInfo | null; onClose: () => void }) {
   const development = appInfo?.testMode === true || appInfo?.distribution === "dev";

@@ -2,7 +2,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createCoordinationJobStore, requestControl, normalizeAdmissionInput } = require("./coordination-job.cjs");
+const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity, jobControlEndpoint } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
@@ -16,6 +16,7 @@ const HOST_REFUSAL_CODES = new Set([
   "background-invalid-admission",
   "background-job-conflict",
   "background-admission-unknown",
+  "background-still-live",
 ]);
 const PREFLIGHT_MESSAGE = "Background Send could not be prepared, so nothing was admitted.";
 const UNKNOWN_MESSAGE = "GoalPort could not confirm this background start.";
@@ -36,10 +37,16 @@ function projection(status, live = false) {
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
     counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress: status.progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
+    workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null };
 }
 function createBackgroundHost(options) {
-  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready() });
+  // The host admits and compares folders on ONE platform identity (the host's
+  // own by default; tests may pin another). Never resolves against
+  // process.cwd(): a workspace that is missing or not absolute on this
+  // platform has no identity and stays fail-closed.
+  const platform = options.platform ?? process.platform;
+  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready(), platform });
   let starting = false;
   let lastJobId = null;
   function jobIds() {
@@ -48,13 +55,57 @@ function createBackgroundHost(options) {
     return fs.readdirSync(root).filter(id => /^[0-9a-f-]{36}$/.test(id))
       .sort((a, b) => fs.statSync(path.join(root, b)).mtimeMs - fs.statSync(path.join(root, a)).mtimeMs);
   }
-  function outstanding() {
+  function confirmedTerminal(facts) {
+    return ["completed", "failed", "stopped"].includes(facts.state) && !!facts.outcome && !facts.pendingCommand;
+  }
+  function outstanding(workspaceRoot) {
     const s = store();
     if (starting || s.getActiveStatus()) return true;
     // A missing pointer is not proof that an earlier owner/tools stopped.
-    // Retained nonterminal or pending job facts still block ordinary/native
-    // admission; only confirmed terminal facts permit normal competition.
-    return jobIds().some(id => { const facts = s.getStatus(id); return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand; });
+    // Leaving an unconfirmed job frees the slot pointer only. The same folder
+    // stays held. An unknown caller folder fails closed.
+    const caller = workspaceIdentity(workspaceRoot, platform);
+    for (const id of jobIds()) {
+      const facts = s.getStatus(id);
+      if (confirmedTerminal(facts)) continue;
+      if (!facts.acknowledgedStuckAt) return true;
+      const held = workspaceIdentity(facts.admission?.workspacePath, platform);
+      if (caller === null || held === null || held === caller) return true;
+    }
+    return false;
+  }
+  // Read-only presentation facts from the existing store, not an admission
+  // authority. Never silently drop a malformed entry or truncate a reservation.
+  function heldWorkspaces(candidate) {
+    const holds = [];
+    let complete = true;
+    let globalBlock = starting;
+    try {
+      const s = store();
+      if (s.getActiveStatus()) globalBlock = true;
+      const root = path.join(options.directory(), "coordination-jobs", "jobs");
+      const entries = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }) : [];
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) { complete = false; continue; }
+        try {
+          const facts = s.getStatus(entry.name);
+          if (confirmedTerminal(facts)) continue;
+          if (!facts.acknowledgedStuckAt) { globalBlock = true; continue; }
+          const workspacePath = facts.admission?.workspacePath;
+          if (!workspaceIdentity(workspacePath, platform)) { complete = false; continue; }
+          if (holds.length === 256) { complete = false; continue; }
+          holds.push({ jobId: facts.jobId, workspacePath });
+        } catch { complete = false; }
+      }
+    } catch { complete = false; }
+    const inventory = { holds, complete, globalBlock: globalBlock || !complete };
+    if (candidate === undefined) return inventory; // Preserve the inventory-only wire shape.
+    const identity = workspaceIdentity(candidate, platform);
+    return { ...inventory, candidate, candidateBlocked: inventory.globalBlock || identity === null
+      || holds.some(hold => {
+        const held = workspaceIdentity(hold.workspacePath, platform);
+        return held === null || held === identity;
+      }) };
   }
   async function status(jobId, controlEndpoint) {
     const s = store();
@@ -68,7 +119,7 @@ function createBackgroundHost(options) {
     if (!facts) return null;
     lastJobId = facts.jobId;
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
+    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
   async function start(input) {
@@ -110,7 +161,7 @@ function createBackgroundHost(options) {
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
         };
-        try { admissionInput = normalizeAdmissionInput(durableInput); }
+        try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {
           if (error?.code === "invalid-admission") throw codedRefusal("background-invalid-admission", error.message, error);
           throw error;
@@ -131,33 +182,58 @@ function createBackgroundHost(options) {
       let admitted;
       try { admitted = s.startAdmission(admissionInput); }
       catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
-      if (!admitted.ok) throw codedRefusal("background-job-conflict", "A background goal is already running. Return to it or stop allowing its access; nothing new was started.");
+      if (!admitted.ok) {
+        const message = admitted.reason === "workspace-held"
+          ? "This folder still has an unfinished background goal, so nothing new was started."
+          : "A background goal is already running. Return to it or stop allowing its access; nothing new was started.";
+        throw codedRefusal("background-job-conflict", message);
+      }
 
       try {
         lastJobId = admitted.jobId;
         if (admitted.created) {
-          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint };
+          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint: jobControlEndpoint(controlEndpoint, admitted.jobId) };
           const child = (options.spawn ?? spawn)(process.execPath, [options.workerPath, JSON.stringify(config)], { env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore", windowsHide: true });
           child.on("error", () => {}); // The immutable admission remains unconfirmed; never respawn.
           child.unref();
         }
         const deadline = Date.now() + (options.startTimeoutMs ?? 15000);
         do {
-          const result = await status(admitted.jobId, controlEndpoint);
+          const result = await status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId));
           if (result.live || !result.active) return result;
           await new Promise(resolve => setTimeout(resolve, 50));
         } while (Date.now() < deadline);
-        return status(admitted.jobId, controlEndpoint); // honest unconfirmed projection, not independently running
+        return status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId)); // honest unconfirmed projection, not independently running
       } catch (error) {
         throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error);
       }
     } finally { starting = false; }
   }
+  async function releaseConfirmedTerminal(jobId) {
+    let current;
+    try { current = await status(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (!current.active) return current;
+    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so its place was not released.");
+    if (!confirmedTerminal(current)) throw codedRefusal("background-still-live", "This goal is not finished, so its place was not released.");
+    try { store().releaseConfirmedTerminal(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
+  async function acknowledge(jobId) {
+    const current = await status(jobId);
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
+    try { store().acknowledgeStuck(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
   async function revoke(jobId) {
     const s = store();
     const facts = s.getStatus(jobId);
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(jobId), "revoke")), true); }
+    try { return projection(withControlAck(facts, await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "revoke")), true); }
     catch {
       // Durable revoke denies future admission if the same owner is still
       // alive. Missing control is NOT proof that tools stopped.
@@ -165,7 +241,7 @@ function createBackgroundHost(options) {
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, outstanding };
+  return { start, status, revoke, acknowledge, releaseConfirmedTerminal, outstanding, heldWorkspaces };
 }
 function withControlAck(facts, ack) {
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {

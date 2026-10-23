@@ -307,6 +307,17 @@ struct Registration {
     identity: String,
 }
 
+// Measured Windows Codex 0.163.0 cold initialize + thread/start: 1.990 s.
+// Ample headroom; this bounds pre-dispatch startup, never provider turn work.
+#[cfg(windows)]
+const CODEX_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+}
+
 const STARTUP_WAITING: u8 = 0;
 const STARTUP_DISPATCHING: u8 = 1;
 const STARTUP_CANCELLING: u8 = 2;
@@ -316,11 +327,18 @@ const STARTUP_FINISHED: u8 = 3;
 /// session initialization returns; a prompt send after that boundary is never
 /// represented as an unstarted operation.
 #[derive(Debug)]
-pub(crate) struct StartupControl {
+pub struct StartupControl {
     phase: AtomicU8,
     binding: Mutex<Option<RuntimeProcessBinding>>,
     done: Mutex<bool>,
     changed: Condvar,
+    cancellation_detail: Mutex<Option<String>>,
+    #[cfg(windows)]
+    child_handle: Mutex<Option<std::os::windows::io::OwnedHandle>>,
+    #[cfg(windows)]
+    owned_exit_observed: AtomicBool,
+    #[cfg(windows)]
+    watchdog_armed: AtomicBool,
 }
 
 impl Default for StartupControl {
@@ -330,6 +348,13 @@ impl Default for StartupControl {
             binding: Mutex::new(None),
             done: Mutex::new(false),
             changed: Condvar::new(),
+            cancellation_detail: Mutex::new(None),
+            #[cfg(windows)]
+            child_handle: Mutex::new(None),
+            #[cfg(windows)]
+            owned_exit_observed: AtomicBool::new(false),
+            #[cfg(windows)]
+            watchdog_armed: AtomicBool::new(false),
         }
     }
 }
@@ -353,7 +378,22 @@ impl StartupControl {
         self.phase.load(Ordering::Acquire) == STARTUP_CANCELLING
     }
 
+    /// True only for a user-requested cancel: the watchdog stores its detail
+    /// under the same `done` lock that publishes CANCELLING, so taking `done`
+    /// here never observes the phase without the reason.
+    fn user_cancelled(&self) -> bool {
+        let _done = self.done.lock().expect("startup completion poisoned");
+        self.phase.load(Ordering::Acquire) == STARTUP_CANCELLING
+            && self
+                .cancellation_detail
+                .lock()
+                .expect("startup reason poisoned")
+                .is_none()
+    }
+
     fn mark_dispatching(&self) -> Result<(), AdapterError> {
+        // Pair phase changes with the watchdog condition lock: no lost wake.
+        let _done = self.done.lock().expect("startup completion poisoned");
         if self.phase.load(Ordering::Acquire) == STARTUP_DISPATCHING {
             return Ok(());
         }
@@ -364,13 +404,18 @@ impl StartupControl {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .map(|_| ())
-            .map_err(|_| AdapterError::Connection("native start was cancelled before prompt dispatch".into()))
+            .map_err(|_| AdapterError::Connection(self.cancellation_detail()
+                .unwrap_or_else(|| "native start was cancelled before prompt dispatch".into())))?;
+        #[cfg(windows)]
+        self.child_handle.lock().expect("startup handle poisoned").take();
+        self.changed.notify_all();
+        Ok(())
     }
 
     /// Returns false if native initialization already passed the pre-dispatch
     /// boundary. That result must not be described as a stopped or unsent turn.
-    pub(crate) fn request_cancel(&self) -> Result<bool, String> {
+    pub fn request_cancel(&self, detail: Option<&str>) -> Result<bool, String> {
+        let _done = self.done.lock().expect("startup completion poisoned");
         match self.phase.compare_exchange(
             STARTUP_WAITING,
             STARTUP_CANCELLING,
@@ -378,13 +423,23 @@ impl StartupControl {
             Ordering::Acquire,
         ) {
             Ok(_) => {
+                *self.cancellation_detail.lock().expect("startup reason poisoned") = detail.map(str::to_owned);
+                self.changed.notify_all();
                 #[cfg(target_os = "linux")]
                 self.signal_exact(libc::SIGTERM)?;
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(windows)]
+                self.terminate_owned_startup()?;
+                #[cfg(not(any(target_os = "linux", windows)))]
                 return Err("startup cancellation is unavailable on this platform".into());
                 Ok(true)
             }
-            Err(STARTUP_CANCELLING) => Ok(true),
+            Err(STARTUP_CANCELLING) => {
+                // A handle may have been published after the first cancel saw
+                // an empty slot. Retry the owned handle; do not start a wait.
+                #[cfg(windows)]
+                self.terminate_owned_startup()?;
+                Ok(true)
+            }
             Err(_) => Ok(false),
         }
     }
@@ -425,15 +480,115 @@ impl StartupControl {
         }
     }
 
-    pub(crate) fn wait_finished(&self, timeout: Duration) -> bool {
+    pub(crate) fn cancellation_detail(&self) -> Option<String> {
+        self.cancellation_detail.lock().expect("startup reason poisoned").clone()
+    }
+
+    #[cfg(windows)]
+    pub fn has_child_handle(&self) -> bool {
+        self.child_handle.lock().expect("startup handle poisoned").is_some()
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle_raw(&self, raw: *mut winapi::ctypes::c_void) -> Result<(), AdapterError> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use winapi::um::{handleapi::DuplicateHandle, processthreadsapi::GetCurrentProcess,
+            winnt::{PROCESS_TERMINATE, SYNCHRONIZE}};
+        let mut duplicate = std::ptr::null_mut();
+        let current = unsafe { GetCurrentProcess() };
+        if unsafe { DuplicateHandle(current, raw, current, &mut duplicate,
+            PROCESS_TERMINATE | SYNCHRONIZE, 0, 0) } == 0 {
+            return Err(AdapterError::Connection(format!("unable to duplicate startup child handle: {}", std::io::Error::last_os_error())));
+        }
+        let owned = unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) };
         let done = self.done.lock().expect("startup completion poisoned");
-        *self.changed.wait_timeout_while(done, timeout, |done| !*done)
-            .expect("startup completion poisoned").0
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == STARTUP_DISPATCHING || phase == STARTUP_FINISHED {
+            drop(owned);
+            return Ok(());
+        }
+        {
+            let mut slot = self.child_handle.lock().expect("startup handle poisoned");
+            *slot = Some(owned);
+        }
+        if phase == STARTUP_CANCELLING {
+            self.terminate_owned_startup()
+                .map_err(AdapterError::Connection)?;
+        }
+        drop(done);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle(&self, child: &Child) -> Result<(), AdapterError> {
+        use std::os::windows::io::AsRawHandle;
+        self.publish_child_handle_raw(child.as_raw_handle() as _)
+    }
+
+    #[cfg(windows)]
+    fn publish_child_handle_contained(&self, child: &crate::runtime_containment::ContainedChild) -> Result<(), AdapterError> {
+        self.publish_child_handle_raw(child.raw_process_handle() as _)
+    }
+
+    #[cfg(windows)]
+    fn terminate_owned_startup(&self) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        if !self.cancelled() { return Err("startup is no longer cancellable".into()); }
+        let handle = self.child_handle.lock().expect("startup handle poisoned");
+        let Some(handle) = handle.as_ref() else { return Ok(()); };
+        if unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } == 0 { return Ok(()); }
+        if unsafe { winapi::um::processthreadsapi::TerminateProcess(handle.as_raw_handle().cast(), 1) } == 0 {
+            return Err(format!("unable to terminate owned startup child: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn arm_watchdog(self: &Arc<Self>, timeout: Duration) -> Option<std::thread::JoinHandle<()>> {
+        let done = self.done.lock().expect("startup completion poisoned");
+        if self.phase.load(Ordering::Acquire) != STARTUP_WAITING
+            || self.watchdog_armed.swap(true, Ordering::AcqRel) { return None; }
+        drop(done);
+        let control = self.clone();
+        Some(std::thread::spawn(move || {
+            let done = control.done.lock().expect("startup completion poisoned");
+            let (done, elapsed) = control.changed.wait_timeout_while(done, timeout, |_| {
+                control.phase.load(Ordering::Acquire) == STARTUP_WAITING
+            }).expect("startup completion poisoned");
+            let expired = elapsed.timed_out() && control.phase.load(Ordering::Acquire) == STARTUP_WAITING;
+            drop(done);
+            if expired {
+                let _ = control.request_cancel(Some("Codex startup timed out before prompt dispatch"));
+            }
+        }))
+    }
+
+    pub fn wait_finished(&self, timeout: Duration) -> bool {
+        let done = self.done.lock().expect("startup completion poisoned");
+        let finished = *self.changed.wait_timeout_while(done, timeout, |done| !*done)
+            .expect("startup completion poisoned").0;
+        #[cfg(windows)]
+        { finished && self.owned_exit_observed.load(Ordering::Acquire) }
+        #[cfg(not(windows))]
+        { finished }
     }
 
     fn finish(&self) {
+        let mut done = self.done.lock().expect("startup completion poisoned");
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // Merge/return follows read completion. TerminateProcess alone is
+            // not proof. Inherited-pipe blockage never gets here.
+            let mut handle = self.child_handle.lock().expect("startup handle poisoned");
+            let exited = self.cancelled() && handle.as_ref().is_some_and(|h| unsafe {
+                WaitForSingleObject(h.as_raw_handle(), 100) == 0
+            });
+            self.owned_exit_observed.store(exited, Ordering::Release);
+            handle.take();
+        }
         self.phase.store(STARTUP_FINISHED, Ordering::Release);
-        *self.done.lock().expect("startup completion poisoned") = true;
+        *done = true;
         self.changed.notify_all();
     }
 }
@@ -660,8 +815,18 @@ impl RuntimeManager {
         format!("{}|{}|{}", self.instance, busy.join("|"), live.join("|"))
     }
 
-    pub(crate) fn startup_control(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
+    pub fn startup_control(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
         self.busy_attempts.get(attempt_id).cloned()
+    }
+
+    /// True when this worker's startup was cancelled by the user's Stop.
+    /// The startup watchdog cancels with a detail and is settled by the
+    /// startup-timeout path instead; it must never be recorded as a user
+    /// cancel.
+    pub(crate) fn user_cancelled_startup(&self) -> bool {
+        self.startup_control
+            .as_ref()
+            .is_some_and(|control| control.user_cancelled())
     }
 
     /// Lend exactly the named Runtime registrations to one connection worker.
@@ -1155,7 +1320,17 @@ impl RuntimeManager {
             }
             ManagedRuntime::Codex(process) => {
                 process.startup_control = startup_control.clone();
+                #[cfg(windows)]
+                if let Some(control) = startup_control.as_ref() {
+                    control.arm_watchdog(CODEX_STARTUP_TIMEOUT);
+                }
                 let result = process.create_session(request);
+                #[cfg(windows)]
+                if result.is_err() && let Some(detail) = startup_control.as_ref().and_then(|control| control.cancellation_detail()) {
+                    // Preserve the timeout in the existing admission-failure
+                    // projection, not merely in the now-returned IPC error.
+                    return Err(AdapterError::Connection(detail));
+                }
                 if result.is_ok() && let Some(control) = startup_control {
                     control.mark_dispatching()?;
                 }
@@ -1164,9 +1339,11 @@ impl RuntimeManager {
             ManagedRuntime::CodexExec(process) => process.create_session(request),
             ManagedRuntime::Claude(process) => {
                 process.startup_control = startup_control.clone();
-                let result = process.create_session(request);
+                let mut result = process.create_session(request);
                 if result.is_ok() && let Some(control) = startup_control.clone() {
-                    control.mark_dispatching()?;
+                    if let Err(err) = control.mark_dispatching() {
+                        result = Err(process.hold_cancelled_startup());
+                    }
                 }
                 result
             }
@@ -2068,8 +2245,21 @@ impl CodexProcess {
         ));
         let mut child = command
             .spawn()
-            .map_err(|error| native_spawn_error("Codex app-server", error))?;
+            .map_err(|error| {
+                native_spawn_error(
+                    &format!("Codex app-server ({})", self.executable.display()),
+                    error,
+                )
+            })?;
         self.spawned = true;
+        #[cfg(windows)]
+        if let Some(control) = self.startup_control.as_ref() {
+            if let Err(error) = control.publish_child_handle(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let stdin = child
             .stdin
             .take()
@@ -3351,6 +3541,14 @@ impl GrokAcpProcess {
             .spawn()
             .map_err(|error| native_spawn_error("grok agent stdio", error))?;
         self.spawned = true;
+        #[cfg(windows)]
+        if let Some(control) = self.startup_control.as_ref() {
+            if let Err(error) = control.publish_child_handle(&child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
         let stdin = child
             .stdin
             .take()
@@ -4964,6 +5162,10 @@ struct ClaudeStreamProcess {
     baseline_window: BaselineWindow,
     baseline_refresh_due: bool,
     startup_control: Option<Arc<StartupControl>>,
+    /// A cancel during Claude startup ended the retained domain, if the
+    /// kill succeeded, and must stay Incomplete. An authorizing startup
+    /// snapshot does not turn that death into a release.
+    startup_cancel_held: bool,
     /// Checked at the start of ensure_started, before the child.is_some()
     /// success return. Refuses another spawn while set.
     resume_hold: bool,
@@ -5050,6 +5252,7 @@ impl ClaudeStreamProcess {
             baseline_window: BaselineWindow::BeforeFirstMessage,
             baseline_refresh_due: false,
             startup_control: None,
+            startup_cancel_held: false,
             resume_hold: false,
             close_disarmed: false,
             close_snapshot: None,
@@ -5166,6 +5369,14 @@ impl ClaudeStreamProcess {
                 let pid = spawned.child.id();
                 let stdin = spawned.stdin;
                 let stdout = spawned.stdout;
+                #[cfg(windows)]
+                if let Some(control) = self.startup_control.as_ref() {
+                    control.publish_child_handle_contained(&spawned.child)?;
+                    if control.cancelled() {
+                        self.child = Some(spawned.child);
+                        return Err(self.hold_cancelled_startup());
+                    }
+                }
                 self.child = Some(spawned.child);
                 (pid, Box::new(stdin) as Box<dyn Write + Send>, Box::new(stdout) as Box<dyn Read + Send>)
             };
@@ -5189,6 +5400,9 @@ impl ClaudeStreamProcess {
         let observed = match process_identity::observe_process(pid) {
             ProcessObservation::Live(identity) => identity,
             ProcessObservation::NotRunning => {
+                if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                    return Err(self.hold_cancelled_startup());
+                }
                 // A pid exists. Do not close(); the caller runs the proof rule.
                 self.latch_resume_hold();
                 return Err(AdapterError::Connection(
@@ -5196,6 +5410,9 @@ impl ClaudeStreamProcess {
                 ));
             }
             ProcessObservation::Unknown(reason) => {
+                if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                    return Err(self.hold_cancelled_startup());
+                }
                 self.latch_resume_hold();
                 return Err(AdapterError::Connection(format!(
                     "claude stream-json process identity is unknown: {reason}"
@@ -5225,23 +5442,34 @@ impl ClaudeStreamProcess {
         {
             control.publish_binding(binding.clone());
             if control.cancelled() {
-                // A pid exists. Do not close(); the caller runs the proof rule.
-                self.latch_resume_hold();
-                return Err(AdapterError::Connection(
-                    "native start was cancelled before prompt dispatch".into(),
-                ));
+                return Err(self.hold_cancelled_startup());
             }
         }
         self.stdin = Some(Arc::new(Mutex::new(stdin)));
         self.stdout = Some(BufReader::new(stdout));
-        self.start_reader()?;
+        if let Err(err) = self.start_reader() {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
         let init_id = self.next_control_id();
-        self.send_json(&json!({
+        if let Err(err) = self.send_json(&json!({
             "type": "control_request",
             "request_id": init_id,
             "request": { "subtype": "initialize", "hooks": null }
-        }))?;
-        self.await_control_response(&init_id, CLAUDE_INIT_TIMEOUT_MS)?;
+        })) {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
+        if let Err(err) = self.await_control_response(&init_id, CLAUDE_INIT_TIMEOUT_MS) {
+            if let Some(control) = self.startup_control.as_ref() && control.cancelled() {
+                return Err(self.hold_cancelled_startup());
+            }
+            return Err(err);
+        }
         self.initialized = true;
         Ok(())
     }
@@ -5527,6 +5755,18 @@ impl ClaudeStreamProcess {
         // Do not signal.
     }
 
+    /// Stop the retained Claude domain after a startup cancel. This is not a
+    /// release: the child, registration fields, and authorizing snapshot stay,
+    /// and later classification remains Incomplete.
+    fn hold_cancelled_startup(&mut self) -> AdapterError {
+        self.latch_resume_hold();
+        self.startup_cancel_held = true;
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.end_domain();
+        }
+        AdapterError::Connection("native start was cancelled before prompt dispatch".into())
+    }
+
     /// Verification failure: snapshot while the original Child is alive, after
     /// the failed first send, before any signal. A startup snapshot does not
     /// authorize this marker. `None` does not signal and does not authorize.
@@ -5619,6 +5859,10 @@ impl ClaudeStreamProcess {
     /// Child::kill on the original handle, before wait, and never after wait.
     /// Does not bare-pid kill. A broker is incomplete.
     fn attempt_stored_proof(&mut self) -> ResumeContainment {
+        if self.startup_cancel_held {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
         if self.broker.is_some() || !self.resume_proof_authorizes {
             self.latch_resume_hold();
             return ResumeContainment::Incomplete;
@@ -5705,6 +5949,10 @@ impl ClaudeStreamProcess {
     }
 
     fn classify_spawn_containment(&mut self) -> ResumeContainment {
+        if self.startup_cancel_held {
+            self.latch_resume_hold();
+            return ResumeContainment::Incomplete;
+        }
         if self.broker.is_some() {
             self.latch_resume_hold();
             return ResumeContainment::Incomplete;
@@ -7711,6 +7959,9 @@ fn waited_pid_was_reused(
     ) -> Result<Value, AdapterError> {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
+            if self.startup_control.as_ref().is_some_and(|control| control.cancelled()) {
+                return Err(self.hold_cancelled_startup());
+            }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(AdapterError::Connection(format!(
                     "Claude initialize did not answer within {timeout_ms} ms"
@@ -7720,9 +7971,10 @@ fn waited_pid_was_reused(
                 let receiver = self.event_rx.as_ref().ok_or_else(|| {
                     AdapterError::Connection("Claude reader is not active".into())
                 })?;
-                receiver.recv_timeout(remaining)
+                receiver.recv_timeout(remaining.min(Duration::from_millis(200)))
             };
             match message {
+                Err(RecvTimeoutError::Timeout) if Instant::now() < deadline => continue,
                 Ok(NativeMessage::Json(value)) => {
                     if claude_control_response_id(&value).as_deref() == Some(request_id) {
                         return Ok(value);
@@ -7731,6 +7983,11 @@ fn waited_pid_was_reused(
                 }
                 Ok(NativeMessage::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.stream_closed = true;
+                    if let Some(control) = self.startup_control.as_ref() {
+                        if control.cancelled() {
+                            return Err(self.hold_cancelled_startup());
+                        }
+                    }
                     return Err(AdapterError::Connection(
                         "native Runtime closed the Claude stream".into(),
                     ));
@@ -8707,7 +8964,11 @@ fn close_owned_child(child: &mut Option<Child>) -> Result<(), AdapterError> {
 }
 
 fn native_spawn_error(label: &str, error: std::io::Error) -> AdapterError {
-    let message = format!("unable to start {label}: {error}");
+    let message = if error.raw_os_error() == Some(193) {
+        format!("{label} is not a valid Windows application")
+    } else {
+        format!("unable to start {label}: {error}")
+    };
     if error.kind() == std::io::ErrorKind::NotFound {
         AdapterError::ExecutableMissing(message)
     } else {
@@ -8722,7 +8983,7 @@ fn debug_runtime(message: &str) {
 }
 
 fn resolve_native_executable(provider: &str) -> PathBuf {
-    let candidates = match provider {
+    let mut candidates = match provider {
         "codex" => {
             let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
             app_data
@@ -8745,10 +9006,48 @@ fn resolve_native_executable(provider: &str) -> PathBuf {
             .collect(),
         _ => Vec::new(),
     };
+    // A file that exists but is not a loadable image must not win. The npm
+    // vendor copy on this machine is one of those: CreateProcess returns
+    // error 193 while the official install is a normal executable.
+    #[cfg(windows)]
+    if provider == "codex" {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local).join(r"Programs\OpenAI\Codex\bin\codex.exe"));
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("codex.exe")));
+        }
+    }
     candidates
         .into_iter()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| loadable_executable(candidate))
         .unwrap_or_else(|| PathBuf::from(provider))
+}
+
+fn loadable_executable(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetBinaryTypeW(application: *const u16, binary_type: *mut u32) -> i32;
+        }
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+        let mut kind = 0u32;
+        let ok = unsafe { GetBinaryTypeW(wide.as_ptr(), &mut kind) != 0 };
+        // Type 1 is SCS_DOS_BINARY. GetBinaryType reports that for a text
+        // file, and error 193 for the unloadable npm vendor image. Neither
+        // can be CreateProcess'd as the Codex CLI.
+        ok && matches!(kind, 0 | 2 | 6)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 fn native_approval_policy() -> Result<String, AdapterError> {
@@ -8765,16 +9064,155 @@ fn native_approval_policy() -> Result<String, AdapterError> {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(windows)]
+    #[test]
+    fn unloadable_npm_codex_does_not_win_over_a_real_install() {
+        let root = std::env::temp_dir().join(format!("goalport-codex-resolve-{}", std::process::id()));
+        let bad = root.join("npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe");
+        std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+        std::fs::write(&bad, b"not a windows application").unwrap();
+        let previous = std::env::var_os("APPDATA");
+        unsafe { std::env::set_var("APPDATA", &root) };
+        let resolved = resolve_native_executable("codex");
+        match previous {
+            Some(value) => unsafe { std::env::set_var("APPDATA", value) },
+            None => unsafe { std::env::remove_var("APPDATA") },
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(resolved, bad, "an existing but unloadable npm codex.exe must not be launched");
+        if resolved != std::path::PathBuf::from("codex") {
+            assert!(loadable_executable(&resolved), "{}", resolved.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancel_before_publish_still_terminates_the_owned_child() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe"))
+            .find(|path| path.is_file())
+            .expect("node.exe required");
+        let control = StartupControl::default();
+        assert_eq!(control.request_cancel(Some("before publish")), Ok(true));
+        let mut child = std::process::Command::new(node)
+            .args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        control.publish_child_handle(&child).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "published child survived cancel");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_startup_cancel_ends_the_domain_and_stays_incomplete() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe"))
+            .find(|path| path.is_file())
+            .expect("node.exe required");
+        let cwd = std::env::temp_dir();
+        let spawned = crate::runtime_containment::spawn_contained(
+            &node,
+            &["-e".into(), "setInterval(()=>{},1000)".into()],
+            &cwd,
+            &[],
+        )
+        .expect("contained sleeper");
+        let pid = spawned.child.id();
+        let mut process = ClaudeStreamProcess::new(node, "test".into(), cwd);
+        process.child = Some(spawned.child);
+        process.spawned = true;
+        process.resume_proof_authorizes = true;
+        process.resume_proof_snapshot = Some(Vec::new());
+        process.process_binding = Some(RuntimeProcessBinding {
+            process_epoch: "runtime-epoch:startup-cancel".into(),
+            pid,
+            parent_pid: 0,
+            creation_date: "test".into(),
+            executable_path: "node.exe".into(),
+            executable_sha256: "a".repeat(64),
+        });
+        let error = process.hold_cancelled_startup();
+        assert!(error.to_string().contains("cancelled before prompt dispatch"));
+        assert!(process.resume_hold);
+        assert!(process.startup_cancel_held);
+        assert!(process.resume_proof_authorizes, "authorizing snapshot must not be cleared");
+        assert!(process.child.is_some(), "the contained child stays owned");
+        assert!(process.process_binding.is_some(), "registration binding stays");
+        assert_eq!(process.classify_spawn_containment(), ResumeContainment::Incomplete);
+        assert_eq!(process.attempt_stored_proof(), ResumeContainment::Incomplete);
+        assert!(process.resume_hold);
+        let again = process.ensure_started(None);
+        assert!(again.is_err(), "a held startup must not spawn again");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while process.child.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "contained child survived startup cancel");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_watchdog_short_deadline_uses_owned_handle_and_exit_proof() {
+        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("node.exe")).find(|p| p.is_file()).expect("node.exe required");
+        let mut child = Command::new(node).args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let control = Arc::new(StartupControl::default());
+        control.publish_child_handle(&child).unwrap();
+        // Duration is injected directly, never through a product env hook.
+        control.arm_watchdog(Duration::from_millis(25)).unwrap().join().unwrap();
+        assert!(control.cancelled());
+        assert!(control.cancellation_detail().unwrap().contains("timed out"));
+        assert!(!control.wait_finished(Duration::ZERO), "kill success is not confirmation");
+        child.wait().unwrap();
+        assert!(!control.wait_finished(Duration::ZERO), "exit without return is not confirmation");
+        control.finish();
+        assert!(control.wait_finished(Duration::ZERO));
+        assert!(control.child_handle.lock().unwrap().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_watchdog_wakes_at_dispatch_and_finish_and_cancel_dispatch_race_is_exclusive() {
+        for finish in [false, true] {
+            let control = Arc::new(StartupControl::default());
+            let started = Instant::now();
+            let watchdog = control.arm_watchdog(Duration::from_secs(10)).unwrap();
+            if finish { control.finish(); } else { control.mark_dispatching().unwrap(); }
+            watchdog.join().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(1), "left a watchdog sleeper");
+            assert_eq!(control.request_cancel(None), Ok(false));
+            assert!(control.cancellation_detail().is_none());
+        }
+        for _ in 0..100 {
+            let control = Arc::new(StartupControl::default());
+            let other = control.clone();
+            let barrier = Arc::new(std::sync::Barrier::new(2)); let gate = barrier.clone();
+            let cancel = std::thread::spawn(move || { gate.wait(); other.request_cancel(None).unwrap() });
+            barrier.wait(); let dispatch = control.mark_dispatching().is_ok();
+            assert_ne!(dispatch, cancel.join().unwrap());
+            control.finish();
+            assert!(!control.wait_finished(Duration::ZERO), "no child exit was proved");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn startup_cancel_cannot_claim_unsent_after_dispatch_boundary() {
         let before_dispatch = StartupControl::default();
-        assert_eq!(before_dispatch.request_cancel().unwrap(), true);
+        assert_eq!(before_dispatch.request_cancel(None).unwrap(), true);
         assert!(before_dispatch.mark_dispatching().is_err());
 
         let after_dispatch = StartupControl::default();
         after_dispatch.mark_dispatching().unwrap();
-        assert_eq!(after_dispatch.request_cancel().unwrap(), false);
+        assert_eq!(after_dispatch.request_cancel(None).unwrap(), false);
     }
 
     #[test]

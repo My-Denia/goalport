@@ -1,4 +1,11 @@
 // Kept self-contained so the same guard runs inside the real renderer.
+export function firstVisible(elements) {
+  return (elements ?? []).find((element) => {
+    const rect = element?.getBoundingClientRect?.();
+    return rect && rect.width > 0 && rect.height > 0;
+  }) ?? null;
+}
+
 export function clickPointFor(element) {
   if (!element) throw new Error("click target is missing");
   if (element.disabled || element.getAttribute?.("aria-disabled") === "true") throw new Error("click target is disabled");

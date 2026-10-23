@@ -132,9 +132,7 @@ export function AuthorizationPanel({
         checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">
-        <label><input type="checkbox" aria-label="Keep working after closing" checked={backgroundConsent}
-          onChange={event => onBackgroundConsentChange(event.target.checked)} /> Keep working after closing</label>
-        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes.</p>
+        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes. Choose that next to Send.</p>
         {!backgroundConfigured ? <>
           <p>Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.</p>
           <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run harness turns on this profile</button>

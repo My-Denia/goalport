@@ -403,14 +403,25 @@ fn sha256_of(path: &Path) -> String {
     format!("{}:{:x}", bytes.len(), digest)
 }
 
+/// An empty directory that stands in for `PATH` while a guard is installed: no
+/// `codex.exe` fallback entry can exist inside it.
+fn empty_path_dir() -> PathBuf {
+    let dir = scratch_root().join("empty-path");
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 const CANDIDATE: &str = r"npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe";
 
 /// The `%APPDATA%` tree `resolve_native_executable("codex")` searches, holding a byte copy of the
-/// node.exe fixture 1 ran on, named codex.exe. Installing it sets `APPDATA` in-process (caller
-/// holds `CODEX_LOCK`); dropping it restores the previous value and asserts the restore, also on
-/// unwind.
+/// node.exe fixture 1 ran on, named codex.exe. Pins `LOCALAPPDATA` to scratch and `PATH` to an empty
+/// directory so a real Codex install fallback can never win. Installing it sets `APPDATA`, `LOCALAPPDATA`,
+/// and `PATH` in-process (caller holds `CODEX_LOCK`); dropping it restores the previous values and asserts
+/// each restore, also on unwind.
 struct FakeAppData {
     previous: Option<std::ffi::OsString>,
+    previous_local: Option<std::ffi::OsString>,
+    previous_path: Option<std::ffi::OsString>,
     root: PathBuf,
     exe: PathBuf,
     digest: String,
@@ -425,12 +436,19 @@ impl FakeAppData {
         if !exe.is_file() || sha256_of(&exe) != digest {
             fs::copy(node, &exe).expect("node.exe should be copyable as codex.exe");
         }
+        let empty_path = empty_path_dir();
         let previous = env::var_os("APPDATA");
+        let previous_local = env::var_os("LOCALAPPDATA");
+        let previous_path = env::var_os("PATH");
         unsafe {
             env::set_var("APPDATA", &root);
+            env::set_var("LOCALAPPDATA", &root);
+            env::set_var("PATH", &empty_path);
         }
         Self {
             previous,
+            previous_local,
+            previous_path,
             root,
             exe,
             digest,
@@ -443,6 +461,16 @@ impl FakeAppData {
             env::var_os("APPDATA").as_deref(),
             Some(self.root.as_os_str()),
             "APPDATA must point at the scratch tree"
+        );
+        assert_eq!(
+            env::var_os("LOCALAPPDATA").as_deref(),
+            Some(self.root.as_os_str()),
+            "LOCALAPPDATA must point at the scratch tree"
+        );
+        assert_eq!(
+            env::var_os("PATH").as_deref(),
+            Some(empty_path_dir().as_os_str()),
+            "PATH must hold no real Codex fallback entry"
         );
         assert!(
             self.exe.is_file(),
@@ -483,8 +511,22 @@ impl Drop for FakeAppData {
                 Some(value) => env::set_var("APPDATA", value),
                 None => env::remove_var("APPDATA"),
             }
+            match &self.previous_local {
+                Some(value) => env::set_var("LOCALAPPDATA", value),
+                None => env::remove_var("LOCALAPPDATA"),
+            }
+            match &self.previous_path {
+                Some(value) => env::set_var("PATH", value),
+                None => env::remove_var("PATH"),
+            }
         }
         assert_eq!(env::var_os("APPDATA"), self.previous, "APPDATA restored");
+        assert_eq!(
+            env::var_os("LOCALAPPDATA"),
+            self.previous_local,
+            "LOCALAPPDATA restored"
+        );
+        assert_eq!(env::var_os("PATH"), self.previous_path, "PATH restored");
     }
 }
 
@@ -510,6 +552,8 @@ fn write_loader(workspace: &Path) {
 /// with the local node.exe fixture for an explicit same-ID retry.
 struct MutableFakeAppData {
     previous: Option<std::ffi::OsString>,
+    previous_local: Option<std::ffi::OsString>,
+    previous_path: Option<std::ffi::OsString>,
     root: PathBuf,
     exe: PathBuf,
 }
@@ -524,10 +568,19 @@ impl MutableFakeAppData {
         let exe = root.join(CANDIDATE);
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, b"not a Windows executable").unwrap();
+        let empty_path = empty_path_dir();
         let previous = env::var_os("APPDATA");
-        unsafe { env::set_var("APPDATA", &root) };
+        let previous_local = env::var_os("LOCALAPPDATA");
+        let previous_path = env::var_os("PATH");
+        unsafe {
+            env::set_var("APPDATA", &root);
+            env::set_var("LOCALAPPDATA", &root);
+            env::set_var("PATH", &empty_path);
+        };
         Self {
             previous,
+            previous_local,
+            previous_path,
             root,
             exe,
         }
@@ -547,8 +600,18 @@ impl Drop for MutableFakeAppData {
                 Some(value) => env::set_var("APPDATA", value),
                 None => env::remove_var("APPDATA"),
             }
+            match &self.previous_local {
+                Some(value) => env::set_var("LOCALAPPDATA", value),
+                None => env::remove_var("LOCALAPPDATA"),
+            }
+            match &self.previous_path {
+                Some(value) => env::set_var("PATH", value),
+                None => env::remove_var("PATH"),
+            }
         }
         assert_eq!(env::var_os("APPDATA"), self.previous);
+        assert_eq!(env::var_os("LOCALAPPDATA"), self.previous_local);
+        assert_eq!(env::var_os("PATH"), self.previous_path);
         assert!(self.root.starts_with(scratch_root()));
     }
 }
@@ -1305,11 +1368,15 @@ fn write_python_loader(workspace: &Path) {
 }
 
 /// The `%APPDATA%` tree `resolve_native_executable("codex")` searches, holding a python.exe copy
-/// named codex.exe plus its runtime DLLs. Install sets `APPDATA` and `PYTHONHOME` in-process
-/// (caller holds `CODEX_LOCK`); drop restores both and asserts the restore, also on unwind.
+/// named codex.exe plus its runtime DLLs. Also pins `LOCALAPPDATA` to scratch and `PATH` to an empty
+/// directory so a real Codex install fallback can never win. Install sets `APPDATA`, `LOCALAPPDATA`,
+/// `PATH`, and `PYTHONHOME` in-process (caller holds `CODEX_LOCK`); drop restores all and asserts
+/// each restore, also on unwind.
 struct FakeCodexPython {
     previous_appdata: Option<std::ffi::OsString>,
     previous_home: Option<std::ffi::OsString>,
+    previous_local: Option<std::ffi::OsString>,
+    previous_path: Option<std::ffi::OsString>,
     root: PathBuf,
     home: PathBuf,
     exe: PathBuf,
@@ -1336,15 +1403,22 @@ impl FakeCodexPython {
             }
         }
         let digest = sha256_of(&exe);
+        let empty_path = empty_path_dir();
         let previous_appdata = env::var_os("APPDATA");
         let previous_home = env::var_os("PYTHONHOME");
+        let previous_local = env::var_os("LOCALAPPDATA");
+        let previous_path = env::var_os("PATH");
         unsafe {
             env::set_var("APPDATA", &root);
             env::set_var("PYTHONHOME", &home);
+            env::set_var("LOCALAPPDATA", &root);
+            env::set_var("PATH", &empty_path);
         }
         Self {
             previous_appdata,
             previous_home,
+            previous_local,
+            previous_path,
             root,
             home,
             exe,
@@ -1357,6 +1431,16 @@ impl FakeCodexPython {
             env::var_os("APPDATA").as_deref(),
             Some(self.root.as_os_str()),
             "APPDATA must point at the scratch tree"
+        );
+        assert_eq!(
+            env::var_os("LOCALAPPDATA").as_deref(),
+            Some(self.root.as_os_str()),
+            "LOCALAPPDATA must point at the scratch tree"
+        );
+        assert_eq!(
+            env::var_os("PATH").as_deref(),
+            Some(empty_path_dir().as_os_str()),
+            "PATH must hold no real Codex fallback entry"
         );
         assert_eq!(
             env::var_os("PYTHONHOME").as_deref(),
@@ -1405,6 +1489,14 @@ impl Drop for FakeCodexPython {
                 Some(value) => env::set_var("PYTHONHOME", value),
                 None => env::remove_var("PYTHONHOME"),
             }
+            match &self.previous_local {
+                Some(value) => env::set_var("LOCALAPPDATA", value),
+                None => env::remove_var("LOCALAPPDATA"),
+            }
+            match &self.previous_path {
+                Some(value) => env::set_var("PATH", value),
+                None => env::remove_var("PATH"),
+            }
         }
         assert_eq!(
             env::var_os("APPDATA"),
@@ -1415,6 +1507,16 @@ impl Drop for FakeCodexPython {
             env::var_os("PYTHONHOME"),
             self.previous_home,
             "PYTHONHOME restored"
+        );
+        assert_eq!(
+            env::var_os("LOCALAPPDATA"),
+            self.previous_local,
+            "LOCALAPPDATA restored"
+        );
+        assert_eq!(
+            env::var_os("PATH"),
+            self.previous_path,
+            "PATH restored"
         );
     }
 }

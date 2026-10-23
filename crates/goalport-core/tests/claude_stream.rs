@@ -16,8 +16,9 @@ use serde_json::{Value, json};
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::Mutex,
-    time::Duration,
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 fn fake_cli() -> PathBuf {
@@ -1374,6 +1375,485 @@ fn assert_honest_stop_payload(payload: &Value) {
         );
         assert!(!native);
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn claude_startup_cancel_before_dispatch_observes_owned_exit_and_confirms_stop() {
+    let workspace = fixture_workspace("claude-startup-cancel-confirm", "stall_initialize");
+    let mut manager = RuntimeManager::new();
+    let summary = manager
+        .select_runtime("attempt-claude-confirm", "claude", Some(fake_cli()), "2.1.259", &workspace)
+        .expect("claude runtime should be selectable");
+    assert_eq!(summary.provider, "claude");
+
+    // Lend worker with attempt-claude-confirm as startup target
+    let mut worker = manager.lend_attempts(&["attempt-claude-confirm".into()], Some("attempt-claude-confirm")).expect("lend worker");
+    let control = manager.startup_control("attempt-claude-confirm").expect("startup control");
+
+    let (tx_send, rx_send) = std::sync::mpsc::channel();
+    let req = session_request("attempt-claude-confirm", &workspace);
+    let worker_handle = std::thread::spawn(move || {
+        let res = worker.create_session("attempt-claude-confirm", &req);
+        let _ = tx_send.send(res);
+        worker
+    });
+
+    // 1. Wait until initialize is reached and handle is published to control
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        if control.has_child_handle() {
+            break;
+        }
+    }
+    assert!(control.has_child_handle(), "child process handle must be published to StartupControl on Windows");
+
+    // 2. Request cancel while stalled in initialize before prompt dispatch
+    let cancel_res = control.request_cancel(None);
+    assert_eq!(cancel_res, Ok(true), "cancellation must be accepted pre-dispatch");
+
+    // 3. The create_session thread returns with connection cancelled error
+    let send_res = rx_send.recv_timeout(Duration::from_secs(10)).expect("create_session must return");
+    assert!(send_res.is_err(), "create_session must fail on cancel: {send_res:?}");
+    let err_str = format!("{send_res:?}");
+    assert!(err_str.contains("native start was cancelled before prompt dispatch"), "error must state pre-dispatch cancel: {err_str}");
+
+    let returned_worker = worker_handle.join().expect("join worker thread");
+    manager.return_attempts(&["attempt-claude-confirm".into()], returned_worker).expect("return attempts");
+
+    // 4. wait_finished must observe the child process exit and return true
+    let confirmed = control.wait_finished(Duration::from_secs(5));
+    assert!(confirmed, "StartupControl::wait_finished must observe owned child exit on Windows");
+
+    // 5. Registration remains held and another start into the attempt is refused
+    let req2 = session_request("attempt-claude-confirm", &workspace);
+    let second_res = manager.create_session("attempt-claude-confirm", &req2);
+    assert!(second_res.is_err(), "second start into cancelled attempt must be refused");
+}
+
+fn public_claude_server(name: &str, nonce: &str) -> (PathBuf, Store, Arc<CoreServer>, String, String) {
+    public_claude_server_with_scenario(name, nonce, "stall_initialize")
+}
+
+fn public_claude_server_with_scenario(
+    name: &str,
+    nonce: &str,
+    scenario: &str,
+) -> (PathBuf, Store, Arc<CoreServer>, String, String) {
+    let workspace = fixture_workspace(name, scenario);
+    let store = Store::memory().expect("in-memory store");
+    store
+        .insert_project(&Project {
+            id: "project-claude-fixture".into(),
+            workspace_root: workspace.to_string_lossy().into_owned(),
+        })
+        .expect("project");
+    seed_core_epoch(&store, &workspace, nonce);
+    let server = Arc::new(CoreServer::new(store.clone()));
+    let (campaign_id, task_id) = create_campaign_fixture(&server, &format!("{name}-campaign"), &workspace, name);
+    (workspace, store, server, campaign_id, task_id)
+}
+
+fn spawn_stalling_select(
+    server: Arc<CoreServer>,
+    campaign_id: String,
+    task_id: String,
+    attempt_id: &'static str,
+) -> mpsc::Receiver<Value> {
+    let executable = fake_cli().to_string_lossy().into_owned();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let response = call(
+            &server,
+            "claude-public-select",
+            "select_runtime",
+            json!({
+                "campaignId": campaign_id,
+                "taskId": task_id,
+                "provider": "claude",
+                "executable": executable,
+                "attemptId": attempt_id,
+            }),
+        );
+        let _ = tx.send(response);
+    });
+    rx
+}
+
+fn await_initialize_stall(workspace: &Path, select: &mpsc::Receiver<Value>) {
+    let marker = workspace.join(".fake-claude-initialize-stalled");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "public select never reached a stalled Claude initialize"
+        );
+        assert!(
+            select.try_recv().is_err(),
+            "select_runtime returned before initialize stalled"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        select.try_recv().is_err(),
+        "select_runtime returned while initialize was still stalled"
+    );
+}
+
+/// Public `safe_stop` while fake Claude is still inside initialize.
+///
+/// The receipt can show root-handle confirmation. It does not carry domain
+/// membership or the Incomplete hold, so this test must not treat a confirmed
+/// receipt as proof that the job ended or the hold was set.
+#[test]
+fn claude_public_stop_overlaps_stalled_initialize() {
+    let (workspace, store, server, campaign_id, task_id) =
+        public_claude_server("claude-public-stall-stop", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeec0c1");
+    let attempt_id = "attempt-claude-public-stall";
+    let select = spawn_stalling_select(Arc::clone(&server), campaign_id, task_id.clone(), attempt_id);
+    await_initialize_stall(&workspace, &select);
+
+    let mut stopped = call(
+        &server,
+        "claude-public-stop",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    let mut cancel = stopped["payload"]["receipt"]["startupCancel"].clone();
+    let confirm_by = Instant::now() + Duration::from_secs(8);
+    let mut retry = 0;
+    while cancel == "pending" && Instant::now() < confirm_by {
+        thread::sleep(Duration::from_millis(50));
+        retry += 1;
+        stopped = call(
+            &server,
+            &format!("claude-public-stop-{retry}"),
+            "safe_stop",
+            json!({"attemptId": attempt_id}),
+        );
+        cancel = stopped["payload"]["receipt"]["startupCancel"].clone();
+    }
+    assert_eq!(cancel, "confirmed", "{stopped}");
+    assert_eq!(stopped["payload"]["receipt"]["nativePromptSent"], false, "{stopped}");
+    assert_eq!(stopped["payload"]["receipt"]["attemptId"], attempt_id, "{stopped}");
+
+    let selected = select.recv_timeout(Duration::from_secs(10)).expect("select_runtime should return after Stop");
+    assert_eq!(selected["ok"], false, "stalled select must not succeed after Stop: {selected}");
+    let stdin = fs::read_to_string(workspace.join(".fake-claude-stdin.jsonl")).unwrap_or_default();
+    assert!(
+        !stdin.contains("\"type\":\"user\"") && !stdin.contains("\"type\": \"user\""),
+        "prompt was dispatched during stalled initialize: {stdin}"
+    );
+    let kind = store
+        .latest_event_kind_in(attempt_id, &["attempt.cancelled", "attempt.start.cancelled"])
+        .expect("event lookup");
+    assert!(kind.is_some(), "confirmed public Stop did not persist a cancellation event");
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(attempts.len(), 1, "public Stop itself created a successor: {attempts:?}");
+    assert_eq!(attempts[0].state, goalport_core::AttemptState::Cancelled);
+}
+
+/// A Stop before any Claude handle exists must not be recorded as confirmed
+/// and must not create a successor attempt.
+#[test]
+fn claude_public_cancel_before_handle_does_not_confirm() {
+    let (workspace, store, server, campaign_id, task_id) =
+        public_claude_server("claude-public-before-handle", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeec0c2");
+    let attempt_id = "attempt-claude-public-pending";
+    assert!(store.attempts_for_task(&task_id).expect("attempts").is_empty());
+
+    let early = call(
+        &server,
+        "claude-public-too-early",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_ne!(early["payload"]["receipt"]["startupCancel"], "confirmed", "{early}");
+    assert!(
+        store.attempts_for_task(&task_id).expect("attempts").is_empty(),
+        "Stop before a handle created an attempt"
+    );
+    assert!(
+        store
+            .latest_event_kind_in(attempt_id, &["attempt.cancelled", "attempt.start.cancelled"])
+            .expect("event lookup")
+            .is_none(),
+        "Stop before a handle persisted a confirmed cancellation"
+    );
+
+    let select = spawn_stalling_select(Arc::clone(&server), campaign_id, task_id, attempt_id);
+    await_initialize_stall(&workspace, &select);
+    // The later Stop is only here so the stalled select returns. Its receipt
+    // is not the pending-path claim.
+    let _ = call(
+        &server,
+        "claude-public-pending-cleanup",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    let _ = select.recv_timeout(Duration::from_secs(10));
+}
+
+fn confirm_public_stall_stop(
+    server: &CoreServer,
+    workspace: &Path,
+    select: mpsc::Receiver<Value>,
+    attempt_id: &str,
+) -> Value {
+    await_initialize_stall(workspace, &select);
+    let mut stopped = call(
+        server,
+        "claude-public-follow-stop",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    let mut cancel = stopped["payload"]["receipt"]["startupCancel"].clone();
+    let confirm_by = Instant::now() + Duration::from_secs(8);
+    let mut retry = 0;
+    while cancel == "pending" && Instant::now() < confirm_by {
+        thread::sleep(Duration::from_millis(50));
+        retry += 1;
+        stopped = call(
+            server,
+            &format!("claude-public-follow-stop-{retry}"),
+            "safe_stop",
+            json!({"attemptId": attempt_id}),
+        );
+        cancel = stopped["payload"]["receipt"]["startupCancel"].clone();
+    }
+    assert_eq!(cancel, "confirmed", "{stopped}");
+    let selected = select
+        .recv_timeout(Duration::from_secs(10))
+        .expect("select should return after Stop");
+    assert_eq!(selected["ok"], false, "{selected}");
+    stopped
+}
+
+/// After a confirmed startup Stop, the same goal stays stopped rather than
+/// completed, Resume is refused, and an explicit Send uses the existing
+/// confirmed-stop successor.
+#[test]
+fn claude_public_confirmed_stop_send_uses_successor() {
+    let (workspace, store, server, campaign_id, task_id) =
+        public_claude_server("claude-public-successor", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeec0c3");
+    let attempt_id = "attempt-claude-public-successor";
+    let select = spawn_stalling_select(Arc::clone(&server), campaign_id.clone(), task_id.clone(), attempt_id);
+    let stopped = confirm_public_stall_stop(&server, &workspace, select, attempt_id);
+    let turn = &stopped["payload"]["snapshot"]["productConversation"]["turn"];
+    assert_eq!(
+        stopped["payload"]["snapshot"]["attempt"]["id"],
+        attempt_id,
+        "confirmed Stop left the goal unselected: {stopped}"
+    );
+    assert_eq!(turn["state"], "stopped", "cancelled startup was not shown as stopped: {stopped}");
+    assert_eq!(turn["canSend"], true, "confirmed Stop did not leave a way to continue: {stopped}");
+    assert_ne!(turn["state"], "completed", "cancelled startup was called finished: {stopped}");
+    let items = stopped["payload"]["snapshot"]["productConversation"]["items"].to_string();
+    assert!(
+        !items.contains("could not start") && !items.contains("could not be started"),
+        "a user Stop was shown as a failed start: {items}"
+    );
+
+    let resume = call(
+        &server,
+        "claude-public-resume-cancelled",
+        "resume_native_session",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(resume["ok"], false, "Resume of a cancelled startup must be refused: {resume}");
+
+    fs::write(workspace.join(".fake-claude-scenario"), "end_turn").expect("release the next start");
+    let sent = call(
+        &server,
+        "claude-public-next-send",
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "Continue after the cancelled start"
+        }),
+    );
+    assert_eq!(sent["ok"], true, "explicit Send after confirmed startup Stop was refused: {sent}");
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(attempts.len(), 2, "confirmed Stop did not admit one successor: {attempts:?}");
+    assert!(attempts.iter().any(|attempt| attempt.id == attempt_id && attempt.state == goalport_core::AttemptState::Cancelled));
+    assert!(attempts.iter().any(|attempt| attempt.id != attempt_id && attempt.state != goalport_core::AttemptState::Cancelled));
+}
+
+/// A public Stop during a stalled startup, with a grandchild holding the worker's
+/// stdout pipe past `TerminateProcess`. On the Claude path the cancel gate ends the
+/// startup before the Stop's bounded waits expire, so the receipt is confirmed and
+/// the admission branch's startup-completion settle — not the Stop's own record
+/// path — is what persists the cancellation.
+#[test]
+fn claude_public_startup_stop_settles_attempt_on_cancelled_startup_end() {
+    let (workspace, store, server, campaign_id, task_id) = public_claude_server_with_scenario(
+        "claude-public-pending-settle",
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeec0c4",
+        "stall_initialize_pipe_holder",
+    );
+    let attempt_id = "attempt-claude-public-pending-settle";
+    let select = spawn_stalling_select(
+        Arc::clone(&server),
+        campaign_id.clone(),
+        task_id.clone(),
+        attempt_id,
+    );
+    await_initialize_stall(&workspace, &select);
+
+    let stopped = call(
+        &server,
+        "claude-public-pending-stop",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(
+        stopped["payload"]["receipt"]["startupCancel"], "confirmed",
+        "the cancelled startup must end inside the Stop's waits: {stopped}"
+    );
+    assert_eq!(stopped["payload"]["receipt"]["attemptId"], attempt_id, "{stopped}");
+    assert_eq!(
+        stopped["payload"]["receipt"]["nativePromptSent"], false,
+        "a startup Stop must claim no prompt was sent: {stopped}"
+    );
+    assert_eq!(
+        store.get_attempt(attempt_id).expect("attempt").state,
+        goalport_core::AttemptState::Cancelled,
+        "the cancelled startup was not settled: {stopped}"
+    );
+    let settled_end = store.list_event_records(attempt_id, 0).expect("events");
+    assert!(
+        !settled_end
+            .iter()
+            .any(|record| record.event.kind == "attempt.start.cancel.requested"),
+        "a receipt-confirmed Stop must not leave a pending request behind: {settled_end:?}"
+    );
+    let settled_cancellations: Vec<_> = settled_end
+        .iter()
+        .filter(|record| record.event.kind == "attempt.cancelled")
+        .collect();
+    assert_eq!(
+        settled_cancellations.len(),
+        1,
+        "the cancelled startup must be settled exactly once: {settled_end:?}"
+    );
+    let settle_payload = settled_cancellations[0]
+        .payload
+        .as_ref()
+        .expect("cancellation payload");
+    assert_eq!(settle_payload["confirmed"], json!(true), "{settle_payload}");
+    assert_eq!(settle_payload["nativePromptSent"], json!(false), "{settle_payload}");
+    assert_eq!(
+        settle_payload["settledOn"],
+        json!("startup-completion"),
+        "the Stop's own record path wrote the cancellation instead of the startup-completion settle: {settle_payload}"
+    );
+    let start_cancelled = settled_end
+        .iter()
+        .find(|record| record.event.kind == "attempt.start.cancelled")
+        .expect("the settle must record the start cancellation");
+    assert_eq!(
+        start_cancelled.payload.as_ref().expect("start cancellation payload")["settledOn"],
+        json!("startup-completion"),
+        "the Stop's own record path wrote the start cancellation: {start_cancelled:?}"
+    );
+
+    // Release the pipe holder so the fixture cannot outlive the test, and prove
+    // the start itself returned cancelled rather than dispatched.
+    fs::write(
+        workspace.join(".fake-claude-release-pipe-holder"),
+        "released\n",
+    )
+    .expect("release the pipe holder");
+    let selected = select
+        .recv_timeout(Duration::from_secs(30))
+        .expect("select_runtime should return once the startup ends");
+    assert_eq!(
+        selected["ok"], false,
+        "a startup the user cancelled must not succeed: {selected}"
+    );
+
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the Stop or the settle created a successor: {attempts:?}"
+    );
+    let settled_snapshot = snapshot_of(&call(
+        &server,
+        "claude-public-pending-snapshot",
+        "snapshot",
+        json!({}),
+    ));
+    let items = settled_snapshot["productConversation"]["items"].to_string();
+    assert!(
+        !items.contains("could not start") && !items.contains("could not be started"),
+        "a user Stop was shown as a failed start: {items}"
+    );
+
+    // A second Stop has no startup to cancel. It must not create an attempt and
+    // must not turn the settled goal into a parked hold.
+    let again = call(
+        &server,
+        "claude-public-pending-stop-again",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(
+        store.attempts_for_task(&task_id).expect("attempts").len(),
+        1,
+        "the second Stop created an attempt: {again}"
+    );
+    assert_eq!(
+        store.get_attempt(attempt_id).expect("attempt").state,
+        goalport_core::AttemptState::Cancelled,
+        "the second Stop changed the settled attempt: {again}"
+    );
+    let after_second = snapshot_of(&call(
+        &server,
+        "claude-public-pending-second-snapshot",
+        "snapshot",
+        json!({}),
+    ));
+    assert_eq!(
+        after_second["productConversation"]["turn"]["state"], "stopped",
+        "the second Stop parked the settled goal: {after_second}"
+    );
+    assert_eq!(
+        after_second["productConversation"]["turn"]["canSend"], true,
+        "the second Stop left no way to continue: {after_second}"
+    );
+
+    fs::write(workspace.join(".fake-claude-scenario"), "end_turn").expect("release the next start");
+    let sent = call(
+        &server,
+        "claude-public-pending-next-send",
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "Continue after the settled startup Stop"
+        }),
+    );
+    assert_eq!(
+        sent["ok"], true,
+        "explicit Send after the settled startup Stop was refused: {sent}"
+    );
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "the settled Stop did not admit exactly one successor: {attempts:?}"
+    );
+    assert_eq!(
+        attempts
+            .iter()
+            .filter(|attempt| attempt.state != goalport_core::AttemptState::Cancelled)
+            .count(),
+        1,
+        "the settled Stop must leave exactly one live successor: {attempts:?}"
+    );
 }
 
 #[test]

@@ -18,6 +18,8 @@ export interface CoordinationStatusProps {
   executionHarness?: string | null;
   auditHarness?: string | null;
   verdict: CoordinationVerdict | null;
+  /** Presentation only: a background Stop with a proven settled outcome. */
+  stoppedOutcome?: boolean;
   stopReason: string;
   planningQuota: CoordinationQuotaWord | null;
   reviewQuota: CoordinationQuotaWord | null;
@@ -58,6 +60,8 @@ export interface CoordinationStatusProps {
   /** Harness access management, reachable only on the current round. */
   onChangeAccess?: () => void;
   onStopAllowing?: () => void;
+  /** Inside the returned goal: the goal is already the title, so skip the ledger. */
+  plain?: boolean;
 }
 
 /** The one Stop-allowing caption: what stopping ends, and what it honestly does not claim. */
@@ -219,6 +223,8 @@ export function CoordinationStatus({
   onAllowMoreTurns,
   onChangeAccess,
   onStopAllowing,
+  plain = false,
+  stoppedOutcome = false,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
   // An assigned writer alone is not evidence it launched: the read-budget
@@ -228,7 +234,7 @@ export function CoordinationStatus({
   return (
     <section className="coordination-status" aria-label="Plan and check">
       <dl className="coordination-outcome">
-        <dt>Outcome</dt><dd>{outcomeLabel(verdict)}</dd>
+        <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
       </dl>
       {feedbackHistory && feedbackHistory.length > 0 ? (
@@ -283,6 +289,19 @@ export function CoordinationStatus({
           <button type="button" onClick={onRevise}>Revise</button>
         </div>
       ) : null}
+      {plain && planText?.trim() ? (
+        <article className="coordination-result">
+          <h3>Plan{planningHarness ? ` — ${planningHarness}` : ""}</h3>
+          <p>{planText}</p>
+        </article>
+      ) : null}
+      {plain && reviewText?.trim() ? (
+        <article className="coordination-result">
+          <h3>Check{reviewHarness ? ` — ${reviewHarness}` : ""}</h3>
+          <p>{reviewText}</p>
+        </article>
+      ) : null}
+      {plain ? null : (
       <dl>
         <dt>Goal</dt>
         <dd>{fact(goal ?? null)}</dd>
@@ -305,6 +324,7 @@ export function CoordinationStatus({
         <dt>Check</dt>
         <dd>{fact(reviewText)}</dd>
       </dl>
+      )}
       {scopeExhausted ? (
         <div className="coordination-budget" role="status">
           {/* The Stop reason above already says the sentence; this block only
@@ -378,7 +398,7 @@ export interface CoordinationProgressProps {
 export function CoordinationProgress({ failures, activity, repair, planRevision, remaining, maxTurns, writeRemaining, maxWriteTurns, onStopAllowing }: CoordinationProgressProps) {
   return (
     <section className="coordination-status coordination-progress" aria-label="Round in progress" aria-live="polite">
-      <p>You sent a goal without picking a runtime. The harnesses you allowed are working on it now.</p>
+      <p>Working on this goal.</p>
       {planRevision ? (
         <p className="coordination-progress-repair">
           The first check rejected the plan, so one revised plan is now being written and checked
@@ -416,16 +436,19 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 }
 
 /** The user returns to the SAME live job, not a draft or saved permission. */
-export function BackgroundCoordinationStatus({ job, onStopAllowing }: { job: BackgroundStatus; onStopAllowing: () => void }) {
+export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void }) {
   const report = job.outcome?.report ?? job.progress?.firstRound;
   // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
   // > live/finished. A stopped job that has settled must say so — the user
   // pressing Stop wants to know it finished stopping, not that a turn "may"
   // still run (that copy is only true while a revocation is still in flight).
-  const settled = job.state === "completed" || job.state === "failed" || job.state === "stopped";
+  const stoppedOutcome = job.state === "stopped" && job.outcome?.status === "stopped"
+    && !job.live && !job.active && !job.pendingCommand;
+  const settled = (job.state === "completed" || job.state === "failed" || stoppedOutcome)
+    && !!job.outcome && !job.live && !job.active && !job.pendingCommand;
   const sentence = job.state === "unconfirmed"
     ? "Progress unavailable or interrupted; the outcome is unconfirmed. GoalPort did not restart this job and will not replay it."
-    : job.state === "stopped"
+    : stoppedOutcome
       ? "This goal was stopped and has settled. Whatever completed before the stop is retained below."
       : settled
         ? "This background job finished. Its result is retained below."
@@ -437,17 +460,34 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing }: { job: Bac
     {/* Stop allowing stays reachable while the admission is active and not
         revoked, even when control is unreachable: revocation itself persists.
         The progress block below stays honestly live-gated. */}
+    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
+    {onContinue ? <div className="coordination-access">
+      <button type="button" className="button button-primary" onClick={onContinue}>
+        {job.state === "unconfirmed" || job.pendingCommand ? "Continue in a new send" : "New send for this goal"}
+      </button>
+      <span className="coordination-access-caption">
+        {job.state === "unconfirmed" || job.pendingCommand
+          ? "The interrupted turn stays unconfirmed and is not replayed. Tools from it may still be running. Nothing is sent until you press Send."
+          : "The finished job stays as it is. Nothing is sent until you press Send."}
+      </span>
+    </div> : null}
     {job.active && !job.revoked ? <div className="coordination-access">
-      <button type="button" className="button button-outline" onClick={onStopAllowing}>Stop allowing</button>
+      <button type="button" className="button button-outline" aria-label="Stop" onClick={onStopAllowing}>Stop</button>
       {job.state === "unconfirmed" ? <span className="coordination-access-caption">{STOP_ALLOWING_CAPTION}</span> : null}
     </div> : null}
     {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
-      repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={job.counters?.readTurnsLeft ?? null} maxTurns={job.readMaxTurns}
-      writeRemaining={job.counters?.writeTurnsLeft ?? null} maxWriteTurns={job.writeMaxTurns} /> : <p>Observed remaining access: {job.counters?.readTurnsLeft ?? "Unknown"} model turns{job.writeMaxTurns !== null ? `; ${job.counters?.writeTurnsLeft ?? "Unknown"} write turns` : ""}.</p>}
-    {report ? <CoordinationStatus {...report} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
+      repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={null} maxTurns={null}
+      writeRemaining={null} maxWriteTurns={null} /> : null}
+    {report ? <CoordinationStatus plain {...report} stoppedOutcome={stoppedOutcome} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
     {!report && job.completedCommands.map(command => command.facts.text ? <article className="coordination-result" key={command.commandId}><h3>Completed {command.commandId.startsWith("coordinate-plan-") ? "plan" : command.commandId.startsWith("coordinate-review-") ? "check" : command.commandId.startsWith("coordinate-execute-") ? "changes" : "verification"}</h3><p>{command.facts.text}</p></article> : null)}
     {job.outcome?.error ? <p>{job.outcome.error}</p> : null}
     <details className="technical-details"><summary>Technical details</summary><p>Job: {job.jobId}; worker: {job.workerPid ?? "unconfirmed"}</p>
       {job.pendingCommand ? <p>Unconfirmed command: {job.pendingCommand.commandId}. No replay is allowed.</p> : null}</details>
   </section>;
+}
+
+function workspaceFolder(root: string): string {
+  const trimmed = root.replace(/[\\/]+$/, "");
+  const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }

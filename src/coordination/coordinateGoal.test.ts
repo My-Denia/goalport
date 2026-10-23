@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
-import { EMPTY_SNAPSHOT } from "../types";
+import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT } from "../types";
 import { evidenceCommand, coordinateGoal, replacementCommand, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
 
 import { authorizeCoordinateWriteTurn, roleOfCommandId } from "./coordinateTurn";
@@ -610,6 +610,25 @@ describe("explicit write assembly and phase verdicts", () => {
 });
 
 // Compatibility regression only, not UI or product execution acceptance.
+it("marks only the background row current while that job is the view", () => {
+  const viewing = renderToStaticMarkup(createElement(CampaignNav, {
+    snapshot: DEMO_SNAPSHOT, collapsed: false,
+    runningJob: { goal: "Keep the helper running", stateLabel: "Running", viewing: true },
+    onSelectCampaign() {}, onSelectProject() {}, onRenameCampaign() {},
+  }));
+  expect(viewing.match(/campaign-active/g)).toHaveLength(1);
+  expect(viewing).toContain("Keep the helper running");
+  expect(viewing).not.toContain("Rename goal");
+  const parked = renderToStaticMarkup(createElement(CampaignNav, {
+    snapshot: DEMO_SNAPSHOT, collapsed: false,
+    runningJob: { goal: "Keep the helper running", stateLabel: "Running", viewing: false },
+    onSelectCampaign() {}, onSelectProject() {}, onRenameCampaign() {},
+  }));
+  expect(parked).toContain("campaign-active");
+  expect(parked).toContain("Build a durable preview");
+  expect(parked).not.toContain("Keep the helper running</strong></span><span class=\"active-arrow\"");
+});
+
 it("the approved nav type seam renders verified with the existing complete class and outcome label", () => {
   const html = renderToStaticMarkup(createElement(CampaignNav, {
     snapshot: EMPTY_SNAPSHOT, collapsed: false,

@@ -117,6 +117,23 @@ test("trusted consent IPC grants once, reads across reload and deletes on revoke
   }
 });
 
+test("retained-holds IPC is trusted, read-only, and accepts only an optional candidate, not permission input", async () => {
+  const facts = { holds: [{ jobId: "older", workspacePath: "/work/a" }], complete: true, globalBlock: false };
+  const registration = /handleTrusted\("goalport:background-held-workspaces",\s*(\(_, candidate\) => \{[\s\S]*?\n  \})\);/.exec(mainSource);
+  assert.ok(registration, "all-holds read uses the trusted main-frame boundary");
+  let reads = 0; let received;
+  const callback = vm.runInNewContext(`(${registration[1]})`, { backgroundHost: { heldWorkspaces(candidate) { reads++; received = candidate; return facts; } } });
+  assert.equal(callback(), facts); assert.equal(reads, 1);
+  assert.equal(callback({}, "/work/alias"), facts); assert.equal(received, "/work/alias");
+  for (const value of [null, {}, 42, "x".repeat(32769)]) assert.throws(() => callback({}, value), /Candidate workspace/);
+  assert.equal(reads, 2);
+  const { exposed, invocations } = loadPreload(null);
+  await exposed.goalportCore.backgroundHeldWorkspaces();
+  assert.deepEqual(invocations.at(-1), { channel: "goalport:background-held-workspaces", args: [] });
+  await exposed.goalportCore.backgroundHeldWorkspaces("/work/alias");
+  assert.deepEqual(invocations.at(-1), { channel: "goalport:background-held-workspaces", args: ["/work/alias"] });
+});
+
 test("actual app-info reports profile consent and env capability honestly", t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-consent-info-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -237,6 +254,35 @@ test("main core-command handler returns the exact guard envelope and never invok
   assert.equal(request.requestId, "same-request");
 });
 
+test("main core-command guard passes a known workspace into the background hold", () => {
+  const seen = [];
+  const backgroundHost = {
+    outstanding: (workspace) => { seen.push(workspace); return false; },
+    workspaceForCampaign: (campaignId) => campaignId === "camp-1" ? "/work/mapped" : null,
+  };
+  const invokeCore = request => ({ accepted: true, requestId: request.requestId });
+  const guardedCoreCommand = loadCoreCommandCallback(backgroundHost, invokeCore);
+  guardedCoreCommand({}, { requestId: "start", messageType: "start_conversation", payload: { workspaceRoot: "/work/same" } });
+  guardedCoreCommand({}, { requestId: "send", messageType: "conversation_send", payload: { campaignId: "camp-1" } });
+  guardedCoreCommand({}, { requestId: "unknown", messageType: "conversation_send", payload: { campaignId: "missing" } });
+  assert.deepEqual(seen, ["/work/same", "/work/mapped", undefined]);
+});
+
+test("main core-command guard resolves attempt-scoped commands to the known workspace", () => {
+  const seen = [];
+  const backgroundHost = {
+    outstanding: (workspace) => { seen.push(workspace); return false; },
+    workspaceForAttempt: (attemptId) => attemptId === "attempt-other" ? "/work/other" : null,
+  };
+  const invokeCore = request => ({ accepted: true, requestId: request.requestId });
+  const guardedCoreCommand = loadCoreCommandCallback(backgroundHost, invokeCore);
+  guardedCoreCommand({}, { requestId: "resume", messageType: "resume_native_session", payload: { attemptId: "attempt-other" } });
+  guardedCoreCommand({}, { requestId: "handoff", messageType: "handoff", payload: { oldAttemptId: "attempt-other" } });
+  guardedCoreCommand({}, { requestId: "continue", messageType: "continue_in_isolated_workspace", payload: { attemptId: "attempt-held", targetWorkspace: "/work/different" } });
+  guardedCoreCommand({}, { requestId: "missing", messageType: "resume_native_session", payload: { attemptId: "attempt-missing" } });
+  assert.deepEqual(seen, ["/work/other", "/work/other", "/work/different", undefined]);
+});
+
 test("main core-command guard invokes Core when clear and leaves guard exceptions uncoded and unrelabeled", async () => {
   let coreCalls = 0;
   const request = { requestId: "same-request", messageType: "conversation_send", payload: {} };
@@ -256,4 +302,119 @@ test("main core-command guard invokes Core when clear and leaves guard exception
   const coreError = Object.assign(new Error("Core transport failed"), { code: "transport-error" });
   const coreFailureGuard = loadCoreCommandCallback({ outstanding: () => false }, () => Promise.reject(coreError));
   await assert.rejects(coreFailureGuard({}, request), error => error === coreError && error.code === "transport-error");
+});
+
+test("uncached campaign falls back to attempt without overriding explicit or cached folders", () => {
+  const seen = [], invoked = [];
+  const guard = loadCoreCommandCallback({
+    workspaceForCampaign: id => id === "cached" ? "/work/campaign" : null,
+    workspaceForAttempt: id => id === "other" ? "/work/other" : id === "held" ? "/work/held" : null,
+    outstanding: folder => { seen.push(folder); return !folder || folder === "/work/held"; },
+  }, request => { invoked.push(request.requestId); return { accepted: true }; });
+  const send = (requestId, payload) => guard({}, { requestId, messageType: "conversation_send", payload });
+  assert.equal(send("other", { campaignId: "uncached", attemptId: "other" }).accepted, true);
+  assert.equal(send("old", { campaignId: "uncached", oldAttemptId: "other" }).accepted, true);
+  assert.equal(send("held", { campaignId: "uncached", attemptId: "held" }).rejection.code, "background-job-outstanding");
+  assert.equal(send("unknown", { campaignId: "uncached", attemptId: "unknown" }).rejection.code, "background-job-outstanding");
+  send("cached", { campaignId: "cached", attemptId: "held" });
+  send("explicit", { workspaceRoot: "/work/explicit", campaignId: "cached", attemptId: "held" });
+  send("target", { targetWorkspace: "/work/target", campaignId: "cached", attemptId: "held" });
+  assert.deepEqual(seen, ["/work/other", "/work/other", "/work/held", undefined, "/work/campaign", "/work/explicit", "/work/target"]);
+  assert.deepEqual(invoked, ["other", "old", "cached", "explicit", "target"]);
+});
+
+test("attempt-less campaign selects runtime by resolving workspace from selected campaign fallback", () => {
+  // 1. VM extraction of the real cacheAttempt and rememberCampaignWorkspaces from mainSource
+  const campaignWorkspaces = new Map();
+  const selectedCampaignWorkspaces = new Map();
+  const attemptWorkspaces = new Map();
+  let lastProjectionUnavailable = false;
+  let lastAttemptActive = false;
+  let lastAttemptId = "";
+  let lastAttemptProvider = "";
+  let lastStopResponsibilityHeld = false;
+  let lastHeldAttemptId = "";
+  let lastCampaignId = "";
+
+  const sandbox = {
+    path,
+    campaignWorkspaces,
+    selectedCampaignWorkspaces,
+    attemptWorkspaces,
+    get lastProjectionUnavailable() { return lastProjectionUnavailable; },
+    set lastProjectionUnavailable(v) { lastProjectionUnavailable = v; },
+    get lastAttemptActive() { return lastAttemptActive; },
+    set lastAttemptActive(v) { lastAttemptActive = v; },
+    get lastAttemptId() { return lastAttemptId; },
+    set lastAttemptId(v) { lastAttemptId = v; },
+    get lastAttemptProvider() { return lastAttemptProvider; },
+    set lastAttemptProvider(v) { lastAttemptProvider = v; },
+    get lastStopResponsibilityHeld() { return lastStopResponsibilityHeld; },
+    set lastStopResponsibilityHeld(v) { lastStopResponsibilityHeld = v; },
+    get lastHeldAttemptId() { return lastHeldAttemptId; },
+    set lastHeldAttemptId(v) { lastHeldAttemptId = v; },
+    get lastCampaignId() { return lastCampaignId; },
+    set lastCampaignId(v) { lastCampaignId = v; },
+  };
+
+  const rememberFn = vm.runInNewContext(`(${extractMainFunction("rememberCampaignWorkspaces")})`, sandbox);
+  const cacheFn = vm.runInNewContext(`(${extractMainFunction("cacheAttempt")})`, { ...sandbox, rememberCampaignWorkspaces: rememberFn });
+
+  // (a) Test caching from real cacheAttempt: snapshot without goalOverview populates selectedCampaignWorkspaces
+  cacheFn({
+    activeCampaignId: "camp-selected",
+    project: { workspaceRoot: "/work/selected-campaign" },
+  });
+  assert.equal(selectedCampaignWorkspaces.get("camp-selected"), path.resolve("/work/selected-campaign"));
+  assert.equal(campaignWorkspaces.has("camp-selected"), false);
+
+  // (b) goalOverview precedence over selectedCampaignWorkspaces
+  cacheFn({
+    activeCampaignId: "camp-selected",
+    project: { workspaceRoot: "/work/selected-campaign" },
+    goalOverview: {
+      goals: [{ campaignId: "camp-selected", workspaceRoot: "/work/overview-precedence" }],
+    },
+  });
+  assert.equal(campaignWorkspaces.get("camp-selected"), path.resolve("/work/overview-precedence"));
+
+  // (c) Invalid relative workspace root fails closed (not cached)
+  cacheFn({
+    activeCampaignId: "camp-relative",
+    project: { workspaceRoot: "relative/path" },
+  });
+  assert.equal(selectedCampaignWorkspaces.has("camp-relative"), false);
+
+  // 2. Real assignment line extraction from mainSource for workspaceForCampaign
+  const assignMatch = /backgroundHost\.workspaceForCampaign\s*=\s*(.+);/.exec(mainSource);
+  assert.ok(assignMatch, "backgroundHost.workspaceForCampaign assignment found in main.cjs");
+  const realWorkspaceForCampaign = vm.runInNewContext(assignMatch[1], sandbox);
+
+  // 3. Connect to loadCoreCommandCallback
+  const seen = [], invoked = [];
+  const guard = loadCoreCommandCallback({
+    workspaceForCampaign: realWorkspaceForCampaign,
+    workspaceForAttempt: () => null,
+    outstanding: folder => { seen.push(folder); return folder === undefined || folder === path.resolve("/work/held"); },
+  }, request => { invoked.push(request.requestId); return { accepted: true }; });
+
+  const select = (requestId, payload) => guard({}, { requestId, messageType: "select_runtime", payload });
+
+  // (1) Overview precedence returns overview path
+  assert.equal(realWorkspaceForCampaign("camp-selected"), path.resolve("/work/overview-precedence"));
+
+  // (2) Attempt-less campaign with only selected fallback resolves to its workspace and is admitted
+  sandbox.campaignWorkspaces.delete("camp-selected");
+  assert.equal(realWorkspaceForCampaign("camp-selected"), path.resolve("/work/selected-campaign"));
+  const resAllowed = select("req-selected", { campaignId: "camp-selected", provider: "scenario" });
+  assert.equal(resAllowed.accepted, true);
+
+  // (3) Unknown campaign fails closed: returns null -> undefined -> rejected
+  assert.equal(realWorkspaceForCampaign("camp-unknown"), null);
+  const resUnknown = select("req-unknown", { campaignId: "camp-unknown", provider: "scenario" });
+  assert.equal(resUnknown.goalportRejected, true);
+  assert.equal(resUnknown.rejection.code, "background-job-outstanding");
+
+  assert.deepEqual(seen, [path.resolve("/work/selected-campaign"), undefined]);
+  assert.deepEqual(invoked, ["req-selected"]);
 });

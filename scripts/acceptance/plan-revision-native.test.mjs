@@ -167,7 +167,7 @@ test('the plan-revision fixture keeps the flawed and revised plans distinct and 
   const before = snapshotFixture(fixture, out, 'before');
   const baseline = baselineChecks(fixture, out);
   assert.equal(baseline.exitCode, 1);
-  assert.match(baseline.stdout, /# fail 2/);
+  assert.match(baseline.stdout, /(?:#|ℹ|info) +fail 2(?![0-9])/u);
   assert.notEqual(EXECUTION_FIXTURE_FLAWED_PLAN, EXECUTION_FIXTURE_REVISED_PLAN);
   assert.match(EXECUTION_FIXTURE_FLAWED_PLAN, /positive inputs/);
   assert.match(EXECUTION_FIXTURE_REVISED_PLAN, /negative-value case/);

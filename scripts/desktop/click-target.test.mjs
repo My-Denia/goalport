@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clickPointFor } from "./click-target.mjs";
+import { clickPointFor, firstVisible } from "./click-target.mjs";
 
 function target({ rect = { x: 10, y: 20, width: 100, height: 40 }, disabled = false, hit = "self" } = {}) {
   const child = {};
@@ -16,6 +16,13 @@ function target({ rect = { x: 10, y: 20, width: 100, height: 40 }, disabled = fa
   };
   return element;
 }
+
+test("a zero-size menu clone does not hide the visible option", () => {
+  const hidden = target({ rect: { x: 0, y: 0, width: 0, height: 0 } });
+  const visible = target();
+  assert.equal(firstVisible([hidden, visible]), visible);
+  assert.equal(firstVisible([hidden]), null);
+});
 
 test("click point must hit the intended control or one of its children", () => {
   assert.deepEqual(clickPointFor(target()), { x: 60, y: 40 });

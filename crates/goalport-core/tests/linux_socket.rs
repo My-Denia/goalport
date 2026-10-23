@@ -739,20 +739,36 @@ fn linux_child_identity_is_observable_and_exit_is_distinct_from_unknown() {
         .expect("spawn local sleep fixture"));
     let pid = child.0.id();
     let observation_started = Instant::now();
-    let deadline = observation_started + Duration::from_secs(2);
+    // Exec itself can take longer than 2s on a loaded runner. A later
+    // /proc read must not be compared with an earlier observation. Disagree
+    // in the same iteration is the observer bug; agreeing that exec has not
+    // happened yet is just waiting.
+    let exec_deadline = observation_started + Duration::from_secs(8);
     let first = loop {
         let observed = observe_process(pid);
-        match observed {
-            ProcessObservation::Live(identity)
-                if std::path::Path::new(&identity.executable_path).file_name()
-                    == Some(std::ffi::OsStr::new("sleep")) => break identity,
-            observed => assert!(
-                Instant::now() < deadline,
-                "spawned sleep did not finish exec: pid={pid}, elapsed={:?}, last_observation={observed:?}, proc_exe={:?}",
-                observation_started.elapsed(),
-                std::fs::read_link(format!("/proc/{pid}/exe")),
-            ),
+        if let ProcessObservation::Live(identity) = &observed {
+            if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
+                break identity.clone();
+            }
         }
+        let proc_exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+        let proc_is_sleep = proc_exe.as_ref().ok().and_then(|path| path.file_name()).is_some_and(|name| name == "sleep");
+        if proc_is_sleep {
+            // Exec finished between or during the first observation. The next
+            // observation must not still report the pre-exec image.
+            let again = observe_process(pid);
+            if let ProcessObservation::Live(identity) = again {
+                if std::path::Path::new(&identity.executable_path).file_name() == Some(std::ffi::OsStr::new("sleep")) {
+                    break identity;
+                }
+                panic!("observe_process stayed on the pre-exec image after /proc/{pid}/exe was sleep: first={observed:?}, again={identity:?}, proc_exe={proc_exe:?}");
+            }
+        }
+        assert!(
+            Instant::now() < exec_deadline,
+            "spawned sleep did not finish exec: pid={pid}, elapsed={:?}, last_observation={observed:?}, proc_exe={proc_exe:?}",
+            observation_started.elapsed(),
+        );
         std::thread::yield_now();
     };
     assert_eq!(first.parent_pid, std::process::id());

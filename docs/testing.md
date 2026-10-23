@@ -23,6 +23,7 @@ pnpm test:unit
 pnpm test:desktop
 cargo test --locked -p goalport-core --lib
 cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch
+cargo test --locked -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker
 cargo test --locked -p goalport-core-launcher
 ```
 
@@ -30,11 +31,12 @@ cargo test --locked -p goalport-core-launcher
 | --- | --- |
 | `pnpm lint` | TypeScript project build (`tsc -b`) |
 | `pnpm test:unit` | Renderer and IPC client tests (Vitest) |
-| `pnpm test:desktop` | Packaging, launch configuration, diagnostics, owned-Core cleanup, CDP helpers, and the documentation contract (`scripts/desktop/docs-ci.test.mjs`) |
+| `pnpm test:desktop` | Packaging, launch configuration, diagnostics, owned-Core cleanup, CDP helpers, the offline driver units (`background-native`, `feedback-native`, `plan-revision-native`), and the documentation contract (`scripts/desktop/docs-ci.test.mjs`) |
 | `cargo test -p goalport-core` | Core library tests and the integration tests CI runs (`crates/goalport-core/tests/`; CI also runs selected `registration_generation` cases) |
+| `cargo test -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker` | The deterministic Core contract tranche added to the ordinary `core` job (see [deterministic coverage](#deterministic-contract-coverage)) |
 | `cargo test -p goalport-core-launcher` | Launcher behavior |
 
-`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case.
+`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case. It also pins the CI coverage contract below: the ordinary `core` whitelist must keep the deterministic tranche and its `$LASTEXITCODE` guard, must not whitelist the excluded red suites, and `test:desktop` must keep the offline driver unit files while never running a driver (the Linux `background-native.mjs` included).
 
 ## Packaged smoke tests
 
@@ -67,10 +69,33 @@ The normal run also captures a 1000-pixel-wide screenshot. It checks layout only
 | Job | Steps |
 | --- | --- |
 | `frontend` | Locked install, `pnpm lint`, `pnpm test:unit`, runtime-safety and IPC client node tests |
-| `core` | Core library and contract tests (Stop, recovery, handoff, workspace identity and more), selected registration cases, launcher tests, Tauri host tests |
-| `desktop` | `pnpm test:desktop`, a fresh Electron package build and verify, normal and synthetic packaged smoke, early-failure cleanup; failure summaries are redacted and kept for 7 days |
+| `core` | Core library and contract tests (Stop, recovery, handoff, workspace identity and more), the deterministic `goal_scope`/`grok_acp`/`ipc_lifecycle`/`claude_stop_broker` tranche, selected registration cases, launcher tests, Tauri host tests |
+| `desktop` | `pnpm test:desktop` (which includes the `background-native`, `feedback-native` and `plan-revision-native` driver units), a fresh Electron package build and verify, normal and synthetic packaged smoke, early-failure cleanup; failure summaries are redacted and kept for 7 days |
 
 A local run is not a remote CI result.
+
+## Deterministic contract coverage
+
+Ordinary CI runs only suites that pass locally with real executed tests. A red suite is never added, and no assertion inside one is skipped, filtered or relaxed to make it green. The `core` step scrubs inherited `GOALPORT_*` before the first `cargo` command and exits on the first nonzero `$LASTEXITCODE`.
+
+The Node pin matters for the JavaScript suites: several offline fixture checks compare the summary text a child `node --test` prints, and that format changed after Node 22 (`# fail 2` became `ℹ fail 2`). The checks in the ordinary-CI tranche accept both prefixes while still asserting the failure count; CI pins Node 22.19.0.
+
+| Suite | Command | Runs in | Why |
+| --- | --- | --- | --- |
+| `goal_scope` | `cargo test --locked -p goalport-core --test goal_scope` | ordinary CI (`core` job) and local | 3 hermetic tests |
+| `grok_acp` | `cargo test --locked -p goalport-core --test grok_acp` | ordinary CI (`core` job) and local | 23 hermetic tests over the offline ACP peer |
+| `ipc_lifecycle` | `cargo test --locked -p goalport-core --test ipc_lifecycle` | ordinary CI (`core` job) and local | 10 hermetic tests |
+| `claude_stop_broker` | `cargo test --locked -p goalport-core --test claude_stop_broker` | ordinary CI (`core` job) and local | 8 hermetic tests; own child cleanup |
+| `claude_stream` | `cargo test --locked -p goalport-core --test claude_stream` | opt-in local only | Excluded: one real product assertion fails (`native_stop_exact_input_and_reordered_receipt_keep_residual_held`). It is a defect to fix, not a test to weaken |
+| `admission_failure` | `cargo test --locked -p goalport-core --test admission_failure` | opt-in local only | Excluded: `m3_a_codex_registration_that_never_started_is_withdrawable` looks for an external `app-server` binary, so it is not hermetic |
+| `recovery_classification` | `cargo test --locked -p goalport-core --test recovery_classification` | opt-in local only | Excluded: four tests, then a live-server probe times out after 60 s. Not deterministic |
+| `background-native` units | `node --test scripts/acceptance/background-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 3 tests over the driver, validator and report predicates. They assert driver behavior and never parse a child `node --test` summary, so the CI Node version cannot change their result. The Linux-only driver `scripts/acceptance/background-native.mjs` is never run in CI |
+| `feedback-native` units | `node --test scripts/acceptance/feedback-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 6 tests. The fixture check accepts `#`, `ℹ` or `info` in the child summary and still asserts exactly 2 failures, so the same assertions pass on Node 22 and 25 |
+| `plan-revision-native` units | `node --test scripts/acceptance/plan-revision-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 7 tests, run in ordinary CI as part of `pnpm test:desktop`; the fixture check accepts `#`, `ℹ` or `info` runner-format text |
+| `windows-packaged-journey` and `windows-stalled-peer` units | `node --test scripts/acceptance/windows-packaged-journey.test.mjs scripts/acceptance/windows-stalled-peer.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 19 journey decision/CLI tests and 13 stalled-peer verdict/wiring tests; no package or Core is launched |
+| `execute-native` and `execution-fixture` units | `node --test scripts/acceptance/execute-native.test.mjs scripts/acceptance/lib/execution-fixture.test.mjs` | ordinary CI (`desktop` job) and local | Already accept both reporter formats (`#`, `ℹ` or `info`) in the same check |
+
+Nothing above establishes native Runtime admission, Windows IME, real CLI confinement or Stable V1. Package-building, driver and synthetic checks are separate evidence from a live or packaged journey.
 
 ## Live and historical verification
 

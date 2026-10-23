@@ -1,5 +1,5 @@
 import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
-import type { BackgroundStatus } from "./coordination/backgroundStatus";
+import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
 import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
@@ -321,8 +321,9 @@ declare global {
       }>;
       // The launch command is the audited CoordinateTurnCommand; the third
       // argument is the scope generation captured at authorize (a launch
-      // without it stays the legacy two-argument launch).
-      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number) => Promise<{
+      // without it stays the legacy two-argument launch); the fourth is the
+      // draft workspace handed to the acknowledged-job guard.
+      coordinateLaunch?: (command: CoordinateTurnCommand, generation?: string, scopeGeneration?: number, workspaceRoot?: string) => Promise<{
         text: string;
         errorText: string;
         prepared?: boolean;
@@ -339,10 +340,16 @@ declare global {
       backgroundSendConsent?: (action: "read" | "grant" | "revoke") => Promise<{ allowed: boolean; grantedAt?: string }>;
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
+      backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
       backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundReleaseTerminal?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {
         instances: string[];
         maxTurns: number;
+        // The draft workspace for the acknowledged-job guard even when no
+        // write authorization is requested.
+        workspaceRoot?: string;
         write?: { instances: string[]; maxTurns: number; workspaceRoot: string };
       }) => Promise<{ ok: boolean; generation: number; remaining: number; writeTurnsRemaining?: number; errorText?: string }>;
       coordinationScope?: () => Promise<{
@@ -487,6 +494,23 @@ class PreviewCoreClient implements CoreClient {
   async openInVsCode(): Promise<void> {
     // The browser preview cannot launch a local editor. The UI keeps this action explicit.
     return Promise.resolve();
+  }
+
+  async resumeSession(attemptId: string): Promise<CoreSnapshot> {
+    const product = this.state.productConversation;
+    if (!product || this.state.attempt.id !== attemptId) return this.state;
+    this.state = {
+      ...this.state,
+      productConversation: {
+        ...product,
+        runtime: product.runtime.provider
+          ? { ...product.runtime, state: "selected" }
+          : product.runtime,
+        session: { state: "attached", nativeIdKnown: true },
+        turn: { state: "idle", canSend: true, canStop: false, actions: ["send"] }
+      }
+    };
+    return this.state;
   }
 
   async appInfo(): Promise<AppInfo> {

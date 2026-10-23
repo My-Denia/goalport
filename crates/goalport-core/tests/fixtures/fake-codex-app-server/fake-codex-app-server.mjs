@@ -15,6 +15,16 @@
 //   thread_start_without_id  answer thread/start with {id, result: {}} (no thread id) and stay alive
 //   resume_ok                like linger; thread/resume is accepted
 //   resume_rejected          like linger; thread/resume is answered with an error
+//   stall_initialize         like linger, but the initialize request is RECORDED in
+//                            `.fake-codex-initialized.marker` and its reply is WITHHELD until a test
+//                            writes `.fake-codex-release` in the cwd (polled every 100 ms).
+//                            `.fake-codex-initialize-released.marker` is written when the withheld
+//                            reply is finally sent. The default initialize reply, every other
+//                            scenario, the 90 s watchdog and the stop-marker cleanup are unchanged.
+// Additional responsiveness cases: stall_thread_start withholds thread creation;
+// stall_initialize_partial leaves a partial JSON line before withholding;
+// disconnect_initialize exits on initialize. Per-pid turn markers prove no
+// startup prompt and distinguish the explicit recovery's different child.
 // Every scenario exits 0 after 90 s at the latest (unconditional watchdog), so no node process
 // outlives a test binary, and every scenario also ends as soon as `.fake-codex-stop.marker` appears
 // in the cwd (polled every 100 ms) so a test can end a lingering fixture without any product kill
@@ -48,6 +58,55 @@ function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
+function writeMarker(names, payload) {
+  const record = `${JSON.stringify(payload, null, 2)}\n`;
+  for (const name of names) {
+    try {
+      writeFileSync(resolve(process.cwd(), name), record);
+    } catch {
+      // markers are diagnostic; the protocol behaviour is what matters
+    }
+  }
+}
+
+// stall_initialize: record that initialize arrived, then withhold its (otherwise unchanged) reply
+// until the test writes the release marker. Returns true when the caller must not answer now.
+function withholdInitialize(message) {
+  writeMarker(
+    [".fake-codex-initialized.marker", `.fake-codex-initialized.${process.pid}.marker`],
+    {
+      kind: "initialize.received",
+      requestId: message.id,
+      pid: process.pid,
+      cwd: process.cwd(),
+      scenario,
+      elapsedMs: Date.now() - startedAt,
+      released: false,
+    },
+  );
+  let releasePoll = null;
+  const reply = () => {
+    if (!existsSync(resolve(process.cwd(), ".fake-codex-release"))) {
+      return;
+    }
+    if (releasePoll !== null) clearInterval(releasePoll);
+    writeMarker(
+      [".fake-codex-initialize-released.marker", `.fake-codex-initialize-released.${process.pid}.marker`],
+      {
+        kind: "initialize.released",
+        requestId: message.id,
+        pid: process.pid,
+        elapsedMs: Date.now() - startedAt,
+      },
+    );
+    // The default initialize reply, exactly as the non-stall scenarios send it.
+    send({ id: message.id, result: {} });
+  };
+  releasePoll = setInterval(reply, 100);
+  reply();
+  return true;
+}
+
 function exitNow(reason) {
   const marker = `${JSON.stringify({ reason, pid: process.pid, elapsedMs: Date.now() - startedAt })}\n`;
   try {
@@ -78,10 +137,16 @@ reader.on("line", (line) => {
     return;
   }
   if (message.method === "initialize" && message.id !== undefined) {
+    if (scenario === "disconnect_initialize") { exitNow("disconnect_initialize"); return; }
+    if (["stall_initialize", "stall_initialize_partial"].includes(scenario)) {
+      if (scenario === "stall_initialize_partial") process.stdout.write('{"id":');
+      if (withholdInitialize(message)) return;
+    }
     send({ id: message.id, result: {} });
     return;
   }
   if (message.method === "turn/start" && message.id !== undefined) {
+    writeMarker([".fake-codex-turn.marker", `.fake-codex-turn.${process.pid}.marker`], { pid: process.pid, requestId: message.id, params: message.params });
     // Increment 5 (ruling B): a turn echoes its input back as an agent message so a test can
     // prove the event-reading path after a resume delivers events tied to that input.
     const text = ((message.params && message.params.input) || [])
@@ -101,6 +166,8 @@ reader.on("line", (line) => {
     return;
   }
   if (message.method === "thread/start" && message.id !== undefined) {
+    writeMarker([".fake-codex-thread-start.marker"], { pid: process.pid, requestId: message.id });
+    if (scenario === "stall_thread_start") return;
     if (scenario === "thread_start_without_id") {
       // A response without a thread id: Core's create_session fails after the process was
       // started, and this process stays alive (until the stop marker or the watchdog).

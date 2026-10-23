@@ -456,9 +456,10 @@ const CONTINUATION_WRITER_STEPS = Object.freeze({
 });
 
 function checkCounts(command) {
-  const passed = /# pass (\d+)/u.exec(command?.stdout ?? "");
-  const failed = /# fail (\d+)/u.exec(command?.stdout ?? "");
-  return { passed: passed ? Number(passed[1]) : null, failed: failed ? Number(failed[1]) : null };
+  return {
+    passed: summaryCount(command?.stdout, "pass"),
+    failed: summaryCount(command?.stdout, "fail"),
+  };
 }
 
 /**

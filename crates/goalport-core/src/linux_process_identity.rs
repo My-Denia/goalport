@@ -124,6 +124,24 @@ fn existence_after_failure(pid: u32, cause: String) -> ProcessObservation {
 }
 
 pub(super) fn observe_process(pid: u32) -> ProcessObservation {
+    // One sample can land in the middle of exec. Retry until the executable
+    // link is stable. A single transition is not a permanent unknown identity.
+    let mut changed = None;
+    for _ in 0..8 {
+        match observe_process_once(pid) {
+            ProcessObservation::Unknown(cause) if cause.contains("changed executable") => {
+                changed = Some(cause);
+                std::thread::yield_now();
+            }
+            observation => return observation,
+        }
+    }
+    ProcessObservation::Unknown(changed.unwrap_or_else(|| {
+        format!("process {pid} changed executable while it was observed")
+    }))
+}
+
+fn observe_process_once(pid: u32) -> ProcessObservation {
     if pid == 0 {
         return ProcessObservation::Unknown("pid 0 is not observable".into());
     }
@@ -159,6 +177,19 @@ pub(super) fn observe_process(pid: u32) -> ProcessObservation {
     if second.start_ticks != first.start_ticks || second.parent_pid != first.parent_pid {
         return ProcessObservation::Unknown(format!(
             "process {pid} changed identity while it was observed"
+        ));
+    }
+    // exec keeps the same start time and parent. A path read before the hash
+    // must not be returned after the executable link has moved.
+    let executable_after = match fs::read_link(&exe_link) {
+        Ok(path) => path,
+        Err(error) => {
+            return existence_after_failure(pid, format!("{}: {error}", exe_link.display()));
+        }
+    };
+    if executable_after != executable_path {
+        return ProcessObservation::Unknown(format!(
+            "process {pid} changed executable while it was observed"
         ));
     }
     let created_ms = match created_ms(first.start_ticks) {

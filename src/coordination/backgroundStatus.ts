@@ -1,4 +1,14 @@
 import type { CoordinationView } from "./requestCoordination";
+/** Read-only presentation facts. The host/store still decides admission. */
+export interface BackgroundHeldWorkspaces {
+  holds: readonly { jobId: string; workspacePath: string }[];
+  complete: boolean;
+  globalBlock: boolean;
+  /** Present only for a candidate-bound host check; echoed without normalization. */
+  candidate?: string;
+  candidateBlocked?: boolean;
+}
+
 /** Permission-free IPC projection. Controls require a fresh acknowledged connection. */
 export interface BackgroundStatus {
   jobId: string;
@@ -9,6 +19,10 @@ export interface BackgroundStatus {
   live: boolean;
   revoked: boolean;
   workerPid: number | null;
+  /** Workspace this job was admitted against. Older projections may omit it. */
+  workspacePath?: string;
+  /** Set when the user left an interrupted job so a different send can start. */
+  acknowledgedStuckAt?: string | null;
   readMaxTurns: number;
   writeMaxTurns: number | null;
   counters: { readTurnsLeft?: number | null; writeTurnsLeft?: number | null } | null;

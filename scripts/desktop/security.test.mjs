@@ -22,8 +22,8 @@ test("every real IPC channel uses one fail-closed sender gate", () => {
   const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /ipcMain\.handle\(/);
   const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 24);
-  for (const channel of ["goalport:background-send-consent", "goalport:background-start", "goalport:background-status", "goalport:background-revoke"]) assert.ok(channels.includes(channel));
+  assert.equal(channels.length, 27);
+  for (const channel of ["goalport:background-send-consent", "goalport:background-start", "goalport:background-status", "goalport:background-revoke", "goalport:background-acknowledge", "goalport:background-release-terminal", "goalport:background-held-workspaces"]) assert.ok(channels.includes(channel));
   for (const channel of channels) {
     const f = fixture(); let calls = 0;
     f.handle(channel, () => ++calls);
@@ -197,4 +197,85 @@ test("trusted preload forwards read-only and explicit-write requests on the same
     assert.equal(calls.at(-1)[1], payload);
     assert.equal(calls.at(-1).length, 2);
   }
+});
+
+test("coordination launch, authorize and save hand the draft workspace to the outstanding-job guard", async () => {
+  const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
+  const slice = (fromChannel, toChannel) => {
+    const start = source.indexOf(`  handleTrusted("${fromChannel}"`);
+    const end = source.indexOf(`  handleTrusted("${toChannel}"`, start);
+    assert.ok(start > 0 && end > start, `${fromChannel} handler block exists in main.cjs`);
+    return source.slice(start, end);
+  };
+  const f = fixture();
+  const guarded = [];
+  let guardHold = null;
+  const refuseCompetingCoordination = (workspaceRoot) => {
+    guarded.push(workspaceRoot);
+    if (guardHold) guardHold(workspaceRoot);
+  };
+  const coordinationScope = { current: () => null };
+  let authorizeCalls = 0;
+  let launchCalls = 0;
+  let saveCalls = 0;
+  const shared = {
+    handleTrusted: f.handle,
+    coordinationScope,
+    coordinationRuntime: () => ({ stateDir: "/injected/state" }),
+    refuseCompetingCoordination,
+  };
+  vm.runInNewContext(slice("goalport:coordinate-launch", "goalport:coordinate-cancel"), {
+    ...shared,
+    process: { env: {} },
+    launchOne: (...args) => { launchCalls += 1; return { launched: true, args }; },
+    backgroundSendConsent: () => ({ allowed: false }),
+  });
+  vm.runInNewContext(slice("goalport:coordination-authorize", "goalport:coordination-scope"), {
+    ...shared,
+    authorizeCoordination: (...args) => { authorizeCalls += 1; return { ok: true, args }; },
+    discoverCliProviders: async () => ({ ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] }),
+  });
+  vm.runInNewContext(slice("goalport:coordination-save", "goalport:coordination-unblock"), {
+    ...shared,
+    saveRecord: (...args) => { saveCalls += 1; return { saved: true, args }; },
+    coordinationDirectory: () => "/injected/profile",
+  });
+  const launch = f.handlers.get("goalport:coordinate-launch");
+  const authorize = f.handlers.get("goalport:coordination-authorize");
+  const save = f.handlers.get("goalport:coordination-save");
+
+  const command = { type: "goalport.coordinateTurn", commandId: "coordinate-plan-fixture" };
+  await launch(f.event, command, "generation-1", 7, "/work/draft-goal");
+  assert.deepEqual(guarded, ["/work/draft-goal"]);
+  assert.equal(launchCalls, 1);
+  // A launch without the draft workspace keeps the legacy shape; the guard is
+  // still consulted first, with no workspace (the guard fails closed).
+  await launch(f.event, command, "generation-1");
+  assert.deepEqual(guarded, ["/work/draft-goal", undefined]);
+  assert.equal(launchCalls, 2);
+
+  await authorize(f.event, { instances: ["codex"], maxTurns: 4, workspaceRoot: "/work/draft-goal" });
+  assert.deepEqual(guarded.at(-1), "/work/draft-goal");
+  assert.equal(authorizeCalls, 1);
+  // Read-only authorize payloads without the draft field keep the write
+  // binding as their workspace fact; with neither, the guard sees none.
+  await authorize(f.event, { instances: ["codex"], maxTurns: 4, write: { instances: ["codex"], maxTurns: 2, workspaceRoot: "/work/draft-goal" } });
+  assert.deepEqual(guarded.at(-1), "/work/draft-goal");
+  assert.equal(authorizeCalls, 2);
+  await authorize(f.event, { instances: ["codex"], maxTurns: 4 });
+  assert.deepEqual(guarded.at(-1), undefined);
+  assert.equal(authorizeCalls, 3);
+
+  await save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" });
+  assert.deepEqual(guarded.at(-1), "/work/draft-goal");
+  assert.equal(saveCalls, 1);
+
+  // A raised guard refuses BEFORE any authorization, launch or save happens.
+  guardHold = () => { throw new Error("background-job-outstanding"); };
+  assert.throws(() => launch(f.event, command, "generation-1", 7, "/work/draft-goal"), /background-job-outstanding/);
+  assert.throws(() => authorize(f.event, { instances: ["codex"], maxTurns: 4, workspaceRoot: "/work/draft-goal" }), /background-job-outstanding/);
+  assert.throws(() => save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" }), /background-job-outstanding/);
+  assert.equal(launchCalls, 2);
+  assert.equal(authorizeCalls, 3);
+  assert.equal(saveCalls, 1);
 });
