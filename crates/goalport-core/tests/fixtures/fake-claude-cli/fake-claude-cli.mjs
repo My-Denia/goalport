@@ -755,7 +755,9 @@ rl.on("line", (line) => {
     if (obj.type === "control_request" && obj.request?.subtype === "initialize") {
       initializeSeen = true;
       if (scenario === "stall_initialize") {
-        // Stalls on initialize request, simulating cold startup before prompt dispatch
+        // Stalls on initialize request, simulating cold startup before prompt dispatch.
+        // The marker lets a public-entry test prove Stop overlapped this stall.
+        writeFileSync(resolve(process.cwd(), ".fake-claude-initialize-stalled"), "stalled\n");
         return;
       }
       send({

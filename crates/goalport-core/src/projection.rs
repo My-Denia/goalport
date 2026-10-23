@@ -896,6 +896,9 @@ impl UiController {
                 None,
             )?;
         }
+        if confirmed {
+            self.show_confirmed_startup_cancel(attempt_id);
+        }
         Ok(UiCommandResult {
             request_id: request.request_id.clone(),
             duplicate,
@@ -908,6 +911,38 @@ impl UiController {
                 "detail": detail,
             })),
         })
+    }
+
+    /// Keep the stopped goal on screen. A confirmed startup Stop is not an
+    /// unselected failure, and the existing continue path needs a provider
+    /// preference so Send stays available.
+    fn show_confirmed_startup_cancel(&mut self, attempt_id: &str) {
+        let Ok(attempt) = self.store.get_attempt(attempt_id) else {
+            return;
+        };
+        let Ok(task) = self.store.get_task(&attempt.task_id) else {
+            return;
+        };
+        // Do not pull the screen back if the user already moved to another goal.
+        let other_campaign = self
+            .selected_campaign_id
+            .as_deref()
+            .is_some_and(|id| id != task.campaign_id);
+        let other_attempt = self.selected_attempt_id.as_deref().is_some_and(|id| {
+            id != attempt_id && id != UNASSIGNED_ATTEMPT_ID
+        });
+        if other_campaign || other_attempt {
+            return;
+        }
+        let _ = self
+            .store
+            .set_conversation_provider(&task.campaign_id, &attempt.provider);
+        if let Ok(Some(project_id)) = self.store.campaign_project(&task.campaign_id) {
+            self.selected_project_id = project_id;
+        }
+        self.selected_campaign_id = Some(task.campaign_id);
+        self.selected_task_id = Some(task.id);
+        self.selected_attempt_id = Some(attempt.id);
     }
 
     pub(crate) fn fork_native_worker(
@@ -3245,6 +3280,13 @@ impl UiController {
             workspace,
             &identity.provider,
         ) {
+            // A user Stop during startup is not a failed admission. The Stop
+            // path records the cancellation and shows the goal as stopped.
+            if self.runtime_manager.startup_cancel_requested()
+                && error.contains("cancelled before prompt dispatch")
+            {
+                return Err(error);
+            }
             return Err(self.record_admission_failure(
                 &attempt_id,
                 &provider,

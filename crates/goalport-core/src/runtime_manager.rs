@@ -806,6 +806,14 @@ impl RuntimeManager {
         self.busy_attempts.get(attempt_id).cloned()
     }
 
+    /// True when this worker's startup was cancelled before prompt dispatch.
+    /// Admission must not record that as a Runtime that failed to start.
+    pub(crate) fn startup_cancel_requested(&self) -> bool {
+        self.startup_control
+            .as_ref()
+            .is_some_and(|control| control.cancelled())
+    }
+
     /// Lend exactly the named Runtime registrations to one connection worker.
     /// Check the whole set before moving any process: handoff needs its source
     /// and newly minted target protected as one operation.
