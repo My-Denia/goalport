@@ -393,9 +393,17 @@ fn stalled_case(scenario: &str, marker: &str) {
     }
     assert_eq!(cancel, "confirmed", "{stopped}");
     assert_eq!(stopped["payload"]["receipt"]["nativePromptSent"], false);
-    assert_eq!(
-        start.recv_timeout(Duration::from_secs(2)).unwrap().expect("start wire failed")["ok"],
-        false
+    let start_response = start
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .expect("start wire failed");
+    assert_eq!(start_response["ok"], false, "{start_response}");
+    assert!(
+        start_response["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cancelled before prompt dispatch"),
+        "a user Stop during startup must not be reported as a startup failure: {start_response}"
     );
     assert!(!h.workspace.join(".fake-codex-release").exists());
     assert!(
@@ -461,9 +469,17 @@ fn stop_before_binding_is_not_registered_as_effective_cancellation() {
         actual["payload"]["receipt"]["startupCancel"], "confirmed",
         "{actual}"
     );
-    assert_eq!(
-        start.recv_timeout(Duration::from_secs(2)).unwrap().expect("start wire failed")["ok"],
-        false
+    let start_response = start
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .expect("start wire failed");
+    assert_eq!(start_response["ok"], false, "{start_response}");
+    assert!(
+        start_response["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cancelled before prompt dispatch"),
+        "a user Stop during startup must not be reported as a startup failure: {start_response}"
     );
 }
 #[test]

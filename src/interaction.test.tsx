@@ -3407,6 +3407,34 @@ describe("one in-window repair", () => {
       expect(row.textContent).toContain("Stopped");
       expect(row.textContent).not.toContain("Running");
     });
+    it("labels a revoked but unconfirmed job Interrupted in the sidebar, never Stopped", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, live: false, state: "unconfirmed" as const, revoked: true });
+      render(<App />);
+      const row = await screen.findByRole("button", { name: /One independent goal/ });
+      expect(row.textContent).toContain("Interrupted");
+      expect(row.textContent).not.toContain("Stopped");
+    });
+    it("a narrow-window goal entry closes the drawer so the backdrop cannot cover Stop", async () => {
+      const previousWidth = window.innerWidth;
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 800 });
+      try {
+        scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+        window.goalportCore!.backgroundStatus = async () => ({ ...liveJob });
+        render(<App />);
+        await screen.findByRole("region", { name: "Background goal" });
+        // The initial narrow drawer is collapsed; open it so the backdrop is
+        // present exactly as it is for a user who opened the navigation.
+        fireEvent.click(screen.getByRole("button", { name: /expand navigation/i }));
+        await waitFor(() => expect(document.querySelector(".mobile-nav-backdrop")).not.toBeNull());
+        fireEvent.click(screen.getByRole("button", { name: /One independent goal/ }));
+        await waitFor(() => expect(document.querySelector(".mobile-nav-backdrop")).toBeNull());
+        expect(document.querySelector(".workspace-grid")?.classList.contains("nav-collapsed")).toBe(true);
+        expect(await screen.findByRole("button", { name: "Stop" })).toBeTruthy();
+      } finally {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
+      }
+    });
     it("shows one draft refusal, and keeps its technical detail on the background view", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundStart = async () => { throw new Error("the reply never arrived"); };

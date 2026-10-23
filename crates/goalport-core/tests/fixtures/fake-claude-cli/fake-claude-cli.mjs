@@ -42,6 +42,27 @@ function spawnSleeper(pidFile) {
   }
 }
 
+// A detached grandchild that keeps the fixture's stdout pipe open after the
+// fixture itself is TerminateProcess-ed, so a reader that waits for stdout EOF
+// cannot see the startup end. It still ends on its own: the release marker
+// below, or the ref'd 90s hard timeout.
+function spawnPipeHolder() {
+  const release = resolve(process.cwd(), ".fake-claude-release-pipe-holder");
+  const script = [
+    'const fs = require("node:fs");',
+    `const release = ${JSON.stringify(release)};`,
+    'const interval = setInterval(() => { try { if (fs.existsSync(release)) process.exit(0); } catch {} }, 25);',
+    'setTimeout(() => process.exit(0), 90000);', // ref'd: guarantees the bound
+  ].join(" ");
+  const holder = spawn(process.execPath, ["-e", script], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "inherit", "ignore"],
+    detached: true,
+    windowsHide: true
+  });
+  holder.unref();
+}
+
 const scenario = scenarioName();
 const sessionHelper = helperMode();
 if (sessionHelper === "startup") {
@@ -754,9 +775,15 @@ rl.on("line", (line) => {
   persistStdin();
     if (obj.type === "control_request" && obj.request?.subtype === "initialize") {
       initializeSeen = true;
-      if (scenario === "stall_initialize") {
+      if (scenario === "stall_initialize" || scenario === "stall_initialize_pipe_holder") {
         // Stalls on initialize request, simulating cold startup before prompt dispatch.
         // The marker lets a public-entry test prove Stop overlapped this stall.
+        // The pipe-holder variant also keeps the stdout pipe open past the
+        // parent's death, for any Stop that waits on the stream instead of the
+        // startup-cancel gate.
+        if (scenario === "stall_initialize_pipe_holder") {
+          spawnPipeHolder();
+        }
         writeFileSync(resolve(process.cwd(), ".fake-claude-initialize-stalled"), "stalled\n");
         return;
       }

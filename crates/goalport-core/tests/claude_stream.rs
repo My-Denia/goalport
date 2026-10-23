@@ -1433,7 +1433,15 @@ fn claude_startup_cancel_before_dispatch_observes_owned_exit_and_confirms_stop()
 }
 
 fn public_claude_server(name: &str, nonce: &str) -> (PathBuf, Store, Arc<CoreServer>, String, String) {
-    let workspace = fixture_workspace(name, "stall_initialize");
+    public_claude_server_with_scenario(name, nonce, "stall_initialize")
+}
+
+fn public_claude_server_with_scenario(
+    name: &str,
+    nonce: &str,
+    scenario: &str,
+) -> (PathBuf, Store, Arc<CoreServer>, String, String) {
+    let workspace = fixture_workspace(name, scenario);
     let store = Store::memory().expect("in-memory store");
     store
         .insert_project(&Project {
@@ -1671,6 +1679,181 @@ fn claude_public_confirmed_stop_send_uses_successor() {
     assert_eq!(attempts.len(), 2, "confirmed Stop did not admit one successor: {attempts:?}");
     assert!(attempts.iter().any(|attempt| attempt.id == attempt_id && attempt.state == goalport_core::AttemptState::Cancelled));
     assert!(attempts.iter().any(|attempt| attempt.id != attempt_id && attempt.state != goalport_core::AttemptState::Cancelled));
+}
+
+/// A public Stop during a stalled startup, with a grandchild holding the worker's
+/// stdout pipe past `TerminateProcess`. On the Claude path the cancel gate ends the
+/// startup before the Stop's bounded waits expire, so the receipt is confirmed and
+/// the admission branch's startup-completion settle — not the Stop's own record
+/// path — is what persists the cancellation.
+#[test]
+fn claude_public_startup_stop_settles_attempt_on_cancelled_startup_end() {
+    let (workspace, store, server, campaign_id, task_id) = public_claude_server_with_scenario(
+        "claude-public-pending-settle",
+        "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeec0c4",
+        "stall_initialize_pipe_holder",
+    );
+    let attempt_id = "attempt-claude-public-pending-settle";
+    let select = spawn_stalling_select(
+        Arc::clone(&server),
+        campaign_id.clone(),
+        task_id.clone(),
+        attempt_id,
+    );
+    await_initialize_stall(&workspace, &select);
+
+    let stopped = call(
+        &server,
+        "claude-public-pending-stop",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(
+        stopped["payload"]["receipt"]["startupCancel"], "confirmed",
+        "the cancelled startup must end inside the Stop's waits: {stopped}"
+    );
+    assert_eq!(stopped["payload"]["receipt"]["attemptId"], attempt_id, "{stopped}");
+    assert_eq!(
+        stopped["payload"]["receipt"]["nativePromptSent"], false,
+        "a startup Stop must claim no prompt was sent: {stopped}"
+    );
+    assert_eq!(
+        store.get_attempt(attempt_id).expect("attempt").state,
+        goalport_core::AttemptState::Cancelled,
+        "the cancelled startup was not settled: {stopped}"
+    );
+    let settled_end = store.list_event_records(attempt_id, 0).expect("events");
+    assert!(
+        !settled_end
+            .iter()
+            .any(|record| record.event.kind == "attempt.start.cancel.requested"),
+        "a receipt-confirmed Stop must not leave a pending request behind: {settled_end:?}"
+    );
+    let settled_cancellations: Vec<_> = settled_end
+        .iter()
+        .filter(|record| record.event.kind == "attempt.cancelled")
+        .collect();
+    assert_eq!(
+        settled_cancellations.len(),
+        1,
+        "the cancelled startup must be settled exactly once: {settled_end:?}"
+    );
+    let settle_payload = settled_cancellations[0]
+        .payload
+        .as_ref()
+        .expect("cancellation payload");
+    assert_eq!(settle_payload["confirmed"], json!(true), "{settle_payload}");
+    assert_eq!(settle_payload["nativePromptSent"], json!(false), "{settle_payload}");
+    assert_eq!(
+        settle_payload["settledOn"],
+        json!("startup-completion"),
+        "the Stop's own record path wrote the cancellation instead of the startup-completion settle: {settle_payload}"
+    );
+    let start_cancelled = settled_end
+        .iter()
+        .find(|record| record.event.kind == "attempt.start.cancelled")
+        .expect("the settle must record the start cancellation");
+    assert_eq!(
+        start_cancelled.payload.as_ref().expect("start cancellation payload")["settledOn"],
+        json!("startup-completion"),
+        "the Stop's own record path wrote the start cancellation: {start_cancelled:?}"
+    );
+
+    // Release the pipe holder so the fixture cannot outlive the test, and prove
+    // the start itself returned cancelled rather than dispatched.
+    fs::write(
+        workspace.join(".fake-claude-release-pipe-holder"),
+        "released\n",
+    )
+    .expect("release the pipe holder");
+    let selected = select
+        .recv_timeout(Duration::from_secs(30))
+        .expect("select_runtime should return once the startup ends");
+    assert_eq!(
+        selected["ok"], false,
+        "a startup the user cancelled must not succeed: {selected}"
+    );
+
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the Stop or the settle created a successor: {attempts:?}"
+    );
+    let settled_snapshot = snapshot_of(&call(
+        &server,
+        "claude-public-pending-snapshot",
+        "snapshot",
+        json!({}),
+    ));
+    let items = settled_snapshot["productConversation"]["items"].to_string();
+    assert!(
+        !items.contains("could not start") && !items.contains("could not be started"),
+        "a user Stop was shown as a failed start: {items}"
+    );
+
+    // A second Stop has no startup to cancel. It must not create an attempt and
+    // must not turn the settled goal into a parked hold.
+    let again = call(
+        &server,
+        "claude-public-pending-stop-again",
+        "safe_stop",
+        json!({"attemptId": attempt_id}),
+    );
+    assert_eq!(
+        store.attempts_for_task(&task_id).expect("attempts").len(),
+        1,
+        "the second Stop created an attempt: {again}"
+    );
+    assert_eq!(
+        store.get_attempt(attempt_id).expect("attempt").state,
+        goalport_core::AttemptState::Cancelled,
+        "the second Stop changed the settled attempt: {again}"
+    );
+    let after_second = snapshot_of(&call(
+        &server,
+        "claude-public-pending-second-snapshot",
+        "snapshot",
+        json!({}),
+    ));
+    assert_eq!(
+        after_second["productConversation"]["turn"]["state"], "stopped",
+        "the second Stop parked the settled goal: {after_second}"
+    );
+    assert_eq!(
+        after_second["productConversation"]["turn"]["canSend"], true,
+        "the second Stop left no way to continue: {after_second}"
+    );
+
+    fs::write(workspace.join(".fake-claude-scenario"), "end_turn").expect("release the next start");
+    let sent = call(
+        &server,
+        "claude-public-pending-next-send",
+        "conversation_send",
+        json!({
+            "campaignId": campaign_id,
+            "attemptId": attempt_id,
+            "message": "Continue after the settled startup Stop"
+        }),
+    );
+    assert_eq!(
+        sent["ok"], true,
+        "explicit Send after the settled startup Stop was refused: {sent}"
+    );
+    let attempts = store.attempts_for_task(&task_id).expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "the settled Stop did not admit exactly one successor: {attempts:?}"
+    );
+    assert_eq!(
+        attempts
+            .iter()
+            .filter(|attempt| attempt.state != goalport_core::AttemptState::Cancelled)
+            .count(),
+        1,
+        "the settled Stop must leave exactly one live successor: {attempts:?}"
+    );
 }
 
 #[test]

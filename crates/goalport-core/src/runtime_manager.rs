@@ -378,6 +378,19 @@ impl StartupControl {
         self.phase.load(Ordering::Acquire) == STARTUP_CANCELLING
     }
 
+    /// True only for a user-requested cancel: the watchdog stores its detail
+    /// under the same `done` lock that publishes CANCELLING, so taking `done`
+    /// here never observes the phase without the reason.
+    fn user_cancelled(&self) -> bool {
+        let _done = self.done.lock().expect("startup completion poisoned");
+        self.phase.load(Ordering::Acquire) == STARTUP_CANCELLING
+            && self
+                .cancellation_detail
+                .lock()
+                .expect("startup reason poisoned")
+                .is_none()
+    }
+
     fn mark_dispatching(&self) -> Result<(), AdapterError> {
         // Pair phase changes with the watchdog condition lock: no lost wake.
         let _done = self.done.lock().expect("startup completion poisoned");
@@ -806,12 +819,14 @@ impl RuntimeManager {
         self.busy_attempts.get(attempt_id).cloned()
     }
 
-    /// True when this worker's startup was cancelled before prompt dispatch.
-    /// Admission must not record that as a Runtime that failed to start.
-    pub(crate) fn startup_cancel_requested(&self) -> bool {
+    /// True when this worker's startup was cancelled by the user's Stop.
+    /// The startup watchdog cancels with a detail and is settled by the
+    /// startup-timeout path instead; it must never be recorded as a user
+    /// cancel.
+    pub(crate) fn user_cancelled_startup(&self) -> bool {
         self.startup_control
             .as_ref()
-            .is_some_and(|control| control.cancelled())
+            .is_some_and(|control| control.user_cancelled())
     }
 
     /// Lend exactly the named Runtime registrations to one connection worker.

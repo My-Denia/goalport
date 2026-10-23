@@ -442,7 +442,12 @@ function App() {
         // must not hijack the startup view — its closeout stays one click
         // away on the background-return button, and its record is already
         // in Plans through the records load.
-        if (job?.active && !backgroundAttached.current) { backgroundAttached.current = true; setBackgroundView(true); }
+        if (job?.active && !backgroundAttached.current) {
+          backgroundAttached.current = true;
+          // Narrow widths: the job view must not sit under the drawer mask.
+          if (window.innerWidth <= 860) setNavCollapsed(true);
+          setBackgroundView(true);
+        }
         // A background round persists its plan record BEFORE the job store
         // records the terminal outcome (electron/coordination-worker.cjs),
         // so the first poll that sees a confirmed-terminal state can re-list
@@ -950,7 +955,11 @@ function App() {
               const job = await probe();
               if (!stillCurrent() || draftGoalRef.current?.requestId !== submittedRequestId) return;
               if (job && job.requestId === submittedRequestId) {
-                setBackgroundJob(job); backgroundAttached.current = true; setBackgroundView(true);
+                setBackgroundJob(job); backgroundAttached.current = true;
+                // Narrow widths: entering the job view closes the drawer so
+                // its backdrop cannot cover the Stop control.
+                if (window.innerWidth <= 860) setNavCollapsed(true);
+                setBackgroundView(true);
               }
             } catch {
               // A failed status read proves nothing; the draft stays blocked.
@@ -994,7 +1003,11 @@ function App() {
               : "The reply about this background start was not a recognizable result.");
             return;
           }
-          setBackgroundJob(outcome.status); backgroundAttached.current = true; setBackgroundView(true);
+          setBackgroundJob(outcome.status); backgroundAttached.current = true;
+          // Narrow widths: entering the job view closes the drawer so its
+          // backdrop cannot cover the Stop control.
+          if (window.innerWidth <= 860) setNavCollapsed(true);
+          setBackgroundView(true);
           setBackgroundConsent(false);
           return;
         }
@@ -2263,9 +2276,9 @@ function App() {
           runningJob={backgroundJob ? {
             goal: backgroundJob.goal,
             viewing: backgroundView,
-            stateLabel: backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : backgroundJob.state === "unconfirmed" ? "Interrupted" : "Finished",
+            stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => setBackgroundView(true)}
+          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(true); }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
@@ -2298,7 +2311,7 @@ function App() {
               </span>
             </div>
           ) : null}
-          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => setBackgroundView(value => !value)}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
+          {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" onClick={() => { if (!backgroundView && window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(value => !value); }}>{backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
             <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
