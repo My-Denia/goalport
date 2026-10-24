@@ -907,6 +907,7 @@ function App() {
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
+        if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent) return;
         const statusEpoch = ++linuxStatusEpoch.current;
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
