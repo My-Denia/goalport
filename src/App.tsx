@@ -893,6 +893,7 @@ function App() {
           if (coordinationStartAdmitted(body)) {
             setLinuxCoordinationLive(true);
             setLinuxCoordinationGoal(message);
+            setDraftGoal((current) => current ? { ...current, message: "" } : current);
           }
         }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
         return;

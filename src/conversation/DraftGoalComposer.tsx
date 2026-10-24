@@ -120,7 +120,7 @@ export function DraftGoalComposer({
         </div>
       </div>
 
-      <form className="draft-composer-form" aria-label="Start a goal" onSubmit={onSubmit}>
+      <form className="draft-composer-form" aria-label={activeGoalTitle ? "This goal" : "Start a goal"} onSubmit={onSubmit}>
         <label className="field-label" htmlFor="draft-workspace">Workspace</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
@@ -166,7 +166,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? "Ask GoalPort…"
+            ? (activeGoalTitle ? "Add a follow-up, or use Continue." : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy}
