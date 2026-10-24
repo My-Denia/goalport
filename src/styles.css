@@ -964,6 +964,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   :root { --sidebar-w: 206px; --content-max: 720px; }
   .titlebar-campaign-wrap { display: none; }
   .connection-pill .connection-text { display: none; }
+  .connection-neutral .connection-text { display: inline; }
   .connection-pill { padding: 0 8px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
@@ -1013,6 +1014,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 @media (max-width: 560px) {
   .connection-pill { display: none; }
+  .connection-neutral { display: inline-flex; }
   .tb-button { font-size: 0; gap: 0; }
   .tb-button .tb-icon-glyph, .tb-button > span[aria-hidden="true"] { font-size: 14px; }
   .composer-secondary { padding: 0 9px; }
