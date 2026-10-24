@@ -2187,18 +2187,22 @@ function App() {
     // drawer away so the conversation is what the user sees next.
     if (window.innerWidth <= 860) setNavCollapsed(true);
     if (campaignId === snapshot.activeCampaignId) return;
-    if (client.mode === "linux-core") pushGoalRoute(campaignId);
+    const previousCampaignId = snapshot.activeCampaignId;
     if (client.selectCampaign) {
       const intent = ++selectionIntent.current;
       const next = await client.selectCampaign(campaignId);
       if (intent !== selectionIntent.current) return;
       setSnapshot(next);
+      if (client.mode === "linux-core") {
+        pushGoalRoute(next.notices.some((notice) => notice.startsWith("Goal open failed:")) ? previousCampaignId : campaignId);
+      }
       const failure = client.mode === "browser-preview" || client.mode === "linux-core"
         ? null
         : commandFailure(next, "select_campaign");
       setActiveNotice(failure);
       return;
     }
+    if (client.mode === "linux-core") pushGoalRoute(campaignId);
     const selected = snapshot.campaigns.find((campaign) => campaign.id === campaignId);
     if (!selected) return;
     setSnapshot({
