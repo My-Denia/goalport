@@ -418,6 +418,35 @@ test("a pi install with an enumerable model table is discovered with its built-i
   });
 });
 
+test("pi oauth providers are classified as a subscription and an api key is not", async () => {
+  const { discoverCliProviders } = require("./cli-coordinate.cjs");
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile(file) {
+      if (String(file).replace(/\\/g, "/").endsWith(".pi/agent/auth.json")) {
+        return JSON.stringify({
+          openai: { type: "oauth", access: "secret" },
+          xai: { type: "oauth" },
+          "kimi-coding": { type: "oauth" },
+          deepseek: { type: "api_key", key: "secret" },
+        });
+      }
+      return "";
+    },
+    execFile(file) {
+      if (file === "where" || file === "which") throw new Error("unused");
+      if (file === "pi") return { stdout: PI_TABLE_STDOUT };
+      return { stdout: "" };
+    },
+  });
+  const pi = discovered.providers.find((item) => item.instanceId === "pi");
+  assert.equal(pi.auth.type, "subscription");
+  assert.match(pi.auth.label, /openai/);
+  assert.match(pi.auth.label, /xai/);
+  assert.match(pi.auth.label, /kimi-coding/);
+  assert.doesNotMatch(pi.auth.label, /deepseek|secret/);
+});
+
 test("a pi probe that fails, stays empty, or prints non-table text is not discovered", async () => {
   const roster = async (piProbe) => discoverCliProviders({
     home: "/home/person",
