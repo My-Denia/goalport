@@ -2662,7 +2662,7 @@ function App() {
                     linuxCanStartCoordination={client.mode === "linux-core"}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
-                    coordinationResult={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationLine : null}
+                    coordinationResult={client.mode === "linux-core" && !linuxShowingFreshDraft ? (leftUnreplayed ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
