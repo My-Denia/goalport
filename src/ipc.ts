@@ -1285,7 +1285,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error, "Goal open failed");
+      return this.fail(new Error(`${campaignId}: ${errorMessage(error)}`), "Goal open failed");
     } finally {
       this.mutationDepth -= 1;
     }
