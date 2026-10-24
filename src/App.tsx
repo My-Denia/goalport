@@ -2108,6 +2108,7 @@ function App() {
         const payload = (body as { payload?: { line?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line) {
           setLinuxCoordinationLine(payload.line);
+          setLinuxCoordinationRequest(null);
           return;
         }
         const record = payload?.record;

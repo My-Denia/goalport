@@ -138,13 +138,13 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
     if not path.is_file():
-        return {"ok": True, "record": None, "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "line": current_job_line(data_dir), "reason": "no coordinated result saved"}
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"ok": False, "record": None, "reason": "coordinated result could not be read"}
     if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
-        return {"ok": True, "record": None, "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "line": current_job_line(data_dir), "reason": "no coordinated result saved"}
     last = records[-1]
     return {
         "ok": True,

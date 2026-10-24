@@ -143,6 +143,8 @@ class CommandRoutingTests(unittest.TestCase):
         live = workbench.latest_coordination_record(directory)
         self.assertEqual(live["line"], "Codex is planning…")
         self.assertEqual(live["record"]["verdict"], "verified")
+        first = workbench.latest_coordination_record(directory / "empty")
+        self.assertIsNone(first["record"])
         argv, error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
         self.assertIsNone(error)
         self.assertIn("coordinate-verified", argv)
