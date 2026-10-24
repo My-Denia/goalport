@@ -995,7 +995,7 @@ function App() {
           linuxHoldLineRef.current = true;
           rememberFailure("The coordinated goal could not be sent.");
           setLinuxHoldLine(true);
-          setSidebarUnconfirmed(true);
+          setSidebarUnconfirmed(false);
           setDraftError(null);
         }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
         return;
