@@ -931,7 +931,9 @@ function App() {
         }).catch(() => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
-          setDraftError({ sentence: "The coordinated goal could not be sent." });
+          setLinuxCoordinationLine("The coordinated goal could not be sent.");
+          setLinuxHoldLine(true);
+          setDraftError(null);
         }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
         return;
       }
