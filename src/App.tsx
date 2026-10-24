@@ -893,7 +893,7 @@ function App() {
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite } }),
+          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent } }),
         }).then(async (response) => response.json()).then((body) => {
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
@@ -2588,7 +2588,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || Boolean(linuxHarnessSentence) || linuxConsentMissing || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
@@ -2614,11 +2614,11 @@ function App() {
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite } }),
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite, background: backgroundConsent } }),
                       }).then(async (response) => response.json()).then((body) => {
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
@@ -2651,7 +2651,7 @@ function App() {
                       }).catch(() => setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent.")).finally(() => setLinuxGranting(false));
                     } : undefined}
                     backgroundConsent={backgroundConsent}
-                    onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
+                    onBackgroundConsentChange={client.mode === "linux-core" || (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim()) ? setBackgroundConsent : undefined}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
                       if (value.provider.trim()) setBackgroundConsent(false);

@@ -224,7 +224,12 @@ def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | Non
     ], None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False) -> tuple[list[str] | None, str | None]:
+KEEP_RUNNING_SENTENCE = "Keep working after closing must be explicitly selected."
+
+
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False) -> tuple[list[str] | None, str | None]:
+    if background is not True:
+        return None, KEEP_RUNNING_SENTENCE
     found = latest_coordination_record(data_dir)
     record = found.get("record") if isinstance(found, dict) else None
     request_id = record.get("requestId") if isinstance(record, dict) else None
@@ -252,7 +257,7 @@ def expand_workspace(workspace: str) -> str:
     return workspace
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
@@ -262,6 +267,8 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     workspace = expand_workspace(workspace.strip())
     if not (workspace.startswith("/") or Path(workspace).is_absolute()):
         return None, "The workspace must be an absolute path, so nothing was admitted."
+    if background is not True:
+        return None, KEEP_RUNNING_SENTENCE
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
     if error:
         return None, error
@@ -375,7 +382,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary,
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True,
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -398,7 +405,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True)
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return

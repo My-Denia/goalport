@@ -198,7 +198,8 @@ describe("Linux Core bridge", () => {
     expect(await screen.findByText("verified. The two files are named and nothing was edited.")).toBeTruthy();
     await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
-    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
@@ -207,6 +208,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
