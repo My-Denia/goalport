@@ -2746,7 +2746,7 @@ function App() {
                       linuxHoldLineRef.current = false;
                       heldJobId.current = null;
                       setLinuxHoldLine(false);
-                      setLinuxCoordinationLine(workerGone ? "Recording the stop." : "Stopping this goal.");
+                      setLinuxCoordinationLine(workerGone || linuxCoordinationLine === "This goal's exit is not confirmed." ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
