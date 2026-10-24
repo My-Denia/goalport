@@ -2870,6 +2870,8 @@ function App() {
                         }
                         if (coordinationStartAdmitted(body)) {
                           sidebarFailed.current = false;
+                          linuxHoldLineRef.current = false;
+                          setLinuxHoldLine(false);
                           setLinuxLeftoverHeld(false);
                           setSidebarUnconfirmed(false);
                           linuxFreshDraft.current = false;
