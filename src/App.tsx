@@ -2363,9 +2363,7 @@ function App() {
 
   useEffect(() => {
     if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
-    const coreDefault = snapshot.project.workspaceRoot || "";
     if (draftGoal.workspace === linuxCoordinationWorkspace) return;
-    if (draftGoal.workspace !== "" && draftGoal.workspace !== coreDefault) return;
     setDraftGoal({ ...draftGoal, workspace: linuxCoordinationWorkspace });
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationWorkspace, draftGoal, snapshot.project.workspaceRoot]);
 
