@@ -415,6 +415,7 @@ function App() {
   const [linuxSignedIn, setLinuxSignedIn] = useState<string[]>([]);
   const [linuxDiscoverChecked, setLinuxDiscoverChecked] = useState(false);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
+  const [linuxLeftoverHeld, setLinuxLeftoverHeld] = useState(false);
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
@@ -2191,7 +2192,7 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || request !== generation || linuxActionOpen.current || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; leftRequestIds?: unknown; unconfirmedGoal?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; leftRequestIds?: unknown; unconfirmedGoal?: unknown; leftoverHeld?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (Array.isArray(payload?.leftRequestIds)) {
           let added = false;
           for (const id of payload.leftRequestIds) {
@@ -2203,6 +2204,7 @@ function App() {
           if (added) setLeftRevision((value) => value + 1);
         }
         if (payload?.unconfirmedGoal === true) setSidebarUnconfirmed(true);
+        setLinuxLeftoverHeld(payload?.leftoverHeld === true);
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
         const workerGoneLine = payload?.line === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
@@ -2855,6 +2857,7 @@ function App() {
                     signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
+                    leftoverHint={client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy && !linuxHoldLine ? "A left goal still holds the slot. The next valid send will release it." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       grantError.current = false;
                       linuxActionOpen.current = true;

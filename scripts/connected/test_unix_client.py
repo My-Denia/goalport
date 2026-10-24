@@ -208,6 +208,7 @@ class CommandRoutingTests(unittest.TestCase):
         (left_dir / "coordination-records.json").write_text(json.dumps([{"requestId": "coordinate-other", "verdict": "verified", "goal": "Other"}]), encoding="utf-8")
         self.assertTrue(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
         self.assertEqual(workbench.leftover_left_job(left_dir), job)
+        self.assertTrue(workbench.latest_coordination_record(left_dir)["leftoverHeld"])
         (left_dir / "coordination-records.json").write_text(json.dumps([{"requestId": "coordinate-left", "goal": "Left"}]), encoding="utf-8")
         continued, continue_error = workbench.coordination_continue_command(left_dir, Path("/tmp"), endpoint="/tmp/core.sock", core_binary="/tmp/goalport-core", background=True)
         self.assertIsNone(continued)

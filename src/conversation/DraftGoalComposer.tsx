@@ -83,6 +83,7 @@ interface DraftGoalComposerProps {
   signedInHint?: string | null;
   discoverHint?: string | null;
   consentWarning?: string | null;
+  leftoverHint?: string | null;
   onGrantConsent?: () => void;
   keepRunningHint?: string | null;
   backgroundConsent?: boolean;
@@ -100,7 +101,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -174,6 +175,7 @@ export function DraftGoalComposer({
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
         {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" onClick={onGrantConsent}>Allow spending subscription quota</button> : null}</p> : null}
+        {leftoverHint ? <p className="draft-hint">{leftoverHint}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
