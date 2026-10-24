@@ -74,6 +74,7 @@ interface DraftGoalComposerProps {
   onLeaveGoal?: () => void;
   linuxCanStartCoordination?: boolean;
   linuxWrite?: boolean;
+  inputsLocked?: boolean;
   onLinuxWriteChange?: (value: boolean) => void;
   workspacePlaceholder?: string;
   workspaceHint?: string;
@@ -98,7 +99,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -177,7 +178,7 @@ export function DraftGoalComposer({
           />
         )}
         {coordinationResult && !activeGoalTitle ? <p className="draft-hint">{coordinationResult}</p> : null}
-        {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
+        {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} disabled={busy || inputsLocked || Boolean(onStopCoordination)} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
         {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>{stopLabel}</button> : null}
         {onLeaveGoal ? <button className="button button-small button-outline" type="button" onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
         {onContinueCoordination ? <button className="button button-small button-outline" type="button" onClick={onContinueCoordination}>Continue this goal</button> : null}
@@ -222,7 +223,7 @@ export function DraftGoalComposer({
               type="checkbox"
               aria-label="Keep working after closing"
               checked={backgroundConsent}
-              disabled={busy}
+              disabled={busy || inputsLocked || Boolean(onStopCoordination)}
               onChange={(event) => onBackgroundConsentChange(event.target.checked)}
             />
             Keep working after closing
