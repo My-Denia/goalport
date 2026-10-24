@@ -13,6 +13,7 @@ interface CampaignNavProps {
   runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean; workspace?: string } | null;
   navigationLocked?: boolean;
   onOpenRunningJob?: () => void;
+  projectOverride?: string;
 }
 
 /**
@@ -25,7 +26,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -52,13 +53,13 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
   return (
     <nav className={`campaign-nav${collapsed ? " nav-collapsed" : ""}`} aria-label="Workspace and goals">
       <div className="nav-head">
-        <label className="project-switcher" aria-label="Select project">
+        <label className="project-switcher" aria-label={projectOverride || "Select project"}>
           <span className="project-avatar" aria-hidden="true">G</span>
           <span className="project-switcher-copy">
-            <strong>{snapshot.project.name}</strong>
+            <strong>{projectOverride || snapshot.project.name}</strong>
           </span>
-          {overview ? (
-            <span className="project-select project-select-static">{snapshot.project.name || "Workspace"}</span>
+          {projectOverride || overview ? (
+            <span className="project-select project-select-static">{projectOverride || snapshot.project.name || "Workspace"}</span>
           ) : (
             <select
               className="project-select"

@@ -2552,6 +2552,7 @@ function App() {
         {!navCollapsed ? <button className="mobile-nav-backdrop" type="button" aria-label="Close navigation" onClick={() => setNavCollapsed(true)} /> : null}
         <CampaignNav
           snapshot={snapshot}
+          projectOverride={client.mode === "linux-core" ? "This page" : undefined}
           collapsed={navCollapsed}
           plans={plans.map((plan) => ({
             requestId: plan.requestId,
