@@ -627,7 +627,7 @@ function createCoordinationJobStore(profileDirectory, {
       // arrive re-cased, so the comparison folds case there only.
       if (typeof progress.acknowledgedStuckAt === "string") {
         if (normalized.requestId === incoming.requestId) {
-          throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
+          throw refusal("stuck-acknowledged", "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
         }
         if (!released) {
           const held = workspaceIdentity(normalized.workspacePath, platform);
