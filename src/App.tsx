@@ -396,6 +396,7 @@ function App() {
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
+  const workerGone = linuxCoordinationLine === "The worker is gone. Stop this goal before starting another.";
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
@@ -2208,9 +2209,9 @@ function App() {
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
-    document.title = short ? (linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    document.title = short ? (linuxCoordinationLive && !workerGone ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
-  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive]);
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine]);
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
@@ -2456,7 +2457,7 @@ function App() {
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
             viewing: !linuxShowingFreshDraft,
-            stateLabel: linuxCoordinationLive ? "Running" : "Finished",
+            stateLabel: workerGone ? "Worker gone" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
           onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
