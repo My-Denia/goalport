@@ -104,7 +104,7 @@ export function DraftGoalComposer({
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent
+  const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
     : !draft.workspace.trim()
       ? "Choose a folder, then send."
