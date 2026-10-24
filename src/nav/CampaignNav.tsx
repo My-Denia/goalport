@@ -54,7 +54,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
     <nav className={`campaign-nav${collapsed ? " nav-collapsed" : ""}`} aria-label="Workspace and goals">
       <div className="nav-head">
         <label className="project-switcher" aria-label={projectOverride || "Select project"}>
-          <span className="project-avatar" aria-hidden="true">G</span>
+          <span className="project-avatar" aria-hidden="true">{projectOverride ? "·" : "G"}</span>
           <span className="project-switcher-copy">
             <strong>{projectOverride || snapshot.project.name}</strong>
           </span>
