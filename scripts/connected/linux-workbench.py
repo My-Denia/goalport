@@ -143,6 +143,16 @@ def live_fields(data_dir: Path | None) -> dict:
     return {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
 
 
+def check_detail(record: dict, outcome: str | None) -> str | None:
+    text = record.get("reviewText")
+    if not isinstance(text, str):
+        return None
+    line = text.strip()
+    if not line or line == outcome:
+        return None
+    return line if len(line) <= 600 else line[:597] + "..."
+
+
 def short_outcome(record: dict) -> str | None:
     for key in ("result", "reviewText", "stopReason"):
         text = record.get(key)
@@ -181,6 +191,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "goal": last.get("goal"),
             "workspacePath": last.get("workspacePath"),
             "outcome": short_outcome(last),
+            "detail": check_detail(last, short_outcome(last)),
         },
         "reason": None,
         **live_fields(data_dir),

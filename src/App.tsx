@@ -394,6 +394,7 @@ function App() {
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
+  const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
@@ -2132,11 +2133,12 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
           setLinuxShowingFreshDraft(false);
           setLinuxCoordinationLine(payload.line);
+          setLinuxCoordinationDetail(null);
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLive(true);
           return;
@@ -2171,6 +2173,7 @@ function App() {
         setLinuxCoordinationLine(outcome
           ? `${record.verdict}. ${outcome}`
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
+        setLinuxCoordinationDetail(typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : null);
       }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
     };
     refresh();
@@ -2603,6 +2606,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     coordinationResult={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationLine : null}
+                    goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
                       void fetch("/goalport/ipc", {

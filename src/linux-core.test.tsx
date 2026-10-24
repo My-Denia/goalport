@@ -178,7 +178,7 @@ describe("Linux Core bridge", () => {
         return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null } });
       }
       if (body.messageType === "coordination_latest") {
-        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited." }, reason: null } });
+        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line." }, reason: null } });
       }
       if (body.messageType === "goal_overview") {
         return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
@@ -196,6 +196,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(await screen.findByText("verified. The two files are named and nothing was edited.")).toBeTruthy();
+    expect(screen.getByText("What was checked")).toBeTruthy();
     await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);

@@ -65,6 +65,7 @@ interface DraftGoalComposerProps {
   coordinationAvailable: boolean;
   runtimeRequiredHint?: string;
   coordinationResult?: string | null;
+  goalDetail?: string | null;
   activeGoalTitle?: string | null;
   onContinueCoordination?: () => void;
   onStopCoordination?: () => void;
@@ -92,7 +93,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, activeGoalTitle, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, activeGoalTitle, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -121,6 +122,12 @@ export function DraftGoalComposer({
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || "Start a goal"}</h2>
           <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : "What would you like to work on?"}</p>
+          {activeGoalTitle && goalDetail ? (
+            <details className="draft-hint">
+              <summary>What was checked</summary>
+              <p>{goalDetail}</p>
+            </details>
+          ) : null}
         </div>
       </div>
 
