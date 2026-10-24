@@ -139,6 +139,8 @@ def current_job(data_dir: Path) -> dict | None:
         job_id = active.get("jobId")
         if not isinstance(job_id, str) or not job_id:
             return None
+        if (data_dir / "coordination-jobs" / "jobs" / job_id / "stuck-ack.json").is_file():
+            return None
         progress_path = data_dir / "coordination-jobs" / "jobs" / job_id / "progress.json"
         if not progress_path.is_file():
             claim_path = data_dir / "coordination-jobs" / "jobs" / job_id / "startup-claim.json"

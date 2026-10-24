@@ -194,6 +194,8 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(workbench.latest_coordination_record(left_dir)["leftRequestIds"], ["coordinate-left"])
         (left_dir / "coordination-records.json").write_text("{", encoding="utf-8")
         self.assertEqual(workbench.latest_coordination_record(left_dir)["leftRequestIds"], ["coordinate-left"])
+        (left_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job}), encoding="utf-8")
+        self.assertIsNone(workbench.current_job(left_dir))
         self.assertEqual(live["line"], "Codex is planning…")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")
