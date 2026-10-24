@@ -972,7 +972,8 @@ function App() {
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
           if (failed && !coordinationStartAdmitted(body)) rememberFailure(shown);
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
-          if (failed && !coordinationStartAdmitted(body) && shown !== "The left goal could not be released, so nothing was sent." && !shown.includes("nothing was admitted") && !shown.includes("nothing will be sent")) setSidebarUnconfirmed(true);
+          if (failed && !coordinationStartAdmitted(body) && /unconfirmed/i.test(shown)) setSidebarUnconfirmed(true);
+          else if (failed && !coordinationStartAdmitted(body)) setSidebarUnconfirmed(false);
           if (coordinationStartAdmitted(body)) {
             clearFailure();
             setLinuxLeftoverHeld(false);
