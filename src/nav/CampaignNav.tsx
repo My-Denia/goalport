@@ -88,6 +88,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
             disabled={runningJob.locked}
+            title={`${runningJob.goal} — ${runningJob.stateLabel}`}
             onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
