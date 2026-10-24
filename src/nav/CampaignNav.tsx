@@ -10,7 +10,7 @@ interface CampaignNavProps {
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
-  runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean; workspace?: string } | null;
+  runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean; workspace?: string; returnHint?: string | null } | null;
   navigationLocked?: boolean;
   navigationLockedReason?: string | null;
   onOpenRunningJob?: () => void;
@@ -106,14 +106,14 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
             disabled={runningJob.locked}
-            title={`${runningJob.goal} — ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}`}
-            aria-label={`${runningJob.goal}, ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}`}
+            title={`${runningJob.goal} — ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}${runningJob.returnHint ? `. ${runningJob.returnHint}` : ""}`}
+            aria-label={`${runningJob.goal}, ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}${runningJob.returnHint ? `. ${runningJob.returnHint}` : ""}`}
             onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
             <span className="campaign-item-copy">
               <strong>{runningJob.goal}</strong>
-              <small>{runningJobDetail(runningJob.stateLabel)}</small>
+              <small>{runningJob.returnHint ?? runningJobDetail(runningJob.stateLabel)}</small>
             </span>
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
