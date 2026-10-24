@@ -416,6 +416,7 @@ function App() {
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
+  const [sidebarUnconfirmed, setSidebarUnconfirmed] = useState(false);
   const linuxHoldLineRef = useRef(false);
   const heldJobId = useRef<string | null>(null);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
@@ -927,7 +928,9 @@ function App() {
           const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
+          if (failed && !coordinationStartAdmitted(body)) setSidebarUnconfirmed(true);
           if (coordinationStartAdmitted(body)) {
+            setSidebarUnconfirmed(false);
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
             setLinuxCoordinationLive(true);
@@ -941,6 +944,7 @@ function App() {
           setLinuxCoordinationLine("The coordinated goal could not be sent.");
           linuxHoldLineRef.current = true;
           setLinuxHoldLine(true);
+          setSidebarUnconfirmed(true);
           setDraftError(null);
         }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
         return;
@@ -2508,7 +2512,7 @@ function App() {
             goal: linuxCoordinationGoal,
             viewing: !linuxShowingFreshDraft && !leftUnreplayed,
             locked: linuxActionBusy,
-            stateLabel: workerGone ? "Worker gone" : linuxHoldLine ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
+            stateLabel: workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
           onOpenRunningJob={() => { if (client.mode === "linux-core" && linuxActionBusy) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
@@ -2756,6 +2760,7 @@ function App() {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
+                          setSidebarUnconfirmed(true);
                         }
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
@@ -2763,6 +2768,7 @@ function App() {
                         linuxHoldLineRef.current = true;
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
+                        setSidebarUnconfirmed(true);
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
@@ -2789,8 +2795,10 @@ function App() {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
+                          setSidebarUnconfirmed(true);
                         }
                         if (coordinationStartAdmitted(body)) {
+                          setSidebarUnconfirmed(false);
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
                           setLinuxCoordinationLive(true);
@@ -2803,6 +2811,7 @@ function App() {
                         linuxHoldLineRef.current = true;
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
+                        setSidebarUnconfirmed(true);
                         setLinuxCoordinationLine("Continue could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
