@@ -1205,7 +1205,13 @@ class LinuxCoreClient implements CoreClient {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       if (envelope.unchanged === true) {
         this.revision = typeof envelope.revision === "string" ? envelope.revision : this.revision;
-        return this.commitSnapshot(generation, { ...this.lastSnapshot, preview: false, goalOverview: overview });
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          connection: "connected",
+          goalOverview: overview,
+          notices: this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Goal list read failed:") && !notice.startsWith("Goal open failed:")),
+        });
       }
       const snapshot = resolveCoreSnapshot(envelope.snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
