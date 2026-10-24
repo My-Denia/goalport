@@ -215,6 +215,8 @@ describe("Linux Core bridge", () => {
     expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
     expect(await screen.findByText("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
