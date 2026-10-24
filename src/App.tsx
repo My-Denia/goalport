@@ -2375,6 +2375,12 @@ function App() {
           try { sessionStorage.removeItem("goalport.linux.leftSlot"); } catch { /* a private window can refuse storage */ }
         }
         const outcome = typeof record.outcome === "string" && record.outcome.trim() ? record.outcome.trim() : null;
+        if (record.verdict === "stopped") {
+          setLinuxCoordinationLine(outcome?.includes("No further turn was sent.") ? `Stopped. ${outcome}` : "Stopped. No further turn was sent.");
+          setLinuxCoordinationDetail(null);
+          setLinuxCoordinationChange(null);
+          return;
+        }
         setLinuxCoordinationLine(outcome
           ? `${record.verdict}. ${outcome}`
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
