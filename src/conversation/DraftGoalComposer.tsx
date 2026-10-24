@@ -154,7 +154,7 @@ export function DraftGoalComposer({
         </div>
       </div>
 
-      <form className="draft-composer-form" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? "This goal — slot held" : leftoverHint) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "Start a goal")} onSubmit={onSubmit}>
+      <form className="draft-composer-form" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? "This goal — slot held" : leftoverHint) || (activeGoalTitle ? (coordinationResult?.includes("stays unreplayed") ? coordinationResult : coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "Start a goal")} onSubmit={onSubmit}>
         <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
