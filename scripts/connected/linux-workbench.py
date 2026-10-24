@@ -404,6 +404,8 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
     request_id = record.get("requestId") if isinstance(record, dict) else None
     if data_dir is None or not isinstance(request_id, str) or not request_id:
         return None, "No saved coordinated goal to continue."
+    if request_id in left_request_ids(data_dir):
+        return None, "The interrupted job stays unreplayed; the same request id cannot be admitted again."
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
     if error:
         return None, error
