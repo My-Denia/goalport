@@ -2272,13 +2272,19 @@ function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode, linuxCoordinationLive]);
 
+  const leftoverSlotLine = client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy && !linuxHoldLine
+    ? (linuxCoordinationRequest && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !leftRequestIds.current.has(linuxCoordinationRequest)
+      ? "A left goal still holds the slot. The next valid send or continue will release it."
+      : "A left goal still holds the slot. The next valid send will release it.")
+    : null;
+
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
     const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
-    document.title = pending || linuxHoldLine ? linuxCoordinationLine : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : linuxLeftoverHeld && !linuxCoordinationLive ? "A left goal still holds the slot." : short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    document.title = pending || linuxHoldLine ? linuxCoordinationLine : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : leftoverSlotLine ?? (short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort");
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld]);
 
@@ -2626,7 +2632,7 @@ function App() {
               />
             </div>
           ) : draftActive ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive ? "A left goal still holds the slot." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft"}>
+            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : leftoverSlotLine ?? (client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft")}>
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}
@@ -2857,7 +2863,7 @@ function App() {
                     signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
-                    leftoverHint={client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy && !linuxHoldLine ? (linuxCoordinationRequest && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !leftRequestIds.current.has(linuxCoordinationRequest) ? "A left goal still holds the slot. The next valid send or continue will release it." : "A left goal still holds the slot. The next valid send will release it.") : null}
+                    leftoverHint={leftoverSlotLine}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       grantError.current = false;
                       linuxActionOpen.current = true;
