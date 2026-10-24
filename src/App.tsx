@@ -444,7 +444,8 @@ function App() {
     failureLoaded.current = true;
     if (typeof sessionStorage !== "undefined") {
       const savedFailure = sessionStorage.getItem("goalport.linux.failedLine");
-      if (savedFailure) { sidebarFailed.current = true; failedLine.current = savedFailure; }
+      if (savedAdmissionUnsaid()) sessionStorage.removeItem("goalport.linux.failedLine");
+      else if (savedFailure) { sidebarFailed.current = true; failedLine.current = savedFailure; }
     }
   }
   function rememberFailure(line: string) {
@@ -982,6 +983,7 @@ function App() {
           const admitted = coordinationStartAdmitted(body);
           admissionUnsaid.current = !failedSend && !admitted;
           rememberAdmissionUnsaid(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : null);
+          if (admissionUnsaid.current) clearFailure();
           const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(shown);
@@ -2990,6 +2992,7 @@ function App() {
                         const admitted = coordinationStartAdmitted(body);
                         admissionUnsaid.current = !continueFailed && !admitted;
                         rememberAdmissionUnsaid(admissionUnsaid.current ? "Continue returned without saying the goal was admitted." : null);
+                        if (admissionUnsaid.current) clearFailure();
                         const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : admitted ? "The goal was admitted." : "Continue returned without saying the goal was admitted.");
                         const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
                         setLinuxCoordinationLine(shown || "Continue was sent.");
