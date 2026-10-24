@@ -2912,6 +2912,9 @@ function App() {
                           const error = (body as { error?: unknown } | null)?.error;
                           const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.";
                           grantError.current = true;
+                          linuxHoldLineRef.current = true;
+                          sidebarFailed.current = true;
+                          setLinuxHoldLine(true);
                           setLinuxHarnessSentence(sentence);
                           setLinuxCoordinationLine(sentence);
                           return;
@@ -2927,6 +2930,9 @@ function App() {
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
                         const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
+                        linuxHoldLineRef.current = true;
+                        sidebarFailed.current = true;
+                        setLinuxHoldLine(true);
                         setLinuxHarnessSentence(sentence);
                         setLinuxCoordinationLine(sentence);
                       }).finally(() => { linuxActionOpen.current = false; setLinuxGranting(false); });
