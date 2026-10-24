@@ -145,6 +145,21 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path) -> tup
     return argv, None
 
 
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object) -> tuple[list[str] | None, str | None]:
+    if data_dir is None:
+        return None, "No coordination profile is configured, so nothing was admitted."
+    if not isinstance(goal, str) or not goal.strip():
+        return None, "A goal is required, so nothing was admitted."
+    if not isinstance(workspace, str) or not (workspace.startswith("/") or Path(workspace).is_absolute()):
+        return None, "The workspace must be an absolute path, so nothing was admitted."
+    argv = [
+        "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
+        "--data-dir", str(data_dir),
+        "run", "--goal", goal.strip(), "--workspace", workspace, "--background",
+    ]
+    return argv, None
+
+
 def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -210,6 +225,21 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     "ok": True,
                     "payload": latest_coordination_record(coordination_data),
                 }).encode(), "application/json")
+                return
+            if message_type == "coordination_start":
+                payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                argv, error = coordination_start_command(coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"))
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({"ok": False, "error": "Start is not wired on this workbench."}).encode(), "application/json")
+                    return
+                if "--write-instances" in argv:
+                    self._send(200, json.dumps({"ok": False, "error": "A new workbench goal does not write files."}).encode(), "application/json")
+                    return
+                code, out, err = continue_runner(argv)
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
                 argv, error = coordination_continue_command(coordination_data, ROOT)

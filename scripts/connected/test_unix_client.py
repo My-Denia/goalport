@@ -140,6 +140,14 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertIn("coordinate-verified", argv)
         self.assertIn("--background", argv)
         self.assertIsNone(workbench.coordination_continue_command(None, Path("/repo"))[0])
+        started, start_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project")
+        self.assertIsNone(start_error)
+        self.assertIn("run", started)
+        self.assertIn("--background", started)
+        self.assertNotIn("--write-instances", started)
+        refused, refuse_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "relative")
+        self.assertIsNone(refused)
+        self.assertIn("absolute", refuse_error)
 
     def test_bridge_disconnect_is_not_a_preview_snapshot(self):
         body = json.loads(workbench.disconnected_body("Linux Core is not connected"))
