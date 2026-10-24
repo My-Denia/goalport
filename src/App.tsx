@@ -2189,7 +2189,8 @@ function App() {
         }
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
-        if (linuxHoldLineRef.current && (!liveJob || (typeof payload?.jobId === "string" && payload.jobId === heldJobId.current))) return;
+        const workerGoneLine = payload?.line === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
+        if (linuxHoldLineRef.current && !workerGoneLine && (!liveJob || (typeof payload?.jobId === "string" && payload.jobId === heldJobId.current))) return;
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           linuxHoldLineRef.current = false;
           heldJobId.current = null;
