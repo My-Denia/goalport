@@ -225,13 +225,32 @@ def left_request_ids(data_dir: Path) -> list[str]:
     return found
 
 
-def disk_unconfirmed(data_dir: Path | None) -> bool:
+def disk_unconfirmed(data_dir: Path | None, request_id: str | None = None) -> bool:
     jobs = data_dir / "coordination-jobs" / "jobs" if data_dir is not None else None
     if jobs is None or not jobs.is_dir():
         return False
+    active_id = None
+    if not request_id:
+        try:
+            active = json.loads((data_dir / "coordination-jobs" / "active-admission.json").read_text(encoding="utf-8"))
+            active_id = active.get("jobId") if isinstance(active, dict) else None
+        except (OSError, json.JSONDecodeError):
+            active_id = None
+        if not isinstance(active_id, str) or not active_id:
+            return False
     for job_dir in jobs.iterdir():
         if not job_dir.is_dir():
             continue
+        if active_id and job_dir.name != active_id:
+            continue
+        if request_id:
+            try:
+                admission = json.loads((job_dir / "admission.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            found = admission.get("input", {}).get("requestId") if isinstance(admission, dict) else None
+            if found != request_id:
+                continue
         try:
             progress = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -276,7 +295,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         },
         "reason": None,
         "leftRequestIds": left_request_ids(data_dir),
-        "unconfirmedGoal": disk_unconfirmed(data_dir),
+        "unconfirmedGoal": disk_unconfirmed(data_dir, last.get("requestId") if isinstance(last.get("requestId"), str) else None),
         **live_fields(data_dir),
     }
 
