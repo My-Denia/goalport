@@ -2310,7 +2310,7 @@ function App() {
           if (!consentStillMissing) grantError.current = false;
           const names = Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : [];
           const reported = typeof sentence === "string" && sentence.trim() ? sentence.trim() : null;
-          setLinuxHarnessSentence(reported ?? (names.length < 2 ? "An independent check needs a second logged-in harness, so nothing will be sent." : null));
+          setLinuxHarnessSentence(reported ?? (names.length === 0 ? "No signed-in subscription harness was found on this machine, so nothing will be sent." : names.length < 2 ? "An independent check needs a second logged-in harness, so nothing will be sent." : null));
         }
         setLinuxConsentMissing(consentStillMissing);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
