@@ -125,7 +125,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft"}>
+    <section className="draft-composer" aria-label={harnessWarning || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
