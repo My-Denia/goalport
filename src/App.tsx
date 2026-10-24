@@ -924,8 +924,9 @@ function App() {
           linuxActionSettled.current = statusEpoch;
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
-          linuxHoldLineRef.current = !coordinationStartAdmitted(body);
-          setLinuxHoldLine(!coordinationStartAdmitted(body));
+          const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+          linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
+          setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
           if (coordinationStartAdmitted(body)) {
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
@@ -2765,8 +2766,8 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
-                      if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy) return;
+                    onContinueCoordination={client.mode === "linux-core" && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
+                      if (linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy) return;
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
