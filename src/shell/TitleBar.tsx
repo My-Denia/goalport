@@ -83,7 +83,7 @@ export function TitleBar({
             </button>
           )}
           <button className="tb-button" type="button" aria-label="New goal" onClick={onNewGoal} disabled={newGoalDisabled}>
-            <span aria-hidden="true">＋</span> New goal
+            <span aria-hidden="true">＋</span> <span className="tb-keep-label">New goal</span>
           </button>
           <button
             className="tb-button tb-icon"

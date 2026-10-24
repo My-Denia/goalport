@@ -1018,6 +1018,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .connection-neutral { display: inline-flex; }
   .tb-button { font-size: 0; gap: 0; }
   .tb-button .tb-icon-glyph, .tb-button > span[aria-hidden="true"] { font-size: 14px; }
+  .tb-keep-label { font-size: 12px; }
   .composer-secondary { padding: 0 9px; }
   .composer-secondary span[aria-hidden="true"] { display: none; }
   .runtime-picker-copy small { display: none; }
