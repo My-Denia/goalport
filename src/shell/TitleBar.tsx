@@ -115,7 +115,7 @@ export function TitleBar({
                 onCheckedChange={() => { if (!detailsDisabled) onToggleDetails(); }}
                 closeOnClick
               >
-                {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
+                {detailsDisabled ? "Details are not this goal." : detailsOpen ? "✓ Details (Ctrl+I)" : "Details (Ctrl+I)"}
               </Menu.CheckboxItem>
               <Menu.Item render={<button type="button" className="app-menu-item" />} onClick={() => { onOpenDiagnostics(); }}>
                 Developer diagnostics
