@@ -982,6 +982,7 @@ function App() {
             setLinuxCoordinationGoal(message);
             setLinuxCoordinationWorkspace(workspace);
             replaceGoalRoute(null);
+            setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
             setDraftGoal((current) => current ? { ...current, message: "" } : current);
           }
         }).catch(() => {
@@ -1788,7 +1789,14 @@ function App() {
 
   function handleNewGoal() {
     if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return;
-    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; heldJobId.current = null; grantAllowed.current = false; setLinuxHoldLine(false); setBackgroundView(false); }
+    if (client.mode === "linux-core") {
+      linuxHoldLineRef.current = false;
+      heldJobId.current = null;
+      grantAllowed.current = false;
+      setLinuxHoldLine(false);
+      setBackgroundView(false);
+      setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
+    }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
