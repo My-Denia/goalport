@@ -2757,6 +2757,7 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         if (body && body.ok !== false && !(typeof body.error === "string" && body.error.trim())) {
                           setLinuxCoordinationLive(false);
+                          setLinuxLeftoverHeld(false);
                           if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
                           if (seenJobId.current) leftJobIds.current.add(seenJobId.current);
                           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
