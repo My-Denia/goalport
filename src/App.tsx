@@ -3037,6 +3037,7 @@ function App() {
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
                         const sentence = "Background Send was not allowed.";
+                        grantError.current = true;
                         linuxHoldLineRef.current = true;
                         rememberFailure(sentence);
                         setLinuxHoldLine(true);
