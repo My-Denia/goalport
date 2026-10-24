@@ -2607,6 +2607,7 @@ function App() {
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
         newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive || sidebarUnconfirmed || workerGone)}
+        newGoalDisabledReason={client.mode === "linux-core" && (sidebarUnconfirmed || workerGone) ? "Another goal cannot start yet." : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? "Wait for this to finish." : client.mode === "linux-core" && linuxCoordinationLive ? "This goal is still running." : null}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
         connectionOverride={client.mode === "linux-core" ? "This status is not the workbench connection" : undefined}
