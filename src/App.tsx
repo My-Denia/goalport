@@ -966,16 +966,17 @@ function App() {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           const failedSend = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
-          const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : "The coordinated goal was sent.");
+          const admitted = coordinationStartAdmitted(body);
+          const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(shown);
           const failed = failedSend;
-          linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
-          if (failed && !coordinationStartAdmitted(body)) rememberFailure(shown);
-          setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
-          if (failed && !coordinationStartAdmitted(body) && /unconfirmed/i.test(shown)) setSidebarUnconfirmed(true);
-          else if (failed && !coordinationStartAdmitted(body)) setSidebarUnconfirmed(false);
-          if (coordinationStartAdmitted(body)) {
+          linuxHoldLineRef.current = failed && !admitted;
+          if (failed && !admitted) rememberFailure(shown);
+          setLinuxHoldLine(failed && !admitted);
+          if (failed && !admitted && /unconfirmed/i.test(shown)) setSidebarUnconfirmed(true);
+          else if (failed && !admitted) setSidebarUnconfirmed(false);
+          if (admitted) {
             clearFailure();
             setLinuxLeftoverHeld(false);
             setSidebarUnconfirmed(false);
@@ -2964,18 +2965,19 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         const continueFailed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
-                        const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : "Continue was sent.");
+                        const admitted = coordinationStartAdmitted(body);
+                        const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : admitted ? "The goal was admitted." : "Continue returned without saying the goal was admitted.");
                         const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
                         setLinuxCoordinationLine(shown || "Continue was sent.");
                         const failed = continueFailed;
-                        if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
+                        if ((failed && !admitted) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
                           if (shown === "The left goal could not be released, so nothing was sent." || !/unconfirmed/i.test(text || "")) rememberFailure(shown || "Continue could not be sent.");
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
                           if (shown !== "The left goal could not be released, so nothing was sent." && /unconfirmed/i.test(text || "")) setSidebarUnconfirmed(true);
                         }
-                        if (coordinationStartAdmitted(body)) {
+                        if (admitted) {
                           clearFailure();
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
