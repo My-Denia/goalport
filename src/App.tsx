@@ -2236,9 +2236,9 @@ function App() {
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
     const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
-    document.title = pending ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    document.title = pending || linuxHoldLine ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
-  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest]);
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine]);
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
