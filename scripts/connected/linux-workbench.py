@@ -205,15 +205,21 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
 
 def subscription_harnesses(stdout: str) -> list[str]:
     found = []
+    blocked = set()
+    current = None
     for line in stdout.splitlines():
-        if not line.startswith("provider ") or "authenticated" not in line:
+        if line.startswith("provider "):
+            current = None
+            if "authenticated" not in line or ("(subscription)" not in line and "(chatgpt)" not in line):
+                continue
+            name = line.split(":", 1)[0].removeprefix("provider ").strip()
+            if name:
+                current = name
+                found.append(name)
             continue
-        if "(subscription)" not in line and "(chatgpt)" not in line:
-            continue
-        name = line.split(":", 1)[0].removeprefix("provider ").strip()
-        if name:
-            found.append(name)
-    return found
+        if current and "environment blocked since" in line:
+            blocked.add(current)
+    return [name for name in found if name not in blocked]
 
 
 def subscription_harness_sentence(stdout: str) -> str | None:

@@ -144,6 +144,9 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["change"], "Codex added pong under before.")
         self.assertNotIn("planText", found["record"])
         self.assertEqual(workbench.subscription_harnesses("provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n"), ["codex", "pi"])
+        blocked = "provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n  environment blocked since 2026-10-23T00:00:00Z: sandbox missing\n"
+        self.assertEqual(workbench.subscription_harnesses(blocked), ["codex"])
+        self.assertIn("nothing will be sent", workbench.subscription_harness_sentence(blocked))
         self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n"))
         self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\nprovider pi: authenticated (subscription)\n"))
         one = workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\n")
