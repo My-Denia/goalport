@@ -292,9 +292,24 @@ def consent_missing(stdout: str) -> bool:
     return "consent: granted" not in stdout
 
 
+def leftover_left_job(data_dir: Path | None) -> str | None:
+    if data_dir is None:
+        return None
+    try:
+        active = json.loads((data_dir / "coordination-jobs" / "active-admission.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    job_id = active.get("jobId") if isinstance(active, dict) else None
+    if not isinstance(job_id, str) or not job_id:
+        return None
+    if not (data_dir / "coordination-jobs" / "jobs" / job_id / "stuck-ack.json").is_file():
+        return None
+    return job_id
+
+
 def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
-    job_id = job.get("jobId") if isinstance(job, dict) else None
+    job_id = job.get("jobId") if isinstance(job, dict) else leftover_left_job(data_dir)
     if not isinstance(job_id, str) or not job_id:
         return None, "No coordinated goal to leave."
     if not all(character.isalnum() or character in "._-" for character in job_id):
@@ -514,6 +529,17 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                left_job = leftover_left_job(coordination_data)
+                if left_job:
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                    if error or continue_runner is None:
+                        self._send(200, json.dumps({"ok": False, "error": error or "Start is not wired on this workbench."}).encode(), "application/json")
+                        return
+                    code, _out, err = continue_runner([*prefix, "acknowledge", "--job", left_job])
+                    if code != 0:
+                        failure = err.strip() if isinstance(err, str) else ""
+                        self._send(200, json.dumps({"ok": False, "error": failure or "The left goal could not be released, so nothing was sent."}).encode(), "application/json")
+                        return
                 argv, error = coordination_start_command(
                     coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"),
                 )
@@ -538,6 +564,18 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
+                payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                left_job = leftover_left_job(coordination_data)
+                if left_job:
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                    if error or continue_runner is None:
+                        self._send(200, json.dumps({"ok": False, "error": error or "Continue is not wired on this workbench."}).encode(), "application/json")
+                        return
+                    code, _out, err = continue_runner([*prefix, "acknowledge", "--job", left_job])
+                    if code != 0:
+                        failure = err.strip() if isinstance(err, str) else ""
+                        self._send(200, json.dumps({"ok": False, "error": failure or "The left goal could not be released, so nothing was sent."}).encode(), "application/json")
+                        return
                 argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
