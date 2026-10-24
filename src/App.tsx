@@ -30,6 +30,7 @@ import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoal
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
+import { coordinationReplyLine } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
 import { usableInstanceIds, type CoordinationWriteAuthorization, type ExecutionFeedback } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
@@ -886,7 +887,7 @@ function App() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite } }),
         }).then(async (response) => response.json()).then((body) => {
-          const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" && body.payload.stdout.trim() ? body.payload.stdout.trim() : "The coordinated goal was sent.";
+          const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
         }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
         return;
@@ -2525,7 +2526,7 @@ function App() {
                         headers: { "content-type": "application/json" },
                         body: JSON.stringify({ messageType: "coordination_stop", payload: {} }),
                       }).then(async (response) => response.json()).then((body) => {
-                        const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" ? body.payload.stdout.trim() : "Stop was sent.";
+                        const text = coordinationReplyLine(body, "Stop was sent.");
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
@@ -2535,7 +2536,7 @@ function App() {
                         headers: { "content-type": "application/json" },
                         body: JSON.stringify({ messageType: "coordination_continue", payload: {} }),
                       }).then(async (response) => response.json()).then((body) => {
-                        const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" ? body.payload.stdout.trim() : "Continue was sent.";
+                        const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
                       }).catch(() => setLinuxCoordinationLine("Continue could not be sent."));
                     } : undefined}
