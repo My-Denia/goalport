@@ -165,6 +165,9 @@ class CommandRoutingTests(unittest.TestCase):
         jobs.mkdir(parents=True)
         (directory / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
         (jobs / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"commandId": "plan"}, "display": {"activity": "Codex is planning…"}}), encoding="utf-8")
+        leave_argv, leave_error = workbench.coordination_acknowledge_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(leave_error)
+        self.assertEqual(leave_argv[-2:], ["--job", job])
         live = workbench.latest_coordination_record(directory)
         admitted_dir = directory / "admitted"
         (admitted_dir / "coordination-jobs").mkdir(parents=True)

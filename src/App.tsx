@@ -2211,7 +2211,7 @@ function App() {
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
-    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send.";
+    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
     document.title = pending ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine]);
@@ -2654,6 +2654,27 @@ function App() {
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     stopLabel={workerGone ? "Record the stop" : "Stop this goal"}
+                    onLeaveGoal={workerGone && !linuxActionBusy ? () => {
+                      const statusEpoch = ++linuxStatusEpoch.current;
+                      setLinuxActionBusy(true);
+                      setLinuxCoordinationLine("Leaving this goal unreplayed.");
+                      void fetch("/goalport/ipc", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ messageType: "coordination_acknowledge", payload: {} }),
+                      }).then(async (response) => response.json().catch(() => null)).then((body) => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
+                        linuxActionSettled.current = statusEpoch;
+                        const text = typeof body?.error === "string" && body.error.trim()
+                          ? body.error.trim()
+                          : coordinationReplyLine(body, "The interrupted job stays unreplayed.");
+                        setLinuxCoordinationLine(text);
+                      }).catch(() => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
+                        linuxActionSettled.current = statusEpoch;
+                        setLinuxCoordinationLine("The job could not be left.");
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
+                    } : undefined}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);

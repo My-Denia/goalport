@@ -271,6 +271,19 @@ def consent_missing(stdout: str) -> bool:
     return "consent: granted" not in stdout
 
 
+def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
+    job = current_job(data_dir) if data_dir is not None else None
+    job_id = job.get("jobId") if isinstance(job, dict) else None
+    if not isinstance(job_id, str) or not job_id:
+        return None, "No coordinated goal to leave."
+    if not all(character.isalnum() or character in "._-" for character in job_id):
+        return None, "The goal id is invalid, so it was not left."
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    if error:
+        return None, error
+    return [*prefix, "acknowledge", "--job", job_id], None
+
+
 def coordination_grant_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
     if error:
@@ -447,6 +460,18 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 code, out, err = continue_runner([*prefix, "discover"])
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
+                return
+            if message_type == "coordination_acknowledge":
+                argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary)
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({"ok": False, "error": "Leave is not wired on this workbench."}).encode(), "application/json")
+                    return
+                code, out, err = continue_runner(argv)
+                failure = err.strip() if isinstance(err, str) else ""
+                self._send(200, json.dumps({"ok": code == 0, "error": None if code == 0 else (failure or "The job could not be left."), "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_grant":
                 prefix, error = coordination_grant_command(coordination_data, ROOT, endpoint, core_binary)
