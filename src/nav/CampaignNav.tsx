@@ -15,6 +15,7 @@ interface CampaignNavProps {
   onOpenRunningJob?: () => void;
   projectOverride?: string;
   failedOpenId?: string;
+  goalListUnreadable?: boolean;
 }
 
 /**
@@ -27,7 +28,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -104,6 +105,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         ) : null}
         {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
+        ) : goalListUnreadable && goalCount === 0 && !runningJob ? (
+          <p className="nav-empty" role="status">The goal list could not be read.</p>
         ) : goalCount === 0 && !runningJob ? (
           <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
         ) : overview ? (
