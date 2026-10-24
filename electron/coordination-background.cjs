@@ -35,10 +35,14 @@ function durableTerminal(facts) {
 function projection(status, live = false) {
   if (!status) return null;
   const confirmedTerminal = ["completed", "failed", "stopped"].includes(status.state);
+  let progress = status.progress;
+  if (durableTerminal(status) && progress && typeof progress.activity === "string" && progress.activity.includes("may finish")) {
+    progress = { ...progress, activity: "Stopped. No further turn was sent." };
+  }
   return { jobId: status.jobId, requestId: status.requestId, goal: status.admission.goal, active: status.active,
     state: !confirmedTerminal && !live ? "unconfirmed" : status.state, live,
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
-    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress: status.progress, outcome: status.outcome,
+    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null };

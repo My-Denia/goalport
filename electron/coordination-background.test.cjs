@@ -468,4 +468,14 @@ test("a settled stop is not revived by a stale control acknowledgement", () => {
   const revived = withControlAck(facts, stale);
   assert.equal(revived.state, "running");
   assert.equal(durableTerminal(facts) && !durableTerminal(revived), true);
+  const shown = require("./coordination-background.cjs").projection({
+    ...facts,
+    jobId: "job",
+    requestId: "req",
+    admission: { goal: "Name the files", maxTurns: 4 },
+    active: false,
+    revoked: true,
+    progress: { activity: "Access stopped; the current turn may finish, but no further turn was sent." },
+  });
+  assert.equal(shown.progress.activity, "Stopped. No further turn was sent.");
 });
