@@ -1821,7 +1821,7 @@ function App() {
   }
 
   function handleNewGoal() {
-    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return;
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive || sidebarUnconfirmed || workerGone)) return;
     if (client.mode === "linux-core") {
       linuxHoldLineRef.current = false;
       heldJobId.current = null;
@@ -2604,7 +2604,7 @@ function App() {
         detailsDisabled={client.mode === "linux-core"}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
-        newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)}
+        newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive || sidebarUnconfirmed || workerGone)}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
         connectionOverride={client.mode === "linux-core" ? "This status is not the workbench connection" : undefined}
@@ -2619,7 +2619,7 @@ function App() {
           projectOverride={client.mode === "linux-core" ? "This page" : undefined}
           failedOpenId={client.mode === "linux-core" ? snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim().split(":")[0]?.trim() : undefined}
           goalListUnreadable={client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:"))}
-          newGoalEnabled={!(client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive))}
+          newGoalEnabled={!(client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive || sidebarUnconfirmed || workerGone))}
           plansUnreadable={plansUnreadable}
           collapsed={navCollapsed}
           plans={plans.map((plan) => ({
@@ -2678,7 +2678,7 @@ function App() {
             <div className="banner banner-warn" role="status">
               <div>
                 <strong>The goal list could not be read.</strong>
-                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}{linuxCoordinationLive || linuxActionBusy || linuxGranting ? "" : " New goal can still start."}</span>
+                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}{linuxCoordinationLive || linuxActionBusy || linuxGranting || sidebarUnconfirmed || workerGone ? "" : " New goal can still start."}</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
                   <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal list read failed:"))?.slice("Goal list read failed:".length).trim()}</pre>
@@ -2696,7 +2696,7 @@ function App() {
                     ?? snapshot.goalOverview?.goals.find((goal) => goal.campaignId === id)?.title;
                   return titled ? `${titled} could not be opened.` : "That goal could not be opened.";
                 })()}</strong>
-                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}{linuxCoordinationLive || linuxActionBusy || linuxGranting ? "" : " New goal can still start."}</span>
+                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}{linuxCoordinationLive || linuxActionBusy || linuxGranting || sidebarUnconfirmed || workerGone ? "" : " New goal can still start."}</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
                   <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim()}</pre>
