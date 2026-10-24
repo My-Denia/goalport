@@ -22,6 +22,8 @@ interface TitleBarProps {
   newGoalDisabled?: boolean;
   onOpenAbout: () => void;
   onReconnect: () => void;
+  connectionOverride?: string;
+  hideReconnect?: boolean;
   onCloseWindow: () => void;
 }
 
@@ -37,7 +39,7 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, onOpenAbout, onReconnect, connectionOverride, hideReconnect = false, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
 
@@ -71,11 +73,11 @@ export function TitleBar({
         </div>
 
         <div className="titlebar-right">
-          <span className={`connection-pill connection-${browserPreview ? "preview" : snapshot.connection}`} title={browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}>
+          <span className={`connection-pill connection-${browserPreview ? "preview" : snapshot.connection}`} title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))}>
             <span className="status-dot" aria-hidden="true" />
-            <span className="connection-text">{browserPreview ? "Browser preview" : connectionLabel(snapshot)}</span>
+            <span className="connection-text">{connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}</span>
           </span>
-          {connected ? null : (
+          {connected || hideReconnect ? null : (
             <button className="tb-button" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>
               Reconnect
             </button>
