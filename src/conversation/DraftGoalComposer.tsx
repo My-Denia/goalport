@@ -225,7 +225,7 @@ export function DraftGoalComposer({
               type="checkbox"
               aria-label="Keep working after closing"
               checked={backgroundConsent}
-              disabled={busy || inputsLocked || Boolean(onStopCoordination)}
+              disabled={busy || inputsLocked || Boolean(onStopCoordination) || Boolean(consentWarning)}
               onChange={(event) => onBackgroundConsentChange(event.target.checked)}
             />
             Keep working after closing
