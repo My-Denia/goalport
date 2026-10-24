@@ -2707,6 +2707,7 @@ function App() {
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       setLinuxGranting(true);
+                      const previousLine = linuxCoordinationLine;
                       setLinuxCoordinationLine("Allowing Background Send.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
@@ -2720,7 +2721,7 @@ function App() {
                           setLinuxCoordinationLine(sentence);
                           return;
                         }
-                        setLinuxCoordinationLine((current) => current === "Allowing Background Send." ? null : current);
+                        setLinuxCoordinationLine((current) => current === "Allowing Background Send." ? previousLine : current);
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
                         const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
