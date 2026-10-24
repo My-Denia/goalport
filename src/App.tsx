@@ -340,6 +340,8 @@ function App() {
   const linuxStatusEpoch = useRef(0);
   const linuxActionSettled = useRef(0);
   const leftRequestIds = useRef(new Set<string>());
+  const seenJobId = useRef<string | null>(null);
+  const leftJobIds = useRef(new Set<string>());
   const [leftRevision, setLeftRevision] = useState(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
@@ -2170,7 +2172,9 @@ function App() {
           }
           if (added) setLeftRevision((value) => value + 1);
         }
-        if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
+        const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
+        if (!jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
+          seenJobId.current = payload.jobId;
           linuxFreshDraft.current = false;
           setLinuxShowingFreshDraft(false);
           setLinuxCoordinationLine(payload.line);
@@ -2681,6 +2685,7 @@ function App() {
                         if (body && body.ok !== false && !(typeof body.error === "string" && body.error.trim())) {
                           setLinuxCoordinationLive(false);
                           if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
+                          if (seenJobId.current) leftJobIds.current.add(seenJobId.current);
                           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
                           return;
                         }
