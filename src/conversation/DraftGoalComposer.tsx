@@ -73,6 +73,7 @@ interface DraftGoalComposerProps {
   onLinuxWriteChange?: (value: boolean) => void;
   workspacePlaceholder?: string;
   workspaceHint?: string;
+  harnessWarning?: string | null;
   backgroundConsent?: boolean;
   onBackgroundConsentChange?: (enabled: boolean) => void;
   onBrowse: () => void;
@@ -88,7 +89,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, activeGoalTitle, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, activeGoalTitle, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -137,6 +138,7 @@ export function DraftGoalComposer({
           ) : null}
         </div>
         {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? "Continue stays in this folder. New goal can use another." : workspaceHint}</p> : null}
+        {harnessWarning && !activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>

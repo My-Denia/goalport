@@ -398,6 +398,7 @@ function App() {
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
+  const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
@@ -2175,6 +2176,25 @@ function App() {
   }, [client.mode, linuxCoordinationLive]);
 
   useEffect(() => {
+    if (client.mode !== "linux-core") return undefined;
+    if (linuxCoordinationGoal && !linuxShowingFreshDraft) {
+      setLinuxHarnessSentence(null);
+      return undefined;
+    }
+    let cancelled = false;
+    void fetch("/goalport/ipc", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
+    }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
+      if (cancelled) return;
+      const sentence = (body as { payload?: { sentence?: unknown } } | null)?.payload?.sentence;
+      setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
+    }).catch(() => { if (!cancelled) setLinuxHarnessSentence(null); });
+    return () => { cancelled = true; };
+  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft]);
+
+  useEffect(() => {
     if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
     const coreDefault = snapshot.project.workspaceRoot || "";
     if (draftGoal.workspace === linuxCoordinationWorkspace) return;
@@ -2602,6 +2622,7 @@ function App() {
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
+                    harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
                     onBrowse={() => { void chooseWorkspace(); }}

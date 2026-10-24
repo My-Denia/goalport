@@ -187,6 +187,21 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     }
 
 
+def subscription_harness_sentence(stdout: str) -> str | None:
+    found = []
+    for line in stdout.splitlines():
+        if not line.startswith("provider ") or "authenticated" not in line or "(subscription)" not in line:
+            continue
+        name = line.split(":", 1)[0].removeprefix("provider ").strip()
+        if name:
+            found.append(name)
+    if len(found) >= 2:
+        return None
+    if len(found) == 1:
+        return "Stopped. An independent check needs a second logged-in harness, so no second role was assigned."
+    return "No installed subscription harness was found on this machine, so nothing was admitted."
+
+
 def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None) -> tuple[list[str] | None, str | None]:
     if not endpoint:
         return None, "The Core socket is required, so nothing was admitted."
@@ -318,6 +333,17 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(400, disconnected_body("Core request must be an object"), "application/json")
                 return
             message_type = request.get("messageType") or request.get("message_type")
+            if message_type == "coordination_discover":
+                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({"ok": False, "error": "Discover is not wired on this workbench."}).encode(), "application/json")
+                    return
+                code, out, err = continue_runner([*prefix, "discover"])
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "stderr": err}}).encode(), "application/json")
+                return
             if message_type == "coordination_latest":
                 self._send(200, json.dumps({
                     "ok": True,
