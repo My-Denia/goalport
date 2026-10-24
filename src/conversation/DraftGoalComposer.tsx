@@ -106,6 +106,7 @@ export function DraftGoalComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
+  const folderHint = !workspaceHint || inFlightLine ? null : activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : failureHeadline && (blockedFromSending || consentWarning || harnessWarning) ? null : "A new send stays in this folder. New goal can use another.") : workspaceHint;
   const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
@@ -171,7 +172,7 @@ export function DraftGoalComposer({
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked}>Browse…</button>
           ) : null}
         </div>
-        {workspaceHint && !(failureHeadline && (blockedFromSending || consentWarning || harnessWarning)) && coordinationResult !== "Sending." && coordinationResult !== "Stopping this goal." && coordinationResult !== "Recording the stop." && coordinationResult !== "Continuing." && coordinationResult !== "Leaving this unreplayed." && coordinationResult !== "Allowing Background Send." ? <p className="draft-hint">{activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : "A new send stays in this folder. New goal can use another.") : workspaceHint}</p> : null}
+        {folderHint ? <p className="draft-hint">{folderHint}</p> : null}
         {harnessWarning && activeGoalTitle && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
