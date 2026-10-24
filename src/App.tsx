@@ -2177,10 +2177,6 @@ function App() {
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
-    if (linuxCoordinationGoal && !linuxShowingFreshDraft) {
-      setLinuxHarnessSentence(null);
-      return undefined;
-    }
     let cancelled = false;
     void fetch("/goalport/ipc", {
       method: "POST",
@@ -2603,7 +2599,7 @@ function App() {
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },

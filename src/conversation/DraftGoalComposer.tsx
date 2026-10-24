@@ -138,7 +138,7 @@ export function DraftGoalComposer({
           ) : null}
         </div>
         {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? "Continue stays in this folder. New goal can use another." : workspaceHint}</p> : null}
-        {harnessWarning && !activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
+        {harnessWarning ? <p className="draft-hint">{harnessWarning}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>

@@ -171,10 +171,11 @@ describe("Linux Core bridge", () => {
       campaigns: [],
       notices: [],
     };
+    let missingHarness = false;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messageType: string };
       if (body.messageType === "coordination_discover") {
-        return jsonResponse({ ok: true, payload: { sentence: "An independent check needs a second logged-in harness, so nothing will be sent." } });
+        return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null } });
       }
       if (body.messageType === "coordination_latest") {
         return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited." }, reason: null } });
@@ -210,6 +211,7 @@ describe("Linux Core bridge", () => {
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
+    missingHarness = true;
     fireEvent.click(screen.getByRole("button", { name: "New goal" }));
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
     expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
@@ -222,6 +224,8 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.getByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Continue this goal" })).toBeNull();
     expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
     expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
   });
