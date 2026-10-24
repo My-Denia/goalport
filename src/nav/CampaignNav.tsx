@@ -80,8 +80,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
 
       <div className="sidebar-section-title">
         <span>Goals</span>
-        <span className="count-badge" aria-label={campaignListUnavailable ? "Goal list unavailable" : undefined}>
-          {campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
+        <span className="count-badge" aria-label={goalListUnreadable ? "The goal list could not be read." : campaignListUnavailable ? "Goal list unavailable" : undefined}>
+          {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
 
