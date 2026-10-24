@@ -974,6 +974,7 @@ function App() {
             clearFailure();
             setLinuxLeftoverHeld(false);
             setSidebarUnconfirmed(false);
+            setBackgroundView(false);
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
             setLinuxCoordinationLive(true);
@@ -2901,6 +2902,7 @@ function App() {
                           setLinuxHoldLine(false);
                           setLinuxLeftoverHeld(false);
                           setSidebarUnconfirmed(false);
+                          setBackgroundView(false);
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
                           setLinuxCoordinationLive(true);
