@@ -2658,7 +2658,7 @@ function App() {
                     ?? snapshot.goalOverview?.goals.find((goal) => goal.campaignId === id)?.title;
                   return titled ? `${titled} could not be opened.` : "That goal could not be opened.";
                 })()}</strong>
-                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}</span>
+                <span>This is not the workbench connection.{linuxCoordinationGoal ? " This did not replace the workbench goal." : ""}{linuxCoordinationLive || linuxActionBusy || linuxGranting ? "" : " New goal can still start."}</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
                   <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim()}</pre>
