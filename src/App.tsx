@@ -441,6 +441,7 @@ function App() {
   const [sidebarUnconfirmed, setSidebarUnconfirmed] = useState(false);
   const linuxHoldLineRef = useRef(false);
   const admissionUnsaid = useRef(savedAdmissionUnsaid() !== null);
+  const leftUnconfirmedSlot = useRef(false);
   const sidebarFailed = useRef(false);
   const failedLine = useRef<string | null>(null);
   const failureLoaded = useRef(false);
@@ -2290,7 +2291,7 @@ function App() {
           }
           if (added) setLeftRevision((value) => value + 1);
         }
-        if (payload?.unconfirmedGoal === true && !(linuxRequestRef.current && leftRequestIds.current.has(linuxRequestRef.current))) setSidebarUnconfirmed(true);
+        if (payload?.unconfirmedGoal === true && !leftUnconfirmedSlot.current && !(linuxRequestRef.current && leftRequestIds.current.has(linuxRequestRef.current))) setSidebarUnconfirmed(true);
         setLinuxLeftoverHeld(payload?.leftoverHeld === true);
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
@@ -2313,6 +2314,7 @@ function App() {
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           admissionUnsaid.current = false;
           rememberAdmissionUnsaid(null);
+          leftUnconfirmedSlot.current = false;
           grantAllowed.current = false;
           linuxHoldLineRef.current = false;
           clearFailure();
@@ -2903,6 +2905,7 @@ function App() {
                           linuxHoldLineRef.current = false;
                           admissionUnsaid.current = false;
                           rememberAdmissionUnsaid(null);
+                          leftUnconfirmedSlot.current = true;
                           clearFailure();
                           setLinuxHoldLine(false);
                           setSidebarUnconfirmed(false);
