@@ -337,6 +337,7 @@ function App() {
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
   const linuxFreshDraft = useRef(false);
+  const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
   // Set when a handler opens a fresh draft whose panel must start in change
   // mode; the draft-open effect consumes it exactly once.
@@ -894,6 +895,7 @@ function App() {
           setLinuxCoordinationLine(text);
           if (coordinationStartAdmitted(body)) {
             linuxFreshDraft.current = false;
+            setLinuxShowingFreshDraft(false);
             setLinuxCoordinationLive(true);
             setLinuxCoordinationGoal(message);
             setLinuxCoordinationWorkspace(workspace);
@@ -1707,10 +1709,7 @@ function App() {
     });
     if (client.mode === "linux-core" && !linuxCoordinationLive) {
       linuxFreshDraft.current = true;
-      setLinuxCoordinationGoal(null);
-      setLinuxCoordinationWorkspace(null);
-      setLinuxCoordinationRequest(null);
-      setLinuxCoordinationLine(null);
+      setLinuxShowingFreshDraft(true);
     }
   }
 
@@ -2132,19 +2131,13 @@ function App() {
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
+          setLinuxShowingFreshDraft(false);
           setLinuxCoordinationLine(payload.line);
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLive(true);
           return;
         }
-        if (linuxFreshDraft.current) {
-          setLinuxCoordinationLive(false);
-          setLinuxCoordinationGoal(null);
-          setLinuxCoordinationWorkspace(null);
-          setLinuxCoordinationRequest(null);
-          setLinuxCoordinationLine(null);
-          return;
-        }
+        if (linuxFreshDraft.current) return;
         setLinuxCoordinationLive(false);
         const record = payload?.record;
         if (record && typeof record.goal === "string" && record.goal.trim()) setLinuxCoordinationGoal(record.goal);
@@ -2322,8 +2315,8 @@ function App() {
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal && !(backgroundView && backgroundJob) ? title : null}
-        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : client.mode === "linux-core" && linuxCoordinationWorkspace ? workspaceFolder(linuxCoordinationWorkspace) : null}
-        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxCoordinationWorkspace ? linuxCoordinationWorkspace : null}
+        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? workspaceFolder(linuxCoordinationWorkspace) : null}
+        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? linuxCoordinationWorkspace : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
@@ -2369,7 +2362,7 @@ function App() {
             viewing: true,
             stateLabel: linuxCoordinationLive ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); }}
+          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
@@ -2556,8 +2549,8 @@ function App() {
                     linuxCanStartCoordination={client.mode === "linux-core"}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
-                    coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
-                    activeGoalTitle={client.mode === "linux-core" ? linuxCoordinationGoal : null}
+                    coordinationResult={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationLine : null}
+                    activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
@@ -2568,7 +2561,7 @@ function App() {
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && linuxCoordinationRequest ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2578,6 +2571,7 @@ function App() {
                         setLinuxCoordinationLine(text || "Continue was sent.");
                         if (coordinationStartAdmitted(body)) {
                           linuxFreshDraft.current = false;
+                          setLinuxShowingFreshDraft(false);
                           setLinuxCoordinationLive(true);
                           if (draftGoal?.message.trim()) setLinuxCoordinationGoal(draftGoal.message.trim());
                           setDraftGoal((current) => current ? { ...current, message: "" } : current);
