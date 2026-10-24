@@ -37,7 +37,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           <div><strong>Browser preview</strong><span>Try the interface with sample data. No Core or Runtime receives work.</span></div>
         </div>
       ) : null}
-      {capacityLimited ? (
+      {capacityLimited && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
           <div>
@@ -49,7 +49,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </button>
         </div>
       ) : null}
-      {historyWindowAdvanced ? (
+      {historyWindowAdvanced && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">↥</span>
           <div>
@@ -58,7 +58,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </div>
         </div>
       ) : null}
-      {hold ? (
+      {hold && !hideCoreConnection ? (
         <div className={`banner banner-held${hold.blocksCurrentWorkspace === false ? " banner-related" : ""}`} role="status">
           <span className="banner-glyph" aria-hidden="true">■</span>
           <div>
