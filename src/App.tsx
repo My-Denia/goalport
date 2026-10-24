@@ -912,7 +912,11 @@ function App() {
             setLinuxCoordinationWorkspace(workspace);
             setDraftGoal((current) => current ? { ...current, message: "" } : current);
           }
-        }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
+        }).catch(() => {
+          if (statusEpoch !== linuxStatusEpoch.current) return;
+          linuxActionSettled.current = statusEpoch;
+          setDraftError({ sentence: "The coordinated goal could not be sent." });
+        });
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
@@ -2633,7 +2637,11 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         setLinuxCoordinationLine(text || "Stop was sent.");
-                      }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
+                      }).catch(() => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
+                        linuxActionSettled.current = statusEpoch;
+                        setLinuxCoordinationLine("Stop could not be sent.");
+                      });
                     } : undefined}
                     onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
@@ -2653,7 +2661,11 @@ function App() {
                           if (draftGoal?.message.trim()) setLinuxCoordinationGoal(draftGoal.message.trim());
                           setDraftGoal((current) => current ? { ...current, message: "" } : current);
                         }
-                      }).catch(() => setLinuxCoordinationLine("Continue could not be sent."));
+                      }).catch(() => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
+                        linuxActionSettled.current = statusEpoch;
+                        setLinuxCoordinationLine("Continue could not be sent.");
+                      });
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
