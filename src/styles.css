@@ -1015,7 +1015,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 @media (max-width: 560px) {
   .connection-pill { display: none; }
-  .connection-neutral { display: inline-flex; }
+  .connection-neutral { display: inline-flex; max-width: 9rem; }
+  .connection-neutral .connection-text { overflow: hidden; text-overflow: ellipsis; max-width: 7.5rem; }
   .tb-button { font-size: 0; gap: 0; }
   .tb-button .tb-icon-glyph, .tb-button > span[aria-hidden="true"] { font-size: 14px; }
   .tb-keep-label { font-size: 12px; }
