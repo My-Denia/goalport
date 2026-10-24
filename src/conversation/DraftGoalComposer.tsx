@@ -71,6 +71,7 @@ interface DraftGoalComposerProps {
   linuxWrite?: boolean;
   onLinuxWriteChange?: (value: boolean) => void;
   workspacePlaceholder?: string;
+  workspaceHint?: string;
   backgroundConsent?: boolean;
   onBackgroundConsentChange?: (enabled: boolean) => void;
   onBrowse: () => void;
@@ -86,7 +87,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -134,6 +135,7 @@ export function DraftGoalComposer({
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy}>Browse…</button>
           ) : null}
         </div>
+        {workspaceHint ? <p className="draft-hint">{workspaceHint}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           <p className="draft-hint">{runtimeRequiredHint}</p>

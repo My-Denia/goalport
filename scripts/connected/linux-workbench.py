@@ -199,12 +199,23 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
     return argv, None
 
 
+def expand_workspace(workspace: str) -> str:
+    if workspace == "~":
+        return str(Path.home())
+    if workspace.startswith("~/"):
+        return str(Path.home() / workspace[2:])
+    return workspace
+
+
 def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
         return None, "A goal is required, so nothing was admitted."
-    if not isinstance(workspace, str) or not (workspace.startswith("/") or Path(workspace).is_absolute()):
+    if not isinstance(workspace, str):
+        return None, "The workspace must be an absolute path, so nothing was admitted."
+    workspace = expand_workspace(workspace.strip())
+    if not (workspace.startswith("/") or Path(workspace).is_absolute()):
         return None, "The workspace must be an absolute path, so nothing was admitted."
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
     if error:

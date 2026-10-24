@@ -176,6 +176,9 @@ class CommandRoutingTests(unittest.TestCase):
         local_bin = Path.home() / ".local" / "bin"
         if local_bin.is_dir():
             self.assertIn(str(local_bin), env["PATH"])
+        home_start, home_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "~/project", False, "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(home_error)
+        self.assertIn(str(Path.home() / "project"), home_start)
         refused, refuse_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "relative")
         self.assertIsNone(refused)
         self.assertIn("absolute", refuse_error)

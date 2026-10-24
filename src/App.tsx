@@ -2541,6 +2541,7 @@ function App() {
                       }).catch(() => setLinuxCoordinationLine("Continue could not be sent."));
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
+                    workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
                     onBrowse={() => { void chooseWorkspace(); }}

@@ -183,6 +183,7 @@ describe("Linux Core bridge", () => {
     }));
     render(<App />);
     expect(await screen.findByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
+    expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
     expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
     expect(screen.queryByText("Choose a Runtime")).toBeNull();
     expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
