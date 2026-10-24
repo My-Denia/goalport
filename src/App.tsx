@@ -2213,7 +2213,10 @@ function App() {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
     let generation = 0;
+    let inFlight = false;
     const check = () => {
+      if (inFlight) return;
+      inFlight = true;
       const request = ++generation;
       void fetch("/goalport/ipc", {
         method: "POST",
@@ -2235,7 +2238,7 @@ function App() {
         setLinuxConsentMissing(payload?.consentMissing === true);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
         setLinuxDiscoverChecked(true);
-      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } });
+      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } }).finally(() => { inFlight = false; });
     };
     check();
     const timer = window.setInterval(check, linuxHarnessSentence ? 2000 : 8000);
