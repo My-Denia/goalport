@@ -2221,6 +2221,9 @@ function App() {
           linuxFreshDraft.current = false;
           setLinuxShowingFreshDraft(false);
           setLinuxCoordinationLine(payload.line);
+          if (payload.line !== "This goal's exit is not confirmed, so another goal cannot start yet." && payload.line !== "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.") {
+            setSidebarUnconfirmed(false);
+          }
           setLinuxCoordinationDetail(null);
           setLinuxCoordinationChange(null);
           setLinuxCoordinationRequest(null);
