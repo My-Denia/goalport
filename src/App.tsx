@@ -2988,7 +2988,7 @@ function App() {
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" && !linuxCoordinationLive && !linuxActionBusy ? linuxHarnessSentence : null}
                     signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
-                    discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : null}
+                    discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : plansUnreadable && !linuxCoordinationLive && !linuxActionBusy ? "Saved plans could not be read. Send will try again." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
                     leftoverHint={leftoverSlotLine}
                     onGrantConsent={client.mode === "linux-core" && (linuxCoordinationLine === "Allowing Background Send." || (linuxConsentMissing && !linuxGranting)) ? () => {
