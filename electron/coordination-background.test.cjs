@@ -458,3 +458,14 @@ for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block bot
     }
   }
 });
+
+test("a settled stop is not revived by a stale control acknowledgement", () => {
+  const { durableTerminal, withControlAck } = require("./coordination-background.cjs");
+  const facts = { state: "stopped", pendingCommand: null, outcome: { status: "stopped" }, jobId: "job", requestId: "req" };
+  assert.equal(durableTerminal(facts), true);
+  assert.equal(durableTerminal({ ...facts, pendingCommand: { commandId: "still-open" } }), false);
+  const stale = { jobId: "job", requestId: "req", state: "running", active: true, revoked: true, pendingCommandId: "coordinate-plan-old" };
+  const revived = withControlAck(facts, stale);
+  assert.equal(revived.state, "running");
+  assert.equal(durableTerminal(facts) && !durableTerminal(revived), true);
+});

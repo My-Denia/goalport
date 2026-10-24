@@ -29,6 +29,9 @@ function codedRefusal(code, message, cause) {
 function preflightRefusal(cause) {
   return codedRefusal("background-preflight-failed", PREFLIGHT_MESSAGE, cause);
 }
+function durableTerminal(facts) {
+  return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
+}
 function projection(status, live = false) {
   if (!status) return null;
   const confirmedTerminal = ["completed", "failed", "stopped"].includes(status.state);
@@ -118,7 +121,7 @@ function createBackgroundHost(options) {
     }
     if (!facts) return null;
     lastJobId = facts.jobId;
-    if (!facts.active) return projection(facts);
+    if (!facts.active || durableTerminal(facts)) return projection(facts);
     try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
@@ -274,4 +277,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply };
+module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal };
