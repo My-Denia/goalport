@@ -425,6 +425,24 @@ function App() {
   const linuxHoldLineRef = useRef(false);
   const sidebarFailed = useRef(false);
   const failedLine = useRef<string | null>(null);
+  const failureLoaded = useRef(false);
+  if (!failureLoaded.current) {
+    failureLoaded.current = true;
+    if (typeof sessionStorage !== "undefined") {
+      const savedFailure = sessionStorage.getItem("goalport.linux.failedLine");
+      if (savedFailure) { sidebarFailed.current = true; failedLine.current = savedFailure; }
+    }
+  }
+  function rememberFailure(line: string) {
+    sidebarFailed.current = true;
+    failedLine.current = line;
+    try { sessionStorage.setItem("goalport.linux.failedLine", line); } catch { /* a private window can refuse storage */ }
+  }
+  function clearFailure() {
+    sidebarFailed.current = false;
+    failedLine.current = null;
+    try { sessionStorage.removeItem("goalport.linux.failedLine"); } catch { /* a private window can refuse storage */ }
+  }
   const heldJobId = useRef<string | null>(null);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
@@ -941,12 +959,11 @@ function App() {
           setLinuxCoordinationLine(shown);
           const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
-          if (failed && !coordinationStartAdmitted(body)) { sidebarFailed.current = true; failedLine.current = shown; }
+          if (failed && !coordinationStartAdmitted(body)) rememberFailure(shown);
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
           if (failed && !coordinationStartAdmitted(body) && shown !== "The left goal could not be released, so nothing was sent." && !shown.includes("nothing was admitted") && !shown.includes("nothing will be sent")) setSidebarUnconfirmed(true);
           if (coordinationStartAdmitted(body)) {
-            sidebarFailed.current = false;
-            failedLine.current = null;
+            clearFailure();
             setLinuxLeftoverHeld(false);
             setSidebarUnconfirmed(false);
             linuxFreshDraft.current = false;
@@ -961,8 +978,7 @@ function App() {
           linuxActionSettled.current = statusEpoch;
           setLinuxCoordinationLine("The coordinated goal could not be sent.");
           linuxHoldLineRef.current = true;
-          sidebarFailed.current = true;
-          failedLine.current = "The coordinated goal could not be sent.";
+          rememberFailure("The coordinated goal could not be sent.");
           setLinuxHoldLine(true);
           setSidebarUnconfirmed(true);
           setDraftError(null);
@@ -2228,8 +2244,7 @@ function App() {
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           grantAllowed.current = false;
           linuxHoldLineRef.current = false;
-          sidebarFailed.current = false;
-          failedLine.current = null;
+          clearFailure();
           heldJobId.current = null;
           setLinuxHoldLine(false);
           seenJobId.current = payload.jobId;
@@ -2771,8 +2786,7 @@ function App() {
                           setLinuxCoordinationLive(false);
                           setLinuxLeftoverHeld(false);
                           linuxHoldLineRef.current = false;
-                          sidebarFailed.current = false;
-                          failedLine.current = null;
+                          clearFailure();
                           setLinuxHoldLine(false);
                           setSidebarUnconfirmed(false);
                           if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
@@ -2786,16 +2800,14 @@ function App() {
                           ? body.error.trim()
                           : "The job could not be left.";
                         linuxHoldLineRef.current = true;
-                        sidebarFailed.current = true;
-                        failedLine.current = text;
+                        rememberFailure(text);
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine(text);
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
-                        sidebarFailed.current = true;
-                        failedLine.current = "The job could not be left.";
+                        rememberFailure("The job could not be left.");
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("The job could not be left.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
@@ -2823,8 +2835,7 @@ function App() {
                         const confirmed = /unconfirmed|not confirmed/i.test(text || "");
                         setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
                         if (body && (body as { ok?: unknown }).ok !== false && confirmed === false && !(wasUnconfirmed && !confirmed) && !/unconfirmed/i.test(text || "")) {
-                          sidebarFailed.current = false;
-                          failedLine.current = null;
+                          clearFailure();
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
                         }
@@ -2838,8 +2849,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
-                        sidebarFailed.current = true;
-                        failedLine.current = "Stop could not be sent.";
+                        rememberFailure("Stop could not be sent.");
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Stop could not be sent.");
@@ -2872,14 +2882,13 @@ function App() {
                         const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
                         if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
-                          if (shown === "The left goal could not be released, so nothing was sent." || !/unconfirmed/i.test(text || "")) { sidebarFailed.current = true; failedLine.current = shown || "Continue could not be sent."; }
+                          if (shown === "The left goal could not be released, so nothing was sent." || !/unconfirmed/i.test(text || "")) rememberFailure(shown || "Continue could not be sent.");
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
                           if (shown !== "The left goal could not be released, so nothing was sent." && /unconfirmed/i.test(text || "")) setSidebarUnconfirmed(true);
                         }
                         if (coordinationStartAdmitted(body)) {
-                          sidebarFailed.current = false;
-                          failedLine.current = null;
+                          clearFailure();
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
                           setLinuxLeftoverHeld(false);
@@ -2894,8 +2903,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
-                        sidebarFailed.current = true;
-                        failedLine.current = "Continue could not be sent.";
+                        rememberFailure("Continue could not be sent.");
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Continue could not be sent.");
@@ -2924,8 +2932,7 @@ function App() {
                           const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.";
                           grantError.current = true;
                           linuxHoldLineRef.current = true;
-                          sidebarFailed.current = true;
-                          failedLine.current = sentence;
+                          rememberFailure(sentence);
                           setLinuxHoldLine(true);
                           setLinuxHarnessSentence(sentence);
                           setLinuxCoordinationLine(sentence);
@@ -2935,8 +2942,7 @@ function App() {
                         setLinuxConsentMissing(false);
                         setLinuxHarnessSentence(null);
                         grantAllowed.current = true;
-                        sidebarFailed.current = false;
-                        failedLine.current = null;
+                        clearFailure();
                         linuxHoldLineRef.current = false;
                         setLinuxHoldLine(false);
                         setLinuxCoordinationLine("Background Send is allowed.");
@@ -2944,8 +2950,7 @@ function App() {
                       }).catch(() => {
                         const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
                         linuxHoldLineRef.current = true;
-                        sidebarFailed.current = true;
-                        failedLine.current = sentence;
+                        rememberFailure(sentence);
                         setLinuxHoldLine(true);
                         setLinuxHarnessSentence(sentence);
                         setLinuxCoordinationLine(sentence);
