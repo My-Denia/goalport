@@ -424,7 +424,7 @@ function projectionLines(projection) {
     if (typeof projection.outcome.error === "string" && projection.outcome.error) lines.push(`outcome detail: ${projection.outcome.error}`);
   }
   if (typeof projection.acknowledgedStuckAt === "string") lines.push(`acknowledged stuck at: ${projection.acknowledgedStuckAt}`);
-  if (projection.workerPid != null) lines.push(`worker pid: ${projection.workerPid}`);
+  if (projection.live === true && projection.workerPid != null) lines.push(`worker pid: ${projection.workerPid}`);
   return lines;
 }
 
