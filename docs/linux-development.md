@@ -122,7 +122,8 @@ $CLI $GLOBAL release --job JOB_ID       # free the profile slot after a confirme
 `--database` defaults to `<data-dir>/core.sqlite`, and `status`/`stop`/
 `acknowledge`/`release` default `--job` to the active or newest job. `discover`
 prints installed and authenticated harnesses with their auth type, model list
-and recorded environment health. Consent and capability are separate lines:
+and recorded environment health. An empty list says no signed-in subscription
+harness was found; it does not say nothing is installed. Consent and capability are separate lines:
 granting access never claims a harness is signed in, and a signed-in harness
 never grants access to spend quota.
 
