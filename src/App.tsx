@@ -343,6 +343,7 @@ function App() {
   const seenJobId = useRef<string | null>(null);
   const leftJobIds = useRef(new Set<string>());
   const linuxActionOpen = useRef(false);
+  const grantError = useRef(false);
   const [leftRevision, setLeftRevision] = useState(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
@@ -2296,8 +2297,12 @@ function App() {
         }
         const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
         const sentence = payload?.sentence;
-        setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
-        setLinuxConsentMissing(payload?.consentMissing === true);
+        const consentStillMissing = payload?.consentMissing === true;
+        if (!(grantError.current && consentStillMissing)) {
+          if (!consentStillMissing) grantError.current = false;
+          setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
+        }
+        setLinuxConsentMissing(consentStillMissing);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
         setLinuxDiscoverChecked(true);
       }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } }).finally(() => { inFlight = false; });
@@ -2836,6 +2841,7 @@ function App() {
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
+                      grantError.current = false;
                       linuxActionOpen.current = true;
                       setLinuxGranting(true);
                       const previousLine = linuxCoordinationLine;
@@ -2848,10 +2854,12 @@ function App() {
                         if (!body || (body as { ok?: unknown }).ok === false) {
                           const error = (body as { error?: unknown } | null)?.error;
                           const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.";
+                          grantError.current = true;
                           setLinuxHarnessSentence(sentence);
                           setLinuxCoordinationLine(sentence);
                           return;
                         }
+                        grantError.current = false;
                         setLinuxCoordinationLine((current) => current === "Allowing Background Send." ? previousLine : current);
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
