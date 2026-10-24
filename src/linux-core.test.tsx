@@ -187,7 +187,7 @@ describe("Linux Core bridge", () => {
     }));
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
-    expect(screen.getByText("Continue stays in this folder. New goal can use another.")).toBeTruthy();
+    expect(screen.getByText("This goal stays in this folder.")).toBeTruthy();
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", true);
     expect(screen.getByText("Project folder")).toBeTruthy();
     expect(screen.queryByText("Workspace")).toBeNull();
