@@ -2714,7 +2714,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
-                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
+                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || linuxCoordinationLine === "Background Send is allowed." || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
@@ -2844,7 +2844,6 @@ function App() {
                       grantError.current = false;
                       linuxActionOpen.current = true;
                       setLinuxGranting(true);
-                      const previousLine = linuxCoordinationLine;
                       setLinuxCoordinationLine("Allowing Background Send.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
@@ -2860,7 +2859,8 @@ function App() {
                           return;
                         }
                         grantError.current = false;
-                        setLinuxCoordinationLine((current) => current === "Allowing Background Send." ? previousLine : current);
+                        setLinuxConsentMissing(false);
+                        setLinuxCoordinationLine("Background Send is allowed.");
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
                         const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
