@@ -2605,7 +2605,7 @@ function App() {
               />
             </div>
           ) : draftActive ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft"}>
+            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft"}>
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}
@@ -2709,7 +2709,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     inputsLocked={client.mode === "linux-core" && linuxActionBusy}
-                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
+                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
