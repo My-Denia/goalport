@@ -196,7 +196,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (onStopCoordination ? "This goal is still running." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (onStopCoordination ? (/unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}
