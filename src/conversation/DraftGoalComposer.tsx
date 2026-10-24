@@ -38,7 +38,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
               {selected ? selected.name[0] : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
+              <strong>{selected ? selected.name : (runtimeRequiredHint ? "Coordinated goal" : "Choose a Runtime")}</strong>
               <small>{coordinationAvailable
                 ? "Send without picking, or pick the single-harness path."
                 : (runtimeRequiredHint ?? "Choose a Runtime before sending.")}</small>
