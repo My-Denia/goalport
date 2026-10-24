@@ -2753,7 +2753,7 @@ function App() {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
             }} />
           </div> : selectedPlan ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label="Saved plan">
+            <div className="timeline-scroll" tabIndex={-1} aria-label={selectedPlan.verdict === "stopped" ? "Stopped. No further turn was sent." : "Saved plan"}>
               <CoordinationStatus
                 goal={selectedPlan.goal}
                 planningHarness={selectedPlan.planningHarness}
