@@ -2868,6 +2868,7 @@ function App() {
                         }
                         grantError.current = false;
                         setLinuxConsentMissing(false);
+                        setLinuxHarnessSentence(null);
                         grantAllowed.current = true;
                         setLinuxCoordinationLine("Background Send is allowed.");
                         setLinuxDiscoverNonce((value) => value + 1);
