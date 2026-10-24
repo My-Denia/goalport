@@ -31,6 +31,16 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
+function runningJobDetail(label: string): string {
+  if (label === "Unreplayed") return "Unreplayed. The same request id cannot be admitted again.";
+  if (label === "Not confirmed") return "Not confirmed. This goal's exit is not confirmed.";
+  if (label === "Not admitted") return "Not admitted. The reply did not say the goal was admitted.";
+  if (label === "Worker gone") return "Worker gone. Its exit is not confirmed.";
+  if (label === "Failed") return "Failed. The last action did not succeed.";
+  if (label === "Slot held") return "Slot held. The next valid send will release it.";
+  return label;
+}
+
 export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -95,8 +105,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
             disabled={runningJob.locked}
-            title={`${runningJob.goal} — ${runningJob.stateLabel === "Unreplayed" ? "Unreplayed. The same request id cannot be admitted again." : runningJob.stateLabel === "Not confirmed" ? "Not confirmed. This goal's exit is not confirmed." : runningJob.stateLabel === "Not admitted" ? "Not admitted. The reply did not say the goal was admitted." : runningJob.stateLabel === "Worker gone" ? "Worker gone. Its exit is not confirmed." : runningJob.stateLabel}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}`}
-            aria-label={`${runningJob.goal}, ${runningJob.stateLabel === "Unreplayed" ? "Unreplayed. The same request id cannot be admitted again." : runningJob.stateLabel === "Not confirmed" ? "Not confirmed. This goal's exit is not confirmed." : runningJob.stateLabel === "Not admitted" ? "Not admitted. The reply did not say the goal was admitted." : runningJob.stateLabel === "Worker gone" ? "Worker gone. Its exit is not confirmed." : runningJob.stateLabel}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}`}
+            title={`${runningJob.goal} — ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}`}
+            aria-label={`${runningJob.goal}, ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}`}
             onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
