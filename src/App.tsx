@@ -394,6 +394,7 @@ function App() {
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
+  const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
@@ -889,7 +890,10 @@ function App() {
         }).then(async (response) => response.json()).then((body) => {
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
-          if (coordinationStartAdmitted(body)) setLinuxCoordinationLive(true);
+          if (coordinationStartAdmitted(body)) {
+            setLinuxCoordinationLive(true);
+            setLinuxCoordinationGoal(message);
+          }
         }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
         return;
       }
@@ -2108,7 +2112,7 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           setLinuxCoordinationLine(payload.line);
           setLinuxCoordinationRequest(null);
@@ -2117,6 +2121,7 @@ function App() {
         }
         setLinuxCoordinationLive(false);
         const record = payload?.record;
+        if (record && typeof record.goal === "string" && record.goal.trim()) setLinuxCoordinationGoal(record.goal);
         if (!record || typeof record.verdict !== "string") {
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
@@ -2332,8 +2337,12 @@ function App() {
             goal: backgroundJob.goal,
             viewing: backgroundView,
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
+          } : client.mode === "linux-core" && linuxCoordinationGoal ? {
+            goal: linuxCoordinationGoal,
+            viewing: true,
+            stateLabel: linuxCoordinationLive ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(true); }}
+          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
