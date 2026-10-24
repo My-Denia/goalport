@@ -2612,7 +2612,7 @@ function App() {
           <StatusBanners
             browserPreview={client.mode === "browser-preview" && coordination === null}
             snapshot={snapshot}
-            activeNotice={displayedNotice && (displayedNotice.sentence === "That goal is no longer available." || displayedNotice.sentence.startsWith("That address is no longer available.")) && (workerGone || sidebarUnconfirmed || leftUnreplayed || linuxHoldLine || linuxLeftoverHeld || linuxActionBusy || linuxGranting || Boolean(linuxHarnessSentence) || linuxConsentMissing) ? null : displayedNotice}
+            activeNotice={displayedNotice && (displayedNotice.sentence === "That goal is no longer available." || displayedNotice.sentence.startsWith("That address is no longer available.")) && (workerGone || sidebarUnconfirmed || leftUnreplayed || linuxHoldLine || linuxLeftoverHeld || linuxActionBusy || linuxGranting || Boolean(linuxHarnessSentence) || linuxConsentMissing || snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:"))) ? null : displayedNotice}
             onDismissNotice={() => {
               setActiveNotice(null);
               setTargetNotices((current) => {
