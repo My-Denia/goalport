@@ -415,6 +415,7 @@ function App() {
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
+  const [linuxHoldLine, setLinuxHoldLine] = useState(false);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
@@ -907,6 +908,7 @@ function App() {
         const statusEpoch = ++linuxStatusEpoch.current;
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
+        setLinuxHoldLine(false);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
           method: "POST",
@@ -917,6 +919,7 @@ function App() {
           linuxActionSettled.current = statusEpoch;
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
+          setLinuxHoldLine(!coordinationStartAdmitted(body));
           if (coordinationStartAdmitted(body)) {
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
@@ -1724,6 +1727,7 @@ function App() {
 
   function handleNewGoal() {
     if (client.mode === "linux-core" && linuxActionBusy) return;
+    if (client.mode === "linux-core") setLinuxHoldLine(false);
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
@@ -2674,7 +2678,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     inputsLocked={client.mode === "linux-core" && linuxActionBusy}
-                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || !linuxShowingFreshDraft) ? (leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
+                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
