@@ -153,10 +153,10 @@ export function DraftGoalComposer({
             value={draft.workspace}
             onChange={(event) => onChange({ ...draft, workspace: event.target.value })}
             placeholder={workspacePlaceholder ?? "C:\\workspace\\your-project"}
-            disabled={busy || Boolean(activeGoalTitle)}
+            disabled={busy || inputsLocked || Boolean(activeGoalTitle)}
           />
           {canBrowse ? (
-            <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy}>Browse…</button>
+            <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked}>Browse…</button>
           ) : null}
         </div>
         {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? "Continue stays in this folder. New goal can use another." : workspaceHint}</p> : null}
@@ -197,7 +197,7 @@ export function DraftGoalComposer({
             ? (onStopCoordination ? "This goal is still running." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
-          disabled={busy}
+          disabled={busy || inputsLocked}
         />
 
         {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
