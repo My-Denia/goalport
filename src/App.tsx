@@ -528,8 +528,9 @@ function App() {
               if (!cancelled && Array.isArray(records)) {
                 plansListedTerminalRef.current = listedJobId;
                 setPlans(records);
+                setPlansUnreadable(false);
               }
-            }).catch(() => undefined)
+            }).catch(() => { if (!cancelled) setPlansUnreadable(true); })
               .finally(() => { terminalListInFlightRef.current = false; });
           }
         }
@@ -1194,11 +1195,13 @@ function App() {
           }
           if (!stillCurrent()) return;
           if (!Array.isArray(disk)) {
+            setPlansUnreadable(true);
             setDraftError({ sentence: "The saved plans could not be read, so nothing was sent. Try again in a moment." });
             return;
           }
           recordCount = disk.length;
           setPlans(disk);
+          setPlansUnreadable(false);
         }
         const sendKey = `send-${recordCount}`;
         const discovery = await discover(generation);
