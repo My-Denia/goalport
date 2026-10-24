@@ -144,7 +144,7 @@ def live_fields(data_dir: Path | None) -> dict:
 
 
 def short_outcome(record: dict) -> str | None:
-    for key in ("stopReason", "result", "reviewText"):
+    for key in ("result", "reviewText", "stopReason"):
         text = record.get(key)
         if not isinstance(text, str):
             continue

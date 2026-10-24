@@ -120,6 +120,7 @@ class CommandRoutingTests(unittest.TestCase):
                 "requestId": "coordinate-verified",
                 "verdict": "verified",
                 "stopReason": "The independent harness verified the changes, so this stopped.",
+                "result": "note.txt now has before and pong.",
                 "planningHarness": "Codex",
                 "reviewHarness": "Pi",
                 "messageDispatched": True,
@@ -135,7 +136,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["planningHarness"], "Codex")
         self.assertEqual(found["record"]["reviewHarness"], "Pi")
         self.assertNotIn("planText", found["record"])
-        self.assertEqual(found["record"]["outcome"], "The independent harness verified the changes, so this stopped.")
+        self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
         job = "31f7caad-52d2-4219-9935-bffeea962876"
         jobs = directory / "coordination-jobs" / "jobs" / job
         jobs.mkdir(parents=True)
