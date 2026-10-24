@@ -134,7 +134,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || leftoverHint || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
+    <section className="draft-composer" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? `${activeGoalTitle} — slot held` : leftoverHint) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : (!activeGoalTitle && failureHeadline) || (!activeGoalTitle && (harnessWarning || consentWarning || leftoverHint)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
@@ -154,7 +154,7 @@ export function DraftGoalComposer({
         </div>
       </div>
 
-      <form className="draft-composer-form" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || leftoverHint || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : "Start a goal")} onSubmit={onSubmit}>
+      <form className="draft-composer-form" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? "This goal — slot held" : leftoverHint) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : "Start a goal")} onSubmit={onSubmit}>
         <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
