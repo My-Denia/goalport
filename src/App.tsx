@@ -705,6 +705,7 @@ function App() {
   // Never fires while a text field has focus or a modal dialog is open.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (client.mode === "linux-core") return;
       if (!(event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "i")) return;
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
@@ -714,7 +715,7 @@ function App() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [closeChoiceOpen, handoffOpen, aboutOpen]);
+  }, [client.mode, closeChoiceOpen, handoffOpen, aboutOpen]);
 
   useEffect(() => {
     let mounted = true;
@@ -2537,7 +2538,8 @@ function App() {
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
         detailsOpen={detailsOpen}
-        onToggleDetails={() => setDetailsOpen((value) => !value)}
+        onToggleDetails={() => { if (client.mode === "linux-core") return; setDetailsOpen((value) => !value); }}
+        detailsDisabled={client.mode === "linux-core"}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
         newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)}

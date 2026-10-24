@@ -16,6 +16,7 @@ interface TitleBarProps {
   onToggleNav: () => void;
   detailsOpen: boolean;
   onToggleDetails: () => void;
+  detailsDisabled?: boolean;
   onOpenDiagnostics: () => void;
   onNewGoal: () => void;
   newGoalDisabled?: boolean;
@@ -36,7 +37,7 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, onOpenAbout, onReconnect, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
 
@@ -85,10 +86,11 @@ export function TitleBar({
           <button
             className="tb-button tb-icon"
             type="button"
-            aria-label={detailsOpen ? "Close details panel" : "Open details panel"}
+            aria-label={detailsDisabled ? "Details are not this goal." : detailsOpen ? "Close details panel" : "Open details panel"}
             aria-expanded={detailsOpen}
-            title={detailsOpen ? "Close details panel" : "Open details panel"}
-            onClick={onToggleDetails}
+            title={detailsDisabled ? "Details are not this goal." : detailsOpen ? "Close details panel" : "Open details panel"}
+            disabled={detailsDisabled}
+            onClick={() => { if (!detailsDisabled) onToggleDetails(); }}
           >
             <span aria-hidden="true">ⓘ</span>
           </button>
@@ -110,7 +112,7 @@ export function TitleBar({
               <Menu.CheckboxItem
                 render={<button type="button" className="app-menu-item" />}
                 checked={detailsOpen}
-                onCheckedChange={() => { onToggleDetails(); }}
+                onCheckedChange={() => { if (!detailsDisabled) onToggleDetails(); }}
                 closeOnClick
               >
                 {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
