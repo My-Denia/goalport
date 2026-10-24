@@ -205,19 +205,37 @@ def short_outcome(record: dict) -> str | None:
     return None
 
 
+def left_request_ids(data_dir: Path) -> list[str]:
+    jobs = data_dir / "coordination-jobs" / "jobs"
+    if not jobs.is_dir():
+        return []
+    found = []
+    for job_dir in jobs.iterdir():
+        if not job_dir.is_dir() or not (job_dir / "stuck-ack.json").is_file():
+            continue
+        try:
+            admission = json.loads((job_dir / "admission.json").read_text(encoding="utf-8"))
+            request_id = admission.get("input", {}).get("requestId") if isinstance(admission, dict) else None
+        except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        if isinstance(request_id, str) and request_id and request_id not in found:
+            found.append(request_id)
+    return found
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
     """Read the last saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
     if not path.is_file():
-        return {"ok": True, "record": None, **live_fields(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"ok": False, "record": None, "reason": "coordinated result could not be read"}
     if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
-        return {"ok": True, "record": None, **live_fields(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
     last = records[-1]
     return {
         "ok": True,
@@ -235,6 +253,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "change": folded_text(last, "executionText", short_outcome(last)),
         },
         "reason": None,
+        "leftRequestIds": left_request_ids(data_dir),
         **live_fields(data_dir),
     }
 
