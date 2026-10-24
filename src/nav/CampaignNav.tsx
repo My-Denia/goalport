@@ -11,6 +11,7 @@ interface CampaignNavProps {
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
   runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean } | null;
+  navigationLocked?: boolean;
   onOpenRunningJob?: () => void;
 }
 
@@ -24,7 +25,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, onOpenRunningJob }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -63,7 +64,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
               className="project-select"
               aria-label="Project"
               value={snapshot.selectedProjectId || snapshot.project.id}
-              onChange={(event) => onSelectProject(event.target.value)}
+              disabled={navigationLocked}
+              onChange={(event) => { if (!navigationLocked) onSelectProject(event.target.value); }}
             >
               {(snapshot.projects.length > 0 ? snapshot.projects : [snapshot.project]).map((project) => (
                 <option key={project.id} value={project.id}>{project.name}</option>
@@ -129,7 +131,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
                     title={goal.workspaceRoot}
-                    onClick={() => onSelectCampaign(goal.campaignId)}
+                    disabled={navigationLocked}
+                    onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
                     <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
@@ -145,7 +148,9 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     type="button"
                     aria-label="Rename goal"
                     title="Rename this goal"
+                    disabled={navigationLocked}
                     onClick={() => {
+                      if (navigationLocked) return;
                       setRenamingId(goal.campaignId);
                       setRenameDraft(goal.title);
                     }}
@@ -185,7 +190,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
                     title={collapsed ? titleFor(campaign.id, campaign.title) : undefined}
-                    onClick={() => onSelectCampaign(campaign.id)}
+                    disabled={navigationLocked}
+                    onClick={() => { if (!navigationLocked) onSelectCampaign(campaign.id); }}
                   >
                     <span className={`campaign-state campaign-state-${campaign.state}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
@@ -200,7 +206,9 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     type="button"
                     aria-label="Rename goal"
                     title="Rename this goal"
+                    disabled={navigationLocked}
                     onClick={() => {
+                      if (navigationLocked) return;
                       setRenamingId(campaign.id);
                       setRenameDraft(titleFor(campaign.id, campaign.title));
                     }}
@@ -226,7 +234,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                 <button
                   className={`campaign-item${plan.active ? " campaign-active" : ""}`}
                   type="button"
-                  onClick={() => onSelectPlan?.(plan.requestId)}
+                  disabled={navigationLocked}
+                  onClick={() => { if (!navigationLocked) onSelectPlan?.(plan.requestId); }}
                   title={planSubline(plan.verdict, plan.savedAt)}
                   aria-label={`Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
                 >

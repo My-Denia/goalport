@@ -2467,12 +2467,14 @@ function App() {
             closeDraft(false);
             setSelectedPlanId(requestId);
           }}
+          navigationLocked={client.mode === "linux-core" && linuxActionBusy}
           onSelectCampaign={(campaignId) => {
+            if (client.mode === "linux-core" && linuxActionBusy) return;
             backgroundAttached.current = true; setBackgroundView(false);
             setSelectedPlanId(null);
             void selectCampaign(campaignId);
           }}
-          onSelectProject={(projectId) => { void selectProject(projectId); }}
+          onSelectProject={(projectId) => { if (client.mode === "linux-core" && linuxActionBusy) return; void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
           runningJob={backgroundJob ? {
             goal: backgroundJob.goal,
