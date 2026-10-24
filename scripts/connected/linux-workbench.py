@@ -202,6 +202,10 @@ def subscription_harness_sentence(stdout: str) -> str | None:
     return "No installed subscription harness was found on this machine, so nothing will be sent."
 
 
+def consent_missing(stdout: str) -> bool:
+    return "consent: granted" not in stdout
+
+
 def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None) -> tuple[list[str] | None, str | None]:
     if not endpoint:
         return None, "The Core socket is required, so nothing was admitted."
@@ -342,7 +346,18 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     self._send(200, json.dumps({"ok": False, "error": "Discover is not wired on this workbench."}).encode(), "application/json")
                     return
                 code, out, err = continue_runner([*prefix, "discover"])
-                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "stderr": err}}).encode(), "application/json")
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
+                return
+            if message_type == "coordination_grant":
+                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({"ok": False, "error": "Grant is not wired on this workbench."}).encode(), "application/json")
+                    return
+                code, out, err = continue_runner([*prefix, "grant-access"])
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_latest":
                 self._send(200, json.dumps({

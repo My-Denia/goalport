@@ -399,6 +399,8 @@ function App() {
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
   const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
+  const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
+  const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
@@ -2191,14 +2193,16 @@ function App() {
           setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
           return;
         }
-        const sentence = (body as { payload?: { sentence?: unknown } }).payload?.sentence;
+        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown } }).payload;
+        const sentence = payload?.sentence;
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
+        setLinuxConsentMissing(payload?.consentMissing === true);
       }).catch(() => { if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
     };
     check();
     const timer = linuxHarnessSentence ? window.setInterval(check, 2000) : 0;
     return () => { cancelled = true; if (timer) window.clearInterval(timer); };
-  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxHarnessSentence]);
+  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxHarnessSentence, linuxDiscoverNonce]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
@@ -2583,7 +2587,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || Boolean(linuxHarnessSentence) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || Boolean(linuxHarnessSentence) || linuxConsentMissing || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
@@ -2609,7 +2613,7 @@ function App() {
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2629,6 +2633,14 @@ function App() {
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
+                    consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
+                    onGrantConsent={client.mode === "linux-core" && linuxConsentMissing ? () => {
+                      void fetch("/goalport/ipc", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ messageType: "coordination_grant", payload: {} }),
+                      }).then(() => setLinuxDiscoverNonce((value) => value + 1)).catch(() => setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."));
+                    } : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
                     onBrowse={() => { void chooseWorkspace(); }}

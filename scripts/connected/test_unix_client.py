@@ -144,6 +144,8 @@ class CommandRoutingTests(unittest.TestCase):
         none = workbench.subscription_harness_sentence("provider pi: authenticated (unknown)\n")
         self.assertIn("nothing will be sent", none)
         self.assertNotIn("Stopped", none)
+        self.assertTrue(workbench.consent_missing("consent: not granted\n"))
+        self.assertFalse(workbench.consent_missing("consent: granted (2026-10-23T17:15:59.514Z)\n"))
         job = "31f7caad-52d2-4219-9935-bffeea962876"
         jobs = directory / "coordination-jobs" / "jobs" / job
         jobs.mkdir(parents=True)
