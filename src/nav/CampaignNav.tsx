@@ -38,6 +38,7 @@ function runningJobDetail(label: string): string {
   if (label === "Worker gone") return "Worker gone. Its exit is not confirmed.";
   if (label === "Failed") return "Failed. The last action did not succeed.";
   if (label === "Slot held") return "Slot held. The next valid send will release it.";
+  if (label === "Stopped") return "Stopped. No further turn was sent.";
   return label;
 }
 
