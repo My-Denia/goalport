@@ -138,7 +138,7 @@ export function DraftGoalComposer({
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : (!activeGoalTitle && failureHeadline) || (!activeGoalTitle && (harnessWarning || consentWarning || leftoverHint)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : leftoverHint ? "You can still write the next goal." : "What would you like to work on?")}</p>
+          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -189,7 +189,7 @@ export function DraftGoalComposer({
             onSelect={(provider) => onChange({ ...draft, provider })}
           />
         )}
-        {coordinationResult && !activeGoalTitle && !inputsLocked && coordinationResult !== failureHeadline ? <p className="draft-hint">{coordinationResult}</p> : null}
+        {coordinationResult && !activeGoalTitle && !inputsLocked && coordinationResult !== failureHeadline && !coordinationResult.includes("stays unreplayed") ? <p className="draft-hint">{coordinationResult}</p> : null}
         {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} disabled={busy || inputsLocked || Boolean(onStopCoordination)} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
         {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>{stopLabel}</button> : null}
         {onLeaveGoal ? <button className="button button-small button-outline" type="button" onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
@@ -206,7 +206,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "The draft is still here." : leftoverHint ? "You can still write the next goal." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "The draft is still here." : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? "A new send can still start." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}
