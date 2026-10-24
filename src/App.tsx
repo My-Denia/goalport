@@ -2195,7 +2195,10 @@ function App() {
     // Narrow widths: choosing any goal, including the active one, puts the
     // drawer away so the conversation is what the user sees next.
     if (window.innerWidth <= 860) setNavCollapsed(true);
-    if (campaignId === snapshot.activeCampaignId) return;
+    if (campaignId === snapshot.activeCampaignId) {
+      if (client.mode === "linux-core") setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
+      return;
+    }
     const previousCampaignId = snapshot.activeCampaignId;
     if (client.selectCampaign) {
       const intent = ++selectionIntent.current;
