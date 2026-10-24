@@ -2621,7 +2621,13 @@ function App() {
           {client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal open failed:")) ? (
             <div className="banner banner-warn" role="status">
               <div>
-                <strong>That goal could not be opened.</strong>
+                <strong>{(() => {
+                  const body = snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim() ?? "";
+                  const id = body.split(":")[0]?.trim();
+                  const titled = snapshot.campaigns.find((campaign) => campaign.id === id)?.title
+                    ?? snapshot.goalOverview?.goals.find((goal) => goal.campaignId === id)?.title;
+                  return titled ? `${titled} could not be opened.` : "That goal could not be opened.";
+                })()}</strong>
                 <span>This is not the workbench connection.</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
