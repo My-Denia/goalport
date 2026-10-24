@@ -3370,7 +3370,7 @@ describe("one in-window repair", () => {
       expect(workspace?.textContent).not.toContain("One independent goal");
       expect(screen.getByRole("button", { name: /One independent goal/ }).textContent).toContain("One independent goal");
       fireEvent.click(screen.getByRole("button", { name: "New goal" }));
-      await screen.findByRole("region", { name: "New goal draft" });
+      await screen.findByRole("region", { name: "New goal" });
       expect(document.querySelector(".titlebar-workspace")?.textContent).not.toContain("One independent goal");
       expect(screen.getByRole("button", { name: /One independent goal/ }).textContent).toContain("One independent goal");
     });

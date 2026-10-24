@@ -1205,13 +1205,25 @@ class LinuxCoreClient implements CoreClient {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       if (envelope.unchanged === true) {
         this.revision = typeof envelope.revision === "string" ? envelope.revision : this.revision;
-        return this.commitSnapshot(generation, { ...this.lastSnapshot, preview: false, goalOverview: overview });
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          connection: "connected",
+          goalOverview: overview,
+          notices: this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Goal list read failed:")),
+        });
       }
       const snapshot = resolveCoreSnapshot(envelope.snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       if (!this.viewPinned && !this.viewCampaignId && snapshot.activeCampaignId) this.viewCampaignId = snapshot.activeCampaignId;
       this.revision = typeof envelope.revision === "string" ? envelope.revision : "";
-      return this.commitSnapshot(generation, { ...snapshot, preview: false, goalOverview: overview });
+      const openFailure = this.lastSnapshot.notices.filter((notice) => notice.startsWith("Goal open failed:"));
+      return this.commitSnapshot(generation, {
+        ...snapshot,
+        preview: false,
+        goalOverview: overview,
+        notices: [...openFailure, ...(snapshot.notices ?? []).filter((notice) => !notice.startsWith("Goal open failed:"))],
+      });
     } catch (error) {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       const message = errorMessage(error);
@@ -1235,7 +1247,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(error, "Goal list read failed");
     }
   }
 
@@ -1273,7 +1285,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(new Error(`${campaignId}: ${errorMessage(error)}`), "Goal open failed");
     } finally {
       this.mutationDepth -= 1;
     }
@@ -1466,13 +1478,14 @@ class LinuxCoreClient implements CoreClient {
     }
   }
 
-  private fail(error: unknown): CoreSnapshot {
+  private fail(error: unknown, label = "Core request failed"): CoreSnapshot {
     const message = errorMessage(error);
+    const notice = `${label}: ${message}`;
     this.lastSnapshot = {
       ...this.lastSnapshot,
       preview: false,
       connection: "disconnected",
-      notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Core request failed:"))]
+      notices: [notice, ...this.lastSnapshot.notices.filter((item) => !item.startsWith(`${label}:`))]
     };
     return this.lastSnapshot;
   }

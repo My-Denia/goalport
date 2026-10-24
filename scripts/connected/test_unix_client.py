@@ -111,6 +111,173 @@ class CommandRoutingTests(unittest.TestCase):
         })
         self.assertEqual(status, 403, rebound)
 
+    def test_latest_coordination_record_is_the_saved_verdict_without_a_plan_body(self):
+        directory = Path(tempfile.mkdtemp(prefix="gp-coord-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        (directory / "coordination-records.json").write_text(json.dumps([
+            {"requestId": "old", "verdict": "revise", "planText": "secret plan"},
+            {
+                "requestId": "coordinate-verified",
+                "verdict": "verified",
+                "stopReason": "The independent harness verified the changes, so this stopped.",
+                "result": "note.txt now has before and pong.",
+                "reviewText": "Pi checked the file and found only that added line.",
+                "auditText": "Pi verified the added line and no other file changed.",
+                "executionText": "Codex added pong under before.",
+                "planningHarness": "Codex",
+                "reviewHarness": "Pi",
+                "messageDispatched": True,
+                "goal": "Add pong",
+                "planText": "do not send this body",
+            },
+        ]), encoding="utf-8")
+        missing = workbench.latest_coordination_record(None)
+        self.assertIsNone(missing["record"])
+        self.assertEqual(missing["reason"], "no coordination profile configured")
+        found = workbench.latest_coordination_record(directory)
+        self.assertEqual(found["record"]["verdict"], "verified")
+        self.assertEqual(found["record"]["planningHarness"], "Codex")
+        self.assertEqual(found["record"]["reviewHarness"], "Pi")
+        self.assertNotIn("planText", found["record"])
+        self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
+        self.assertEqual(found["record"]["detail"], "Pi verified the added line and no other file changed.")
+        self.assertEqual(found["record"]["change"], "Codex added pong under before.")
+        self.assertNotIn("planText", found["record"])
+        self.assertEqual(workbench.subscription_harnesses("provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n"), ["codex", "pi"])
+        blocked = "provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n  environment blocked since 2026-10-23T00:00:00Z: sandbox missing\n"
+        self.assertEqual(workbench.subscription_harnesses(blocked), ["codex"])
+        self.assertIn("nothing will be sent", workbench.subscription_harness_sentence(blocked))
+        self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n"))
+        self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\nprovider pi: authenticated (subscription)\n"))
+        one = workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\n")
+        self.assertIn("nothing will be sent", one)
+        self.assertNotIn("Stopped", one)
+        none = workbench.subscription_harness_sentence("provider pi: authenticated (unknown)\n")
+        self.assertIn("nothing will be sent", none)
+        self.assertNotIn("Stopped", none)
+        self.assertTrue(workbench.consent_missing("consent: not granted\n"))
+        self.assertFalse(workbench.consent_missing("consent: granted (2026-10-23T17:15:59.514Z)\n"))
+        grant_argv, grant_error = workbench.coordination_grant_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(grant_error)
+        self.assertEqual(grant_argv[-1], "grant-access")
+        job = "31f7caad-52d2-4219-9935-bffeea962876"
+        jobs = directory / "coordination-jobs" / "jobs" / job
+        jobs.mkdir(parents=True)
+        (directory / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
+        (jobs / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"commandId": "plan"}, "display": {"activity": "Codex is planning…"}}), encoding="utf-8")
+        leave_argv, leave_error = workbench.coordination_acknowledge_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(leave_error)
+        self.assertEqual(leave_argv[-2:], ["--job", job])
+        live = workbench.latest_coordination_record(directory)
+        admitted_dir = directory / "admitted"
+        (admitted_dir / "coordination-jobs").mkdir(parents=True)
+        (admitted_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
+        admitted = workbench.latest_coordination_record(admitted_dir)
+        self.assertEqual(admitted["line"], "The goal was admitted.")
+        self.assertEqual(admitted["jobId"], job)
+        gone_dir = directory / "gone"
+        (gone_dir / "coordination-jobs" / "jobs" / job).mkdir(parents=True)
+        (gone_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job}), encoding="utf-8")
+        (gone_dir / "coordination-jobs" / "jobs" / job / "startup-claim.json").write_text(json.dumps({"pid": 99}), encoding="utf-8")
+        previous_alive = workbench.worker_alive
+        workbench.worker_alive = lambda _pid: False
+        try:
+            gone = workbench.current_job(gone_dir)
+        finally:
+            workbench.worker_alive = previous_alive
+        self.assertEqual(gone["line"], "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
+        left_dir = directory / "left"
+        left_job = left_dir / "coordination-jobs" / "jobs" / job
+        left_job.mkdir(parents=True)
+        (left_job / "stuck-ack.json").write_text("{}", encoding="utf-8")
+        (left_job / "admission.json").write_text(json.dumps({"input": {"requestId": "coordinate-left"}}), encoding="utf-8")
+        self.assertEqual(workbench.latest_coordination_record(left_dir)["leftRequestIds"], ["coordinate-left"])
+        (left_dir / "coordination-records.json").write_text("{", encoding="utf-8")
+        self.assertEqual(workbench.latest_coordination_record(left_dir)["leftRequestIds"], ["coordinate-left"])
+        (left_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job}), encoding="utf-8")
+        self.assertIsNone(workbench.current_job(left_dir))
+        (left_job / "progress.json").write_text(json.dumps({"state": "unconfirmed"}), encoding="utf-8")
+        self.assertTrue(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
+        (left_job / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"state": "unconfirmed"}}), encoding="utf-8")
+        self.assertFalse(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
+        other = left_dir / "coordination-jobs" / "jobs" / "other-job"
+        other.mkdir()
+        (other / "progress.json").write_text(json.dumps({"state": "unconfirmed"}), encoding="utf-8")
+        self.assertFalse(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
+        (left_job / "progress.json").write_text(json.dumps({"state": "unconfirmed"}), encoding="utf-8")
+        (left_dir / "coordination-records.json").write_text(json.dumps([{"requestId": "coordinate-other", "verdict": "verified", "goal": "Other"}]), encoding="utf-8")
+        self.assertTrue(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
+        self.assertEqual(workbench.leftover_left_job(left_dir), job)
+        self.assertTrue(workbench.latest_coordination_record(left_dir)["leftoverHeld"])
+        (left_dir / "coordination-records.json").write_text(json.dumps([{"requestId": "coordinate-left", "goal": "Left"}]), encoding="utf-8")
+        continued, continue_error = workbench.coordination_continue_command(left_dir, Path("/tmp"), endpoint="/tmp/core.sock", core_binary="/tmp/goalport-core", background=True)
+        self.assertIsNone(continued)
+        self.assertEqual(continue_error, "The interrupted job stays unreplayed; the same request id cannot be admitted again.")
+        argv, error = workbench.coordination_acknowledge_command(left_dir, Path("/tmp"), "/tmp/core.sock", "/tmp/goalport-core")
+        self.assertIsNone(error)
+        self.assertIn(job, argv or [])
+        self.assertEqual(live["line"], "Codex is planning…")
+        self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
+        self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")
+        self.assertEqual(workbench.activity_line({"state": "unconfirmed", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "This goal's exit is not confirmed, so another goal cannot start yet.")
+        self.assertEqual(live["jobId"], job)
+        self.assertEqual(live["record"]["verdict"], "verified")
+        stop_argv, stop_error = workbench.coordination_stop_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(stop_error)
+        self.assertIn("stop", stop_argv)
+        self.assertIn(job, stop_argv)
+        idle, idle_error = workbench.coordination_stop_command(directory / "empty", Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(idle)
+        self.assertEqual(idle_error, "No running coordinated goal to stop.")
+        first = workbench.latest_coordination_record(directory / "empty")
+        self.assertIsNone(first["record"])
+        argv, error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", background=True)
+        self.assertIsNone(error)
+        self.assertIn("coordinate-verified", argv)
+        self.assertIn("--pipe", argv)
+        self.assertIn("--core-binary", argv)
+        self.assertIn("--background", argv)
+        followed, follow_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Check the second file too", background=True)
+        self.assertIsNone(follow_error)
+        self.assertEqual(followed[followed.index("--goal") + 1], "Check the second file too")
+        self.assertNotIn("--write-instances", followed)
+        writing_follow, writing_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Add the line", True, background=True)
+        self.assertIsNone(writing_error)
+        self.assertEqual(writing_follow[writing_follow.index("--write-instances") + 1], "codex")
+        self.assertNotIn("pi", writing_follow)
+        self.assertIsNone(workbench.coordination_continue_command(None, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")[0])
+        started, start_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", "/usr/bin/goalport-core", background=True)
+        quiet, quiet_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(quiet)
+        self.assertEqual(quiet_error, "Keep working after closing must be explicitly selected.")
+        self.assertIsNone(start_error)
+        self.assertIn("run", started)
+        self.assertIn("--background", started)
+        named, named_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", "/usr/bin/goalport-core", background=True, instances="codex,pi")
+        self.assertIsNone(named_error)
+        self.assertEqual(named[named.index("--instances") + 1], "codex,pi")
+        invalid, invalid_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", "/usr/bin/goalport-core", background=True, instances="codex pi")
+        self.assertIsNone(invalid)
+        self.assertIn("invalid", invalid_error)
+        self.assertNotIn("--write-instances", started)
+        writing, _write_error = workbench.coordination_start_command(directory, Path("/repo"), "Add pong", "/home/you/project", True, "/tmp/core.sock", "/usr/bin/goalport-core", background=True)
+        self.assertEqual(writing[writing.index("--write-instances") + 1], "codex")
+        self.assertNotIn("pi", writing)
+        missing_core, missing_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", None, background=True)
+        self.assertIsNone(missing_core)
+        self.assertIn("--core-binary", missing_error)
+        env = workbench.coordination_child_env({"PATH": "/opt/pi/bin"})
+        self.assertIn("/opt/pi/bin", env["PATH"])
+        local_bin = Path.home() / ".local" / "bin"
+        if local_bin.is_dir():
+            self.assertIn(str(local_bin), env["PATH"])
+        home_start, home_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "~/project", False, "/tmp/core.sock", "/usr/bin/goalport-core", background=True)
+        self.assertIsNone(home_error)
+        self.assertIn(str(Path.home() / "project"), home_start)
+        refused, refuse_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "relative")
+        self.assertIsNone(refused)
+        self.assertIn("absolute", refuse_error)
+
     def test_bridge_disconnect_is_not_a_preview_snapshot(self):
         body = json.loads(workbench.disconnected_body("Linux Core is not connected"))
         self.assertFalse(body["ok"])

@@ -458,3 +458,45 @@ for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block bot
     }
   }
 });
+
+test("a settled stop is not revived by a stale control acknowledgement", () => {
+  const { durableTerminal, withControlAck } = require("./coordination-background.cjs");
+  const facts = { state: "stopped", pendingCommand: null, outcome: { status: "stopped" }, jobId: "job", requestId: "req" };
+  assert.equal(durableTerminal(facts), true);
+  assert.equal(durableTerminal({ ...facts, pendingCommand: { commandId: "still-open" } }), false);
+  const stale = { jobId: "job", requestId: "req", state: "running", active: true, revoked: true, pendingCommandId: "coordinate-plan-old" };
+  const revived = withControlAck(facts, stale);
+  assert.equal(revived.state, "running");
+  assert.equal(durableTerminal(facts) && !durableTerminal(revived), true);
+  const shown = require("./coordination-background.cjs").projection({
+    ...facts,
+    jobId: "job",
+    requestId: "req",
+    admission: { goal: "Name the files", maxTurns: 4 },
+    active: false,
+    revoked: true,
+    progress: { activity: "Access stopped; the current turn may finish, but no further turn was sent." },
+  });
+  assert.equal(shown.progress.activity, "Stopped. No further turn was sent.");
+});
+
+test("a dead worker pid is gone and is not called stopped", () => {
+  const { pidGone } = require("./coordination-background.cjs");
+  assert.equal(pidGone(0), false);
+  assert.equal(pidGone(-1), false);
+  if (process.platform === "win32") {
+    assert.equal(pidGone(4242), false);
+    return;
+  }
+  const original = process.kill;
+  process.kill = () => {
+    const error = new Error("gone");
+    error.code = "ESRCH";
+    throw error;
+  };
+  try {
+    assert.equal(pidGone(4242), true);
+  } finally {
+    process.kill = original;
+  }
+});

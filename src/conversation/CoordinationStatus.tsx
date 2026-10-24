@@ -232,7 +232,7 @@ export function CoordinationStatus({
   const executionEvidence = Boolean(executionText || auditHarness || auditText)
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
-    <section className="coordination-status" aria-label="Plan and check">
+    <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
       <dl className="coordination-outcome">
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
@@ -460,7 +460,7 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     {/* Stop allowing stays reachable while the admission is active and not
         revoked, even when control is unreachable: revocation itself persists.
         The progress block below stays honestly live-gated. */}
-    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
+    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath} aria-label={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
     {onContinue ? <div className="coordination-access">
       <button type="button" className="button button-primary" onClick={onContinue}>
         {job.state === "unconfirmed" || job.pendingCommand ? "Continue in a new send" : "New send for this goal"}
@@ -488,6 +488,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
 
 function workspaceFolder(root: string): string {
   const trimmed = root.replace(/[\\/]+$/, "");
+  if (trimmed === "~") return trimmed;
   const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  const name = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return trimmed.startsWith("~/") ? `~/${name}` : name;
 }

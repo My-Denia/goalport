@@ -23,6 +23,34 @@ function usableInstance(instanceId: string, environmentHealth?: unknown) {
   };
 }
 
+describe("catalog auth billing", () => {
+  it("keeps a confirmed subscription usable and does not treat unknown auth as one", () => {
+    const catalog = catalogFromProviderSnapshots([
+      usableInstance("codex"),
+      {
+        ...usableInstance("pi"),
+        auth: { status: "authenticated", type: "unknown", label: "unknown" },
+      },
+      {
+        ...usableInstance("bare"),
+        auth: { status: "authenticated" },
+      },
+      {
+        ...usableInstance("keyed"),
+        auth: { status: "authenticated", type: "apiKey", label: "API key" },
+      },
+    ]);
+
+    expect(catalog.map((item) => [item.instanceId, item.billing])).toEqual([
+      ["codex", "subscription"],
+      ["pi", "unknown"],
+      ["bare", "unknown"],
+      ["keyed", "paid-api"],
+    ]);
+    expect(usableInstanceIds(catalog)).toEqual(["codex"]);
+  });
+});
+
 describe("catalog environment health", () => {
   it("maps stored health evidence to an avoided instance and excludes it from usable ids", () => {
     const catalog = catalogFromProviderSnapshots([

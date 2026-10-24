@@ -29,13 +29,25 @@ function codedRefusal(code, message, cause) {
 function preflightRefusal(cause) {
   return codedRefusal("background-preflight-failed", PREFLIGHT_MESSAGE, cause);
 }
+function pidGone(pid) {
+  if (process.platform === "win32" || typeof pid !== "number" || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error?.code === "ESRCH"; }
+}
+function durableTerminal(facts) {
+  return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
+}
 function projection(status, live = false) {
   if (!status) return null;
   const confirmedTerminal = ["completed", "failed", "stopped"].includes(status.state);
+  let progress = status.progress;
+  if (durableTerminal(status) && progress && typeof progress.activity === "string" && progress.activity.includes("may finish")) {
+    progress = { ...progress, activity: "Stopped. No further turn was sent." };
+  }
   return { jobId: status.jobId, requestId: status.requestId, goal: status.admission.goal, active: status.active,
     state: !confirmedTerminal && !live ? "unconfirmed" : status.state, live,
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
-    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress: status.progress, outcome: status.outcome,
+    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null };
@@ -118,7 +130,7 @@ function createBackgroundHost(options) {
     }
     if (!facts) return null;
     lastJobId = facts.jobId;
-    if (!facts.active) return projection(facts);
+    if (!facts.active || durableTerminal(facts)) return projection(facts);
     try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
@@ -224,7 +236,7 @@ function createBackgroundHost(options) {
   async function acknowledge(jobId) {
     const current = await status(jobId);
     if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
-    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
+    if (current.live && !pidGone(current.workerPid)) throw codedRefusal("background-still-live", "This goal is still running, so it was not left.");
     try { store().acknowledgeStuck(jobId); }
     catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
     return status(jobId);
@@ -274,4 +286,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply };
+module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };

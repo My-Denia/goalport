@@ -225,7 +225,11 @@ function authorizeMembershipError(discovered, requested) {
   const discoveredById = new Map(providers.map((provider) => [provider.instanceId, provider]));
   for (const instance of requested) {
     const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
-    if (!provider || provider?.auth?.type === "apiKey") {
+    const type = provider?.auth?.type;
+    // Unknown is not a confirmed subscription. It may still be an explicitly
+    // named installed harness (Pi). A missing provider or an API-key login
+    // never enters a scope.
+    if (!provider || type === "apiKey" || (type !== "chatgpt" && type !== "subscription" && type !== "unknown")) {
       return "Only harnesses signed in with their own subscription can be authorized.";
     }
   }

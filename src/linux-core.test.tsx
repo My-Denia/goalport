@@ -161,6 +161,85 @@ describe("Linux Core bridge", () => {
     expect((await client.snapshot()).activeCampaignId).toBe("campaign-b");
   });
 
+  it("points an empty Linux draft at the coordinated CLI and does not invent a coordination bridge", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      connection: "connected" as const,
+      activeCampaignId: "",
+      campaigns: [],
+      notices: [],
+    };
+    let missingHarness = false;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null, harnesses: missingHarness ? ["codex"] : ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line.", change: "Codex added pong under before." }, reason: null } });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.getByText("A new send stays in this folder. New goal can use another.")).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", true);
+    expect(screen.getByText("Project folder")).toBeTruthy();
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
+    expect(screen.queryByText("Choose a Runtime")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
+    expect(await screen.findByText("verified. The two files are named and nothing was edited.")).toBeTruthy();
+    expect(screen.getByText("What was checked")).toBeTruthy();
+    expect(screen.getByText("What changed")).toBeTruthy();
+    await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Keep working after closing must be explicitly selected.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.getAllByRole("region", { name: "Name the two files" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(document.title).toBe("Name the two files");
+    expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
+    expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
+    missingHarness = true;
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
+    expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
+    expect(await screen.findByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    missingHarness = false;
+    await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
+    expect(screen.getByText("Signed in: Codex, Pi.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
+    expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
+    fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
+    expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue this goal" })).toBeTruthy();
+    expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
+    expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
+  });
+
   it("keeps Core connected when a request is refused", async () => {
     window.__GOALPORT_LINUX_CORE__ = true;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {

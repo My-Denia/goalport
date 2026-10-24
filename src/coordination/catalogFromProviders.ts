@@ -59,12 +59,17 @@ function environmentAvoidedOf(
   return { since, detail };
 }
 
+function confirmedSubscription(type: unknown): boolean {
+  return type === "chatgpt" || type === "subscription";
+}
+
 function billing(snapshot: ProviderSnapshot): SyntheticCatalogInstance["billing"] {
   if (snapshot.auth?.type === "apiKey") return "paid-api";
   if (typeof snapshot.auth?.label === "string" && snapshot.auth.label.toLowerCase().includes("api key")) {
     return "paid-api";
   }
-  return "subscription";
+  if (confirmedSubscription(snapshot.auth?.type)) return "subscription";
+  return "unknown";
 }
 
 export function catalogFromProviderSnapshots(

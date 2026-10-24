@@ -153,6 +153,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .connection-pill .connection-text { color: inherit; }
 .connection-connected { border-color: rgba(92, 204, 135, 0.3); background: rgba(70, 173, 112, 0.08); color: #a9e3bd; }
 .connection-preview { border-color: rgba(111, 179, 255, 0.4); background: rgba(111, 179, 255, 0.1); color: #b9d9fb; }
+.connection-neutral { border-color: var(--line); background: transparent; color: var(--ink-soft); }
+.connection-neutral .status-dot { background: var(--ink-soft); }
 .connection-disconnected { border-color: rgba(230, 105, 107, 0.32); background: rgba(230, 105, 107, 0.08); color: #f3b0b0; }
 .connection-reconnecting, .connection-degraded { border-color: rgba(232, 189, 117, 0.32); background: rgba(232, 189, 117, 0.08); color: #efd39d; }
 
@@ -962,7 +964,9 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   :root { --sidebar-w: 206px; --content-max: 720px; }
   .titlebar-campaign-wrap { display: none; }
   .connection-pill .connection-text { display: none; }
+  .connection-neutral .connection-text { display: inline; }
   .connection-pill { padding: 0 8px; }
+  .connection-neutral { padding: 0 9px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
   .timeline-inner, .composer-dock { padding-left: 14px; padding-right: 14px; }
@@ -1011,8 +1015,11 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 @media (max-width: 560px) {
   .connection-pill { display: none; }
+  .connection-neutral { display: inline-flex; max-width: 9rem; }
+  .connection-neutral .connection-text { overflow: hidden; text-overflow: ellipsis; max-width: 7.5rem; }
   .tb-button { font-size: 0; gap: 0; }
   .tb-button .tb-icon-glyph, .tb-button > span[aria-hidden="true"] { font-size: 14px; }
+  .tb-keep-label { font-size: 12px; }
   .composer-secondary { padding: 0 9px; }
   .composer-secondary span[aria-hidden="true"] { display: none; }
   .runtime-picker-copy small { display: none; }
@@ -1096,6 +1103,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 /* First-use draft composer. */
 .draft-composer { max-width: 640px; margin: 18px auto 0; width: 100%; }
+.draft-composer details.draft-hint { margin: 8px 0 0; }
+.draft-composer details.draft-hint p { max-height: 8rem; overflow: auto; white-space: pre-wrap; }
 .draft-composer-form {
   display: grid; gap: 8px; padding: 18px;
   border: 1px solid var(--line); border-radius: 12px;

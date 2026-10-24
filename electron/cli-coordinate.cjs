@@ -257,10 +257,58 @@ async function claudeProvider(io) {
   });
 }
 
+function classifyPiAuth(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const subscription = [];
+  const apiKey = [];
+  for (const [name, record] of Object.entries(parsed)) {
+    if (!record || typeof record !== "object") continue;
+    if (record.type === "oauth") subscription.push(name);
+    else if (record.type === "api_key") apiKey.push(name);
+  }
+  subscription.sort();
+  if (subscription.length > 0) {
+    return {
+      status: "authenticated",
+      type: "subscription",
+      label: `oauth: ${subscription.join(", ")}`,
+    };
+  }
+  if (apiKey.length > 0) return { status: "authenticated", type: "apiKey", label: "API key" };
+  return null;
+}
+
+async function piAuth(io) {
+  const candidates = [path.join(io.home, ".pi", "agent", "auth.json")];
+  try {
+    const located = await io.execFile(process.platform === "win32" ? "where" : "which", ["pi"]);
+    const first = String(located.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+    if (first) candidates.unshift(path.resolve(path.dirname(first), "..", "auth.json"));
+  } catch {
+    // A model table without a readable auth record stays unknown. It is not
+    // guessed into a subscription.
+  }
+  for (const file of candidates) {
+    try {
+      const classified = classifyPiAuth(io.readFile(file));
+      if (classified) return classified;
+    } catch {
+      // Missing or unreadable. Try the next candidate. Never log the file body.
+    }
+  }
+  return { status: "authenticated", type: "unknown", label: "unknown" };
+}
+
 async function piProvider(io) {
-  // One hardened probe: no extensions, no MCP, no skills, no context files,
-  // offline, and only a model listing — nothing from the workspace project is
-  // ever executed and no network call is made.
+  // Offline model table proves the install. Auth type is read only from the
+  // type field of Pi's auth record (oauth vs api_key). Token material is
+  // never parsed into the snapshot.
   let stdout = "";
   try {
     stdout = String((await io.execFile("pi", [
@@ -274,24 +322,13 @@ async function piProvider(io) {
   } catch {
     return null;
   }
-  // The success predicate is the model-table shape, never the exit code
-  // (defaultExec discards it): a provider/model/context header line plus at
-  // least one model-shaped row. Nonempty error text from a nonzero exit,
-  // empty output, or a shim banner all fail this shape and yield null.
   const hasHeader = stdout.split(/\r?\n/).some((line) => /^provider\s+model\s+context/i.test(line.trim()));
   if (!hasHeader || !/^\S+\s+\S+\s+\d/m.test(stdout)) return null;
   return provider({
     instanceId: "pi",
     displayName: "Pi",
     driver: "pi",
-    // The probe proves the install and an enumerable model catalog — it is
-    // NOT credential verification. "authenticated" is the minimal claim the
-    // panel renders as a selectable row (any other status shows "not signed
-    // in"), and a dead credential surfaces on the first turn through the
-    // existing failed/health path instead of being guessed here.
-    auth: { status: "authenticated" },
-    // The turn passes no --model, so pi runs on its own configured default
-    // (mirrors the codex built-in default arm).
+    auth: await piAuth(io),
     models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
   });
 }
