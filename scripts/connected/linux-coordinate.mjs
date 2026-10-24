@@ -507,6 +507,9 @@ function commandRevoke(parsed, io, context) {
 async function startAdmission(parsed, io, context, selection) {
   const consentRefusal = admissionConsentGate(parsed, io, context);
   if (consentRefusal !== null) return consentRefusal;
+  if (activeLeftJob(context.dataDir)) {
+    return refuse(io, "A left job still holds the admission slot. Acknowledge it before starting another, so nothing was admitted.");
+  }
   const prepared = prepareAdmission(io, context);
   if (!prepared.ok) return refuse(io, prepared.message);
 
@@ -583,6 +586,20 @@ async function commandRun(parsed, io, context) {
     workspace: parsed.values.workspace,
     instancesText: parsed.values.instances,
   });
+}
+
+function activeLeftJob(dataDir) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  try {
+    const active = JSON.parse(fs.readFileSync(path.join(dataDir, "coordination-jobs", "active-admission.json"), "utf8"));
+    const jobId = active?.jobId;
+    if (typeof jobId !== "string" || !jobId) return null;
+    fs.accessSync(path.join(dataDir, "coordination-jobs", "jobs", jobId, "stuck-ack.json"));
+    return jobId;
+  } catch {
+    return null;
+  }
 }
 
 function requestWasLeft(dataDir, requestId) {

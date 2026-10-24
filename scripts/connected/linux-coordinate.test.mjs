@@ -420,6 +420,21 @@ test("continue carries the saved plan and review as execution feedback with a fr
   assert.equal(f.launches.length, 1);
 });
 
+test("a left job holding the admission slot blocks a new run until it is acknowledged", async (t) => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const jobDir = path.join(f.dataDir, "coordination-jobs", "jobs", "job-left");
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(path.join(jobDir, "stuck-ack.json"), "{}");
+  fs.writeFileSync(path.join(jobDir, "admission.json"), JSON.stringify({ input: { requestId: "left-pass" } }));
+  fs.mkdirSync(path.join(f.dataDir, "coordination-jobs"), { recursive: true });
+  fs.writeFileSync(path.join(f.dataDir, "coordination-jobs", "active-admission.json"), JSON.stringify({ jobId: "job-left" }));
+  const refused = await invoke(f, runArgs(f));
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /A left job still holds the admission slot/);
+  assert.equal(f.launches.length, 0);
+});
+
 test("a left request does not block a new run", async (t) => {
   const f = fixture(t);
   await invoke(f, ["grant-access"]);
