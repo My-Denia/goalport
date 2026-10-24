@@ -233,7 +233,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"ok": False, "record": None, "reason": "coordinated result could not be read"}
+        return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "reason": "coordinated result could not be read"}
     if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
         return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
     last = records[-1]
