@@ -933,18 +933,18 @@ function App() {
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
+        if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
+          if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
+            setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
+          }
+          return;
+        }
         if (!(workspace.startsWith("/") || workspace === "~" || workspace.startsWith("~/"))) {
           const sentence = "The workspace must be an absolute path, so nothing was admitted.";
           rememberFailure(sentence);
           setLinuxCoordinationLine(sentence);
           linuxHoldLineRef.current = true;
           setLinuxHoldLine(true);
-          return;
-        }
-        if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
-          if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
-            setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
-          }
           return;
         }
         const statusEpoch = ++linuxStatusEpoch.current;
