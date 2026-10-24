@@ -14,6 +14,7 @@ interface CampaignNavProps {
   navigationLocked?: boolean;
   onOpenRunningJob?: () => void;
   projectOverride?: string;
+  failedOpenId?: string;
 }
 
 /**
@@ -26,7 +27,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -140,7 +141,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{goal.title}</strong>
-                      {attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
+                      {failedOpenId === goal.campaignId ? <small>Could not open</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
@@ -199,6 +200,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     <span className={`campaign-state campaign-state-${campaign.state}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{titleFor(campaign.id, campaign.title)}</strong>
+                      {failedOpenId === campaign.id ? <small>Could not open</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>

@@ -2553,6 +2553,7 @@ function App() {
         <CampaignNav
           snapshot={snapshot}
           projectOverride={client.mode === "linux-core" ? "This page" : undefined}
+          failedOpenId={client.mode === "linux-core" ? snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim().split(":")[0]?.trim() : undefined}
           collapsed={navCollapsed}
           plans={plans.map((plan) => ({
             requestId: plan.requestId,
