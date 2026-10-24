@@ -123,7 +123,7 @@ def worker_alive(pid: int) -> bool:
 
 def activity_line(progress: dict, pid: object, alive=worker_alive) -> str | None:
     if isinstance(pid, int) and pid > 0 and not alive(pid):
-        return "The worker is gone. Stop this goal before starting another."
+        return "The worker is gone. Its exit is not confirmed, so another goal cannot start yet."
     display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
     activity = display.get("activity") if isinstance(display.get("activity"), str) else None
     return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
@@ -150,7 +150,7 @@ def current_job(data_dir: Path) -> dict | None:
             except (OSError, json.JSONDecodeError, TypeError):
                 pid = None
             if isinstance(pid, int) and pid > 0 and not worker_alive(pid):
-                return {"line": "The worker is gone. Stop this goal before starting another.", "jobId": job_id}
+                return {"line": "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.", "jobId": job_id}
             return {"line": "The goal was admitted.", "jobId": job_id}
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):

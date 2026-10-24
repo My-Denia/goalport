@@ -396,7 +396,7 @@ function App() {
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
-  const workerGone = linuxCoordinationLine === "The worker is gone. Stop this goal before starting another.";
+  const workerGone = linuxCoordinationLine === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);

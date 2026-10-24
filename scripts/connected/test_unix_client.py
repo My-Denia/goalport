@@ -182,9 +182,9 @@ class CommandRoutingTests(unittest.TestCase):
             gone = workbench.current_job(gone_dir)
         finally:
             workbench.worker_alive = previous_alive
-        self.assertEqual(gone["line"], "The worker is gone. Stop this goal before starting another.")
+        self.assertEqual(gone["line"], "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
         self.assertEqual(live["line"], "Codex is planning…")
-        self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Stop this goal before starting another.")
+        self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")
         self.assertEqual(live["jobId"], job)
         self.assertEqual(live["record"]["verdict"], "verified")
