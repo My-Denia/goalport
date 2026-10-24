@@ -2584,7 +2584,7 @@ function App() {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "" } }),
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite } }),
                       }).then(async (response) => response.json()).then((body) => {
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");

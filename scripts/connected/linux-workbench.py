@@ -185,7 +185,7 @@ def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | Non
     ], None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False) -> tuple[list[str] | None, str | None]:
     found = latest_coordination_record(data_dir)
     record = found.get("record") if isinstance(found, dict) else None
     request_id = record.get("requestId") if isinstance(record, dict) else None
@@ -200,6 +200,8 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
     workspace = record.get("workspacePath")
     if isinstance(workspace, str) and workspace:
         argv.extend(["--workspace", workspace])
+    if write is True:
+        argv.extend(["--write-instances", "codex", "--write-turns", "1"])
     return argv, None
 
 
@@ -335,7 +337,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"))
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
