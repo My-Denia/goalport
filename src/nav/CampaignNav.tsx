@@ -16,6 +16,7 @@ interface CampaignNavProps {
   projectOverride?: string;
   failedOpenId?: string;
   goalListUnreadable?: boolean;
+  plansUnreadable?: boolean;
 }
 
 /**
@@ -28,7 +29,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, plansUnreadable = false }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -229,11 +230,12 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         )}
       </div>
 
+      {plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read.</p> : null}
       {plans.length > 0 ? (
         <>
           <div className="sidebar-section-title">
             <span>Plans</span>
-            <span className="count-badge">{plans.length}</span>
+            <span className="count-badge" aria-label={plansUnreadable ? "Saved plans could not be read." : undefined}>{plansUnreadable ? "–" : plans.length}</span>
           </div>
           <div className="campaign-list">
             {plans.map((plan) => (

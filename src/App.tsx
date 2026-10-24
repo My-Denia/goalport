@@ -258,6 +258,7 @@ function App() {
   // has discovered at least once.
   const discoveredProvidersRef = useRef<readonly ProviderSnapshot[] | null>(null);
   const [plans, setPlans] = useState<SavedPlan[]>([]);
+  const [plansUnreadable, setPlansUnreadable] = useState(false);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<ActiveNotice | null>(null);
@@ -466,8 +467,8 @@ function App() {
     if (!list) return;
     let cancelled = false;
     void list().then((records) => {
-      if (!cancelled) setPlans(records);
-    }).catch(() => undefined);
+      if (!cancelled) { setPlans(records); setPlansUnreadable(false); }
+    }).catch(() => { if (!cancelled) setPlansUnreadable(true); });
     return () => { cancelled = true; };
   }, []);
 
@@ -2572,6 +2573,7 @@ function App() {
           projectOverride={client.mode === "linux-core" ? "This page" : undefined}
           failedOpenId={client.mode === "linux-core" ? snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim().split(":")[0]?.trim() : undefined}
           goalListUnreadable={client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:"))}
+          plansUnreadable={plansUnreadable}
           collapsed={navCollapsed}
           plans={plans.map((plan) => ({
             requestId: plan.requestId,
