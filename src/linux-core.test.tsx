@@ -174,7 +174,7 @@ describe("Linux Core bridge", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messageType: string };
       if (body.messageType === "coordination_latest") {
-        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files" }, reason: null } });
+        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project" }, reason: null } });
       }
       if (body.messageType === "goal_overview") {
         return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
@@ -195,6 +195,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
+    expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));

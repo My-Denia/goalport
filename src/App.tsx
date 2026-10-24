@@ -396,6 +396,7 @@ function App() {
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
+  const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
@@ -895,6 +896,7 @@ function App() {
             linuxFreshDraft.current = false;
             setLinuxCoordinationLive(true);
             setLinuxCoordinationGoal(message);
+            setLinuxCoordinationWorkspace(workspace);
             setDraftGoal((current) => current ? { ...current, message: "" } : current);
           }
         }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
@@ -1706,6 +1708,7 @@ function App() {
     if (client.mode === "linux-core" && !linuxCoordinationLive) {
       linuxFreshDraft.current = true;
       setLinuxCoordinationGoal(null);
+      setLinuxCoordinationWorkspace(null);
       setLinuxCoordinationRequest(null);
       setLinuxCoordinationLine(null);
     }
@@ -2121,7 +2124,7 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
           setLinuxCoordinationLine(payload.line);
@@ -2132,6 +2135,7 @@ function App() {
         if (linuxFreshDraft.current) {
           setLinuxCoordinationLive(false);
           setLinuxCoordinationGoal(null);
+          setLinuxCoordinationWorkspace(null);
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLine(null);
           return;
@@ -2139,6 +2143,7 @@ function App() {
         setLinuxCoordinationLive(false);
         const record = payload?.record;
         if (record && typeof record.goal === "string" && record.goal.trim()) setLinuxCoordinationGoal(record.goal);
+        if (record && typeof record.workspacePath === "string" && record.workspacePath.trim()) setLinuxCoordinationWorkspace(record.workspacePath);
         if (!record || typeof record.verdict !== "string") {
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
@@ -2312,8 +2317,8 @@ function App() {
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal && !(backgroundView && backgroundJob) ? title : null}
-        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : null}
-        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : null}
+        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : client.mode === "linux-core" && linuxCoordinationWorkspace ? workspaceFolder(linuxCoordinationWorkspace) : null}
+        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxCoordinationWorkspace ? linuxCoordinationWorkspace : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
