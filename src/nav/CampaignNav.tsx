@@ -101,7 +101,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
-        {campaignListUnavailable ? (
+        {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
         ) : goalCount === 0 && !runningJob ? (
           <p className="nav-empty">No goals yet. Start one from the top bar.</p>
