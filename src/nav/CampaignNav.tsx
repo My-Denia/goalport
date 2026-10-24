@@ -230,12 +230,12 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         )}
       </div>
 
-      {plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read.</p> : null}
+      {plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again.</p> : null}
       {plans.length > 0 ? (
         <>
           <div className="sidebar-section-title">
             <span>Plans</span>
-            <span className="count-badge" aria-label={plansUnreadable ? "Saved plans could not be read." : undefined}>{plansUnreadable ? "–" : plans.length}</span>
+            <span className="count-badge" aria-label={plansUnreadable ? "Saved plans could not be read. Send will try again." : undefined}>{plansUnreadable ? "–" : plans.length}</span>
           </div>
           <div className="campaign-list">
             {plans.map((plan) => (
@@ -245,8 +245,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   type="button"
                   disabled={navigationLocked || plansUnreadable}
                   onClick={() => { if (!navigationLocked && !plansUnreadable) onSelectPlan?.(plan.requestId); }}
-                  title={plansUnreadable ? "Saved plans could not be read." : planSubline(plan.verdict, plan.savedAt)}
-                  aria-label={plansUnreadable ? `Plan: ${plan.title}. Saved plans could not be read.` : `Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
+                  title={plansUnreadable ? "Saved plans could not be read. Send will try again." : planSubline(plan.verdict, plan.savedAt)}
+                  aria-label={plansUnreadable ? `Plan: ${plan.title}. Saved plans could not be read. Send will try again.` : `Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
                 >
                   <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
                   <span className="campaign-item-copy">
