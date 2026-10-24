@@ -109,8 +109,8 @@ def coordination_child_env(base: dict[str, str] | None = None) -> dict[str, str]
     return env
 
 
-def current_job_line(data_dir: Path) -> str | None:
-    """The active job's activity, if it has not settled. Older saved records must not cover it."""
+def current_job(data_dir: Path) -> dict | None:
+    """The active job, if it has not settled. Older saved records must not cover it."""
     active_path = data_dir / "coordination-jobs" / "active-admission.json"
     if not active_path.is_file():
         return None
@@ -129,7 +129,15 @@ def current_job_line(data_dir: Path) -> str | None:
         return None
     display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
     activity = display.get("activity") if isinstance(display.get("activity"), str) else None
-    return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
+    line = activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
+    if not line:
+        return None
+    return {"line": line, "jobId": job_id}
+
+
+def live_fields(data_dir: Path | None) -> dict:
+    job = current_job(data_dir) if data_dir is not None else None
+    return {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
 
 
 def latest_coordination_record(data_dir: Path | None) -> dict:
@@ -138,13 +146,13 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
     if not path.is_file():
-        return {"ok": True, "record": None, "line": current_job_line(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, **live_fields(data_dir), "reason": "no coordinated result saved"}
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"ok": False, "record": None, "reason": "coordinated result could not be read"}
     if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
-        return {"ok": True, "record": None, "line": current_job_line(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, **live_fields(data_dir), "reason": "no coordinated result saved"}
     last = records[-1]
     return {
         "ok": True,
@@ -159,7 +167,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "workspacePath": last.get("workspacePath"),
         },
         "reason": None,
-        "line": current_job_line(data_dir),
+        **live_fields(data_dir),
     }
 
 
@@ -205,6 +213,19 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     if write is True:
         argv.extend(["--write-instances", "codex", "--write-turns", "1"])
     return argv, None
+
+
+def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
+    job = current_job(data_dir) if data_dir is not None else None
+    job_id = job.get("jobId") if isinstance(job, dict) else None
+    if not isinstance(job_id, str) or not job_id:
+        return None, "No running coordinated goal to stop."
+    if not all(character.isalnum() or character in "._-" for character in job_id):
+        return None, "The running goal id is invalid, so nothing was stopped."
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    if error:
+        return None, error
+    return [*prefix, "stop", "--job", job_id], None
 
 
 def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None):
@@ -283,6 +304,17 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 if continue_runner is None:
                     self._send(200, json.dumps({"ok": False, "error": "Start is not wired on this workbench."}).encode(), "application/json")
+                    return
+                code, out, err = continue_runner(argv)
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
+                return
+            if message_type == "coordination_stop":
+                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary)
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({"ok": False, "error": "Stop is not wired on this workbench."}).encode(), "application/json")
                     return
                 code, out, err = continue_runner(argv)
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")

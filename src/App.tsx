@@ -392,6 +392,7 @@ function App() {
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
+  const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
@@ -2105,12 +2106,14 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
-        if (typeof payload?.line === "string" && payload.line) {
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
+        if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           setLinuxCoordinationLine(payload.line);
           setLinuxCoordinationRequest(null);
+          setLinuxCoordinationLive(true);
           return;
         }
+        setLinuxCoordinationLive(false);
         const record = payload?.record;
         if (!record || typeof record.verdict !== "string") {
           setLinuxCoordinationRequest(null);
@@ -2516,6 +2519,16 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
+                    onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
+                      void fetch("/goalport/ipc", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ messageType: "coordination_stop", payload: {} }),
+                      }).then(async (response) => response.json()).then((body) => {
+                        const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" ? body.payload.stdout.trim() : "Stop was sent.";
+                        setLinuxCoordinationLine(text || "Stop was sent.");
+                      }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
+                    } : undefined}
                     onContinueCoordination={client.mode === "linux-core" && linuxCoordinationRequest ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
