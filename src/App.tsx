@@ -1280,6 +1280,7 @@ function App() {
                 if (!stillCurrent()) return false;
                 if (!remembered || !remembered.recorded) return false;
                 setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
+                setPlansUnreadable(false);
                 setRoundProgress((current) => current && current.requestId === draftGoal.requestId
                   ? { ...current, repair: true }
                   : current);
@@ -1302,6 +1303,7 @@ function App() {
                 if (!stillCurrent()) return false;
                 if (!remembered || !remembered.recorded) return false;
                 setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
+                setPlansUnreadable(false);
                 setRoundProgress((current) => current && current.requestId === draftGoal.requestId
                   ? { ...current, planRevision: true }
                   : current);
@@ -1355,6 +1357,7 @@ function App() {
                 }
                 if (remembered) {
                   setPlans((current) => [remembered.record, ...current.filter((plan) => plan.requestId !== remembered.record.requestId)]);
+                  setPlansUnreadable(false);
                 }
               }
               const result = await launch(command, generation, scopeGeneration, workspace);
@@ -1396,6 +1399,7 @@ function App() {
         if (coordinationRequest.current !== request) return;
         if (saved?.recorded) {
           setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]);
+          setPlansUnreadable(false);
           setSelectedPlanId(saved.record.requestId);
         }
       } catch (error) {
@@ -1422,7 +1426,7 @@ function App() {
         };
         setCoordination(failed);
         const saved = await rememberPlan(draftGoal.requestId, workspace, message, failed);
-        if (saved?.recorded) setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]);
+        if (saved?.recorded) { setPlans((current) => [saved.record, ...current.filter((plan) => plan.requestId !== saved.record.requestId)]); setPlansUnreadable(false); }
       } finally {
         if (coordinationRequest.current === request) {
           setDraftBusy(false);
