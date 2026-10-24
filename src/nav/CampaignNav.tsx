@@ -134,7 +134,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open` : goal.workspaceRoot}
+                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open — ${goal.workspaceRoot}` : goal.workspaceRoot}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
