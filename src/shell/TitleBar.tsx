@@ -63,7 +63,7 @@ export function TitleBar({
             {campaignTitle ? (
               <span className="titlebar-campaign-wrap">
                 <span className="titlebar-sep" aria-hidden="true">/</span>
-                <span className="titlebar-campaign">{campaignTitle}</span>
+                <span className="titlebar-campaign" title={campaignTitle}>{campaignTitle}</span>
               </span>
             ) : null}
           </div>
