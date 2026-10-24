@@ -479,3 +479,24 @@ test("a settled stop is not revived by a stale control acknowledgement", () => {
   });
   assert.equal(shown.progress.activity, "Stopped. No further turn was sent.");
 });
+
+test("a dead worker pid is gone and is not called stopped", () => {
+  const { pidGone } = require("./coordination-background.cjs");
+  assert.equal(pidGone(0), false);
+  assert.equal(pidGone(-1), false);
+  if (process.platform === "win32") {
+    assert.equal(pidGone(4242), false);
+    return;
+  }
+  const original = process.kill;
+  process.kill = () => {
+    const error = new Error("gone");
+    error.code = "ESRCH";
+    throw error;
+  };
+  try {
+    assert.equal(pidGone(4242), true);
+  } finally {
+    process.kill = original;
+  }
+});

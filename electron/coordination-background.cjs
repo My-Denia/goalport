@@ -29,6 +29,11 @@ function codedRefusal(code, message, cause) {
 function preflightRefusal(cause) {
   return codedRefusal("background-preflight-failed", PREFLIGHT_MESSAGE, cause);
 }
+function pidGone(pid) {
+  if (process.platform === "win32" || typeof pid !== "number" || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error?.code === "ESRCH"; }
+}
 function durableTerminal(facts) {
   return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
 }
@@ -231,7 +236,7 @@ function createBackgroundHost(options) {
   async function acknowledge(jobId) {
     const current = await status(jobId);
     if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
-    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
+    if (current.live && !pidGone(current.workerPid)) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
     try { store().acknowledgeStuck(jobId); }
     catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
     return status(jobId);
@@ -281,4 +286,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal };
+module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };
