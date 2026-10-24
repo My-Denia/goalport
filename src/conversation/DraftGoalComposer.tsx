@@ -65,6 +65,7 @@ interface DraftGoalComposerProps {
   coordinationAvailable: boolean;
   runtimeRequiredHint?: string;
   coordinationResult?: string | null;
+  failureHeadline?: string | null;
   goalDetail?: string | null;
   goalChange?: string | null;
   activeGoalTitle?: string | null;
@@ -99,7 +100,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -127,7 +128,7 @@ export function DraftGoalComposer({
     <section className="draft-composer" aria-label={activeGoalTitle || coordinationResult || "New goal draft"}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <h2>{activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
           <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
@@ -178,7 +179,7 @@ export function DraftGoalComposer({
             onSelect={(provider) => onChange({ ...draft, provider })}
           />
         )}
-        {coordinationResult && !activeGoalTitle && !inputsLocked ? <p className="draft-hint">{coordinationResult}</p> : null}
+        {coordinationResult && !activeGoalTitle && !inputsLocked && coordinationResult !== failureHeadline ? <p className="draft-hint">{coordinationResult}</p> : null}
         {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} disabled={busy || inputsLocked || Boolean(onStopCoordination)} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
         {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>{stopLabel}</button> : null}
         {onLeaveGoal ? <button className="button button-small button-outline" type="button" onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
