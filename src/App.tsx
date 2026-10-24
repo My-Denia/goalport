@@ -908,7 +908,12 @@ function App() {
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
-        if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent) return;
+        if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
+          if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence) {
+            setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
+          }
+          return;
+        }
         const statusEpoch = ++linuxStatusEpoch.current;
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
@@ -2777,7 +2782,12 @@ function App() {
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
                     onContinueCoordination={client.mode === "linux-core" && !sidebarUnconfirmed && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
-                      if (sidebarUnconfirmed || linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy) return;
+                      if (sidebarUnconfirmed || linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy || linuxSignedIn.length < 2) {
+                        if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence) {
+                          setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
+                        }
+                        return;
+                      }
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
