@@ -2376,7 +2376,8 @@ function App() {
         }
         const outcome = typeof record.outcome === "string" && record.outcome.trim() ? record.outcome.trim() : null;
         if (record.verdict === "stopped") {
-          setLinuxCoordinationLine(outcome?.includes("No further turn was sent.") ? `Stopped. ${outcome}` : "Stopped. No further turn was sent.");
+          const stoppedSentence = outcome?.includes("No further turn was sent.") ? outcome : "Stopped. No further turn was sent.";
+          setLinuxCoordinationLine(stoppedSentence.startsWith("Stopped.") ? stoppedSentence : `Stopped. ${stoppedSentence}`);
           setLinuxCoordinationDetail(null);
           setLinuxCoordinationChange(null);
           return;
