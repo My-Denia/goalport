@@ -2605,6 +2605,7 @@ function App() {
               });
             }}
             onReconnect={handleReconnect}
+            hideCoreConnection={client.mode === "linux-core"}
           />
 
           {draftError && ((backgroundView && backgroundJob) || selectedPlan) ? (

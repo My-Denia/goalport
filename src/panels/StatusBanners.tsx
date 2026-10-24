@@ -13,6 +13,7 @@ interface StatusBannersProps {
   activeNotice: ActiveNotice | null;
   onDismissNotice: () => void;
   onReconnect: () => void;
+  hideCoreConnection?: boolean;
 }
 
 /**
@@ -21,7 +22,7 @@ interface StatusBannersProps {
  * Success paths are deliberately quiet — no banner is raised for accepted
  * sends, renames, reconnects or handoffs.
  */
-export function StatusBanners({ browserPreview = false, snapshot, activeNotice, onDismissNotice, onReconnect }: StatusBannersProps) {
+export function StatusBanners({ browserPreview = false, snapshot, activeNotice, onDismissNotice, onReconnect, hideCoreConnection = false }: StatusBannersProps) {
   const hold = snapshot.stopResponsibility;
   const disconnected = snapshot.connection === "disconnected";
   const reconnecting = snapshot.connection === "reconnecting" || snapshot.connection === "degraded";
@@ -70,7 +71,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </div>
         </div>
       ) : null}
-      {disconnected ? (
+      {disconnected && !hideCoreConnection ? (
         <div className="banner banner-error" role="alert">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
           <div>
@@ -83,7 +84,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
             Reconnect
           </button>
         </div>
-      ) : reconnecting ? (
+      ) : reconnecting && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">↻</span>
           <div>
