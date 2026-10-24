@@ -232,7 +232,7 @@ export function CoordinationStatus({
   const executionEvidence = Boolean(executionText || auditHarness || auditText)
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
-    <section className="coordination-status" aria-label="Plan and check">
+    <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
       <dl className="coordination-outcome">
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
