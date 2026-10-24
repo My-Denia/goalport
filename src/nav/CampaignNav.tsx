@@ -81,7 +81,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
 
       <div className="sidebar-section-title">
         <span>Goals</span>
-        <span className="count-badge" aria-label={goalListUnreadable ? "The goal list could not be read." : campaignListUnavailable ? "Goal list unavailable" : undefined}>
+        <span className="count-badge" aria-label={goalListUnreadable ? "The goal list could not be read. This is not the workbench connection." : campaignListUnavailable ? "Goal list unavailable" : undefined}>
           {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
@@ -104,7 +104,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
-        {goalListUnreadable ? <p className="nav-empty" role="status">The goal list could not be read.</p> : null}
+        {goalListUnreadable ? <p className="nav-empty" role="status">The goal list could not be read. This is not the workbench connection.</p> : null}
         {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
         ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
