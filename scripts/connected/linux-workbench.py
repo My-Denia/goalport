@@ -119,7 +119,10 @@ def current_job(data_dir: Path) -> dict | None:
         job_id = active.get("jobId")
         if not isinstance(job_id, str) or not job_id:
             return None
-        progress = json.loads((data_dir / "coordination-jobs" / "jobs" / job_id / "progress.json").read_text(encoding="utf-8"))
+        progress_path = data_dir / "coordination-jobs" / "jobs" / job_id / "progress.json"
+        if not progress_path.is_file():
+            return {"line": "The goal was admitted.", "jobId": job_id}
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         return None
     if not isinstance(progress, dict):

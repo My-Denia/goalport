@@ -141,6 +141,12 @@ class CommandRoutingTests(unittest.TestCase):
         (directory / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
         (jobs / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"commandId": "plan"}, "display": {"activity": "Codex is planning…"}}), encoding="utf-8")
         live = workbench.latest_coordination_record(directory)
+        admitted_dir = directory / "admitted"
+        (admitted_dir / "coordination-jobs").mkdir(parents=True)
+        (admitted_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
+        admitted = workbench.latest_coordination_record(admitted_dir)
+        self.assertEqual(admitted["line"], "The goal was admitted.")
+        self.assertEqual(admitted["jobId"], job)
         self.assertEqual(live["line"], "Codex is planning…")
         self.assertEqual(live["jobId"], job)
         self.assertEqual(live["record"]["verdict"], "verified")
