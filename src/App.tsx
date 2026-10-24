@@ -2187,13 +2187,15 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
+    let generation = 0;
     const check = () => {
+      const request = ++generation;
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
       }).then(async (response) => response.json().catch(() => null)).then((body) => {
-        if (cancelled) return;
+        if (cancelled || request !== generation) return;
         const unchecked = "The signed-in harnesses could not be checked, so nothing will be sent.";
         if (!body || typeof body !== "object" || (body as { ok?: unknown }).ok === false) {
           const error = (body as { error?: unknown } | null)?.error;
@@ -2204,7 +2206,7 @@ function App() {
         const sentence = payload?.sentence;
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
         setLinuxConsentMissing(payload?.consentMissing === true);
-      }).catch(() => { if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
+      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
     };
     check();
     const timer = linuxHarnessSentence ? window.setInterval(check, 2000) : 0;
