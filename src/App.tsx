@@ -2665,9 +2665,14 @@ function App() {
                       }).then(async (response) => response.json().catch(() => null)).then((body) => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
+                        if (body && body.ok !== false && !(typeof body.error === "string" && body.error.trim())) {
+                          setLinuxCoordinationLive(false);
+                          setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+                          return;
+                        }
                         const text = typeof body?.error === "string" && body.error.trim()
                           ? body.error.trim()
-                          : coordinationReplyLine(body, "The interrupted job stays unreplayed.");
+                          : "The job could not be left.";
                         setLinuxCoordinationLine(text);
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
