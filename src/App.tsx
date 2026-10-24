@@ -2639,7 +2639,7 @@ function App() {
             <div className="banner banner-warn" role="status">
               <div>
                 <strong>The goal list could not be read.</strong>
-                <span>This is not the workbench connection.</span>
+                <span>This is not the workbench connection.{linuxCoordinationGoal ? " The goal on screen is unchanged." : ""}</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
                   <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal list read failed:"))?.slice("Goal list read failed:".length).trim()}</pre>
@@ -2657,7 +2657,7 @@ function App() {
                     ?? snapshot.goalOverview?.goals.find((goal) => goal.campaignId === id)?.title;
                   return titled ? `${titled} could not be opened.` : "That goal could not be opened.";
                 })()}</strong>
-                <span>This is not the workbench connection.</span>
+                <span>This is not the workbench connection.{linuxCoordinationGoal ? " The goal on screen is unchanged." : ""}</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
                   <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim()}</pre>
