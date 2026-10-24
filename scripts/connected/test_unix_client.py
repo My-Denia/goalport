@@ -214,6 +214,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(live["line"], "Codex is planning…")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")
+        self.assertEqual(workbench.activity_line({"state": "unconfirmed", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "This goal's exit is not confirmed.")
         self.assertEqual(live["jobId"], job)
         self.assertEqual(live["record"]["verdict"], "verified")
         stop_argv, stop_error = workbench.coordination_stop_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
