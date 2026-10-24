@@ -2194,9 +2194,7 @@ function App() {
       if (intent !== selectionIntent.current) return;
       setSnapshot(next);
       const failure = client.mode === "browser-preview" || client.mode === "linux-core"
-        ? (client.mode === "linux-core" && next.connection === "disconnected"
-          ? { sentence: "That goal could not be opened.", technical: next.notices[0] }
-          : null)
+        ? null
         : commandFailure(next, "select_campaign");
       setActiveNotice(failure);
       return;
