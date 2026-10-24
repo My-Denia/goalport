@@ -125,11 +125,11 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={harnessWarning || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
+    <section className="draft-composer" aria-label={harnessWarning || (!activeGoalTitle && consentWarning) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{(!activeGoalTitle && harnessWarning) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? "Sign in another harness before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
+          <h2>{(!activeGoalTitle && (harnessWarning || consentWarning)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -145,7 +145,7 @@ export function DraftGoalComposer({
         </div>
       </div>
 
-      <form className="draft-composer-form" aria-label={harnessWarning || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : "Start a goal")} onSubmit={onSubmit}>
+      <form className="draft-composer-form" aria-label={harnessWarning || (!activeGoalTitle && consentWarning) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : "Start a goal")} onSubmit={onSubmit}>
         <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
@@ -165,7 +165,7 @@ export function DraftGoalComposer({
         {harnessWarning && activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
-        {consentWarning ? <p className="draft-hint">{consentWarning} {onGrantConsent ? <button className="button button-small button-outline" type="button" onClick={onGrantConsent}>Allow spending subscription quota</button> : null}</p> : null}
+        {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" onClick={onGrantConsent}>Allow spending subscription quota</button> : null}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
@@ -196,7 +196,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? "Sign in another harness before sending." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}

@@ -2267,9 +2267,9 @@ function App() {
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
     const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
-    document.title = pending || linuxHoldLine ? linuxCoordinationLine : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    document.title = pending || linuxHoldLine ? linuxCoordinationLine : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
-  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence]);
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing]);
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
@@ -2605,7 +2605,7 @@ function App() {
               />
             </div>
           ) : draftActive ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft"}>
+            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine) ? linuxCoordinationLine : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal draft"}>
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}
