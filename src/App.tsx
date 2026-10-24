@@ -416,6 +416,7 @@ function App() {
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
+  const linuxHoldLineRef = useRef(false);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
@@ -908,6 +909,7 @@ function App() {
         const statusEpoch = ++linuxStatusEpoch.current;
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
+        linuxHoldLineRef.current = false;
         setLinuxHoldLine(false);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
@@ -919,6 +921,7 @@ function App() {
           linuxActionSettled.current = statusEpoch;
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
+          linuxHoldLineRef.current = !coordinationStartAdmitted(body);
           setLinuxHoldLine(!coordinationStartAdmitted(body));
           if (coordinationStartAdmitted(body)) {
             linuxFreshDraft.current = false;
@@ -932,6 +935,7 @@ function App() {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           setLinuxCoordinationLine("The coordinated goal could not be sent.");
+          linuxHoldLineRef.current = true;
           setLinuxHoldLine(true);
           setDraftError(null);
         }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
@@ -1729,7 +1733,7 @@ function App() {
 
   function handleNewGoal() {
     if (client.mode === "linux-core" && linuxActionBusy) return;
-    if (client.mode === "linux-core") setLinuxHoldLine(false);
+    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; setLinuxHoldLine(false); }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
@@ -2182,7 +2186,11 @@ function App() {
           if (added) setLeftRevision((value) => value + 1);
         }
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
-        if (!jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
+        const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
+        if (linuxHoldLineRef.current && !liveJob) return;
+        if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
+          linuxHoldLineRef.current = false;
+          setLinuxHoldLine(false);
           seenJobId.current = payload.jobId;
           linuxFreshDraft.current = false;
           setLinuxShowingFreshDraft(false);
@@ -2719,6 +2727,8 @@ function App() {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
+                      linuxHoldLineRef.current = false;
+                      setLinuxHoldLine(false);
                       setLinuxCoordinationLine(workerGone ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
@@ -2729,9 +2739,15 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         setLinuxCoordinationLine(text || "Stop was sent.");
+                        if (!body || (body as { ok?: unknown }).ok === false) {
+                          linuxHoldLineRef.current = true;
+                          setLinuxHoldLine(true);
+                        }
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
+                        linuxHoldLineRef.current = true;
+                        setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
@@ -2739,6 +2755,8 @@ function App() {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
+                      linuxHoldLineRef.current = false;
+                      setLinuxHoldLine(false);
                       setLinuxCoordinationLine("Continuing.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
@@ -2749,6 +2767,10 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
+                        if (!coordinationStartAdmitted(body)) {
+                          linuxHoldLineRef.current = true;
+                          setLinuxHoldLine(true);
+                        }
                         if (coordinationStartAdmitted(body)) {
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
@@ -2759,6 +2781,8 @@ function App() {
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
+                        linuxHoldLineRef.current = true;
+                        setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Continue could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
