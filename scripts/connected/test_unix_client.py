@@ -153,6 +153,11 @@ class CommandRoutingTests(unittest.TestCase):
         missing_core, missing_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "/home/you/project", False, "/tmp/core.sock", None)
         self.assertIsNone(missing_core)
         self.assertIn("--core-binary", missing_error)
+        env = workbench.coordination_child_env({"PATH": "/opt/pi/bin"})
+        self.assertIn("/opt/pi/bin", env["PATH"])
+        local_bin = Path.home() / ".local" / "bin"
+        if local_bin.is_dir():
+            self.assertIn(str(local_bin), env["PATH"])
         refused, refuse_error = workbench.coordination_start_command(directory, Path("/repo"), "Plan the check", "relative")
         self.assertIsNone(refused)
         self.assertIn("absolute", refuse_error)

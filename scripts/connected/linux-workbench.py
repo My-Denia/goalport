@@ -10,6 +10,7 @@ says so and the page stays disconnected — it does not invent preview data.
 import argparse
 import importlib.util
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -95,6 +96,17 @@ def safe_file(dist: Path, url_path: str) -> Path | None:
     if candidate.is_file():
         return candidate
     return None
+
+
+def coordination_child_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    env = dict(base or os.environ)
+    local_bin = str(Path.home() / ".local" / "bin")
+    if Path(local_bin).is_dir():
+        current = env.get("PATH", "")
+        parts = current.split(":") if current else []
+        if local_bin not in parts:
+            env["PATH"] = local_bin + (":" + current if current else "")
+    return env
 
 
 def latest_coordination_record(data_dir: Path | None) -> dict:
@@ -317,7 +329,7 @@ def main(argv=None) -> int:
 
     def continue_runner(argv: list[str]) -> tuple[int, str, str]:
         import subprocess
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=coordination_child_env())
         return completed.returncode, completed.stdout, completed.stderr
 
     handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary)
