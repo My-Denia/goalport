@@ -185,7 +185,8 @@ describe("Linux Core bridge", () => {
     expect(await screen.findByText(/File changes stay off unless you allow Codex to change files/)).toBeTruthy();
     expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
     expect(screen.queryByText("Choose a Runtime")).toBeNull();
-    expect(screen.getByText("Coordinated goal")).toBeTruthy();
+    expect(screen.getByText("Coordinated goal.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/home/you/project" } });
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(await screen.findByText("Last coordinated goal: verified. Codex planned, Pi checked.")).toBeTruthy();

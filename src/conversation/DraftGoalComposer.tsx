@@ -135,14 +135,18 @@ export function DraftGoalComposer({
           ) : null}
         </div>
 
-        <DraftRuntimePicker
-          runtimes={runtimes}
-          provider={draft.provider}
-          connected={connected}
-          coordinationAvailable={coordinationAvailable}
-          runtimeRequiredHint={runtimeRequiredHint}
-          onSelect={(provider) => onChange({ ...draft, provider })}
-        />
+        {linuxCanStartCoordination && !draft.provider.trim() ? (
+          <p className="draft-hint"><strong>Coordinated goal.</strong> {runtimeRequiredHint}</p>
+        ) : (
+          <DraftRuntimePicker
+            runtimes={runtimes}
+            provider={draft.provider}
+            connected={connected}
+            coordinationAvailable={coordinationAvailable}
+            runtimeRequiredHint={runtimeRequiredHint}
+            onSelect={(provider) => onChange({ ...draft, provider })}
+          />
+        )}
         {coordinationResult ? <p className="draft-hint">{coordinationResult}</p> : null}
         {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
         {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>Stop this goal</button> : null}
