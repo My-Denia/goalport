@@ -2417,8 +2417,8 @@ function App() {
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
         campaignTitle={hasGoal && !(backgroundView && backgroundJob) ? title : null}
-        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? workspaceFolder(linuxCoordinationWorkspace) : null}
-        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? linuxCoordinationWorkspace : null}
+        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? workspaceFolder(backgroundJob.workspacePath) : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft && !leftUnreplayed ? workspaceFolder(linuxCoordinationWorkspace) : null}
+        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationWorkspace : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
