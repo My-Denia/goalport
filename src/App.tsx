@@ -900,6 +900,7 @@ function App() {
       if (client.mode === "linux-core") {
         const statusEpoch = ++linuxStatusEpoch.current;
         setLinuxActionBusy(true);
+        setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -2148,12 +2149,13 @@ function App() {
       inFlight = true;
       const request = ++generation;
       const settledAtStart = linuxActionSettled.current;
+      const epochAtStart = linuxStatusEpoch.current;
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-        if (cancelled || request !== generation || settledAtStart !== linuxActionSettled.current || !body || typeof body !== "object") return;
+        if (cancelled || request !== generation || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
@@ -2654,6 +2656,7 @@ function App() {
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);
+                      setLinuxCoordinationLine(workerGone ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2672,6 +2675,7 @@ function App() {
                     onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);
+                      setLinuxCoordinationLine("Continuing.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
