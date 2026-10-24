@@ -179,7 +179,7 @@ export function DraftGoalComposer({
         {harnessWarning && activeGoalTitle && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
-        {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onGrantConsent}>{coordinationResult === "Allowing Background Send." ? coordinationResult : "Allow spending subscription quota"}</button> : null}</p> : null}
+        {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onGrantConsent}>{coordinationResult === "Allowing Background Send." ? coordinationResult : harnessWarning === "Background Send was not allowed." || coordinationResult === "Background Send was not allowed." ? "Try again" : "Allow spending subscription quota"}</button> : null}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
