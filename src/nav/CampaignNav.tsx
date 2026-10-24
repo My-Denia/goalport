@@ -243,10 +243,10 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                 <button
                   className={`campaign-item${plan.active ? " campaign-active" : ""}`}
                   type="button"
-                  disabled={navigationLocked}
-                  onClick={() => { if (!navigationLocked) onSelectPlan?.(plan.requestId); }}
-                  title={planSubline(plan.verdict, plan.savedAt)}
-                  aria-label={`Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
+                  disabled={navigationLocked || plansUnreadable}
+                  onClick={() => { if (!navigationLocked && !plansUnreadable) onSelectPlan?.(plan.requestId); }}
+                  title={plansUnreadable ? "Saved plans could not be read." : planSubline(plan.verdict, plan.savedAt)}
+                  aria-label={plansUnreadable ? `Plan: ${plan.title}. Saved plans could not be read.` : `Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
                 >
                   <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
                   <span className="campaign-item-copy">
