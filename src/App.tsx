@@ -2465,7 +2465,7 @@ function App() {
               />
             </div>
           ) : draftActive ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label="New goal draft">
+            <div className="timeline-scroll" tabIndex={-1} aria-label={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal : "New goal draft"}>
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}

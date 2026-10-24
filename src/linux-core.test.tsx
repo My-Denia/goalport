@@ -198,6 +198,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.getAllByRole("region", { name: "Name the two files" }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");

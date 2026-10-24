@@ -112,7 +112,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label="New goal draft">
+    <section className="draft-composer" aria-label={activeGoalTitle || "New goal draft"}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || "Start a goal"}</h2>
