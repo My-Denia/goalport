@@ -198,6 +198,8 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertIsNone(workbench.current_job(left_dir))
         (left_job / "progress.json").write_text(json.dumps({"state": "unconfirmed"}), encoding="utf-8")
         self.assertTrue(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
+        (left_job / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"state": "unconfirmed"}}), encoding="utf-8")
+        self.assertFalse(workbench.latest_coordination_record(left_dir)["unconfirmedGoal"])
         self.assertEqual(workbench.leftover_left_job(left_dir), job)
         argv, error = workbench.coordination_acknowledge_command(left_dir, Path("/tmp"), "/tmp/core.sock", "/tmp/goalport-core")
         self.assertIsNone(error)

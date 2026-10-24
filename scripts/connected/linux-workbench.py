@@ -238,7 +238,9 @@ def disk_unconfirmed(data_dir: Path | None) -> bool:
             continue
         if not isinstance(progress, dict):
             continue
-        if progress.get("state") == "unconfirmed" or progress.get("outcome") == "unconfirmed" or isinstance(progress.get("pendingCommand"), dict):
+        outcome = progress.get("outcome")
+        outcome_status = outcome.get("status") if isinstance(outcome, dict) else outcome
+        if progress.get("state") == "unconfirmed" or outcome_status == "unconfirmed":
             return True
     return False
 
