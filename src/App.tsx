@@ -2745,7 +2745,8 @@ function App() {
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed && !leftUnreplayed ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Record the stop" : "Stop this goal"}
-                    onLeaveGoal={workerGone && !linuxActionBusy ? () => {
+                    onLeaveGoal={workerGone || linuxCoordinationLine === "Leaving this unreplayed." ? () => {
+                      if (linuxActionBusy) return;
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
@@ -2780,7 +2781,8 @@ function App() {
                         setLinuxCoordinationLine("The job could not be left.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
+                    onStopCoordination={client.mode === "linux-core" && (linuxCoordinationLive || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop.") ? () => {
+                      if (linuxActionBusy) return;
                       const wasGone = workerGone;
                       const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet.";
                       const statusEpoch = ++linuxStatusEpoch.current;
@@ -2817,8 +2819,8 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !sidebarUnconfirmed && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
-                      if (sidebarUnconfirmed || linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy || linuxSignedIn.length < 2) {
+                    onContinueCoordination={client.mode === "linux-core" && (linuxCoordinationLine === "Continuing." || (!sidebarUnconfirmed && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest))) ? () => {
+                      if (linuxActionBusy || sidebarUnconfirmed || linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
                         if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
                           setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
                         }
@@ -2874,7 +2876,8 @@ function App() {
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
                     leftoverHint={leftoverSlotLine}
-                    onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
+                    onGrantConsent={client.mode === "linux-core" && (linuxCoordinationLine === "Allowing Background Send." || (linuxConsentMissing && !linuxGranting)) ? () => {
+                      if (linuxGranting) return;
                       grantError.current = false;
                       linuxActionOpen.current = true;
                       setLinuxGranting(true);
