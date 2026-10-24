@@ -2181,10 +2181,10 @@ function App() {
           }
         }
         if (!record || typeof record.verdict !== "string") {
-          setLinuxCoordinationRequest(null);
-          setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
-            ? "No coordinated result is saved for this workbench profile."
-            : null);
+          if (payload?.reason === "no coordination profile configured") {
+            setLinuxCoordinationRequest(null);
+            setLinuxCoordinationLine("No coordinated result is saved for this workbench profile.");
+          }
           return;
         }
         const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
