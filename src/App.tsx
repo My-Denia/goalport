@@ -2650,6 +2650,7 @@ function App() {
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
+                    stopLabel={workerGone ? "Record the stop" : "Stop this goal"}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);

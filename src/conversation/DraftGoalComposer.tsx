@@ -70,6 +70,7 @@ interface DraftGoalComposerProps {
   activeGoalTitle?: string | null;
   onContinueCoordination?: () => void;
   onStopCoordination?: () => void;
+  stopLabel?: string;
   linuxCanStartCoordination?: boolean;
   linuxWrite?: boolean;
   onLinuxWriteChange?: (value: boolean) => void;
@@ -96,7 +97,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -176,7 +177,7 @@ export function DraftGoalComposer({
         )}
         {coordinationResult && !activeGoalTitle ? <p className="draft-hint">{coordinationResult}</p> : null}
         {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
-        {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>Stop this goal</button> : null}
+        {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>{stopLabel}</button> : null}
         {onContinueCoordination ? <button className="button button-small button-outline" type="button" onClick={onContinueCoordination}>Continue this goal</button> : null}
 
 
