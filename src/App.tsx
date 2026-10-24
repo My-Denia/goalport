@@ -2741,8 +2741,8 @@ function App() {
                     inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
                     coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || linuxCoordinationLine === "Background Send is allowed." || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
-                    goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
-                    goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
+                    goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed && !leftUnreplayed ? linuxCoordinationDetail : null}
+                    goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed && !leftUnreplayed ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
