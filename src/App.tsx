@@ -2708,7 +2708,7 @@ function App() {
                     linuxCanStartCoordination={client.mode === "linux-core"}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
-                    inputsLocked={client.mode === "linux-core" && linuxActionBusy}
+                    inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
                     coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
