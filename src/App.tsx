@@ -1735,7 +1735,7 @@ function App() {
   }
 
   function handleNewGoal() {
-    if (client.mode === "linux-core" && linuxActionBusy) return;
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxCoordinationLive)) return;
     if (client.mode === "linux-core") { linuxHoldLineRef.current = false; heldJobId.current = null; setLinuxHoldLine(false); }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
@@ -2462,8 +2462,8 @@ function App() {
         detailsOpen={detailsOpen}
         onToggleDetails={() => setDetailsOpen((value) => !value)}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-        onNewGoal={() => { if (client.mode === "linux-core" && linuxActionBusy) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
-        newGoalDisabled={client.mode === "linux-core" && linuxActionBusy}
+        onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxCoordinationLive)) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
+        newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxCoordinationLive)}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
         onCloseWindow={handleCloseWindow}
@@ -2486,7 +2486,7 @@ function App() {
             closeDraft(false);
             setSelectedPlanId(requestId);
           }}
-          navigationLocked={client.mode === "linux-core" && linuxActionBusy}
+          navigationLocked={client.mode === "linux-core" && (linuxActionBusy || linuxCoordinationLive)}
           onSelectCampaign={(campaignId) => {
             if (client.mode === "linux-core" && linuxActionBusy) return;
             backgroundAttached.current = true; setBackgroundView(false);
