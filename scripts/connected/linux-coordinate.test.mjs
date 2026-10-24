@@ -420,6 +420,32 @@ test("continue carries the saved plan and review as execution feedback with a fr
   assert.equal(f.launches.length, 1);
 });
 
+test("continue refuses a request that was left unreplayed", async (t) => {
+  const f = fixture(t);
+  saveRecord(f.dataDir, {
+    requestId: "left-pass",
+    workspacePath: f.workspace,
+    goal: "Left goal",
+    planningHarness: "codex",
+    reviewHarness: "claude",
+    planText: "PLAN",
+    reviewText: "REVIEW",
+    result: "RESULT",
+    verdict: "checked",
+    stopReason: "Checked.",
+    planningQuota: "unknown",
+    reviewQuota: "unknown",
+  });
+  const jobDir = path.join(f.dataDir, "coordination-jobs", "jobs", "job-left");
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(path.join(jobDir, "stuck-ack.json"), "{}");
+  fs.writeFileSync(path.join(jobDir, "admission.json"), JSON.stringify({ input: { requestId: "left-pass" } }));
+  const refused = await invoke(f, ["continue", "--from", "left-pass", "--goal", "Again", "--background"]);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /The interrupted job stays unreplayed; the same request id cannot be admitted again/);
+  assert.equal(f.launches.length, 0);
+});
+
 function assertNoAdmission(f, out) {
   assert.equal(f.launches.length, 0);
   assert.equal(fs.existsSync(jobsDirectory(f)), false);
