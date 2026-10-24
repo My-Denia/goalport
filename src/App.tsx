@@ -2196,7 +2196,7 @@ function App() {
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
         setLinuxCoordinationDetail(typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : null);
         setLinuxCoordinationChange(typeof record.change === "string" && record.change.trim() ? record.change.trim() : null);
-      }).catch(() => { if (!cancelled && request === generation && settledAtStart === linuxActionSettled.current) setLinuxCoordinationLine(null); }).finally(() => { inFlight = false; });
+      }).catch(() => { /* a failed read is not a missing goal; keep the last line */ }).finally(() => { inFlight = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
