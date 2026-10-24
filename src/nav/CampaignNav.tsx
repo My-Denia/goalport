@@ -137,14 +137,14 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open — ${goal.workspaceRoot}` : goal.workspaceRoot}
+                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open. Not the workbench. — ${goal.workspaceRoot}` : goal.workspaceRoot}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
                     <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{goal.title}</strong>
-                      {failedOpenId === goal.campaignId ? <small>Could not open</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
+                      {failedOpenId === goal.campaignId ? <small>Could not open. Not the workbench.</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
@@ -196,14 +196,14 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={failedOpenId === campaign.id ? `${titleFor(campaign.id, campaign.title)} — Could not open` : collapsed ? titleFor(campaign.id, campaign.title) : undefined}
+                    title={failedOpenId === campaign.id ? `${titleFor(campaign.id, campaign.title)} — Could not open. Not the workbench.` : collapsed ? titleFor(campaign.id, campaign.title) : undefined}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(campaign.id); }}
                   >
                     <span className={`campaign-state campaign-state-${campaign.state}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{titleFor(campaign.id, campaign.title)}</strong>
-                      {failedOpenId === campaign.id ? <small>Could not open</small> : null}
+                      {failedOpenId === campaign.id ? <small>Could not open. Not the workbench.</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
