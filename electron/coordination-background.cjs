@@ -236,7 +236,7 @@ function createBackgroundHost(options) {
   async function acknowledge(jobId) {
     const current = await status(jobId);
     if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
-    if (current.live && !pidGone(current.workerPid)) throw codedRefusal("background-still-live", "This goal is still running, so no new send was opened.");
+    if (current.live && !pidGone(current.workerPid)) throw codedRefusal("background-still-live", "This goal is still running, so it was not left.");
     try { store().acknowledgeStuck(jobId); }
     catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
     return status(jobId);
