@@ -340,6 +340,7 @@ function App() {
   const linuxStatusEpoch = useRef(0);
   const linuxActionSettled = useRef(0);
   const leftRequestIds = useRef(new Set<string>());
+  const [leftRevision, setLeftRevision] = useState(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
   // Set when a handler opens a fresh draft whose panel must start in change
@@ -401,7 +402,7 @@ function App() {
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
-  const leftUnreplayed = linuxCoordinationLine === "The interrupted job stays unreplayed; the same request id cannot be admitted again." || (linuxCoordinationRequest ? leftRequestIds.current.has(linuxCoordinationRequest) : false);
+  const leftUnreplayed = (linuxCoordinationLine === "The interrupted job stays unreplayed; the same request id cannot be admitted again." || (linuxCoordinationRequest ? leftRequestIds.current.has(linuxCoordinationRequest) : false)) && leftRevision >= 0;
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
@@ -2160,9 +2161,14 @@ function App() {
         if (cancelled || request !== generation || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; leftRequestIds?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (Array.isArray(payload?.leftRequestIds)) {
+          let added = false;
           for (const id of payload.leftRequestIds) {
-            if (typeof id === "string" && id) leftRequestIds.current.add(id);
+            if (typeof id === "string" && id && !leftRequestIds.current.has(id)) {
+              leftRequestIds.current.add(id);
+              added = true;
+            }
           }
+          if (added) setLeftRevision((value) => value + 1);
         }
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
