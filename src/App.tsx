@@ -2215,6 +2215,7 @@ function App() {
         if (!body || typeof body !== "object" || (body as { ok?: unknown }).ok === false) {
           const error = (body as { error?: unknown } | null)?.error;
           setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
+          setLinuxSignedIn([]);
           return;
         }
         const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
@@ -2222,11 +2223,11 @@ function App() {
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
         setLinuxConsentMissing(payload?.consentMissing === true);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
-      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
+      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); } });
     };
     check();
-    const timer = linuxHarnessSentence ? window.setInterval(check, 2000) : 0;
-    return () => { cancelled = true; if (timer) window.clearInterval(timer); };
+    const timer = window.setInterval(check, linuxHarnessSentence ? 2000 : 8000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxHarnessSentence, linuxDiscoverNonce]);
 
   useEffect(() => {
