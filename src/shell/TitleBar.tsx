@@ -57,7 +57,7 @@ export function TitleBar({
           <div className="titlebar-identity">
             <span className="titlebar-app" title={appInfo ? `GoalPort ${appInfo.version}` : "GoalPort"}>GoalPort</span>
             <span className="titlebar-sep" aria-hidden="true">/</span>
-            <span className="titlebar-workspace" title={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name}>
+            <span className="titlebar-workspace" title={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name} aria-label={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name || "No workspace"}>
               {workspaceLabel || snapshot.project.name || "No workspace"}
             </span>
             {campaignTitle ? (
