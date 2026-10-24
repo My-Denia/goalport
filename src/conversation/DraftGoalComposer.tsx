@@ -172,7 +172,7 @@ export function DraftGoalComposer({
           ) : null}
         </div>
         {workspaceHint && coordinationResult !== "Sending." && coordinationResult !== "Stopping this goal." && coordinationResult !== "Recording the stop." && coordinationResult !== "Continuing." && coordinationResult !== "Leaving this unreplayed." && coordinationResult !== "Allowing Background Send." ? <p className="draft-hint">{activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : "A new send stays in this folder. New goal can use another.") : workspaceHint}</p> : null}
-        {harnessWarning && activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
+        {harnessWarning && activeGoalTitle && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
         {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onGrantConsent}>{coordinationResult === "Allowing Background Send." ? coordinationResult : "Allow spending subscription quota"}</button> : null}</p> : null}
