@@ -430,6 +430,7 @@ test("a left request does not block a new run", async (t) => {
   const run = await invoke(f, runArgs(f));
   assert.equal(run.code, 0, run.stderr);
   assert.equal(f.launches.length, 1);
+  assert.notEqual(storeOf(f).getActiveStatus().requestId, "left-pass");
 });
 
 test("run refuses a request id that was left unreplayed", async (t) => {
