@@ -143,6 +143,18 @@ def live_fields(data_dir: Path | None) -> dict:
     return {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
 
 
+def short_outcome(record: dict) -> str | None:
+    for key in ("stopReason", "result", "reviewText"):
+        text = record.get(key)
+        if not isinstance(text, str):
+            continue
+        line = " ".join(text.split())
+        if not line:
+            continue
+        return line if len(line) <= 180 else line[:177] + "..."
+    return None
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
     """Read the last saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
@@ -168,6 +180,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "messageDispatched": last.get("messageDispatched"),
             "goal": last.get("goal"),
             "workspacePath": last.get("workspacePath"),
+            "outcome": short_outcome(last),
         },
         "reason": None,
         **live_fields(data_dir),

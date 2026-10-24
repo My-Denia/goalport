@@ -2128,7 +2128,7 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
           setLinuxShowingFreshDraft(false);
@@ -2163,7 +2163,10 @@ function App() {
         const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
         const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
         setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
-        setLinuxCoordinationLine(`Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
+        const outcome = typeof record.outcome === "string" && record.outcome.trim() ? record.outcome.trim() : null;
+        setLinuxCoordinationLine(outcome
+          ? `${record.verdict}. ${outcome}`
+          : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
       }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
     };
     refresh();

@@ -135,6 +135,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["planningHarness"], "Codex")
         self.assertEqual(found["record"]["reviewHarness"], "Pi")
         self.assertNotIn("planText", found["record"])
+        self.assertEqual(found["record"]["outcome"], "The independent harness verified the changes, so this stopped.")
         job = "31f7caad-52d2-4219-9935-bffeea962876"
         jobs = directory / "coordination-jobs" / "jobs" / job
         jobs.mkdir(parents=True)
