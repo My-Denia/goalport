@@ -2461,7 +2461,7 @@ function App() {
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
-            viewing: !linuxShowingFreshDraft,
+            viewing: !linuxShowingFreshDraft && !leftUnreplayed,
             stateLabel: workerGone ? "Worker gone" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
           onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
