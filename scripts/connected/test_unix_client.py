@@ -135,6 +135,14 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["planningHarness"], "Codex")
         self.assertEqual(found["record"]["reviewHarness"], "Pi")
         self.assertNotIn("planText", found["record"])
+        job = "31f7caad-52d2-4219-9935-bffeea962876"
+        jobs = directory / "coordination-jobs" / "jobs" / job
+        jobs.mkdir(parents=True)
+        (directory / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job, "requestId": "live"}), encoding="utf-8")
+        (jobs / "progress.json").write_text(json.dumps({"state": "running", "pendingCommand": {"commandId": "plan"}, "display": {"activity": "Codex is planning…"}}), encoding="utf-8")
+        live = workbench.latest_coordination_record(directory)
+        self.assertEqual(live["line"], "Codex is planning…")
+        self.assertEqual(live["record"]["verdict"], "verified")
         argv, error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
         self.assertIsNone(error)
         self.assertIn("coordinate-verified", argv)

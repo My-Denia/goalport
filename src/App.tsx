@@ -2105,7 +2105,11 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
         if (cancelled || !body || typeof body !== "object") return;
-        const payload = (body as { payload?: { record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
+        const payload = (body as { payload?: { line?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
+        if (typeof payload?.line === "string" && payload.line) {
+          setLinuxCoordinationLine(payload.line);
+          return;
+        }
         const record = payload?.record;
         if (!record || typeof record.verdict !== "string") {
           setLinuxCoordinationRequest(null);

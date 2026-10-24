@@ -109,6 +109,29 @@ def coordination_child_env(base: dict[str, str] | None = None) -> dict[str, str]
     return env
 
 
+def current_job_line(data_dir: Path) -> str | None:
+    """The active job's activity, if it has not settled. Older saved records must not cover it."""
+    active_path = data_dir / "coordination-jobs" / "active-admission.json"
+    if not active_path.is_file():
+        return None
+    try:
+        active = json.loads(active_path.read_text(encoding="utf-8"))
+        job_id = active.get("jobId")
+        if not isinstance(job_id, str) or not job_id:
+            return None
+        progress = json.loads((data_dir / "coordination-jobs" / "jobs" / job_id / "progress.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(progress, dict):
+        return None
+    settled = progress.get("state") in {"completed", "failed", "stopped"} and progress.get("outcome") and not progress.get("pendingCommand")
+    if settled:
+        return None
+    display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
+    activity = display.get("activity") if isinstance(display.get("activity"), str) else None
+    return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
     """Read the last saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
@@ -136,6 +159,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "workspacePath": last.get("workspacePath"),
         },
         "reason": None,
+        "line": current_job_line(data_dir),
     }
 
 
