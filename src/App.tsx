@@ -981,6 +981,7 @@ function App() {
             setLinuxCoordinationLive(true);
             setLinuxCoordinationGoal(message);
             setLinuxCoordinationWorkspace(workspace);
+            replaceGoalRoute(null);
             setDraftGoal((current) => current ? { ...current, message: "" } : current);
           }
         }).catch(() => {
