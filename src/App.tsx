@@ -2571,19 +2571,19 @@ function App() {
           }}
           onSelectProject={(projectId) => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
-          runningJob={backgroundJob ? {
-            goal: backgroundJob.goal,
-            workspace: backgroundJob.workspacePath,
-            viewing: backgroundView,
-            stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
-          } : client.mode === "linux-core" && linuxCoordinationGoal ? {
+          runningJob={client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
             workspace: linuxCoordinationWorkspace || undefined,
             viewing: !linuxShowingFreshDraft,
             locked: linuxActionBusy,
             stateLabel: (linuxActionBusy || linuxGranting) && (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send.") ? linuxCoordinationLine : workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy ? "Slot held" : linuxHoldLine || sidebarFailed.current ? "Failed" : linuxCoordinationLive ? "Running" : "Finished",
+          } : backgroundJob ? {
+            goal: backgroundJob.goal,
+            workspace: backgroundJob.workspacePath,
+            viewing: backgroundView,
+            stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
+          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (client.mode === "linux-core" && linuxCoordinationGoal) { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); return; } if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
