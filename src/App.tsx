@@ -2654,7 +2654,7 @@ function App() {
                     coordinationResult={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
-                    activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
+                    activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
                     stopLabel={workerGone ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
