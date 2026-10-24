@@ -340,6 +340,7 @@ function App() {
   const linuxStatusEpoch = useRef(0);
   const linuxActionSettled = useRef(0);
   const leftRequestIds = useRef(new Set<string>());
+  const linuxRequestRef = useRef<string | null>(null);
   const seenJobId = useRef<string | null>(null);
   const leftJobIds = useRef(new Set<string>());
   const linuxActionOpen = useRef(false);
@@ -407,6 +408,7 @@ function App() {
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
+  linuxRequestRef.current = linuxCoordinationRequest;
   const leftUnreplayed = (linuxCoordinationLine === "The interrupted job stays unreplayed; the same request id cannot be admitted again." || (linuxCoordinationRequest ? leftRequestIds.current.has(linuxCoordinationRequest) : false)) && leftRevision >= 0;
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
@@ -2204,7 +2206,7 @@ function App() {
           }
           if (added) setLeftRevision((value) => value + 1);
         }
-        if (payload?.unconfirmedGoal === true) setSidebarUnconfirmed(true);
+        if (payload?.unconfirmedGoal === true && !(linuxRequestRef.current && leftRequestIds.current.has(linuxRequestRef.current))) setSidebarUnconfirmed(true);
         setLinuxLeftoverHeld(payload?.leftoverHeld === true);
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
