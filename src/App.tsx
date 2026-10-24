@@ -2637,7 +2637,8 @@ function App() {
             closeDraft(false);
             setSelectedPlanId(requestId);
           }}
-          navigationLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)}
+          navigationLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive || sidebarUnconfirmed || workerGone)}
+          navigationLockedReason={client.mode === "linux-core" && (sidebarUnconfirmed || workerGone) ? "Another goal cannot start yet." : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? "Wait for this to finish." : client.mode === "linux-core" && linuxCoordinationLive ? "This goal is still running." : null}
           onSelectCampaign={(campaignId) => {
             if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
             backgroundAttached.current = true; setBackgroundView(false);

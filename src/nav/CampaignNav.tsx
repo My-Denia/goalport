@@ -12,6 +12,7 @@ interface CampaignNavProps {
   onRenameCampaign: (id: string, title: string) => void;
   runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean; workspace?: string } | null;
   navigationLocked?: boolean;
+  navigationLockedReason?: string | null;
   onOpenRunningJob?: () => void;
   projectOverride?: string;
   failedOpenId?: string;
@@ -30,7 +31,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -86,6 +87,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
           {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
+      {navigationLockedReason ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
 
       <div className="campaign-list">
         {runningJob ? (
