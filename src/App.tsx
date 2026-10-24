@@ -2859,7 +2859,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || (client.mode === "linux-core" && !linuxDiscoverChecked) || (client.mode === "linux-core" && linuxDiscoverChecked && linuxSignedIn.length < 2) || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || sidebarUnconfirmed || workerGone || (client.mode === "linux-core" && !linuxDiscoverChecked) || (client.mode === "linux-core" && linuxDiscoverChecked && linuxSignedIn.length < 2) || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
