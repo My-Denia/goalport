@@ -2546,10 +2546,15 @@ function App() {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ messageType: "coordination_continue", payload: {} }),
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "" } }),
                       }).then(async (response) => response.json()).then((body) => {
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
+                        if (coordinationStartAdmitted(body)) {
+                          setLinuxCoordinationLive(true);
+                          if (draftGoal?.message.trim()) setLinuxCoordinationGoal(draftGoal.message.trim());
+                          setDraftGoal((current) => current ? { ...current, message: "" } : current);
+                        }
                       }).catch(() => setLinuxCoordinationLine("Continue could not be sent."));
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
