@@ -95,8 +95,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
             disabled={runningJob.locked}
-            title={runningJob.stateLabel === "Unreplayed" ? `${runningJob.goal} — Unreplayed. The same request id cannot be admitted again.${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}` : runningJob.workspace ? `${runningJob.goal} — ${runningJob.stateLabel} — ${runningJob.workspace}` : `${runningJob.goal} — ${runningJob.stateLabel}`}
-            aria-label={runningJob.stateLabel === "Unreplayed" ? `${runningJob.goal}, Unreplayed. The same request id cannot be admitted again.${runningJob.workspace ? `, ${runningJob.workspace}` : ""}` : runningJob.workspace ? `${runningJob.goal}, ${runningJob.stateLabel}, ${runningJob.workspace}` : undefined}
+            title={`${runningJob.goal} — ${runningJob.stateLabel === "Unreplayed" ? "Unreplayed. The same request id cannot be admitted again." : runningJob.stateLabel === "Not confirmed" ? "Not confirmed. This goal's exit is not confirmed." : runningJob.stateLabel === "Not admitted" ? "Not admitted. The reply did not say the goal was admitted." : runningJob.stateLabel === "Worker gone" ? "Worker gone. Its exit is not confirmed." : runningJob.stateLabel}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}`}
+            aria-label={`${runningJob.goal}, ${runningJob.stateLabel === "Unreplayed" ? "Unreplayed. The same request id cannot be admitted again." : runningJob.stateLabel === "Not confirmed" ? "Not confirmed. This goal's exit is not confirmed." : runningJob.stateLabel === "Not admitted" ? "Not admitted. The reply did not say the goal was admitted." : runningJob.stateLabel === "Worker gone" ? "Worker gone. Its exit is not confirmed." : runningJob.stateLabel}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}`}
             onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
