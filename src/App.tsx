@@ -2897,6 +2897,8 @@ function App() {
                           setLinuxCoordinationLive(false);
                           setLinuxLeftoverHeld(false);
                           linuxHoldLineRef.current = false;
+                          admissionUnsaid.current = false;
+                          rememberAdmissionUnsaid(null);
                           clearFailure();
                           setLinuxHoldLine(false);
                           setSidebarUnconfirmed(false);
@@ -2950,6 +2952,8 @@ function App() {
                         const shownStop = failedWhileUnconfirmed ? `${failedStop} This goal's exit is not confirmed.` : failedStop;
                         setLinuxCoordinationLine(stopFailed ? shownStop : wasGone && !textMentionsUnconfirmed ? gone : wasUnconfirmed && !textMentionsUnconfirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
                         if (!stopFailed && !textMentionsUnconfirmed && !(wasUnconfirmed && !textMentionsUnconfirmed) && !(wasGone && !textMentionsUnconfirmed)) {
+                          admissionUnsaid.current = false;
+                          rememberAdmissionUnsaid(null);
                           clearFailure();
                           setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
                           linuxHoldLineRef.current = false;
