@@ -2708,7 +2708,7 @@ function App() {
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
-                    stopLabel={workerGone ? "Record the stop" : "Stop this goal"}
+                    stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed." ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
