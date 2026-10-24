@@ -9,7 +9,7 @@ import { EMPTY_SNAPSHOT, type CoreSnapshot } from "../types";
  */
 export function useCoreSnapshot(client: CoreClient, coreReady: boolean): [CoreSnapshot, Dispatch<SetStateAction<CoreSnapshot>>, boolean] {
   const [snapshot, setSnapshotState] = useState<CoreSnapshot>(() => client.mode === "browser-preview" ? previewInitialSnapshot() : EMPTY_SNAPSHOT);
-  const [booted, setBooted] = useState(() => client.mode === "browser-preview");
+  const [booted, setBooted] = useState(() => client.mode === "browser-preview" || client.mode === "linux-core");
   const epoch = useRef(0);
   const setSnapshot = useCallback((action: SetStateAction<CoreSnapshot>) => {
     epoch.current += 1;
@@ -40,7 +40,7 @@ export function useCoreSnapshot(client: CoreClient, coreReady: boolean): [CoreSn
           }
           setSnapshotState((current) => current.loadedHistory ? mergeSnapshotHistory(current, next) : next);
           setBooted(true);
-          if (allowStart && !autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview") {
+          if (allowStart && !autoStartAttempted && next.connection !== "connected" && client.mode !== "browser-preview" && client.mode !== "linux-core") {
             autoStartAttempted = true;
             const started = await client.startCore();
             if (mounted && token === epoch.current) setSnapshotState(started);
