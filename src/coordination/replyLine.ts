@@ -12,6 +12,18 @@ export function coordinationReplyLine(body: { error?: unknown; payload?: { stdou
   return fallback;
 }
 
+export function harnessDisplayName(id: string): string {
+  if (id === "codex") return "Codex";
+  if (id === "pi") return "Pi";
+  if (id === "claude") return "Claude";
+  return id;
+}
+
+export function signedInLine(ids: readonly string[]): string | null {
+  if (ids.length < 2) return null;
+  return `Signed in: ${ids.map(harnessDisplayName).join(", ")}.`;
+}
+
 export function coordinationStartAdmitted(body: { error?: unknown; payload?: { stdout?: unknown } } | null): boolean {
   if (typeof body?.error === "string" && body.error.trim()) return false;
   const stdout = typeof body?.payload?.stdout === "string" ? body.payload.stdout : "";

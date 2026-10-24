@@ -227,7 +227,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     missingHarness = false;
     await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
-    expect(screen.getByText("Signed in: codex, pi.")).toBeTruthy();
+    expect(screen.getByText("Signed in: Codex, Pi.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");

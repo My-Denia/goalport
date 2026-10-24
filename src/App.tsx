@@ -30,7 +30,7 @@ import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoal
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
-import { coordinationReplyLine, coordinationStartAdmitted } from "./coordination/replyLine";
+import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
 import { usableInstanceIds, type CoordinationWriteAuthorization, type ExecutionFeedback } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
@@ -2680,7 +2680,7 @@ function App() {
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
-                    signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && linuxSignedIn.length >= 2 && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? `Signed in: ${linuxSignedIn.join(", ")}.` : null}
+                    signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {

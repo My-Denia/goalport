@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coordinationReplyLine, coordinationStartAdmitted } from "./replyLine";
+import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./replyLine";
 
 describe("coordinationReplyLine", () => {
   it("keeps the unconfirmed sentence instead of a planning activity", () => {
@@ -14,6 +14,11 @@ describe("coordinationReplyLine", () => {
       payload: { stdout: "state: stopped\nactivity: Stopped. No further turn was sent.\n" },
     }, "Stop was sent.");
     expect(line).toBe("Stopped. No further turn was sent.");
+  });
+
+  it("names the known harnesses the same way the rest of the page does", () => {
+    expect(signedInLine(["codex", "pi"])).toBe("Signed in: Codex, Pi.");
+    expect(signedInLine(["codex"])).toBeNull();
   });
 
   it("locks a second send only after the goal was actually admitted", () => {
