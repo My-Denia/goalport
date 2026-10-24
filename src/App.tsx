@@ -2703,7 +2703,7 @@ function App() {
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
                     signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
-                    discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked ? "Checking signed-in harnesses." : null}
+                    discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       setLinuxGranting(true);
