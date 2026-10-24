@@ -122,6 +122,7 @@ class CommandRoutingTests(unittest.TestCase):
                 "stopReason": "The independent harness verified the changes, so this stopped.",
                 "result": "note.txt now has before and pong.",
                 "reviewText": "Pi checked the file and found only that added line.",
+                "auditText": "Pi verified the added line and no other file changed.",
                 "executionText": "Codex added pong under before.",
                 "planningHarness": "Codex",
                 "reviewHarness": "Pi",
@@ -139,7 +140,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["reviewHarness"], "Pi")
         self.assertNotIn("planText", found["record"])
         self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
-        self.assertEqual(found["record"]["detail"], "Pi checked the file and found only that added line.")
+        self.assertEqual(found["record"]["detail"], "Pi verified the added line and no other file changed.")
         self.assertEqual(found["record"]["change"], "Codex added pong under before.")
         self.assertNotIn("planText", found["record"])
         self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\nprovider pi: authenticated (subscription)\n"))

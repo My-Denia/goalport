@@ -154,7 +154,7 @@ def folded_text(record: dict, key: str, outcome: str | None) -> str | None:
 
 
 def check_detail(record: dict, outcome: str | None) -> str | None:
-    return folded_text(record, "reviewText", outcome)
+    return folded_text(record, "auditText", outcome) or folded_text(record, "reviewText", outcome)
 
 
 def short_outcome(record: dict) -> str | None:
