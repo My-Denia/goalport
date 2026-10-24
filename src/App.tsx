@@ -2141,7 +2141,10 @@ function App() {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
     let generation = 0;
+    let inFlight = false;
     const refresh = () => {
+      if (inFlight) return;
+      inFlight = true;
       const request = ++generation;
       const settledAtStart = linuxActionSettled.current;
       void fetch("/goalport/ipc", {
@@ -2193,7 +2196,7 @@ function App() {
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
         setLinuxCoordinationDetail(typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : null);
         setLinuxCoordinationChange(typeof record.change === "string" && record.change.trim() ? record.change.trim() : null);
-      }).catch(() => { if (!cancelled && request === generation && settledAtStart === linuxActionSettled.current) setLinuxCoordinationLine(null); });
+      }).catch(() => { if (!cancelled && request === generation && settledAtStart === linuxActionSettled.current) setLinuxCoordinationLine(null); }).finally(() => { inFlight = false; });
     };
     refresh();
     const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
