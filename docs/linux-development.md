@@ -65,7 +65,7 @@ python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.s
   --coordination-data "$HOME/.goalport/linux-coordinate"
 ```
 
-Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Switching goals and reading another goal from `detail` are independent.
+Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Send stays off until Keep working after closing is selected. Switching goals and reading another goal from `detail` are independent.
 
 Every operation goes through the production v2 protocol and Core's existing
 permission and delivery rules. A timeout after sending a mutation means its

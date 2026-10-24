@@ -2652,6 +2652,7 @@ function App() {
                     } : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={client.mode === "linux-core" || (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim()) ? setBackgroundConsent : undefined}
+                    keepRunningHint={client.mode === "linux-core" && !backgroundConsent ? "Keep working after closing must be explicitly selected." : null}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
                       if (value.provider.trim()) setBackgroundConsent(false);

@@ -200,6 +200,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Keep working after closing must be explicitly selected.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
