@@ -2907,20 +2907,24 @@ function App() {
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const stopFailed = !body || (body as { ok?: unknown }).ok === false;
                         const textMentionsUnconfirmed = /unconfirmed|not confirmed/i.test(text || "");
-                        setLinuxCoordinationLine(stopFailed ? (text || "Stop could not be sent.") : wasGone && !textMentionsUnconfirmed ? gone : wasUnconfirmed && !textMentionsUnconfirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
+                        const failedStop = text || "Stop could not be sent.";
+                        const failedWhileUnconfirmed = stopFailed && !textMentionsUnconfirmed && (wasUnconfirmed || wasGone);
+                        const shownStop = failedWhileUnconfirmed ? `${failedStop} This goal's exit is not confirmed.` : failedStop;
+                        setLinuxCoordinationLine(stopFailed ? shownStop : wasGone && !textMentionsUnconfirmed ? gone : wasUnconfirmed && !textMentionsUnconfirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
                         if (!stopFailed && !textMentionsUnconfirmed && !(wasUnconfirmed && !textMentionsUnconfirmed) && !(wasGone && !textMentionsUnconfirmed)) {
                           clearFailure();
                           setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
                         }
-                        if (stopFailed && !textMentionsUnconfirmed) {
-                          rememberFailure(text || "Stop could not be sent.");
+                        if (stopFailed && !textMentionsUnconfirmed && !failedWhileUnconfirmed) {
+                          rememberFailure(failedStop);
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
                           setSidebarUnconfirmed(false);
-                        } else if (textMentionsUnconfirmed || (wasUnconfirmed && !textMentionsUnconfirmed) || (wasGone && !textMentionsUnconfirmed)) {
+                        } else if (failedWhileUnconfirmed || textMentionsUnconfirmed || (wasUnconfirmed && !textMentionsUnconfirmed) || (wasGone && !textMentionsUnconfirmed)) {
+                          if (failedWhileUnconfirmed) rememberFailure(shownStop);
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
