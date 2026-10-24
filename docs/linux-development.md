@@ -142,8 +142,8 @@ Honesty rules the client keeps:
   and is not auto-selected. Naming it with `--instances` still uses it; that
   does not make the sign-in a confirmed subscription. Omitting `--instances`
   selects only confirmed subscription logins.
-- A request that was left unreplayed cannot be continued. The workbench
-  refuses with `The interrupted job stays unreplayed; the same request id cannot be admitted again.`
+- A request that was left unreplayed cannot be continued. The CLI and the
+  workbench refuse with `The interrupted job stays unreplayed; the same request id cannot be admitted again.`
 - File changes are not implied by `--background` or by a read goal. Pass both
   `--write-instances` and `--write-turns` to opt into the existing write
   authorization. One confirmed subscription harness still cannot review itself:

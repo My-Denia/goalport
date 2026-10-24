@@ -582,11 +582,36 @@ async function commandRun(parsed, io, context) {
   });
 }
 
+function requestWasLeft(dataDir, requestId) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  let names;
+  try {
+    names = fs.readdirSync(path.join(dataDir, "coordination-jobs", "jobs"));
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    const jobDir = path.join(dataDir, "coordination-jobs", "jobs", name);
+    try {
+      fs.accessSync(path.join(jobDir, "stuck-ack.json"));
+      const admission = JSON.parse(fs.readFileSync(path.join(jobDir, "admission.json"), "utf8"));
+      if (admission?.input?.requestId === requestId) return true;
+    } catch {
+      // A job without a readable stuck acknowledgement is not a left request.
+    }
+  }
+  return false;
+}
+
 async function commandContinue(parsed, io, context) {
   const from = typeof parsed.values.from === "string" ? parsed.values.from.trim() : "";
   if (!from) return refuse(io, "continue needs --from with the request id of a saved record, so nothing was admitted.");
   const record = readRecords(context.dataDir).find((item) => item.requestId === from);
   if (!record) return refuse(io, `No saved coordinated-goal record has request id ${from} on this profile, so nothing was admitted.`);
+  if (requestWasLeft(context.dataDir, from)) {
+    return refuse(io, "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+  }
   const workspace = typeof parsed.values.workspace === "string" ? parsed.values.workspace : record.workspacePath;
   // The saved texts travel as execution feedback. They are references, never
   // commands to relaunch: previousCommandIds stays empty, and the new admission
