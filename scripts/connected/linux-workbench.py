@@ -121,12 +121,31 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "reviewHarness": last.get("reviewHarness"),
             "messageDispatched": last.get("messageDispatched"),
             "goal": last.get("goal"),
+            "workspacePath": last.get("workspacePath"),
         },
         "reason": None,
     }
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None):
+def coordination_continue_command(data_dir: Path | None, repo_root: Path) -> tuple[list[str] | None, str | None]:
+    found = latest_coordination_record(data_dir)
+    record = found.get("record") if isinstance(found, dict) else None
+    request_id = record.get("requestId") if isinstance(record, dict) else None
+    if data_dir is None or not isinstance(request_id, str) or not request_id:
+        return None, "No saved coordinated goal to continue."
+    goal = record.get("goal") if isinstance(record.get("goal"), str) and record.get("goal") else "Continue the saved goal"
+    argv = [
+        "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
+        "--data-dir", str(data_dir),
+        "continue", "--from", request_id, "--goal", goal, "--background",
+    ]
+    workspace = record.get("workspacePath")
+    if isinstance(workspace, str) and workspace:
+        argv.extend(["--workspace", workspace])
+    return argv, None
+
+
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -192,6 +211,23 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     "payload": latest_coordination_record(coordination_data),
                 }).encode(), "application/json")
                 return
+            if message_type == "coordination_continue":
+                argv, error = coordination_continue_command(coordination_data, ROOT)
+                if error:
+                    self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
+                    return
+                if continue_runner is None:
+                    self._send(200, json.dumps({
+                        "ok": False,
+                        "error": "Continue is not wired on this workbench.",
+                    }).encode(), "application/json")
+                    return
+                code, out, err = continue_runner(argv)
+                self._send(200, json.dumps({
+                    "ok": code == 0,
+                    "payload": {"exitCode": code, "stdout": out, "stderr": err},
+                }).encode(), "application/json")
+                return
             payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
             request_id = request.get("requestId") or request.get("request_id")
             try:
@@ -236,7 +272,13 @@ def main(argv=None) -> int:
     unix_client = load_unix_client()
     endpoint = unix_client.resolve(args.endpoint)
     coordination_data = args.coordination_data.resolve() if args.coordination_data else None
-    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data)
+
+    def continue_runner(argv: list[str]) -> tuple[int, str, str]:
+        import subprocess
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        return completed.returncode, completed.stdout, completed.stderr
+
+    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"GoalPort workbench http://{args.host}:{args.port}  core {endpoint}", flush=True)
     try:

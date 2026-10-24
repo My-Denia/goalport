@@ -174,7 +174,7 @@ describe("Linux Core bridge", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messageType: string };
       if (body.messageType === "coordination_latest") {
-        return jsonResponse({ ok: true, payload: { record: { verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi" }, reason: null } });
+        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi" }, reason: null } });
       }
       if (body.messageType === "goal_overview") {
         return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
@@ -189,6 +189,8 @@ describe("Linux Core bridge", () => {
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     expect(await screen.findByText("Last coordinated goal: verified. Codex planned, Pi checked.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
     expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
     expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
   });

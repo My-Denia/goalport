@@ -391,6 +391,7 @@ function App() {
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
+  const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
     // never the pre-connect placeholder, never a capacity acknowledgement.
@@ -2094,6 +2095,7 @@ function App() {
       const payload = (body as { payload?: { record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown } | null; reason?: unknown } }).payload;
       const record = payload?.record;
       if (!record || typeof record.verdict !== "string") {
+        setLinuxCoordinationRequest(null);
         setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
           ? "No coordinated result is saved for this workbench profile."
           : null);
@@ -2101,6 +2103,7 @@ function App() {
       }
       const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
       const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
+      setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
       setLinuxCoordinationLine(`Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
     }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
     return () => { cancelled = true; };
@@ -2489,6 +2492,16 @@ function App() {
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
+                    onContinueCoordination={client.mode === "linux-core" && linuxCoordinationRequest ? () => {
+                      void fetch("/goalport/ipc", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: {} }),
+                      }).then(async (response) => response.json()).then((body) => {
+                        const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" ? body.payload.stdout.trim() : "Continue was sent.";
+                        setLinuxCoordinationLine(text || "Continue was sent.");
+                      }).catch(() => setLinuxCoordinationLine("Continue could not be sent."));
+                    } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
