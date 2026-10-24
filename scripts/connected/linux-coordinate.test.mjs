@@ -420,6 +420,18 @@ test("continue carries the saved plan and review as execution feedback with a fr
   assert.equal(f.launches.length, 1);
 });
 
+test("a left request does not block a new run", async (t) => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const jobDir = path.join(f.dataDir, "coordination-jobs", "jobs", "job-left");
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.writeFileSync(path.join(jobDir, "stuck-ack.json"), "{}");
+  fs.writeFileSync(path.join(jobDir, "admission.json"), JSON.stringify({ input: { requestId: "left-pass" } }));
+  const run = await invoke(f, runArgs(f));
+  assert.equal(run.code, 0, run.stderr);
+  assert.equal(f.launches.length, 1);
+});
+
 test("run refuses a request id that was left unreplayed", async (t) => {
   const f = fixture(t);
   await invoke(f, ["grant-access"]);
