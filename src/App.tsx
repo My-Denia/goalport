@@ -403,6 +403,7 @@ function App() {
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
   const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
+  const [linuxSignedIn, setLinuxSignedIn] = useState<string[]>([]);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
@@ -2216,10 +2217,11 @@ function App() {
           setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
           return;
         }
-        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown } }).payload;
+        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
         const sentence = payload?.sentence;
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
         setLinuxConsentMissing(payload?.consentMissing === true);
+        setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
       }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
     };
     check();
@@ -2674,6 +2676,7 @@ function App() {
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
+                    signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && linuxSignedIn.length >= 2 && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? `Signed in: ${linuxSignedIn.join(", ")}.` : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       setLinuxGranting(true);

@@ -203,7 +203,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     }
 
 
-def subscription_harness_sentence(stdout: str) -> str | None:
+def subscription_harnesses(stdout: str) -> list[str]:
     found = []
     for line in stdout.splitlines():
         if not line.startswith("provider ") or "authenticated" not in line or "(subscription)" not in line:
@@ -211,6 +211,11 @@ def subscription_harness_sentence(stdout: str) -> str | None:
         name = line.split(":", 1)[0].removeprefix("provider ").strip()
         if name:
             found.append(name)
+    return found
+
+
+def subscription_harness_sentence(stdout: str) -> str | None:
+    found = subscription_harnesses(stdout)
     if len(found) >= 2:
         return None
     if len(found) == 1:
@@ -376,7 +381,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     self._send(200, json.dumps({"ok": False, "error": "Discover is not wired on this workbench."}).encode(), "application/json")
                     return
                 code, out, err = continue_runner([*prefix, "discover"])
-                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_grant":
                 prefix, error = coordination_grant_command(coordination_data, ROOT, endpoint, core_binary)
