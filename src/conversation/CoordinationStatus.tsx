@@ -460,7 +460,7 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     {/* Stop allowing stays reachable while the admission is active and not
         revoked, even when control is unreachable: revocation itself persists.
         The progress block below stays honestly live-gated. */}
-    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
+    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath} aria-label={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
     {onContinue ? <div className="coordination-access">
       <button type="button" className="button button-primary" onClick={onContinue}>
         {job.state === "unconfirmed" || job.pendingCommand ? "Continue in a new send" : "New send for this goal"}
