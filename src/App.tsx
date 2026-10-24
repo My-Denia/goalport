@@ -2905,15 +2905,22 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
-                        const confirmed = /unconfirmed|not confirmed/i.test(text || "");
-                        setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
-                        if (body && (body as { ok?: unknown }).ok !== false && confirmed === false && !(wasUnconfirmed && !confirmed) && !/unconfirmed/i.test(text || "")) {
+                        const stopFailed = !body || (body as { ok?: unknown }).ok === false;
+                        const textMentionsUnconfirmed = /unconfirmed|not confirmed/i.test(text || "");
+                        setLinuxCoordinationLine(stopFailed ? (text || "Stop could not be sent.") : wasGone && !textMentionsUnconfirmed ? gone : wasUnconfirmed && !textMentionsUnconfirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
+                        if (!stopFailed && !textMentionsUnconfirmed && !(wasUnconfirmed && !textMentionsUnconfirmed) && !(wasGone && !textMentionsUnconfirmed)) {
                           clearFailure();
                           setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
                         }
-                        if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "") || (wasUnconfirmed && !confirmed)) {
+                        if (stopFailed && !textMentionsUnconfirmed) {
+                          rememberFailure(text || "Stop could not be sent.");
+                          linuxHoldLineRef.current = true;
+                          heldJobId.current = seenJobId.current;
+                          setLinuxHoldLine(true);
+                          setSidebarUnconfirmed(false);
+                        } else if (textMentionsUnconfirmed || (wasUnconfirmed && !textMentionsUnconfirmed) || (wasGone && !textMentionsUnconfirmed)) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
