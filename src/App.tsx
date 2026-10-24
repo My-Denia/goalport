@@ -2211,7 +2211,7 @@ function App() {
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
-    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop.";
+    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send.";
     document.title = pending ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine]);
@@ -2707,6 +2707,7 @@ function App() {
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
                       setLinuxGranting(true);
+                      setLinuxCoordinationLine("Allowing Background Send.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2714,11 +2715,18 @@ function App() {
                       }).then(async (response) => response.json().catch(() => null)).then((body) => {
                         if (!body || (body as { ok?: unknown }).ok === false) {
                           const error = (body as { error?: unknown } | null)?.error;
-                          setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.");
+                          const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.";
+                          setLinuxHarnessSentence(sentence);
+                          setLinuxCoordinationLine(sentence);
                           return;
                         }
+                        setLinuxCoordinationLine((current) => current === "Allowing Background Send." ? null : current);
                         setLinuxDiscoverNonce((value) => value + 1);
-                      }).catch(() => setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent.")).finally(() => setLinuxGranting(false));
+                      }).catch(() => {
+                        const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
+                        setLinuxHarnessSentence(sentence);
+                        setLinuxCoordinationLine(sentence);
+                      }).finally(() => setLinuxGranting(false));
                     } : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={client.mode === "linux-core" || (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim()) ? setBackgroundConsent : undefined}
