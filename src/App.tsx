@@ -974,6 +974,8 @@ function App() {
         linuxHoldLineRef.current = false;
         heldJobId.current = null;
         grantAllowed.current = false;
+        admissionUnsaid.current = false;
+        rememberAdmissionUnsaid(null);
         setLinuxHoldLine(false);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
@@ -2994,6 +2996,8 @@ function App() {
                       setLinuxActionBusy(true);
                       linuxHoldLineRef.current = false;
                       heldJobId.current = null;
+                      admissionUnsaid.current = false;
+                      rememberAdmissionUnsaid(null);
                       setLinuxHoldLine(false);
                       setLinuxCoordinationLine("Continuing.");
                       void fetch("/goalport/ipc", {
