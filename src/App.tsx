@@ -2211,7 +2211,8 @@ function App() {
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
-    document.title = short ? (workerGone ? `${short} — worker gone` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop.";
+    document.title = pending ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine]);
 
