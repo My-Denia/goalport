@@ -170,7 +170,7 @@ export function DraftGoalComposer({
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked}>Browse…</button>
           ) : null}
         </div>
-        {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : "This goal stays in this folder.") : workspaceHint}</p> : null}
+        {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : "A new send stays in this folder. New goal can use another.") : workspaceHint}</p> : null}
         {harnessWarning && activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
