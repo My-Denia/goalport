@@ -146,6 +146,9 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertNotIn("Stopped", none)
         self.assertTrue(workbench.consent_missing("consent: not granted\n"))
         self.assertFalse(workbench.consent_missing("consent: granted (2026-10-23T17:15:59.514Z)\n"))
+        grant_argv, grant_error = workbench.coordination_grant_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")
+        self.assertIsNone(grant_error)
+        self.assertEqual(grant_argv[-1], "grant-access")
         job = "31f7caad-52d2-4219-9935-bffeea962876"
         jobs = directory / "coordination-jobs" / "jobs" / job
         jobs.mkdir(parents=True)

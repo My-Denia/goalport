@@ -400,6 +400,7 @@ function App() {
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
   const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
+  const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
@@ -2634,12 +2635,20 @@ function App() {
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" ? linuxHarnessSentence : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
-                    onGrantConsent={client.mode === "linux-core" && linuxConsentMissing ? () => {
+                    onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
+                      setLinuxGranting(true);
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
                         body: JSON.stringify({ messageType: "coordination_grant", payload: {} }),
-                      }).then(() => setLinuxDiscoverNonce((value) => value + 1)).catch(() => setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."));
+                      }).then(async (response) => response.json().catch(() => null)).then((body) => {
+                        if (!body || (body as { ok?: unknown }).ok === false) {
+                          const error = (body as { error?: unknown } | null)?.error;
+                          setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.");
+                          return;
+                        }
+                        setLinuxDiscoverNonce((value) => value + 1);
+                      }).catch(() => setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent.")).finally(() => setLinuxGranting(false));
                     } : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}
