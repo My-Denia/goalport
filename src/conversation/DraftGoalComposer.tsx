@@ -134,7 +134,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? `${activeGoalTitle} — slot held` : leftoverHint) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
+    <section className="draft-composer" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || (leftoverHint && activeGoalTitle ? `${activeGoalTitle} — slot held` : leftoverHint) || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : (!activeGoalTitle && failureHeadline) || (!activeGoalTitle && (harnessWarning || consentWarning || leftoverHint)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
