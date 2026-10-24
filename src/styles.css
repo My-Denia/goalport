@@ -966,6 +966,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .connection-pill .connection-text { display: none; }
   .connection-neutral .connection-text { display: inline; }
   .connection-pill { padding: 0 8px; }
+  .connection-neutral { padding: 0 9px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
   .timeline-inner, .composer-dock { padding-left: 14px; padding-right: 14px; }
