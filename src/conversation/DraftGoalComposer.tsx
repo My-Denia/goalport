@@ -136,7 +136,7 @@ export function DraftGoalComposer({
         </div>
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
-          <p className="draft-hint"><strong>Coordinated goal.</strong> {runtimeRequiredHint}</p>
+          <p className="draft-hint">{runtimeRequiredHint}</p>
         ) : (
           <DraftRuntimePicker
             runtimes={runtimes}
