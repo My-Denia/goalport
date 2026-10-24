@@ -2362,12 +2362,17 @@ function App() {
         const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
         const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
         setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
-        if (leftUnconfirmedSlot.current || (typeof record.requestId === "string" && leftRequestIds.current.has(record.requestId))) {
+        const recordWasLeft = typeof record.requestId === "string" && leftRequestIds.current.has(record.requestId);
+        if (recordWasLeft || (leftUnconfirmedSlot.current && typeof record.requestId !== "string")) {
           if (typeof record.requestId === "string") leftRequestIds.current.add(record.requestId);
           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
           setLinuxCoordinationDetail(null);
           setLinuxCoordinationChange(null);
           return;
+        }
+        if (leftUnconfirmedSlot.current) {
+          leftUnconfirmedSlot.current = false;
+          try { sessionStorage.removeItem("goalport.linux.leftSlot"); } catch { /* a private window can refuse storage */ }
         }
         const outcome = typeof record.outcome === "string" && record.outcome.trim() ? record.outcome.trim() : null;
         setLinuxCoordinationLine(outcome
