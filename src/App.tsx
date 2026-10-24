@@ -2573,6 +2573,7 @@ function App() {
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
           runningJob={backgroundJob ? {
             goal: backgroundJob.goal,
+            workspace: backgroundJob.workspacePath,
             viewing: backgroundView,
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
