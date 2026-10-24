@@ -1096,6 +1096,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 /* First-use draft composer. */
 .draft-composer { max-width: 640px; margin: 18px auto 0; width: 100%; }
+.draft-composer details.draft-hint { margin: 8px 0 0; }
+.draft-composer details.draft-hint p { max-height: 8rem; overflow: auto; white-space: pre-wrap; }
 .draft-composer-form {
   display: grid; gap: 8px; padding: 18px;
   border: 1px solid var(--line); border-radius: 12px;
