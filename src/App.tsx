@@ -405,6 +405,7 @@ function App() {
   const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
   const [linuxGranting, setLinuxGranting] = useState(false);
+  const [linuxActionBusy, setLinuxActionBusy] = useState(false);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
@@ -895,6 +896,7 @@ function App() {
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
         const statusEpoch = ++linuxStatusEpoch.current;
+        setLinuxActionBusy(true);
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -916,7 +918,7 @@ function App() {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           setDraftError({ sentence: "The coordinated goal could not be sent." });
-        });
+        }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
@@ -2608,7 +2610,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
@@ -2626,8 +2628,9 @@ function App() {
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
-                    onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
+                    onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
+                      setLinuxActionBusy(true);
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2641,10 +2644,11 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         setLinuxCoordinationLine("Stop could not be sent.");
-                      });
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
+                      setLinuxActionBusy(true);
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2665,7 +2669,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         setLinuxCoordinationLine("Continue could not be sent.");
-                      });
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
