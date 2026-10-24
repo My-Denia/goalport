@@ -2920,6 +2920,9 @@ function App() {
                         setLinuxConsentMissing(false);
                         setLinuxHarnessSentence(null);
                         grantAllowed.current = true;
+                        sidebarFailed.current = false;
+                        linuxHoldLineRef.current = false;
+                        setLinuxHoldLine(false);
                         setLinuxCoordinationLine("Background Send is allowed.");
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
