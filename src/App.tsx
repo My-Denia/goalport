@@ -3209,8 +3209,10 @@ function App() {
 
 function workspaceFolder(root: string): string {
   const trimmed = root.replace(/[\\/]+$/, "");
+  if (trimmed === "~") return trimmed;
   const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  const name = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return trimmed.startsWith("~/") ? `~/${name}` : name;
 }
 
 /** A terminal outcome with no pending command is the only fact that releases a folder. */
