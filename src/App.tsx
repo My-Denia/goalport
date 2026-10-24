@@ -398,10 +398,10 @@ function App() {
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
   const workerGone = linuxCoordinationLine === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
-  const leftUnreplayed = linuxCoordinationLine === "The interrupted job stays unreplayed; the same request id cannot be admitted again.";
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
+  const leftUnreplayed = linuxCoordinationLine === "The interrupted job stays unreplayed; the same request id cannot be admitted again." || (linuxCoordinationRequest ? leftRequestIds.current.has(linuxCoordinationRequest) : false);
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
@@ -2216,7 +2216,7 @@ function App() {
     const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
     document.title = pending ? linuxCoordinationLine : short ? (workerGone ? `${short} — worker gone` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
     return () => { document.title = previous; };
-  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine]);
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest]);
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
