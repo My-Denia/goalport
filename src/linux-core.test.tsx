@@ -182,7 +182,7 @@ describe("Linux Core bridge", () => {
       return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
     }));
     render(<App />);
-    expect(await screen.findByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
     expect(screen.getByText("Project folder")).toBeTruthy();
     expect(screen.queryByText("Workspace")).toBeNull();
@@ -197,6 +197,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
@@ -206,6 +207,7 @@ describe("Linux Core bridge", () => {
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "New goal" }));
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();

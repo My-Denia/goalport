@@ -139,7 +139,7 @@ export function DraftGoalComposer({
         {workspaceHint ? <p className="draft-hint">{workspaceHint}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
-          <p className="draft-hint">{runtimeRequiredHint}</p>
+          activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
         ) : (
           <DraftRuntimePicker
             runtimes={runtimes}
