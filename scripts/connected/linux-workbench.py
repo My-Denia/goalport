@@ -97,7 +97,36 @@ def safe_file(dist: Path, url_path: str) -> Path | None:
     return None
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float):
+def latest_coordination_record(data_dir: Path | None) -> dict:
+    """Read the last saved coordinated-goal record. No tokens, no plan body."""
+    if data_dir is None:
+        return {"ok": True, "record": None, "reason": "no coordination profile configured"}
+    path = data_dir / "coordination-records.json"
+    if not path.is_file():
+        return {"ok": True, "record": None, "reason": "no coordinated result saved"}
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"ok": False, "record": None, "reason": "coordinated result could not be read"}
+    if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
+        return {"ok": True, "record": None, "reason": "no coordinated result saved"}
+    last = records[-1]
+    return {
+        "ok": True,
+        "record": {
+            "requestId": last.get("requestId"),
+            "verdict": last.get("verdict"),
+            "stopReason": last.get("stopReason"),
+            "planningHarness": last.get("planningHarness"),
+            "reviewHarness": last.get("reviewHarness"),
+            "messageDispatched": last.get("messageDispatched"),
+            "goal": last.get("goal"),
+        },
+        "reason": None,
+    }
+
+
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -157,6 +186,12 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float):
                 self._send(400, disconnected_body("Core request must be an object"), "application/json")
                 return
             message_type = request.get("messageType") or request.get("message_type")
+            if message_type == "coordination_latest":
+                self._send(200, json.dumps({
+                    "ok": True,
+                    "payload": latest_coordination_record(coordination_data),
+                }).encode(), "application/json")
+                return
             payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
             request_id = request.get("requestId") or request.get("request_id")
             try:
@@ -190,6 +225,7 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--coordination-data", type=Path, default=None, help="Profile directory that holds coordination-records.json. Read only.")
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         raise SystemExit("The workbench bridge listens on 127.0.0.1 only")
@@ -199,7 +235,8 @@ def main(argv=None) -> int:
         raise SystemExit(f"Built renderer not found at {index}. Run pnpm build first.")
     unix_client = load_unix_client()
     endpoint = unix_client.resolve(args.endpoint)
-    handler = make_handler(endpoint, dist, unix_client, args.timeout)
+    coordination_data = args.coordination_data.resolve() if args.coordination_data else None
+    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"GoalPort workbench http://{args.host}:{args.port}  core {endpoint}", flush=True)
     try:

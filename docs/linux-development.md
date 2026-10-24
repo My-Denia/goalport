@@ -60,7 +60,8 @@ The same renderer can talk to this Core through a local bridge. The bridge is a 
 
 ```sh
 pnpm build
-python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.sock
+python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.sock \
+  --coordination-data /tmp/goalport-dev
 ```
 
 Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Switching goals and reading another goal from `detail` are independent.

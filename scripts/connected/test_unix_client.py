@@ -111,6 +111,31 @@ class CommandRoutingTests(unittest.TestCase):
         })
         self.assertEqual(status, 403, rebound)
 
+    def test_latest_coordination_record_is_the_saved_verdict_without_a_plan_body(self):
+        directory = Path(tempfile.mkdtemp(prefix="gp-coord-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        (directory / "coordination-records.json").write_text(json.dumps([
+            {"requestId": "old", "verdict": "revise", "planText": "secret plan"},
+            {
+                "requestId": "coordinate-verified",
+                "verdict": "verified",
+                "stopReason": "The independent harness verified the changes, so this stopped.",
+                "planningHarness": "Codex",
+                "reviewHarness": "Pi",
+                "messageDispatched": True,
+                "goal": "Add pong",
+                "planText": "do not send this body",
+            },
+        ]), encoding="utf-8")
+        missing = workbench.latest_coordination_record(None)
+        self.assertIsNone(missing["record"])
+        self.assertEqual(missing["reason"], "no coordination profile configured")
+        found = workbench.latest_coordination_record(directory)
+        self.assertEqual(found["record"]["verdict"], "verified")
+        self.assertEqual(found["record"]["planningHarness"], "Codex")
+        self.assertEqual(found["record"]["reviewHarness"], "Pi")
+        self.assertNotIn("planText", found["record"])
+
     def test_bridge_disconnect_is_not_a_preview_snapshot(self):
         body = json.loads(workbench.disconnected_body("Linux Core is not connected"))
         self.assertFalse(body["ok"])

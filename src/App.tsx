@@ -390,6 +390,7 @@ function App() {
   // close the draft: explicit navigation, Discard, or Core creating/moving
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
+  const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
     // never the pre-connect placeholder, never a capacity acknowledgement.
@@ -2082,6 +2083,30 @@ function App() {
   }
 
   useEffect(() => {
+    if (client.mode !== "linux-core") return undefined;
+    let cancelled = false;
+    void fetch("/goalport/ipc", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
+    }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
+      if (cancelled || !body || typeof body !== "object") return;
+      const payload = (body as { payload?: { record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown } | null; reason?: unknown } }).payload;
+      const record = payload?.record;
+      if (!record || typeof record.verdict !== "string") {
+        setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
+          ? "No coordinated result is saved for this workbench profile."
+          : null);
+        return;
+      }
+      const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
+      const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
+      setLinuxCoordinationLine(`Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
+    }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
+    return () => { cancelled = true; };
+  }, [client.mode]);
+
+  useEffect(() => {
     if (client.mode !== "linux-core" || !booted) return undefined;
     const miss = client.takeRouteMiss?.() ?? "";
     if (miss) {
@@ -2463,6 +2488,7 @@ function App() {
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
+                    coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}

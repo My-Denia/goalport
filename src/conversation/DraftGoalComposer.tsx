@@ -64,6 +64,7 @@ interface DraftGoalComposerProps {
   canBrowse: boolean;
   coordinationAvailable: boolean;
   runtimeRequiredHint?: string;
+  coordinationResult?: string | null;
   workspacePlaceholder?: string;
   backgroundConsent?: boolean;
   onBackgroundConsentChange?: (enabled: boolean) => void;
@@ -80,7 +81,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -137,6 +138,7 @@ export function DraftGoalComposer({
           runtimeRequiredHint={runtimeRequiredHint}
           onSelect={(provider) => onChange({ ...draft, provider })}
         />
+        {coordinationResult ? <p className="draft-hint">{coordinationResult}</p> : null}
 
 
         <textarea
