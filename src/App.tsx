@@ -875,7 +875,7 @@ function App() {
   // -----------------------------------------------------------------------
   async function handleDraftSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!draftGoal || draftBusy || draftInFlight.current) return;
+    if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && linuxActionBusy)) return;
     const retrying = canExplicitlyRetry(draftGoal.intent);
     if (draftBlocked && !retrying) return;
     const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();

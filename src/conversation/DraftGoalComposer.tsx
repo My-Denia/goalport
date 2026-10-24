@@ -104,6 +104,7 @@ export function DraftGoalComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const canSubmit = !busy
+    && !inputsLocked
     && !waitingOn
     && (!blockedFromSending || Boolean(retryLabel))
     && connected
