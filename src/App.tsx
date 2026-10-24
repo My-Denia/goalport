@@ -2606,6 +2606,9 @@ function App() {
             onReconnect={handleReconnect}
             hideCoreConnection={client.mode === "linux-core"}
           />
+          {client.mode === "linux-core" && snapshot.connection === "disconnected" ? (
+            <div className="banner banner-warn" role="status">The goal list could not be read. This is not the workbench connection.</div>
+          ) : null}
 
           {draftError && ((backgroundView && backgroundJob) || selectedPlan) ? (
             <div className="dialog-note" role="alert">
