@@ -337,6 +337,7 @@ function App() {
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
   const linuxFreshDraft = useRef(false);
+  const linuxStatusEpoch = useRef(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
   // Set when a handler opens a fresh draft whose panel must start in change
@@ -892,11 +893,13 @@ function App() {
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
+        const statusEpoch = ++linuxStatusEpoch.current;
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent } }),
         }).then(async (response) => response.json()).then((body) => {
+          if (statusEpoch !== linuxStatusEpoch.current) return;
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
           if (coordinationStartAdmitted(body)) {
@@ -2127,15 +2130,14 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
-    let generation = 0;
     const refresh = () => {
-      const request = ++generation;
+      const request = ++linuxStatusEpoch.current;
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-        if (cancelled || request !== generation || !body || typeof body !== "object") return;
+        if (cancelled || request !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
@@ -2179,7 +2181,7 @@ function App() {
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
         setLinuxCoordinationDetail(typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : null);
         setLinuxCoordinationChange(typeof record.change === "string" && record.change.trim() ? record.change.trim() : null);
-      }).catch(() => { if (!cancelled && request === generation) setLinuxCoordinationLine(null); });
+      }).catch(() => { if (!cancelled && request === linuxStatusEpoch.current) setLinuxCoordinationLine(null); });
     };
     refresh();
     const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
@@ -2617,21 +2619,25 @@ function App() {
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
+                      const statusEpoch = ++linuxStatusEpoch.current;
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
                         body: JSON.stringify({ messageType: "coordination_stop", payload: {} }),
                       }).then(async (response) => response.json()).then((body) => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         setLinuxCoordinationLine(text || "Stop was sent.");
                       }).catch(() => setLinuxCoordinationLine("Stop could not be sent."));
                     } : undefined}
                     onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent ? () => {
+                      const statusEpoch = ++linuxStatusEpoch.current;
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
                         body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite, background: backgroundConsent } }),
                       }).then(async (response) => response.json()).then((body) => {
+                        if (statusEpoch !== linuxStatusEpoch.current) return;
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
                         if (coordinationStartAdmitted(body)) {
