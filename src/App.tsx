@@ -344,6 +344,7 @@ function App() {
   const leftJobIds = useRef(new Set<string>());
   const linuxActionOpen = useRef(false);
   const grantError = useRef(false);
+  const grantAllowed = useRef(false);
   const [leftRevision, setLeftRevision] = useState(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
@@ -920,6 +921,7 @@ function App() {
         setLinuxActionBusy(true);
         linuxHoldLineRef.current = false;
         heldJobId.current = null;
+        grantAllowed.current = false;
         setLinuxHoldLine(false);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
@@ -1747,7 +1749,7 @@ function App() {
 
   function handleNewGoal() {
     if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)) return;
-    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; heldJobId.current = null; setLinuxHoldLine(false); }
+    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; heldJobId.current = null; grantAllowed.current = false; setLinuxHoldLine(false); }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
@@ -2204,12 +2206,14 @@ function App() {
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
         const workerGoneLine = payload?.line === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
         const exitUnconfirmed = payload?.line === "This goal's exit is not confirmed, so another goal cannot start yet.";
+        if (grantAllowed.current && !liveJob && !workerGoneLine && !exitUnconfirmed) return;
         if (linuxHoldLineRef.current && !workerGoneLine && !exitUnconfirmed && !liveJob) {
           setLinuxCoordinationLive(false);
           return;
         }
         if (linuxHoldLineRef.current && !workerGoneLine && !exitUnconfirmed && typeof payload?.jobId === "string" && payload.jobId === heldJobId.current) return;
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
+          grantAllowed.current = false;
           linuxHoldLineRef.current = false;
           heldJobId.current = null;
           setLinuxHoldLine(false);
@@ -2860,6 +2864,7 @@ function App() {
                         }
                         grantError.current = false;
                         setLinuxConsentMissing(false);
+                        grantAllowed.current = true;
                         setLinuxCoordinationLine("Background Send is allowed.");
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
