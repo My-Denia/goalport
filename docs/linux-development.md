@@ -158,9 +158,10 @@ Honesty rules the client keeps:
   later.
 - This stack has no process-group kill on Linux. A forced timeout kills only
   the direct harness CLI child (SIGKILL), so tools that child already started,
-  and its grandchildren, are not proven quiescent. The coordinated slice is
-  read-only planning and independent review; workspace changes still need the
-  desktop's explicit write authorization.
+  and its grandchildren, are not proven quiescent. The workbench checkbox and
+  the CLI flags `--write-instances codex --write-turns 1` opt into one Codex
+  write turn. Pi stays read-only. Without that opt-in, the round is planning
+  and review only.
 
 ## Native acceptance
 
