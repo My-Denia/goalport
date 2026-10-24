@@ -359,24 +359,24 @@ def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, end
         return None, "No coordinated goal to leave."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The goal id is invalid, so it was not left."
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "it was not left.")
     if error:
         return None, error
     return [*prefix, "acknowledge", "--job", job_id], None
 
 
 def coordination_grant_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "Background Send was not allowed.")
     if error:
         return None, error
     return [*prefix, "grant-access"], None
 
 
-def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None) -> tuple[list[str] | None, str | None]:
+def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None, refused: str = "nothing was admitted.") -> tuple[list[str] | None, str | None]:
     if not endpoint:
-        return None, "The Core socket is required, so nothing was admitted."
+        return None, f"The Core socket is required, so {refused}"
     if not core_binary or not (core_binary.startswith("/") or Path(core_binary).is_absolute()):
-        return None, "The Core executable is required: pass --core-binary with an absolute path, so nothing was admitted."
+        return None, f"The Core executable is required: pass --core-binary with an absolute path, so {refused}"
     return [
         "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
         "--data-dir", str(data_dir), "--pipe", endpoint, "--core-binary", core_binary,
@@ -467,7 +467,7 @@ def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: 
         return None, "No running coordinated goal to stop."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The running goal id is invalid, so nothing was stopped."
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.")
     if error:
         return None, error
     return [*prefix, "stop", "--job", job_id], None
@@ -534,7 +534,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             message_type = request.get("messageType") or request.get("message_type")
             if message_type == "coordination_discover":
-                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "the signed-in harnesses could not be checked.")
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -587,7 +587,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 left_job = leftover_left_job(coordination_data)
                 if left_job:
-                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.")
                     if error:
                         self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                         return
@@ -626,7 +626,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 left_job = leftover_left_job(coordination_data)
                 if left_job:
-                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary)
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.")
                     if error:
                         self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                         return
