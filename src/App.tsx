@@ -2761,6 +2761,7 @@ function App() {
                           if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
                           if (seenJobId.current) leftJobIds.current.add(seenJobId.current);
                           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+                          setDraftGoal((current) => current ? { ...current, message: "" } : current);
                           return;
                         }
                         const text = typeof body?.error === "string" && body.error.trim()
