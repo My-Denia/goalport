@@ -2098,27 +2098,31 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
-    void fetch("/goalport/ipc", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
-    }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-      if (cancelled || !body || typeof body !== "object") return;
-      const payload = (body as { payload?: { record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown } | null; reason?: unknown } }).payload;
-      const record = payload?.record;
-      if (!record || typeof record.verdict !== "string") {
-        setLinuxCoordinationRequest(null);
-        setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
-          ? "No coordinated result is saved for this workbench profile."
-          : null);
-        return;
-      }
-      const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
-      const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
-      setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
-      setLinuxCoordinationLine(`Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
-    }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
-    return () => { cancelled = true; };
+    const refresh = () => {
+      void fetch("/goalport/ipc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
+      }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
+        if (cancelled || !body || typeof body !== "object") return;
+        const payload = (body as { payload?: { record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown } | null; reason?: unknown } }).payload;
+        const record = payload?.record;
+        if (!record || typeof record.verdict !== "string") {
+          setLinuxCoordinationRequest(null);
+          setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
+            ? "No coordinated result is saved for this workbench profile."
+            : null);
+          return;
+        }
+        const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
+        const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
+        setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
+        setLinuxCoordinationLine(`Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
+      }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 8000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode]);
 
   useEffect(() => {
