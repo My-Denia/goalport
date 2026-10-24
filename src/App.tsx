@@ -468,7 +468,7 @@ function App() {
     let cancelled = false;
     void list().then((records) => {
       if (!cancelled) { setPlans(records); setPlansUnreadable(false); }
-    }).catch(() => { if (!cancelled) setPlansUnreadable(true); });
+    }).catch(() => { if (!cancelled) { setPlansUnreadable(true); setSelectedPlanId(null); } });
     return () => { cancelled = true; };
   }, []);
 
@@ -530,7 +530,7 @@ function App() {
                 setPlans(records);
                 setPlansUnreadable(false);
               }
-            }).catch(() => { if (!cancelled) setPlansUnreadable(true); })
+            }).catch(() => { if (!cancelled) { setPlansUnreadable(true); setSelectedPlanId(null); } })
               .finally(() => { terminalListInFlightRef.current = false; });
           }
         }
@@ -1196,6 +1196,7 @@ function App() {
           if (!stillCurrent()) return;
           if (!Array.isArray(disk)) {
             setPlansUnreadable(true);
+            setSelectedPlanId(null);
             setDraftError({ sentence: "The saved plans could not be read, so nothing was sent. Try again in a moment." });
             return;
           }
