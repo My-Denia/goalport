@@ -2755,8 +2755,8 @@ function App() {
             }} />
           </div> : selectedPlan ? (
             <div className="timeline-scroll" tabIndex={-1} aria-label={selectedPlan.verdict === "stopped" ? "Stopped. No further turn was sent." : "Saved plan"}>
-              {client.mode === "linux-core" && !linuxActionBusy && !linuxGranting ? (
-                <button className="button button-small button-outline" type="button" onClick={() => { setSelectedPlanId(null); setBackgroundView(false); if (linuxCoordinationGoal) { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } else { linuxFreshDraft.current = true; setLinuxShowingFreshDraft(true); } }}>{linuxCoordinationGoal ? "Show the goal. This closes the saved plan." : "Close this plan. This returns to a new draft."}</button>
+              {client.mode === "linux-core" ? (
+                <button className="button button-small button-outline" type="button" disabled={linuxActionBusy || linuxGranting} onClick={() => { if (linuxActionBusy || linuxGranting) return; setSelectedPlanId(null); setBackgroundView(false); if (linuxCoordinationGoal) { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } else { linuxFreshDraft.current = true; setLinuxShowingFreshDraft(true); } }}>{linuxActionBusy || linuxGranting ? "Wait for this to finish." : linuxCoordinationGoal ? "Show the goal. This closes the saved plan." : "Close this plan. This returns to a new draft."}</button>
               ) : null}
               <CoordinationStatus
                 goal={selectedPlan.goal}
