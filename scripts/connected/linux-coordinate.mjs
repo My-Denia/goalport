@@ -540,7 +540,7 @@ async function startAdmission(parsed, io, context, selection) {
     || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);
   if (instances.length < 2) {
-    return refuse(io, "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+    return refuse(io, "An independent check needs a second logged-in harness, so nothing was admitted.");
   }
 
   try {

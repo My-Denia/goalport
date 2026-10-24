@@ -174,7 +174,7 @@ describe("Linux Core bridge", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messageType: string };
       if (body.messageType === "coordination_discover") {
-        return jsonResponse({ ok: true, payload: { sentence: "Stopped. An independent check needs a second logged-in harness, so no second role was assigned." } });
+        return jsonResponse({ ok: true, payload: { sentence: "An independent check needs a second logged-in harness, so nothing will be sent." } });
       }
       if (body.messageType === "coordination_latest") {
         return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited." }, reason: null } });
@@ -214,7 +214,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
     expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
-    expect(await screen.findByText("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.")).toBeTruthy();
+    expect(await screen.findByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);

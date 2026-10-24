@@ -138,8 +138,12 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertNotIn("planText", found["record"])
         self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
         self.assertIsNone(workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\nprovider pi: authenticated (subscription)\n"))
-        self.assertIn("second logged-in harness", workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\n"))
-        self.assertIn("No installed subscription harness", workbench.subscription_harness_sentence("provider pi: authenticated (unknown)\n"))
+        one = workbench.subscription_harness_sentence("provider codex: authenticated (subscription)\n")
+        self.assertIn("nothing will be sent", one)
+        self.assertNotIn("Stopped", one)
+        none = workbench.subscription_harness_sentence("provider pi: authenticated (unknown)\n")
+        self.assertIn("nothing will be sent", none)
+        self.assertNotIn("Stopped", none)
         job = "31f7caad-52d2-4219-9935-bffeea962876"
         jobs = directory / "coordination-jobs" / "jobs" / job
         jobs.mkdir(parents=True)
