@@ -2607,7 +2607,16 @@ function App() {
             hideCoreConnection={client.mode === "linux-core"}
           />
           {client.mode === "linux-core" && snapshot.connection === "disconnected" && snapshot.notices.some((notice) => notice.startsWith("Core request failed:")) ? (
-            <div className="banner banner-warn" role="status">The goal list could not be read. This is not the workbench connection.</div>
+            <div className="banner banner-warn" role="status">
+              <div>
+                <strong>The goal list could not be read.</strong>
+                <span>This is not the workbench connection.</span>
+                <details className="technical-details">
+                  <summary>Technical details</summary>
+                  <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Core request failed:"))?.slice("Core request failed:".length).trim()}</pre>
+                </details>
+              </div>
+            </div>
           ) : null}
 
           {draftError && ((backgroundView && backgroundJob) || selectedPlan) ? (
