@@ -128,7 +128,7 @@ export function DraftGoalComposer({
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || "Start a goal"}</h2>
-          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : "What would you like to work on?"}</p>
+          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked && coordinationResult ? coordinationResult : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -178,7 +178,7 @@ export function DraftGoalComposer({
             onSelect={(provider) => onChange({ ...draft, provider })}
           />
         )}
-        {coordinationResult && !activeGoalTitle ? <p className="draft-hint">{coordinationResult}</p> : null}
+        {coordinationResult && !activeGoalTitle && !inputsLocked ? <p className="draft-hint">{coordinationResult}</p> : null}
         {onLinuxWriteChange ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} disabled={busy || inputsLocked || Boolean(onStopCoordination)} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
         {onStopCoordination ? <button className="button button-small button-outline" type="button" onClick={onStopCoordination}>{stopLabel}</button> : null}
         {onLeaveGoal ? <button className="button button-small button-outline" type="button" onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
