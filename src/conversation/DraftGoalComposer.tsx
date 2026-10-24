@@ -106,7 +106,7 @@ export function DraftGoalComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
-  const folderHint = !workspaceHint || inFlightLine ? null : leftoverHint ? "The next goal stays in this folder." : activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : failureHeadline && (blockedFromSending || consentWarning || harnessWarning) ? null : "A new send stays in this folder. New goal can use another.") : workspaceHint;
+  const folderHint = !workspaceHint || inFlightLine ? null : leftoverHint ? (activeGoalTitle ? "The next goal stays in this folder." : "You can change the folder before the next goal.") : activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : onStopCoordination ? "This goal stays in this folder." : failureHeadline && (blockedFromSending || consentWarning || harnessWarning) ? null : "A new send stays in this folder. New goal can use another.") : workspaceHint;
   const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
