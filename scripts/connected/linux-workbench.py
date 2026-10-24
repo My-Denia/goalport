@@ -206,7 +206,9 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
 def subscription_harnesses(stdout: str) -> list[str]:
     found = []
     for line in stdout.splitlines():
-        if not line.startswith("provider ") or "authenticated" not in line or "(subscription)" not in line:
+        if not line.startswith("provider ") or "authenticated" not in line:
+            continue
+        if "(subscription)" not in line and "(chatgpt)" not in line:
             continue
         name = line.split(":", 1)[0].removeprefix("provider ").strip()
         if name:
