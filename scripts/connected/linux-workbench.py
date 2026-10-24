@@ -109,6 +109,26 @@ def coordination_child_env(base: dict[str, str] | None = None) -> dict[str, str]
     return env
 
 
+def worker_alive(pid: int) -> bool:
+    if os.name == "nt" or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def activity_line(progress: dict, pid: object, alive=worker_alive) -> str | None:
+    if isinstance(pid, int) and pid > 0 and not alive(pid):
+        return "The worker is gone. Stop this goal before starting another."
+    display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
+    activity = display.get("activity") if isinstance(display.get("activity"), str) else None
+    return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
+
+
 def current_job(data_dir: Path) -> dict | None:
     """The active job, if it has not settled. Older saved records must not cover it."""
     active_path = data_dir / "coordination-jobs" / "active-admission.json"
@@ -130,9 +150,15 @@ def current_job(data_dir: Path) -> dict | None:
     settled = progress.get("state") in {"completed", "failed", "stopped"} and progress.get("outcome") and not progress.get("pendingCommand")
     if settled:
         return None
-    display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
-    activity = display.get("activity") if isinstance(display.get("activity"), str) else None
-    line = activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
+    claim_path = data_dir / "coordination-jobs" / "jobs" / job_id / "startup-claim.json"
+    pid = None
+    try:
+        claim = json.loads(claim_path.read_text(encoding="utf-8"))
+        if isinstance(claim, dict):
+            pid = claim.get("pid")
+    except (OSError, json.JSONDecodeError, TypeError):
+        pid = None
+    line = activity_line(progress, pid)
     if not line:
         return None
     return {"line": line, "jobId": job_id}
