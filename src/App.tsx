@@ -2774,10 +2774,14 @@ function App() {
                         const text = typeof body?.error === "string" && body.error.trim()
                           ? body.error.trim()
                           : "The job could not be left.";
+                        linuxHoldLineRef.current = true;
+                        setLinuxHoldLine(true);
                         setLinuxCoordinationLine(text);
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
+                        linuxHoldLineRef.current = true;
+                        setLinuxHoldLine(true);
                         setLinuxCoordinationLine("The job could not be left.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
