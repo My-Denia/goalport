@@ -596,6 +596,8 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                         self._send(200, json.dumps({"ok": False, "error": failure or "The left goal could not be released, so nothing was sent."}).encode(), "application/json")
                         return
                 code, out, err = continue_runner(argv)
+                if isinstance(err, str) and "Run acknowledge before starting another" in err:
+                    err = "The left goal could not be released, so nothing was sent."
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_stop":
@@ -633,6 +635,8 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                         self._send(200, json.dumps({"ok": False, "error": failure or "The left goal could not be released, so nothing was sent."}).encode(), "application/json")
                         return
                 code, out, err = continue_runner(argv)
+                if isinstance(err, str) and "Run acknowledge before starting another" in err:
+                    err = "The left goal could not be released, so nothing was sent."
                 self._send(200, json.dumps({
                     "ok": code == 0,
                     "payload": {"exitCode": code, "stdout": out, "stderr": err},
