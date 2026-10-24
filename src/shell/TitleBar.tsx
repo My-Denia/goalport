@@ -73,7 +73,7 @@ export function TitleBar({
         </div>
 
         <div className="titlebar-right">
-          <span className={`connection-pill connection-${browserPreview ? "preview" : snapshot.connection}`} title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))}>
+          <span className={`connection-pill ${connectionOverride ? "connection-neutral" : `connection-${browserPreview ? "preview" : snapshot.connection}`}`} title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))}>
             <span className="status-dot" aria-hidden="true" />
             <span className="connection-text">{connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}</span>
           </span>

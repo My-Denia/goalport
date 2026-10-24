@@ -153,6 +153,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .connection-pill .connection-text { color: inherit; }
 .connection-connected { border-color: rgba(92, 204, 135, 0.3); background: rgba(70, 173, 112, 0.08); color: #a9e3bd; }
 .connection-preview { border-color: rgba(111, 179, 255, 0.4); background: rgba(111, 179, 255, 0.1); color: #b9d9fb; }
+.connection-neutral { border-color: var(--line); background: transparent; color: var(--ink-soft); }
+.connection-neutral .status-dot { background: var(--ink-soft); }
 .connection-disconnected { border-color: rgba(230, 105, 107, 0.32); background: rgba(230, 105, 107, 0.08); color: #f3b0b0; }
 .connection-reconnecting, .connection-degraded { border-color: rgba(232, 189, 117, 0.32); background: rgba(232, 189, 117, 0.08); color: #efd39d; }
 
