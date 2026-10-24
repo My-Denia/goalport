@@ -940,6 +940,7 @@ function App() {
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
           if (failed && !coordinationStartAdmitted(body) && shown !== "The left goal could not be released, so nothing was sent.") setSidebarUnconfirmed(true);
           if (coordinationStartAdmitted(body)) {
+            setLinuxLeftoverHeld(false);
             setSidebarUnconfirmed(false);
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
@@ -2840,6 +2841,7 @@ function App() {
                           if (shown !== "The left goal could not be released, so nothing was sent.") setSidebarUnconfirmed(true);
                         }
                         if (coordinationStartAdmitted(body)) {
+                          setLinuxLeftoverHeld(false);
                           setSidebarUnconfirmed(false);
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
