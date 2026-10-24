@@ -2674,7 +2674,7 @@ function App() {
           runningJob={client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
             workspace: linuxCoordinationWorkspace || undefined,
-            viewing: !linuxShowingFreshDraft,
+            viewing: !linuxShowingFreshDraft && selectedPlan === null,
             locked: linuxActionBusy,
             stateLabel: (linuxActionBusy || linuxGranting) && (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send.") ? linuxCoordinationLine : workerGone ? "Worker gone" : lineSaysAdmissionUnsaid(linuxCoordinationLine) ? "Not admitted" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy ? "Slot held" : linuxHoldLine || sidebarFailed.current ? "Failed" : linuxCoordinationLive ? "Running" : linuxCoordinationLine?.includes("No further turn was sent.") ? "Stopped" : "Finished",
           } : backgroundJob ? {
