@@ -180,6 +180,18 @@ interface GoalDraft extends GoalDraftValue {
   readyNote?: string;
 }
 
+function savedAdmissionUnsaid(): string | null {
+  if (typeof sessionStorage === "undefined") return null;
+  const saved = sessionStorage.getItem("goalport.linux.admissionUnsaid");
+  return saved === "The send returned without saying the goal was admitted." || saved === "Continue returned without saying the goal was admitted." ? saved : null;
+}
+
+function rememberAdmissionUnsaid(sentence: string | null) {
+  if (typeof sessionStorage === "undefined") return;
+  if (sentence) sessionStorage.setItem("goalport.linux.admissionUnsaid", sentence);
+  else sessionStorage.removeItem("goalport.linux.admissionUnsaid");
+}
+
 function App() {
   const client = useMemo(() => getCoreClient(), []);
   const [coreReady, setCoreReady] = useState(
@@ -404,7 +416,7 @@ function App() {
   // close the draft: explicit navigation, Discard, or Core creating/moving
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
-  const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
+  const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(savedAdmissionUnsaid);
   const workerGone = linuxCoordinationLine === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
@@ -424,7 +436,7 @@ function App() {
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
   const [sidebarUnconfirmed, setSidebarUnconfirmed] = useState(false);
   const linuxHoldLineRef = useRef(false);
-  const admissionUnsaid = useRef(false);
+  const admissionUnsaid = useRef(savedAdmissionUnsaid() !== null);
   const sidebarFailed = useRef(false);
   const failedLine = useRef<string | null>(null);
   const failureLoaded = useRef(false);
@@ -969,6 +981,7 @@ function App() {
           const failedSend = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
           const admitted = coordinationStartAdmitted(body);
           admissionUnsaid.current = !failedSend && !admitted;
+          rememberAdmissionUnsaid(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : null);
           const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(shown);
@@ -1827,6 +1840,7 @@ function App() {
       linuxFreshDraft.current = true;
       setLinuxShowingFreshDraft(true);
       admissionUnsaid.current = false;
+      rememberAdmissionUnsaid(null);
       setLinuxCoordinationLine((current) => current === "The send returned without saying the goal was admitted." || current === "Continue returned without saying the goal was admitted." ? "" : current);
     }
   }
@@ -2283,6 +2297,7 @@ function App() {
         if (admissionUnsaid.current && !liveJob && !workerGoneLine && !exitUnconfirmed) return;
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           admissionUnsaid.current = false;
+          rememberAdmissionUnsaid(null);
           grantAllowed.current = false;
           linuxHoldLineRef.current = false;
           clearFailure();
@@ -2974,6 +2989,7 @@ function App() {
                         const continueFailed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
                         const admitted = coordinationStartAdmitted(body);
                         admissionUnsaid.current = !continueFailed && !admitted;
+                        rememberAdmissionUnsaid(admissionUnsaid.current ? "Continue returned without saying the goal was admitted." : null);
                         const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : admitted ? "The goal was admitted." : "Continue returned without saying the goal was admitted.");
                         const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
                         setLinuxCoordinationLine(shown || "Continue was sent.");
@@ -2987,6 +3003,7 @@ function App() {
                         }
                         if (admitted) {
                           admissionUnsaid.current = false;
+                          rememberAdmissionUnsaid(null);
                           clearFailure();
                           linuxHoldLineRef.current = false;
                           setLinuxHoldLine(false);
