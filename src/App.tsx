@@ -2530,6 +2530,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
+                    activeGoalTitle={client.mode === "linux-core" ? linuxCoordinationGoal : null}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive ? () => {
                       void fetch("/goalport/ipc", {
                         method: "POST",
