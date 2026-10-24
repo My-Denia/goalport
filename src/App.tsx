@@ -2951,6 +2951,7 @@ function App() {
                           setLinuxLeftoverHeld(false);
                           setSidebarUnconfirmed(false);
                           setBackgroundView(false);
+                          setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
                           setLinuxCoordinationLive(true);
