@@ -121,7 +121,7 @@ export function DraftGoalComposer({
       </div>
 
       <form className="draft-composer-form" aria-label={activeGoalTitle ? "This goal" : "Start a goal"} onSubmit={onSubmit}>
-        <label className="field-label" htmlFor="draft-workspace">Workspace</label>
+        <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
           <input

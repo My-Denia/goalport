@@ -2158,9 +2158,9 @@ function App() {
       }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
     };
     refresh();
-    const timer = window.setInterval(refresh, 8000);
+    const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [client.mode]);
+  }, [client.mode, linuxCoordinationLive]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || !booted) return undefined;
