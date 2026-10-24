@@ -250,8 +250,9 @@ test("omitted --instances selects only confirmed subscription logins", async (t)
   await invoke(f, ["grant-access"]);
   drain(f);
   const run = await invoke(f, runArgs(f, { instances: null, requestId: "unknown-not-default" }));
-  assert.equal(run.code, 0, run.stderr);
-  assert.deepEqual(storeOf(f).getActiveStatus().admission.allowedInstances, ["codex"]);
+  assert.equal(run.code, 1);
+  assert.match(run.stderr, /second logged-in harness/);
+  assert.equal(f.launches.length, 0);
 });
 
 test("run spawns the detached worker with the main-process config contract and a stripped environment", async (t) => {

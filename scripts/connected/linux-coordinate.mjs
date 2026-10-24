@@ -539,6 +539,9 @@ async function startAdmission(parsed, io, context, selection) {
   const membership = authorizeMembershipError(discoveredMembership, instances)
     || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);
+  if (instances.length < 2) {
+    return refuse(io, "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  }
 
   try {
     await prepared.snapshot();
