@@ -932,7 +932,7 @@ function App() {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
-          setLinuxCoordinationLine(text);
+          setLinuxCoordinationLine(text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text);
           const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
@@ -2821,7 +2821,8 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Continue was sent.");
-                        setLinuxCoordinationLine(text || "Continue was sent.");
+                        const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
+                        setLinuxCoordinationLine(shown || "Continue was sent.");
                         const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
                         if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
