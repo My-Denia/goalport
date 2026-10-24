@@ -2606,14 +2606,26 @@ function App() {
             onReconnect={handleReconnect}
             hideCoreConnection={client.mode === "linux-core"}
           />
-          {client.mode === "linux-core" && snapshot.connection === "disconnected" && snapshot.notices.some((notice) => notice.startsWith("Core request failed:")) ? (
+          {client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:")) ? (
             <div className="banner banner-warn" role="status">
               <div>
                 <strong>The goal list could not be read.</strong>
                 <span>This is not the workbench connection.</span>
                 <details className="technical-details">
                   <summary>Technical details</summary>
-                  <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Core request failed:"))?.slice("Core request failed:".length).trim()}</pre>
+                  <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal list read failed:"))?.slice("Goal list read failed:".length).trim()}</pre>
+                </details>
+              </div>
+            </div>
+          ) : null}
+          {client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal open failed:")) ? (
+            <div className="banner banner-warn" role="status">
+              <div>
+                <strong>That goal could not be opened.</strong>
+                <span>This is not the workbench connection.</span>
+                <details className="technical-details">
+                  <summary>Technical details</summary>
+                  <pre className="technical-details-pre">{snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim()}</pre>
                 </details>
               </div>
             </div>

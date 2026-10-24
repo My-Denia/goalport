@@ -1235,7 +1235,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(error, "Goal list read failed");
     }
   }
 
@@ -1273,7 +1273,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(error, "Goal open failed");
     } finally {
       this.mutationDepth -= 1;
     }
@@ -1466,13 +1466,14 @@ class LinuxCoreClient implements CoreClient {
     }
   }
 
-  private fail(error: unknown): CoreSnapshot {
+  private fail(error: unknown, label = "Core request failed"): CoreSnapshot {
     const message = errorMessage(error);
+    const notice = `${label}: ${message}`;
     this.lastSnapshot = {
       ...this.lastSnapshot,
       preview: false,
       connection: "disconnected",
-      notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Core request failed:"))]
+      notices: [notice, ...this.lastSnapshot.notices.filter((item) => !item.startsWith(`${label}:`))]
     };
     return this.lastSnapshot;
   }
