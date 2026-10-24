@@ -137,8 +137,8 @@ export function DraftGoalComposer({
     <section className="draft-composer" aria-label={coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : harnessWarning || (!activeGoalTitle && (failureHeadline || consentWarning)) || leftoverHint || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : (!activeGoalTitle && failureHeadline) || (!activeGoalTitle && (harnessWarning || consentWarning)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
+          <h2>{coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) ? coordinationResult : (!activeGoalTitle && failureHeadline) || (!activeGoalTitle && (harnessWarning || consentWarning || leftoverHint)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : leftoverHint ? "You can still write the next goal." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -175,7 +175,7 @@ export function DraftGoalComposer({
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
         {consentWarning ? <p className="draft-hint">{activeGoalTitle || harnessWarning ? consentWarning : null} {onGrantConsent ? <button className="button button-small button-outline" type="button" onClick={onGrantConsent}>Allow spending subscription quota</button> : null}</p> : null}
-        {leftoverHint ? <p className="draft-hint">{leftoverHint}</p> : null}
+        {leftoverHint && activeGoalTitle ? <p className="draft-hint">{leftoverHint}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
@@ -206,7 +206,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "The draft is still here." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? signInFollow : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "The draft is still here." : leftoverHint ? "You can still write the next goal." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}
