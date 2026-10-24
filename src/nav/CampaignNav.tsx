@@ -134,7 +134,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={goal.workspaceRoot}
+                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open` : goal.workspaceRoot}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
@@ -193,7 +193,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={collapsed ? titleFor(campaign.id, campaign.title) : undefined}
+                    title={collapsed ? (failedOpenId === campaign.id ? `${titleFor(campaign.id, campaign.title)} — Could not open` : titleFor(campaign.id, campaign.title)) : failedOpenId === campaign.id ? "Could not open" : undefined}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(campaign.id); }}
                   >
