@@ -103,11 +103,10 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
+        {goalListUnreadable ? <p className="nav-empty" role="status">The goal list could not be read.</p> : null}
         {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
-        ) : goalListUnreadable && goalCount === 0 && !runningJob ? (
-          <p className="nav-empty" role="status">The goal list could not be read.</p>
-        ) : goalCount === 0 && !runningJob ? (
+        ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
           <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
         ) : overview ? (
           overview.goals.map((goal) => {
