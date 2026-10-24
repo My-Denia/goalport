@@ -417,6 +417,7 @@ function App() {
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
   const linuxHoldLineRef = useRef(false);
+  const heldJobId = useRef<string | null>(null);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
@@ -910,6 +911,7 @@ function App() {
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
         linuxHoldLineRef.current = false;
+        heldJobId.current = null;
         setLinuxHoldLine(false);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
@@ -1733,7 +1735,7 @@ function App() {
 
   function handleNewGoal() {
     if (client.mode === "linux-core" && linuxActionBusy) return;
-    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; setLinuxHoldLine(false); }
+    if (client.mode === "linux-core") { linuxHoldLineRef.current = false; heldJobId.current = null; setLinuxHoldLine(false); }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
@@ -2187,9 +2189,10 @@ function App() {
         }
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
-        if (linuxHoldLineRef.current && !liveJob) return;
+        if (linuxHoldLineRef.current && (!liveJob || (typeof payload?.jobId === "string" && payload.jobId === heldJobId.current))) return;
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           linuxHoldLineRef.current = false;
+          heldJobId.current = null;
           setLinuxHoldLine(false);
           seenJobId.current = payload.jobId;
           linuxFreshDraft.current = false;
@@ -2728,6 +2731,7 @@ function App() {
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       linuxHoldLineRef.current = false;
+                      heldJobId.current = null;
                       setLinuxHoldLine(false);
                       setLinuxCoordinationLine(workerGone ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
@@ -2739,14 +2743,16 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         setLinuxCoordinationLine(text || "Stop was sent.");
-                        if (!body || (body as { ok?: unknown }).ok === false) {
+                        if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
+                          heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
                         }
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
+                        heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
@@ -2756,6 +2762,7 @@ function App() {
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       linuxHoldLineRef.current = false;
+                      heldJobId.current = null;
                       setLinuxHoldLine(false);
                       setLinuxCoordinationLine("Continuing.");
                       void fetch("/goalport/ipc", {
@@ -2769,6 +2776,7 @@ function App() {
                         setLinuxCoordinationLine(text || "Continue was sent.");
                         if (!coordinationStartAdmitted(body)) {
                           linuxHoldLineRef.current = true;
+                          heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
                         }
                         if (coordinationStartAdmitted(body)) {
@@ -2782,6 +2790,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
+                        heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("Continue could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
