@@ -2507,7 +2507,7 @@ function App() {
             goal: linuxCoordinationGoal,
             viewing: !linuxShowingFreshDraft && !leftUnreplayed,
             locked: linuxActionBusy,
-            stateLabel: workerGone ? "Worker gone" : linuxHoldLine && linuxCoordinationLive ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
+            stateLabel: workerGone ? "Worker gone" : linuxHoldLine ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
           onOpenRunningJob={() => { if (client.mode === "linux-core" && linuxActionBusy) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
