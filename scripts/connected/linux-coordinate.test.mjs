@@ -431,7 +431,7 @@ test("a left job holding the admission slot blocks a new run until it is acknowl
   fs.writeFileSync(path.join(f.dataDir, "coordination-jobs", "active-admission.json"), JSON.stringify({ jobId: "job-left" }));
   const refused = await invoke(f, runArgs(f));
   assert.equal(refused.code, 1);
-  assert.match(refused.stderr, /A left job still holds the admission slot/);
+  assert.match(refused.stderr, /A left job still holds the admission slot. Run acknowledge before starting another/);
   assert.equal(f.launches.length, 0);
 });
 

@@ -508,7 +508,7 @@ async function startAdmission(parsed, io, context, selection) {
   const consentRefusal = admissionConsentGate(parsed, io, context);
   if (consentRefusal !== null) return consentRefusal;
   if (activeLeftJob(context.dataDir)) {
-    return refuse(io, "A left job still holds the admission slot. Acknowledge it before starting another, so nothing was admitted.");
+    return refuse(io, "A left job still holds the admission slot. Run acknowledge before starting another, so nothing was admitted.");
   }
   const prepared = prepareAdmission(io, context);
   if (!prepared.ok) return refuse(io, prepared.message);
