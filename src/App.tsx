@@ -3036,7 +3036,7 @@ function App() {
                         setLinuxCoordinationLine("Background Send is allowed.");
                         setLinuxDiscoverNonce((value) => value + 1);
                       }).catch(() => {
-                        const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
+                        const sentence = "Background Send was not allowed.";
                         linuxHoldLineRef.current = true;
                         rememberFailure(sentence);
                         setLinuxHoldLine(true);
