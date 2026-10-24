@@ -488,6 +488,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
 
 function workspaceFolder(root: string): string {
   const trimmed = root.replace(/[\\/]+$/, "");
+  if (trimmed === "~") return trimmed;
   const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  const name = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return trimmed.startsWith("~/") ? `~/${name}` : name;
 }
