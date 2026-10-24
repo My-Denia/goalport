@@ -295,7 +295,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         },
         "reason": None,
         "leftRequestIds": left_request_ids(data_dir),
-        "unconfirmedGoal": disk_unconfirmed(data_dir, last.get("requestId") if isinstance(last.get("requestId"), str) else None),
+        "unconfirmedGoal": disk_unconfirmed(data_dir, last.get("requestId") if isinstance(last.get("requestId"), str) else None) or disk_unconfirmed(data_dir),
         **live_fields(data_dir),
     }
 
