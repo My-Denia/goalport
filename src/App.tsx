@@ -2784,7 +2784,8 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
-                        if (!coordinationStartAdmitted(body)) {
+                        const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+                        if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
