@@ -127,7 +127,7 @@ def activity_line(progress: dict, pid: object, alive=worker_alive) -> str | None
     outcome = progress.get("outcome")
     outcome_status = outcome.get("status") if isinstance(outcome, dict) else outcome
     if progress.get("state") == "unconfirmed" or outcome_status == "unconfirmed":
-        return "This goal's exit is not confirmed."
+        return "This goal's exit is not confirmed, so another goal cannot start yet."
     display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
     activity = display.get("activity") if isinstance(display.get("activity"), str) else None
     return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)

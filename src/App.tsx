@@ -2197,7 +2197,7 @@ function App() {
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
         const workerGoneLine = payload?.line === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
-        const exitUnconfirmed = payload?.line === "This goal's exit is not confirmed.";
+        const exitUnconfirmed = payload?.line === "This goal's exit is not confirmed, so another goal cannot start yet.";
         if (linuxHoldLineRef.current && !workerGoneLine && !exitUnconfirmed && !liveJob) {
           setLinuxCoordinationLive(false);
           return;
@@ -2704,12 +2704,12 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     inputsLocked={client.mode === "linux-core" && linuxActionBusy}
-                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxHoldLine && !leftUnreplayed ? "This goal's exit is not confirmed." : leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
+                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxHoldLine && !leftUnreplayed ? "This goal's exit is not confirmed, so another goal cannot start yet." : leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
-                    stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed." ? "Record the stop" : "Stop this goal"}
+                    stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
@@ -2741,14 +2741,14 @@ function App() {
                     } : undefined}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const wasGone = workerGone;
-                      const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed.";
+                      const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet.";
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       linuxHoldLineRef.current = false;
                       heldJobId.current = null;
                       setLinuxHoldLine(false);
-                      setLinuxCoordinationLine(workerGone || linuxCoordinationLine === "This goal's exit is not confirmed." ? "Recording the stop." : "Stopping this goal.");
+                      setLinuxCoordinationLine(workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
@@ -2759,7 +2759,7 @@ function App() {
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const confirmed = /unconfirmed|not confirmed/i.test(text || "");
-                        setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed." : (text || "Stop was sent."));
+                        setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
                         if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "") || (wasUnconfirmed && !confirmed)) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;

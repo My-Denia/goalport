@@ -125,7 +125,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={activeGoalTitle ? (coordinationResult === "This goal's exit is not confirmed." ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft"}>
+    <section className="draft-composer" aria-label={activeGoalTitle ? (coordinationResult === "This goal's exit is not confirmed, so another goal cannot start yet." ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft"}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
@@ -196,7 +196,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult === "This goal's exit is not confirmed." ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult === "This goal's exit is not confirmed, so another goal cannot start yet." ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}
