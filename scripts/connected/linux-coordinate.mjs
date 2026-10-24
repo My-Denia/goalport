@@ -520,6 +520,9 @@ async function startAdmission(parsed, io, context, selection) {
   if (turns === null) return refuse(io, "The turn cap must be a whole number from 2 through 32, so nothing was admitted.");
   const requestId = requestIdFor(parsed.values["request-id"]);
   if (requestId === null) return refuse(io, "The request id must use letters, digits, dots, underscores or hyphens, so nothing was admitted.");
+  if (requestWasLeft(context.dataDir, requestId)) {
+    return refuse(io, "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+  }
   const selectedWrite = writeSelection(parsed, selection.workspace);
   if (!selectedWrite.ok) return refuse(io, selectedWrite.message);
 
