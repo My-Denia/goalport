@@ -404,6 +404,7 @@ function App() {
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
   const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
   const [linuxSignedIn, setLinuxSignedIn] = useState<string[]>([]);
+  const [linuxDiscoverChecked, setLinuxDiscoverChecked] = useState(false);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
   const [linuxGranting, setLinuxGranting] = useState(false);
   const [linuxActionBusy, setLinuxActionBusy] = useState(false);
@@ -2216,6 +2217,7 @@ function App() {
           const error = (body as { error?: unknown } | null)?.error;
           setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
           setLinuxSignedIn([]);
+          setLinuxDiscoverChecked(true);
           return;
         }
         const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
@@ -2223,7 +2225,8 @@ function App() {
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
         setLinuxConsentMissing(payload?.consentMissing === true);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
-      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); } });
+        setLinuxDiscoverChecked(true);
+      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } });
     };
     check();
     const timer = window.setInterval(check, linuxHarnessSentence ? 2000 : 8000);
@@ -2613,7 +2616,7 @@ function App() {
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
-                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                    blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || (client.mode === "linux-core" && !linuxDiscoverChecked) || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
                         ? "Send is waiting: your harness-access choices could not be loaded."
@@ -2649,7 +2652,7 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);
                       void fetch("/goalport/ipc", {

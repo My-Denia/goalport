@@ -212,6 +212,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
     fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false));
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
