@@ -225,19 +225,37 @@ def left_request_ids(data_dir: Path) -> list[str]:
     return found
 
 
+def disk_unconfirmed(data_dir: Path | None) -> bool:
+    jobs = data_dir / "coordination-jobs" / "jobs" if data_dir is not None else None
+    if jobs is None or not jobs.is_dir():
+        return False
+    for job_dir in jobs.iterdir():
+        if not job_dir.is_dir():
+            continue
+        try:
+            progress = json.loads((job_dir / "progress.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(progress, dict):
+            continue
+        if progress.get("state") == "unconfirmed" or progress.get("outcome") == "unconfirmed" or isinstance(progress.get("pendingCommand"), dict):
+            return True
+    return False
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
     """Read the last saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
     if not path.is_file():
-        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "reason": "coordinated result could not be read"}
+        return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "reason": "coordinated result could not be read"}
     if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
-        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
+        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), **live_fields(data_dir), "reason": "no coordinated result saved"}
     last = records[-1]
     return {
         "ok": True,
@@ -256,6 +274,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         },
         "reason": None,
         "leftRequestIds": left_request_ids(data_dir),
+        "unconfirmedGoal": disk_unconfirmed(data_dir),
         **live_fields(data_dir),
     }
 
