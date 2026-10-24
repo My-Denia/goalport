@@ -2193,9 +2193,8 @@ function App() {
       const next = await client.selectCampaign(campaignId);
       if (intent !== selectionIntent.current) return;
       setSnapshot(next);
-      if (client.mode === "linux-core") {
-        pushGoalRoute(next.notices.some((notice) => notice.startsWith("Goal open failed:")) ? previousCampaignId : campaignId);
-      }
+      if (client.mode === "linux-core" && !next.notices.some((notice) => notice.startsWith("Goal open failed:"))) pushGoalRoute(campaignId);
+      else if (client.mode === "linux-core" && previousCampaignId) pushGoalRoute(previousCampaignId);
       const failure = client.mode === "browser-preview" || client.mode === "linux-core"
         ? null
         : commandFailure(next, "select_campaign");
