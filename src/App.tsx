@@ -2729,6 +2729,7 @@ function App() {
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
+                      const wasGone = workerGone;
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
@@ -2744,7 +2745,8 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
-                        setLinuxCoordinationLine(text || "Stop was sent.");
+                        const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
+                        setLinuxCoordinationLine(wasGone && !/unconfirmed/i.test(text || "") ? gone : (text || "Stop was sent."));
                         if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
