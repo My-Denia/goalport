@@ -2481,9 +2481,10 @@ function App() {
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
             viewing: !linuxShowingFreshDraft && !leftUnreplayed,
+            locked: linuxActionBusy,
             stateLabel: workerGone ? "Worker gone" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
+          onOpenRunningJob={() => { if (client.mode === "linux-core" && linuxActionBusy) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">

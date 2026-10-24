@@ -10,7 +10,7 @@ interface CampaignNavProps {
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
-  runningJob?: { goal: string; stateLabel: string; viewing: boolean } | null;
+  runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean } | null;
   onOpenRunningJob?: () => void;
 }
 
@@ -85,7 +85,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
           <button
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
-            onClick={() => onOpenRunningJob?.()}
+            disabled={runningJob.locked}
+            onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
             <span className="campaign-item-copy">
