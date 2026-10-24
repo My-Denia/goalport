@@ -2141,7 +2141,18 @@ function App() {
         setLinuxCoordinationLive(false);
         const record = payload?.record;
         if (record && typeof record.goal === "string" && record.goal.trim()) setLinuxCoordinationGoal(record.goal);
-        if (record && typeof record.workspacePath === "string" && record.workspacePath.trim()) setLinuxCoordinationWorkspace(record.workspacePath);
+        if (record && typeof record.workspacePath === "string" && record.workspacePath.trim()) {
+          const goalFolder = record.workspacePath.trim();
+          setLinuxCoordinationWorkspace(goalFolder);
+          if (!linuxFreshDraft.current) {
+            setDraftGoal((current) => {
+              if (!current || current.workspace === goalFolder) return current;
+              const coreDefault = snapshotRef.current.project.workspaceRoot || "";
+              if (current.workspace !== "" && current.workspace !== coreDefault) return current;
+              return { ...current, workspace: goalFolder };
+            });
+          }
+        }
         if (!record || typeof record.verdict !== "string") {
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLine(payload?.reason === "no coordination profile configured"
@@ -2159,6 +2170,14 @@ function App() {
     const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode, linuxCoordinationLive]);
+
+  useEffect(() => {
+    if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
+    const coreDefault = snapshot.project.workspaceRoot || "";
+    if (draftGoal.workspace === linuxCoordinationWorkspace) return;
+    if (draftGoal.workspace !== "" && draftGoal.workspace !== coreDefault) return;
+    setDraftGoal({ ...draftGoal, workspace: linuxCoordinationWorkspace });
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationWorkspace, draftGoal, snapshot.project.workspaceRoot]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || !booted) return undefined;
@@ -2531,7 +2550,7 @@ function App() {
               ) : (
                 <>
                   <DraftGoalComposer
-                    draft={draftGoal ?? { workspace: snapshot.project.workspaceRoot || "", provider: "", message: "" }}
+                    draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || "", provider: "", message: "" }}
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}

@@ -189,9 +189,9 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
     expect(screen.queryByText("Choose a Runtime")).toBeNull();
     expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
-    fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/home/you/project" } });
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(await screen.findByText("Last coordinated goal: verified. Codex planned, Pi checked.")).toBeTruthy();
+    await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
