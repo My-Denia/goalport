@@ -462,7 +462,7 @@ async function commandDiscover(parsed, io, context) {
   const discovered = await readDiscovery(io, context);
   if (!discovered.ok) return refuse(io, discovered.message);
   if (!discovered.providers.length) {
-    write(io, "No installed and authenticated harness was found on this machine.");
+    write(io, "No signed-in subscription harness was found on this machine.");
     return 0;
   }
   for (const provider of discovered.providers) {
