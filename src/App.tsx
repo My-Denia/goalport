@@ -2545,7 +2545,7 @@ function App() {
         newGoalDisabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
-        connectionOverride={client.mode === "linux-core" ? "This page does not use Core" : undefined}
+        connectionOverride={client.mode === "linux-core" ? "This status is not the workbench connection" : undefined}
         hideReconnect={client.mode === "linux-core"}
         onCloseWindow={handleCloseWindow}
       />
