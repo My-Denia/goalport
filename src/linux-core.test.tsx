@@ -182,11 +182,12 @@ describe("Linux Core bridge", () => {
       return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
     }));
     render(<App />);
-    expect(await screen.findByText(/Send without a Runtime starts a coordinated read goal/)).toBeTruthy();
+    expect(await screen.findByText(/File changes stay off unless you allow Codex to change files/)).toBeTruthy();
     expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
     fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/home/you/project" } });
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(await screen.findByText("Last coordinated goal: verified. Codex planned, Pi checked.")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));

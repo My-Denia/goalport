@@ -269,7 +269,7 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   // A first send with no Runtime chosen only proceeds when this window can assign a harness.
-  const linuxRuntimeRequired = "Send without a Runtime starts a coordinated read goal. Choose a Runtime only for a single-harness goal in this workbench.";
+  const linuxRuntimeRequired = "Send without a Runtime starts a coordinated goal. File changes stay off unless you allow Codex to change files.";
   const coordinationAvailable = client.mode === "electron"
     && appInfo?.coordinationConfigured === true
     && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
@@ -392,6 +392,7 @@ function App() {
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
   const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(null);
   const [linuxCoordinationRequest, setLinuxCoordinationRequest] = useState<string | null>(null);
+  const [linuxWrite, setLinuxWrite] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
     // never the pre-connect placeholder, never a capacity acknowledgement.
@@ -882,7 +883,7 @@ function App() {
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace } }),
+          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite } }),
         }).then(async (response) => response.json()).then((body) => {
           const text = typeof body?.error === "string" ? body.error : typeof body?.payload?.stdout === "string" && body.payload.stdout.trim() ? body.payload.stdout.trim() : "The coordinated goal was sent.";
           setLinuxCoordinationLine(text);
@@ -2503,6 +2504,8 @@ function App() {
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     linuxCanStartCoordination={client.mode === "linux-core"}
+                    linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
+                    onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     coordinationResult={client.mode === "linux-core" ? linuxCoordinationLine : null}
                     onContinueCoordination={client.mode === "linux-core" && linuxCoordinationRequest ? () => {
                       void fetch("/goalport/ipc", {
