@@ -204,6 +204,11 @@ describe("Linux Core bridge", () => {
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_start"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
+    fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
+    expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
     expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
   });
