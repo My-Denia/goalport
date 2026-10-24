@@ -707,7 +707,7 @@ test("leaving a stuck job keeps the unconfirmed command, holds the same folder, 
   assert.equal(typeof left.acknowledgedStuckAt, "string");
   assert.equal(left.outcome?.status, "unconfirmed");
   assert.equal(fs.existsSync(path.join(profile, "coordination-jobs", "active-admission.json")), false);
-  assert.throws(() => start(store), { code: "stuck-acknowledged" });
+  assert.throws(() => start(store), { code: "stuck-acknowledged", message: "The interrupted job stays unreplayed; the same request id cannot be admitted again." });
   const sameFolder = store.startAdmission(admission({ requestId: "send-background-2" }));
   assert.equal(sameFolder.ok, false);
   assert.equal(sameFolder.reason, "workspace-held");
