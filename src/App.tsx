@@ -441,7 +441,7 @@ function App() {
   const [sidebarUnconfirmed, setSidebarUnconfirmed] = useState(false);
   const linuxHoldLineRef = useRef(false);
   const admissionUnsaid = useRef(savedAdmissionUnsaid() !== null);
-  const leftUnconfirmedSlot = useRef(false);
+  const leftUnconfirmedSlot = useRef(typeof sessionStorage !== "undefined" && sessionStorage.getItem("goalport.linux.leftSlot") === "1");
   const sidebarFailed = useRef(false);
   const failedLine = useRef<string | null>(null);
   const failureLoaded = useRef(false);
@@ -2291,7 +2291,9 @@ function App() {
           }
           if (added) setLeftRevision((value) => value + 1);
         }
-        if (payload?.unconfirmedGoal === true && !leftUnconfirmedSlot.current && !(linuxRequestRef.current && leftRequestIds.current.has(linuxRequestRef.current))) setSidebarUnconfirmed(true);
+        const recordRequest = typeof payload?.record?.requestId === "string" ? payload.record.requestId : null;
+        const recordLeft = recordRequest !== null && leftRequestIds.current.has(recordRequest);
+        if (payload?.unconfirmedGoal === true && !leftUnconfirmedSlot.current && !recordLeft && !(linuxRequestRef.current && leftRequestIds.current.has(linuxRequestRef.current))) setSidebarUnconfirmed(true);
         setLinuxLeftoverHeld(payload?.leftoverHeld === true);
         const jobLeft = typeof payload?.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const liveJob = !jobLeft && typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId;
@@ -2315,6 +2317,7 @@ function App() {
           admissionUnsaid.current = false;
           rememberAdmissionUnsaid(null);
           leftUnconfirmedSlot.current = false;
+          try { sessionStorage.removeItem("goalport.linux.leftSlot"); } catch { /* a private window can refuse storage */ }
           grantAllowed.current = false;
           linuxHoldLineRef.current = false;
           clearFailure();
@@ -2906,6 +2909,7 @@ function App() {
                           admissionUnsaid.current = false;
                           rememberAdmissionUnsaid(null);
                           leftUnconfirmedSlot.current = true;
+                          try { sessionStorage.setItem("goalport.linux.leftSlot", "1"); } catch { /* a private window can refuse storage */ }
                           clearFailure();
                           setLinuxHoldLine(false);
                           setSidebarUnconfirmed(false);
