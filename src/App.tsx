@@ -2547,7 +2547,7 @@ function App() {
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
-            viewing: !linuxShowingFreshDraft && !leftUnreplayed,
+            viewing: !linuxShowingFreshDraft,
             locked: linuxActionBusy,
             stateLabel: workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
@@ -2743,7 +2743,7 @@ function App() {
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
-                    activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft && !leftUnreplayed ? linuxCoordinationGoal : null}
+                    activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
                     stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
