@@ -2383,7 +2383,7 @@ function App() {
     if (client.mode !== "linux-core" || !booted) return undefined;
     const miss = client.takeRouteMiss?.() ?? "";
     if (miss) {
-      setActiveNotice({ sentence: "That goal is no longer available." });
+      setActiveNotice({ sentence: linuxCoordinationGoal ? "That address is no longer available. The goal on screen is unchanged." : "That goal is no longer available." });
       if (!linuxCoordinationGoal) replaceGoalRoute(snapshot.activeCampaignId || null);
     } else if (snapshot.activeCampaignId && !linuxCoordinationGoal) {
       replaceGoalRoute(snapshot.activeCampaignId);
