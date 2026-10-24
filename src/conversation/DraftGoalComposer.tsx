@@ -145,7 +145,7 @@ export function DraftGoalComposer({
         </div>
       </div>
 
-      <form className="draft-composer-form" aria-label={activeGoalTitle ? "This goal" : "Start a goal"} onSubmit={onSubmit}>
+      <form className="draft-composer-form" aria-label={activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? "This goal is not confirmed" : "This goal") : "Start a goal"} onSubmit={onSubmit}>
         <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label>
         <div className="field-with-icon draft-workspace-row">
           <span aria-hidden="true">⌂</span>
