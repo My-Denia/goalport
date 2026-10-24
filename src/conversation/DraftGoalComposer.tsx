@@ -124,7 +124,7 @@ export function DraftGoalComposer({
   });
 
   return (
-    <section className="draft-composer" aria-label={activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "New goal draft")}>
+    <section className="draft-composer" aria-label={activeGoalTitle || coordinationResult || "New goal draft"}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
