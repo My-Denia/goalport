@@ -136,8 +136,9 @@ Honesty rules the client keeps:
 - Only harnesses signed in with their own subscription can be authorized. An
   apiKey login, or a sign-in whose type is missing or unknown, is refused with
   `Only harnesses signed in with their own subscription can be authorized.`
-  and never enters a turn budget. Omitting `--instances` selects only confirmed
-  subscription logins, not every installed CLI.
+  and is not auto-selected. Naming it with `--instances` still uses it; that
+  does not make the sign-in a confirmed subscription. Omitting `--instances`
+  selects only confirmed subscription logins.
 - File changes are not implied by `--background` or by a read goal. Pass both
   `--write-instances` and `--write-turns` to opt into the existing write
   authorization. One confirmed subscription harness still cannot review itself:

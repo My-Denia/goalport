@@ -252,7 +252,14 @@ export function eligibleInstances(
   const avoid = new Set(filter.avoidInstances ?? []);
   const allowed = filter.allowedInstances === undefined ? null : new Set(filter.allowedInstances);
   return uniqueInstances(catalog).filter((instance) => {
-    if (!isUsable(instance)) return false;
+    const named = allowed !== null && allowed.has(instance.instanceId);
+    // An explicitly named harness whose sign-in type is unknown can take a
+    // role. It is not added to the default pool, and it is not a subscription.
+    const explicitUnknown = named && instance.billing === "unknown"
+      && instance.enabled !== false && instance.installed !== false
+      && instance.launchable !== false && instance.authenticated !== false
+      && publishedModel(instance).length > 0;
+    if (!isUsable(instance) && !explicitUnknown) return false;
     if (instance.environmentAvoided) return false;
     if (avoid.has(instance.instanceId)) return false;
     if (exclude.has(instance.instanceId)) return false;

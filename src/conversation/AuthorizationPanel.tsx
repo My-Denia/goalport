@@ -67,9 +67,6 @@ function rowState(instance: SyntheticCatalogInstance): { state: RowState; reason
   if (instance.billing === "paid-api") {
     return { state: "paid-api", reason: "bills through its own API key, so it cannot be selected." };
   }
-  if (instance.billing === "unknown") {
-    return { state: "unavailable", reason: "has no confirmed subscription sign-in, so it cannot be selected." };
-  }
   if (instance.authenticated === false) return { state: "unavailable", reason: "is not signed in, so it cannot be selected." };
   if (instance.installed === false) return { state: "unavailable", reason: "is not installed on this machine." };
   if (instance.enabled === false || instance.launchable === false) {
@@ -161,6 +158,7 @@ export function AuthorizationPanel({
                     onChange={(event) => onToggle(instance.instanceId, event.target.checked)}
                   />
                   <span>{instance.name}</span>
+                  {instance.billing === "unknown" ? <span className="authorization-row-reason">Sign-in type is not a confirmed subscription.</span> : null}
                 </label>
               ) : (
                 <div className="authorization-row-static">
@@ -217,12 +215,14 @@ export function AuthorizationPanel({
                 <label className="authorization-row-select">
                   <input type="checkbox" aria-label={`Allow changes through ${instance.name}`}
                     checked={writeSelected.includes(instance.instanceId)}
-                    disabled={state !== "selectable" || !workspaceRoot || (writeScope !== null && !changeMode)}
+                    disabled={state !== "selectable" || instance.billing === "unknown" || instance.instanceId === "pi" || !workspaceRoot || (writeScope !== null && !changeMode)}
                     onChange={(event) => onWriteToggle(instance.instanceId, event.target.checked)} />
                   <span>{instance.name}</span>
                 </label>
-                {state !== "selectable" ? <span className="authorization-row-reason">
-                  {state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
+                {state !== "selectable" || instance.billing === "unknown" || instance.instanceId === "pi" ? <span className="authorization-row-reason">
+                  {instance.instanceId === "pi" || instance.billing === "unknown"
+                    ? "Unavailable for file changes; this harness has no write sandbox."
+                    : state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
                 </span> : null}
               </li>
             );

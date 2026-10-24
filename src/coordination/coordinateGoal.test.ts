@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
 import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT } from "../types";
-import { evidenceCommand, coordinateGoal, replacementCommand, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
+import { evidenceCommand, coordinateGoal, replacementCommand, usableInstanceIds, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
 
 import { authorizeCoordinateWriteTurn, roleOfCommandId } from "./coordinateTurn";
 import { verdictFromAudit, verdictFromReview, outcomeLabel } from "./verdict";
@@ -369,6 +369,23 @@ describe("Synthetic path", () => {
     expect(state.commands).toHaveLength(0);
     expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
     expect(state.quotaLabels.codex).toBe("available");
+  });
+
+  it("an explicitly named harness with unknown billing can take a role and is not called a subscription", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "available", billing: "subscription", authenticated: true, installed: true, enabled: true, launchable: true }),
+      instance({ instanceId: "pi", name: "Pi", defaultModel: "pi-default", quota: "unknown", billing: "unknown", authenticated: true, installed: true, enabled: true, launchable: true }),
+    ];
+    const state = coordinateGoal({
+      goal,
+      workspacePath,
+      sendKey: "use-pi",
+      catalog,
+      allowedInstances: ["codex", "pi"],
+    });
+    expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["codex", "pi"]);
+    expect(state.roles).toEqual(["planning", "review"]);
+    expect(usableInstanceIds(catalog)).toEqual(["codex"]);
   });
 
   it("write authorization with one usable harness assigns no role and emits no workspaceWrite", () => {

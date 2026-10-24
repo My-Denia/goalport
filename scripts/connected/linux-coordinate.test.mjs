@@ -162,7 +162,7 @@ test("run refuses without --background and without durable consent, each with it
 test("apiKey membership is refused by the authorization bridge and by run", async (t) => {
   const apiKeyProviders = [{ instanceId: "codex", auth: { status: "authenticated", type: "apiKey" } }];
   assert.equal(authorizeMembershipError({ ok: true, providers: apiKeyProviders }, ["codex"]), APIKEY_SENTENCE);
-  assert.equal(authorizeMembershipError({ ok: true, providers: [{ instanceId: "pi", auth: { status: "authenticated", type: "unknown" } }] }, ["pi"]), APIKEY_SENTENCE);
+  assert.equal(authorizeMembershipError({ ok: true, providers: [{ instanceId: "pi", auth: { status: "authenticated", type: "unknown" } }] }, ["pi"]), null);
   assert.equal(authorizeMembershipError({ ok: true, providers: SUBSCRIPTION_PROVIDERS }, ["codex"]), null);
   assert.equal(authorizeMembershipError({ ok: false, providers: [] }, ["codex"]), APIKEY_SENTENCE);
 
@@ -212,16 +212,21 @@ test("write flags are opt-in, subscription-only, and never inferred", async (t) 
     ],
   });
   await invoke(unknownWriter, ["grant-access"]);
+  const named = await invoke(unknownWriter, runArgs(unknownWriter, {
+    instances: "codex,pi",
+    requestId: "use-pi",
+  }));
+  assert.equal(named.code, 0, named.stderr);
+  assert.deepEqual(storeOf(unknownWriter).getActiveStatus().admission.allowedInstances, ["codex", "pi"]);
   const refused = await invoke(unknownWriter, runArgs(unknownWriter, {
-    instances: null,
-    requestId: "write-unknown",
+    instances: "codex,pi",
+    requestId: "write-pi",
     writeInstances: "pi",
     writeTurns: "1",
   }));
   assert.equal(refused.code, 1);
-  assert.equal(refused.stderr.trim(), APIKEY_SENTENCE);
-  assert.equal(unknownWriter.launches.length, 0);
-  assert.equal(fs.existsSync(jobsDirectory(unknownWriter)), false);
+  assert.match(refused.stderr, /Pi runs read-only turns/);
+  assert.equal(unknownWriter.launches.length, 1);
 
   const admitted = fixture(t);
   await invoke(admitted, ["grant-access"]);

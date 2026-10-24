@@ -590,7 +590,7 @@ function App() {
       setSelectedInstances(scope && scope.instances.length > 0
         ? scope.instances.filter((instanceId) => {
           const catalog = catalogFromProviderSnapshots(discovery.providers).find((item) => item.instanceId === instanceId);
-          return catalog ? catalog.billing === "subscription" || catalog.billing === "included" : false;
+          return catalog ? catalog.billing === "subscription" || catalog.billing === "included" || catalog.billing === "unknown" : false;
         })
         : [...selectable]);
     })();

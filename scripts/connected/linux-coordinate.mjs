@@ -533,6 +533,9 @@ async function startAdmission(parsed, io, context, selection) {
   // The authorization bridge owns the subscription-only rule; apiKey and
   // unknown logins are refused with its existing sentence before any admission.
   const discoveredMembership = { ok: true, providers: discovered.providers };
+  if (selectedWrite.write?.instances.includes("pi")) {
+    return refuse(io, "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.");
+  }
   const membership = authorizeMembershipError(discoveredMembership, instances)
     || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);

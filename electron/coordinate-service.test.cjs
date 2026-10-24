@@ -562,7 +562,7 @@ test("authorize membership refuses an apiKey login even when it is discovered", 
   assert.equal(authorizeMembershipError(discovered, ["codex"]), null);
 });
 
-test("authorize membership refuses a discovered harness whose auth type is missing or unknown", () => {
+test("authorize membership allows an explicitly named unknown harness and still refuses a missing auth type", () => {
   const { authorizeMembershipError } = require("./coordinate-service.cjs");
   const sentence = "Only harnesses signed in with their own subscription can be authorized.";
   const discovered = {
@@ -573,7 +573,7 @@ test("authorize membership refuses a discovered harness whose auth type is missi
       { instanceId: "bare", auth: { status: "authenticated" } },
     ],
   };
-  assert.equal(authorizeMembershipError(discovered, ["pi"]), sentence);
+  assert.equal(authorizeMembershipError(discovered, ["pi"]), null);
   assert.equal(authorizeMembershipError(discovered, ["bare"]), sentence);
   assert.equal(authorizeMembershipError(discovered, ["codex"]), null);
 });
