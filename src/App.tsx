@@ -2384,7 +2384,7 @@ function App() {
     const miss = client.takeRouteMiss?.() ?? "";
     if (miss) {
       setActiveNotice({ sentence: "That goal is no longer available." });
-      replaceGoalRoute(snapshot.activeCampaignId || null);
+      if (!linuxCoordinationGoal) replaceGoalRoute(snapshot.activeCampaignId || null);
     } else if (snapshot.activeCampaignId && !linuxCoordinationGoal) {
       replaceGoalRoute(snapshot.activeCampaignId);
     }
