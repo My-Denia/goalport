@@ -2529,7 +2529,7 @@ function App() {
       <TitleBar
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
-        campaignTitle={client.mode === "linux-core" ? null : hasGoal && !(backgroundView && backgroundJob) ? title : null}
+        campaignTitle={client.mode === "linux-core" ? (!linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal : null) : hasGoal && !(backgroundView && backgroundJob) ? title : null}
         workspaceLabel={backgroundView && backgroundJob?.workspacePath ? (workspaceFolder(backgroundJob.workspacePath) || backgroundJob.workspacePath) : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() ? (workspaceFolder(draftGoal.workspace.trim()) || draftGoal.workspace.trim()) : "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? (workspaceFolder(linuxCoordinationWorkspace) || linuxCoordinationWorkspace) : null}
         workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() || "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? linuxCoordinationWorkspace : null}
         appInfo={appInfo}
