@@ -2405,7 +2405,7 @@ function App() {
     if (client.mode !== "linux-core" || !booted) return undefined;
     const miss = client.takeRouteMiss?.() ?? "";
     if (miss) {
-      setActiveNotice({ sentence: linuxCoordinationGoal ? "That address is no longer available. The goal on screen is unchanged." : "That goal is no longer available.", technical: miss });
+      setActiveNotice({ sentence: linuxCoordinationGoal ? "That address is no longer available. This did not replace the workbench goal." : "That goal is no longer available.", technical: miss });
       if (!linuxCoordinationGoal) replaceGoalRoute(snapshot.activeCampaignId || null);
     } else if (snapshot.activeCampaignId && !linuxCoordinationGoal) {
       replaceGoalRoute(snapshot.activeCampaignId);
