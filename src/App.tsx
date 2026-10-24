@@ -336,6 +336,7 @@ function App() {
   const coordinationScope = useRef(freshRequestId());
   const coordinationRequest = useRef(0);
   const draftGoalRef = useRef(draftGoal);
+  const linuxFreshDraft = useRef(false);
   draftGoalRef.current = draftGoal;
   // Set when a handler opens a fresh draft whose panel must start in change
   // mode; the draft-open effect consumes it exactly once.
@@ -891,6 +892,7 @@ function App() {
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
           if (coordinationStartAdmitted(body)) {
+            linuxFreshDraft.current = false;
             setLinuxCoordinationLive(true);
             setLinuxCoordinationGoal(message);
             setDraftGoal((current) => current ? { ...current, message: "" } : current);
@@ -1701,6 +1703,12 @@ function App() {
       provider: "",
       message: ""
     });
+    if (client.mode === "linux-core" && !linuxCoordinationLive) {
+      linuxFreshDraft.current = true;
+      setLinuxCoordinationGoal(null);
+      setLinuxCoordinationRequest(null);
+      setLinuxCoordinationLine(null);
+    }
   }
 
   function handleDiscardDraft() {
@@ -2115,9 +2123,17 @@ function App() {
         if (cancelled || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
+          linuxFreshDraft.current = false;
           setLinuxCoordinationLine(payload.line);
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLive(true);
+          return;
+        }
+        if (linuxFreshDraft.current) {
+          setLinuxCoordinationLive(false);
+          setLinuxCoordinationGoal(null);
+          setLinuxCoordinationRequest(null);
+          setLinuxCoordinationLine(null);
           return;
         }
         setLinuxCoordinationLive(false);
@@ -2551,6 +2567,7 @@ function App() {
                         const text = coordinationReplyLine(body, "Continue was sent.");
                         setLinuxCoordinationLine(text || "Continue was sent.");
                         if (coordinationStartAdmitted(body)) {
+                          linuxFreshDraft.current = false;
                           setLinuxCoordinationLive(true);
                           if (draftGoal?.message.trim()) setLinuxCoordinationGoal(draftGoal.message.trim());
                           setDraftGoal((current) => current ? { ...current, message: "" } : current);

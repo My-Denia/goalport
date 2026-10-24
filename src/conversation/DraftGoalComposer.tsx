@@ -166,7 +166,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (activeGoalTitle ? "Add a follow-up, then Continue. The next Send starts a new goal." : "Ask GoalPort…")
+            ? (onStopCoordination ? "This goal is still running." : activeGoalTitle ? "Add a follow-up, then Continue. The next Send starts a new goal." : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy}
