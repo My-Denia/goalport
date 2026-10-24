@@ -70,7 +70,7 @@ const USAGE = [
   "  discover                 Installed/authenticated harnesses, auth type and health.",
   "  grant-access             Save the durable Background Send consent.",
   "  revoke-access            Remove the durable Background Send consent.",
-  "  run                      Admit one read-only plan + independent review goal.",
+  "  run                      Admit one coordinated goal. Writes only with both write flags.",
   "  status [--job ID]        Print the live projection exactly as stored.",
   "  stop [--job ID]          Durably revoke access and print the real state.",
   "  result [--request-id ID] Print the saved verdict, plan and review.",
@@ -83,6 +83,8 @@ const USAGE = [
   "  --workspace PATH         Absolute workspace (run; continue defaults to the saved one).",
   "  --instances a,b          Read harnesses; defaults to every subscription harness discovered.",
   "  --turns N                Read turn cap, 2..32 (default 4).",
+  "  --write-instances a,b    Opt-in write harnesses. Never inferred. Requires --write-turns.",
+  "  --write-turns N          Write turn cap, 1..8. Requires --write-instances.",
   "  --background             Explicit keep-working-after-closing consent (required for run/continue).",
   "  --request-id ID          Caller-stable request id for a retry of the same admission.",
   "  --from ID                Saved request id that continue revises.",
@@ -93,9 +95,9 @@ const USAGE = [
   "  --data-dir PATH          Absolute profile directory (default $HOME/.goalport/linux-coordinate).",
   "  --help                   This help.",
   "",
-  "Consent: --background is never defaulted, and the durable consent store is the",
-  "only grant. An apiKey-authenticated harness is never authorized. A job whose",
-  "exit could not be confirmed stays unconfirmed and is never replayed.",
+  "Consent: --background is never defaulted and is not write consent. The durable",
+  "consent store is the only grant. Unknown and apiKey logins are never authorized.",
+  "A job whose exit could not be confirmed stays unconfirmed and is never replayed.",
 ].join("\n");
 
 const OPTIONS = {
@@ -103,6 +105,8 @@ const OPTIONS = {
   workspace: { type: "string" },
   instances: { type: "string" },
   turns: { type: "string" },
+  "write-instances": { type: "string" },
+  "write-turns": { type: "string" },
   background: { type: "boolean" },
   job: { type: "string" },
   "request-id": { type: "string" },
@@ -318,6 +322,32 @@ function instanceList(text, providers) {
     .map((provider) => provider.instanceId))];
 }
 
+function writeSelection(parsed, workspace) {
+  const instancesText = parsed.values["write-instances"];
+  const turnsText = parsed.values["write-turns"];
+  const hasInstances = typeof instancesText === "string";
+  const hasTurns = typeof turnsText === "string";
+  if (!hasInstances && !hasTurns) return { ok: true, write: null };
+  if (!hasInstances || !hasTurns) {
+    return { ok: false, message: "Workspace writes need both --write-instances and --write-turns, so nothing was admitted." };
+  }
+  const instances = [...new Set(instancesText.split(",").map((item) => item.trim()).filter(Boolean))];
+  if (instances.length === 0 || !instances.every((instance) => /^[A-Za-z0-9._-]+$/.test(instance))) {
+    return { ok: false, message: "A write harness id is invalid, so nothing was admitted." };
+  }
+  if (!/^[0-9]+$/.test(String(turnsText).trim())) {
+    return { ok: false, message: "The write turn cap must be a whole number from 1 through 8, so nothing was admitted." };
+  }
+  const maxTurns = Number(String(turnsText).trim());
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 8) {
+    return { ok: false, message: "The write turn cap must be a whole number from 1 through 8, so nothing was admitted." };
+  }
+  if (typeof workspace !== "string" || !path.isAbsolute(workspace)) {
+    return { ok: false, message: "The workspace must be an absolute path, so nothing was admitted." };
+  }
+  return { ok: true, write: { instances, workspaceRoot: workspace, maxTurns } };
+}
+
 function turnCap(value) {
   if (value === undefined) return 4;
   const text = String(value).trim();
@@ -490,6 +520,8 @@ async function startAdmission(parsed, io, context, selection) {
   if (turns === null) return refuse(io, "The turn cap must be a whole number from 2 through 32, so nothing was admitted.");
   const requestId = requestIdFor(parsed.values["request-id"]);
   if (requestId === null) return refuse(io, "The request id must use letters, digits, dots, underscores or hyphens, so nothing was admitted.");
+  const selectedWrite = writeSelection(parsed, selection.workspace);
+  if (!selectedWrite.ok) return refuse(io, selectedWrite.message);
 
   const discovered = await readDiscovery(io, context);
   if (!discovered.ok) return refuse(io, discovered.message);
@@ -498,9 +530,11 @@ async function startAdmission(parsed, io, context, selection) {
   if (!instances.every((instance) => /^[A-Za-z0-9._-]+$/.test(instance))) {
     return refuse(io, "A harness id is invalid, so nothing was admitted.");
   }
-  // The authorization bridge owns the subscription-only rule; apiKey logins
-  // are refused with its existing sentence before any admission write.
-  const membership = authorizeMembershipError({ ok: true, providers: discovered.providers }, instances);
+  // The authorization bridge owns the subscription-only rule; apiKey and
+  // unknown logins are refused with its existing sentence before any admission.
+  const discoveredMembership = { ok: true, providers: discovered.providers };
+  const membership = authorizeMembershipError(discoveredMembership, instances)
+    || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);
 
   try {
@@ -519,6 +553,7 @@ async function startAdmission(parsed, io, context, selection) {
       readInstances: instances,
       readMaxTurns: turns,
       backgroundConsent: true,
+      ...(selectedWrite.write ? { write: selectedWrite.write } : {}),
       ...(selection.executionFeedback ? { executionFeedback: selection.executionFeedback } : {}),
     });
   } catch (error) {

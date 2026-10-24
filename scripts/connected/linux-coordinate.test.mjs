@@ -112,6 +112,8 @@ function runArgs(f, overrides = {}) {
     "--turns", String(overrides.turns ?? "4"),
   ];
   if (overrides.instances !== null) args.push("--instances", overrides.instances ?? "codex,claude");
+  if (overrides.writeInstances) args.push("--write-instances", overrides.writeInstances);
+  if (overrides.writeTurns) args.push("--write-turns", String(overrides.writeTurns));
   if (overrides.background !== false) args.push("--background");
   if (overrides.requestId) args.push("--request-id", overrides.requestId);
   return args;
@@ -186,6 +188,51 @@ test("apiKey membership is refused by the authorization bridge and by run", asyn
   assert.equal(run.stderr.trim(), APIKEY_SENTENCE);
   assert.equal(f.launches.length, 0);
   assert.equal(fs.existsSync(jobsDirectory(f)), false);
+});
+
+test("write flags are opt-in, subscription-only, and never inferred", async (t) => {
+  const plain = fixture(t);
+  await invoke(plain, ["grant-access"]);
+  const readOnly = await invoke(plain, runArgs(plain, { requestId: "read-default" }));
+  assert.equal(readOnly.code, 0, readOnly.stderr);
+  assert.equal(storeOf(plain).getActiveStatus().admission.writeAuthorization, null);
+
+  const partial = fixture(t);
+  await invoke(partial, ["grant-access"]);
+  const missingTurns = await invoke(partial, runArgs(partial, { requestId: "write-partial", writeInstances: "codex" }));
+  assert.equal(missingTurns.code, 1);
+  assert.match(missingTurns.stderr, /both --write-instances and --write-turns/);
+  assert.equal(partial.launches.length, 0);
+  assert.equal(fs.existsSync(jobsDirectory(partial)), false);
+
+  const unknownWriter = fixture(t, {
+    providers: [
+      ...SUBSCRIPTION_PROVIDERS,
+      { instanceId: "pi", displayName: "Pi", auth: { status: "authenticated", type: "unknown" }, models: [{ slug: "default", isDefault: true }] },
+    ],
+  });
+  await invoke(unknownWriter, ["grant-access"]);
+  const refused = await invoke(unknownWriter, runArgs(unknownWriter, {
+    instances: null,
+    requestId: "write-unknown",
+    writeInstances: "pi",
+    writeTurns: "1",
+  }));
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stderr.trim(), APIKEY_SENTENCE);
+  assert.equal(unknownWriter.launches.length, 0);
+  assert.equal(fs.existsSync(jobsDirectory(unknownWriter)), false);
+
+  const admitted = fixture(t);
+  await invoke(admitted, ["grant-access"]);
+  const wrote = await invoke(admitted, runArgs(admitted, { requestId: "write-codex", writeInstances: "codex", writeTurns: "1" }));
+  assert.equal(wrote.code, 0, wrote.stderr);
+  assert.deepEqual(storeOf(admitted).getActiveStatus().admission.writeAuthorization, {
+    instances: ["codex"],
+    workspaceRoot: admitted.workspace,
+    maxTurns: 1,
+  });
+  assert.deepEqual(storeOf(admitted).getActiveStatus().admission.allowedInstances, ["codex", "claude"]);
 });
 
 test("omitted --instances selects only confirmed subscription logins", async (t) => {

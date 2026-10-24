@@ -371,6 +371,23 @@ describe("Synthetic path", () => {
     expect(state.quotaLabels.codex).toBe("available");
   });
 
+  it("write authorization with one usable harness assigns no role and emits no workspaceWrite", () => {
+    const catalog = [
+      instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "available", billing: "subscription", authenticated: true, installed: true, enabled: true, launchable: true, models: [{ slug: "gpt-a", name: "gpt-a", isDefault: true }] }),
+    ];
+    const state = coordinateGoal({
+      goal,
+      workspacePath,
+      sendKey: "write-one",
+      catalog,
+      allowedInstances: ["codex"],
+      writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 1 },
+    });
+    expect(state.commands).toEqual([]);
+    expect(state.roles).toEqual([]);
+    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  });
+
   it("an unusable catalog keeps its original stop reason even with an avoidance", () => {
     const catalog = [
       instance({ instanceId: "codex", name: "Codex", defaultModel: "gpt-a", quota: "exhausted" }),

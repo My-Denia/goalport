@@ -21,12 +21,13 @@ async function scenario(t, options = {}) {
   let authorizations = 0;
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
+  const roster = options.providers ?? providers;
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
   if (options.storeDecorator) {
     options.store = options.storeDecorator(options.store ?? store, start);
   }
   const launches = [];
-  const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers }), prepare: async () => ({}), close() {}, run: async command => {
+  const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers: roster }), prepare: async () => ({}), close() {}, run: async command => {
     launches.push(command);
     if (options.onLaunch) options.onLaunch(command, launches.length);
     if (options.revokeAt === launches.length) store.revoke(start.jobId);
@@ -58,13 +59,30 @@ async function scenario(t, options = {}) {
   } : engine;
   const controlEndpoint = process.platform === "win32" ? String.raw`\\.\pipe\goalport-worker-test-` + randomUUID() : path.join(directory, "control.sock");
   if (options.consentGranted) fs.writeFileSync(path.join(directory, "background-send-consent.json"), JSON.stringify({ allowed: true, grantedAt: new Date().toISOString() }) + "\n");
-  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
+  if (typeof options.sentinel === "string") fs.writeFileSync(path.join(directory, "sentinel.txt"), options.sentinel);
+  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, core: {
     invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
-  }, env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
-  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
+  }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
+  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue };
 }
+test("one confirmed harness with write authorization stops before any workspace write and cannot be replayed", async t => {
+  const ran = await scenario(t, {
+    providers: [providers[0]],
+    allowedInstances: ["codex"],
+    writeInstances: ["codex"],
+    sentinel: "do-not-touch\n",
+  });
+  assert.equal(ran.launches.length, 0);
+  assert.equal(ran.launches.some((command) => command.sandboxPolicy?.type === "workspaceWrite"), false);
+  assert.equal(ran.records[0]?.stopReason, "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  assert.equal(ran.records[0]?.messageDispatched, false);
+  assert.equal(ran.status.pendingCommand, null);
+  assert.equal(fs.readFileSync(path.join(ran.directory, "sentinel.txt"), "utf8"), "do-not-touch\n");
+  assert.throws(() => ran.store.claimWorker(ran.jobId), /no replacement was started/);
+});
+
 test("a revocation before the worker claim settles stopped without contacting anything", async t => {
   // Windows-safe: the settlement path returns before the control endpoint,
   // Core, scopes or harnesses are ever touched, so no Unix socket is needed.

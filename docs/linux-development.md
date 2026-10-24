@@ -138,6 +138,11 @@ Honesty rules the client keeps:
   `Only harnesses signed in with their own subscription can be authorized.`
   and never enters a turn budget. Omitting `--instances` selects only confirmed
   subscription logins, not every installed CLI.
+- File changes are not implied by `--background` or by a read goal. Pass both
+  `--write-instances` and `--write-turns` to opt into the existing write
+  authorization. One confirmed subscription harness still cannot review itself:
+  the goal stops with `Stopped. An independent check needs a second logged-in
+  harness, so no second role was assigned.` and no workspace write is sent.
 - A lost start reply stays `unconfirmed`. The admitted job keeps its durable
   slot and is not spawned again; `status` keeps printing `unconfirmed`.
   `acknowledge` is how you leave that job without replaying it, and its request
