@@ -2815,7 +2815,11 @@ function App() {
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const confirmed = /unconfirmed|not confirmed/i.test(text || "");
                         setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed, so another goal cannot start yet." : (text || "Stop was sent."));
-                        if (body && (body as { ok?: unknown }).ok !== false && confirmed === false && !(wasUnconfirmed && !confirmed) && !/unconfirmed/i.test(text || "")) sidebarFailed.current = false;
+                        if (body && (body as { ok?: unknown }).ok !== false && confirmed === false && !(wasUnconfirmed && !confirmed) && !/unconfirmed/i.test(text || "")) {
+                          sidebarFailed.current = false;
+                          linuxHoldLineRef.current = false;
+                          setLinuxHoldLine(false);
+                        }
                         if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "") || (wasUnconfirmed && !confirmed)) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
