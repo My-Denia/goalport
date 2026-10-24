@@ -342,6 +342,7 @@ function App() {
   const leftRequestIds = useRef(new Set<string>());
   const seenJobId = useRef<string | null>(null);
   const leftJobIds = useRef(new Set<string>());
+  const linuxActionOpen = useRef(false);
   const [leftRevision, setLeftRevision] = useState(0);
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
@@ -904,6 +905,7 @@ function App() {
       const launch = bridge?.coordinateLaunch;
       if (client.mode === "linux-core") {
         const statusEpoch = ++linuxStatusEpoch.current;
+        linuxActionOpen.current = true;
         setLinuxActionBusy(true);
         setLinuxCoordinationLine("Sending.");
         void fetch("/goalport/ipc", {
@@ -927,7 +929,7 @@ function App() {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           setDraftError({ sentence: "The coordinated goal could not be sent." });
-        }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
+        }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
@@ -2150,7 +2152,7 @@ function App() {
     let generation = 0;
     let inFlight = false;
     const refresh = () => {
-      if (inFlight) return;
+      if (inFlight || linuxActionOpen.current) return;
       inFlight = true;
       const request = ++generation;
       const settledAtStart = linuxActionSettled.current;
@@ -2160,7 +2162,7 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-        if (cancelled || request !== generation || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
+        if (cancelled || request !== generation || linuxActionOpen.current || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; leftRequestIds?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (Array.isArray(payload?.leftRequestIds)) {
           let added = false;
@@ -2673,6 +2675,7 @@ function App() {
                     stopLabel={workerGone ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
+                      linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       setLinuxCoordinationLine("Leaving this goal unreplayed.");
                       void fetch("/goalport/ipc", {
@@ -2697,10 +2700,11 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         setLinuxCoordinationLine("The job could not be left.");
-                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
+                      linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       setLinuxCoordinationLine(workerGone ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
@@ -2716,10 +2720,11 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         setLinuxCoordinationLine("Stop could not be sent.");
-                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
                     onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
+                      linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
                       setLinuxCoordinationLine("Continuing.");
                       void fetch("/goalport/ipc", {
@@ -2742,7 +2747,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         setLinuxCoordinationLine("Continue could not be sent.");
-                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
+                      }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
@@ -2751,6 +2756,7 @@ function App() {
                     discoverHint={client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone ? "Checking signed-in harnesses." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing ? "Background Send is not ready in this GoalPort window yet." : null}
                     onGrantConsent={client.mode === "linux-core" && linuxConsentMissing && !linuxGranting ? () => {
+                      linuxActionOpen.current = true;
                       setLinuxGranting(true);
                       const previousLine = linuxCoordinationLine;
                       setLinuxCoordinationLine("Allowing Background Send.");
@@ -2772,7 +2778,7 @@ function App() {
                         const sentence = "The signed-in harnesses could not be checked, so nothing will be sent.";
                         setLinuxHarnessSentence(sentence);
                         setLinuxCoordinationLine(sentence);
-                      }).finally(() => setLinuxGranting(false));
+                      }).finally(() => { linuxActionOpen.current = false; setLinuxGranting(false); });
                     } : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={client.mode === "linux-core" || (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim()) ? setBackgroundConsent : undefined}
