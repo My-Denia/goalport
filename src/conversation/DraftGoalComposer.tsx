@@ -127,8 +127,8 @@ export function DraftGoalComposer({
     <section className="draft-composer" aria-label={activeGoalTitle || "New goal draft"}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{activeGoalTitle || "Start a goal"}</h2>
-          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked && coordinationResult ? coordinationResult : "What would you like to work on?")}</p>
+          <h2>{activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
