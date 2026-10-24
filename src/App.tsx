@@ -2606,7 +2606,7 @@ function App() {
             onReconnect={handleReconnect}
             hideCoreConnection={client.mode === "linux-core"}
           />
-          {client.mode === "linux-core" && snapshot.connection === "disconnected" ? (
+          {client.mode === "linux-core" && snapshot.connection === "disconnected" && snapshot.notices.some((notice) => notice.startsWith("Core request failed:")) ? (
             <div className="banner banner-warn" role="status">The goal list could not be read. This is not the workbench connection.</div>
           ) : null}
 
