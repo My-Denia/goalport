@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coordinationReplyLine } from "./replyLine";
+import { coordinationReplyLine, coordinationStartAdmitted } from "./replyLine";
 
 describe("coordinationReplyLine", () => {
   it("keeps the unconfirmed sentence instead of a planning activity", () => {
@@ -14,6 +14,11 @@ describe("coordinationReplyLine", () => {
       payload: { stdout: "state: stopped\nactivity: Stopped. No further turn was sent.\n" },
     }, "Stop was sent.");
     expect(line).toBe("Stopped. No further turn was sent.");
+  });
+
+  it("locks a second send only after the goal was actually admitted", () => {
+    expect(coordinationStartAdmitted({ payload: { stdout: "The goal was admitted with request id coordinate-1; its worker runs detached.\n" } })).toBe(true);
+    expect(coordinationStartAdmitted({ error: "The workspace must be an absolute path, so nothing was admitted." })).toBe(false);
   });
 
   it("prefers the bridge error over a dump", () => {

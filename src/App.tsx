@@ -30,7 +30,7 @@ import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoal
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
-import { coordinationReplyLine } from "./coordination/replyLine";
+import { coordinationReplyLine, coordinationStartAdmitted } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
 import { usableInstanceIds, type CoordinationWriteAuthorization, type ExecutionFeedback } from "./coordination/coordinateGoal";
 import type { SavedPlan } from "./coordination/savedPlan";
@@ -889,6 +889,7 @@ function App() {
         }).then(async (response) => response.json()).then((body) => {
           const text = coordinationReplyLine(body, "The coordinated goal was sent.");
           setLinuxCoordinationLine(text);
+          if (coordinationStartAdmitted(body)) setLinuxCoordinationLive(true);
         }).catch(() => setDraftError({ sentence: "The coordinated goal could not be sent." }));
         return;
       }

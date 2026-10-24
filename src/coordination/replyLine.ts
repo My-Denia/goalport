@@ -11,3 +11,9 @@ export function coordinationReplyLine(body: { error?: unknown; payload?: { stdou
   if (stderr) return stderr.split("\n")[0].trim();
   return fallback;
 }
+
+export function coordinationStartAdmitted(body: { error?: unknown; payload?: { stdout?: unknown } } | null): boolean {
+  if (typeof body?.error === "string" && body.error.trim()) return false;
+  const stdout = typeof body?.payload?.stdout === "string" ? body.payload.stdout : "";
+  return stdout.includes("The goal was admitted");
+}
