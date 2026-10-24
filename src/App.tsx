@@ -2611,7 +2611,7 @@ function App() {
           <StatusBanners
             browserPreview={client.mode === "browser-preview" && coordination === null}
             snapshot={snapshot}
-            activeNotice={displayedNotice}
+            activeNotice={displayedNotice && (displayedNotice.sentence === "That goal is no longer available." || displayedNotice.sentence.startsWith("That address is no longer available.")) && (workerGone || sidebarUnconfirmed || leftUnreplayed || linuxHoldLine || linuxLeftoverHeld || linuxActionBusy || linuxGranting) ? null : displayedNotice}
             onDismissNotice={() => {
               setActiveNotice(null);
               setTargetNotices((current) => {
