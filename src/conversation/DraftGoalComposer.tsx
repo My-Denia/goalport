@@ -170,7 +170,7 @@ export function DraftGoalComposer({
             disabled={busy || inputsLocked || Boolean(activeGoalTitle)}
           />
           {canBrowse ? (
-            <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked}>Browse…</button>
+            <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked || Boolean(activeGoalTitle)}>Browse…</button>
           ) : null}
         </div>
         {folderHint ? <p id="draft-folder-hint" className="draft-hint">{folderHint}</p> : null}
