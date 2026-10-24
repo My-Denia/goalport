@@ -2183,11 +2183,17 @@ function App() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
-      }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
+      }).then(async (response) => response.json().catch(() => null)).then((body) => {
         if (cancelled) return;
-        const sentence = (body as { payload?: { sentence?: unknown } } | null)?.payload?.sentence;
+        const unchecked = "The signed-in harnesses could not be checked, so nothing will be sent.";
+        if (!body || typeof body !== "object" || (body as { ok?: unknown }).ok === false) {
+          const error = (body as { error?: unknown } | null)?.error;
+          setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
+          return;
+        }
+        const sentence = (body as { payload?: { sentence?: unknown } }).payload?.sentence;
         setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
-      }).catch(() => { if (!cancelled) setLinuxHarnessSentence(null); });
+      }).catch(() => { if (!cancelled) setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); });
     };
     check();
     const timer = linuxHarnessSentence ? window.setInterval(check, 2000) : 0;
