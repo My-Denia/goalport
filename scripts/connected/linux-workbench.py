@@ -256,7 +256,18 @@ def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | Non
 KEEP_RUNNING_SENTENCE = "Keep working after closing must be explicitly selected."
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False) -> tuple[list[str] | None, str | None]:
+def checked_instances(instances: object) -> tuple[str | None, str | None]:
+    if instances is None or instances == "":
+        return None, None
+    if not isinstance(instances, str):
+        return None, "A harness id is invalid, so nothing was admitted."
+    names = [part.strip() for part in instances.split(",") if part.strip()]
+    if not names or any(not all(character.isalnum() or character in "._-" for character in name) for name in names):
+        return None, "A harness id is invalid, so nothing was admitted."
+    return ",".join(names), None
+
+
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None) -> tuple[list[str] | None, str | None]:
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
     found = latest_coordination_record(data_dir)
@@ -275,6 +286,11 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
         argv.extend(["--workspace", workspace])
     if write is True:
         argv.extend(["--write-instances", "codex", "--write-turns", "1"])
+    names, names_error = checked_instances(instances)
+    if names_error:
+        return None, names_error
+    if names:
+        argv.extend(["--instances", names])
     return argv, None
 
 
@@ -286,7 +302,7 @@ def expand_workspace(workspace: str) -> str:
     return workspace
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
@@ -304,6 +320,11 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     argv = [*prefix, "run", "--goal", goal.strip(), "--workspace", workspace, "--background"]
     if write is True:
         argv.extend(["--write-instances", "codex", "--write-turns", "1"])
+    names, names_error = checked_instances(instances)
+    if names_error:
+        return None, names_error
+    if names:
+        argv.extend(["--instances", names])
     return argv, None
 
 
@@ -412,7 +433,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True,
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"),
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -435,7 +456,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True)
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return

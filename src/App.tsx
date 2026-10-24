@@ -901,7 +901,7 @@ function App() {
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent } }),
+          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent, instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
         }).then(async (response) => response.json()).then((body) => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
@@ -2655,7 +2655,7 @@ function App() {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite, background: backgroundConsent } }),
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: { followUp: draftGoal?.message ?? "", write: linuxWrite, background: backgroundConsent, instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
                       }).then(async (response) => response.json()).then((body) => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
