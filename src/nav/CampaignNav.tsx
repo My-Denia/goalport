@@ -234,6 +234,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
       </div>
 
       {plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
+      {navigationLockedReason && plans.length > 0 ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
       {plans.length > 0 ? (
         <>
           <div className="sidebar-section-title">
