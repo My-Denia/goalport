@@ -104,6 +104,13 @@ export function DraftGoalComposer({
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  const allowedFollow = harnessWarning || consentWarning || !backgroundConsent
+    ? "You can send when the other checks pass."
+    : !draft.workspace.trim()
+      ? "Choose a folder, then send."
+      : !draft.message.trim()
+        ? "Write the goal, then send."
+        : "You can send.";
   const canSubmit = !busy
     && !inputsLocked
     && !waitingOn
@@ -129,7 +136,7 @@ export function DraftGoalComposer({
       <div className="conversation-heading">
         <div className="conversation-heading-main">
           <h2>{coordinationResult === "Allowing Background Send." || coordinationResult === "Background Send is allowed." ? coordinationResult : (!activeGoalTitle && (harnessWarning || consentWarning)) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (backgroundConsent && !harnessWarning && !consentWarning ? "You can send." : "You can send when the other checks pass.") : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
+          <p>{coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? allowedFollow : activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -196,7 +203,7 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? (backgroundConsent && !harnessWarning && !consentWarning ? "You can send." : "You can send when the other checks pass.") : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            ? (coordinationResult === "Allowing Background Send." ? "This has not returned." : coordinationResult === "Background Send is allowed." ? allowedFollow : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning ? "Sign in another harness before sending." : consentWarning ? "Allow Background Send before sending." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
             : "Reconnect Core before sending…"}
           rows={3}
           disabled={busy || inputsLocked}
