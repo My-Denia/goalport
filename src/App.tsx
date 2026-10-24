@@ -965,10 +965,11 @@ function App() {
         }).then(async (response) => response.json()).then((body) => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
-          const text = coordinationReplyLine(body, "The coordinated goal was sent.");
+          const failedSend = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+          const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : "The coordinated goal was sent.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(shown);
-          const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+          const failed = failedSend;
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
           if (failed && !coordinationStartAdmitted(body)) rememberFailure(shown);
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
@@ -2904,9 +2905,9 @@ function App() {
                       }).then(async (response) => response.json()).then((body) => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
-                        const text = coordinationReplyLine(body, "Stop was sent.");
-                        const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const stopFailed = !body || (body as { ok?: unknown }).ok === false;
+                        const text = coordinationReplyLine(body, stopFailed ? "Stop could not be sent." : "Stop was sent.");
+                        const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const textMentionsUnconfirmed = /unconfirmed|not confirmed/i.test(text || "");
                         const failedStop = text || "Stop could not be sent.";
                         const failedWhileUnconfirmed = stopFailed && !textMentionsUnconfirmed && (wasUnconfirmed || wasGone);
@@ -2962,10 +2963,11 @@ function App() {
                       }).then(async (response) => response.json()).then((body) => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
-                        const text = coordinationReplyLine(body, "Continue was sent.");
+                        const continueFailed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+                        const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : "Continue was sent.");
                         const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
                         setLinuxCoordinationLine(shown || "Continue was sent.");
-                        const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
+                        const failed = continueFailed;
                         if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
                           if (shown === "The left goal could not be released, so nothing was sent." || !/unconfirmed/i.test(text || "")) rememberFailure(shown || "Continue could not be sent.");
