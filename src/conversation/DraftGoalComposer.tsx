@@ -163,6 +163,7 @@ export function DraftGoalComposer({
           <input
             id="draft-workspace"
             aria-label="Project folder"
+            aria-describedby={folderHint ? "draft-folder-hint" : undefined}
             value={draft.workspace}
             onChange={(event) => onChange({ ...draft, workspace: event.target.value })}
             placeholder={workspacePlaceholder ?? "C:\\workspace\\your-project"}
@@ -172,7 +173,7 @@ export function DraftGoalComposer({
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked}>Browse…</button>
           ) : null}
         </div>
-        {folderHint ? <p className="draft-hint">{folderHint}</p> : null}
+        {folderHint ? <p id="draft-folder-hint" className="draft-hint">{folderHint}</p> : null}
         {harnessWarning && activeGoalTitle && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
