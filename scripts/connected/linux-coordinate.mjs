@@ -526,7 +526,7 @@ async function startAdmission(parsed, io, context, selection) {
   const discovered = await readDiscovery(io, context);
   if (!discovered.ok) return refuse(io, discovered.message);
   const instances = instanceList(selection.instancesText, discovered.providers);
-  if (instances.length === 0) return refuse(io, "No installed subscription harness was found on this machine, so nothing was admitted.");
+  if (instances.length === 0) return refuse(io, "No signed-in subscription harness was found on this machine, so nothing was admitted.");
   if (!instances.every((instance) => /^[A-Za-z0-9._-]+$/.test(instance))) {
     return refuse(io, "A harness id is invalid, so nothing was admitted.");
   }

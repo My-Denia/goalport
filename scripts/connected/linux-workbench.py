@@ -329,7 +329,7 @@ def subscription_harness_sentence(stdout: str) -> str | None:
         return None
     if len(found) == 1:
         return "An independent check needs a second logged-in harness, so nothing will be sent."
-    return "No installed subscription harness was found on this machine, so nothing will be sent."
+    return "No signed-in subscription harness was found on this machine, so nothing will be sent."
 
 
 def consent_missing(stdout: str) -> bool:
