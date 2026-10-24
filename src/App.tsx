@@ -2755,6 +2755,9 @@ function App() {
             }} />
           </div> : selectedPlan ? (
             <div className="timeline-scroll" tabIndex={-1} aria-label={selectedPlan.verdict === "stopped" ? "Stopped. No further turn was sent." : "Saved plan"}>
+              {client.mode === "linux-core" && linuxCoordinationGoal && !linuxActionBusy && !linuxGranting ? (
+                <button className="button button-small button-outline" type="button" onClick={() => { setSelectedPlanId(null); linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); setBackgroundView(false); }}>Show the goal. This closes the saved plan.</button>
+              ) : null}
               <CoordinationStatus
                 goal={selectedPlan.goal}
                 planningHarness={selectedPlan.planningHarness}
