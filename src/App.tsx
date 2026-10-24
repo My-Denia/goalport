@@ -2127,13 +2127,15 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
+    let generation = 0;
     const refresh = () => {
+      const request = ++generation;
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messageType: "coordination_latest", payload: {} }),
       }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-        if (cancelled || !body || typeof body !== "object") return;
+        if (cancelled || request !== generation || !body || typeof body !== "object") return;
         const payload = (body as { payload?: { line?: unknown; jobId?: unknown; record?: { verdict?: unknown; planningHarness?: unknown; reviewHarness?: unknown; requestId?: unknown; goal?: unknown; workspacePath?: unknown; outcome?: unknown; detail?: unknown; change?: unknown } | null; reason?: unknown } }).payload;
         if (typeof payload?.line === "string" && payload.line && typeof payload?.jobId === "string" && payload.jobId) {
           linuxFreshDraft.current = false;
@@ -2177,7 +2179,7 @@ function App() {
           : `Last coordinated goal: ${record.verdict}. ${planned} planned, ${checked} checked.`);
         setLinuxCoordinationDetail(typeof record.detail === "string" && record.detail.trim() ? record.detail.trim() : null);
         setLinuxCoordinationChange(typeof record.change === "string" && record.change.trim() ? record.change.trim() : null);
-      }).catch(() => { if (!cancelled) setLinuxCoordinationLine(null); });
+      }).catch(() => { if (!cancelled && request === generation) setLinuxCoordinationLine(null); });
     };
     refresh();
     const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
