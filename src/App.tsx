@@ -2385,7 +2385,7 @@ function App() {
     if (miss) {
       setActiveNotice({ sentence: "That goal is no longer available." });
       replaceGoalRoute(snapshot.activeCampaignId || null);
-    } else if (snapshot.activeCampaignId) {
+    } else if (snapshot.activeCampaignId && !linuxCoordinationGoal) {
       replaceGoalRoute(snapshot.activeCampaignId);
     }
     const onPop = () => {
@@ -2395,7 +2395,7 @@ function App() {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [booted, client, snapshot.activeCampaignId]);
+  }, [booted, client, snapshot.activeCampaignId, linuxCoordinationGoal]);
 
   async function selectProject(projectId: string) {
     if (!client.selectProject || projectId === snapshot.selectedProjectId) return;
