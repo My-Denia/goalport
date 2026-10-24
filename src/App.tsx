@@ -2299,7 +2299,7 @@ function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode, linuxCoordinationLive]);
 
-  const leftoverSlotLine = client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy && !linuxHoldLine
+  const leftoverSlotLine = client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy
     ? (linuxCoordinationRequest && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !leftRequestIds.current.has(linuxCoordinationRequest)
       ? "A left goal still holds the slot. The next valid send or continue will release it."
       : "A left goal still holds the slot. The next valid send will release it.")
