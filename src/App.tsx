@@ -1723,6 +1723,7 @@ function App() {
   }
 
   function handleNewGoal() {
+    if (client.mode === "linux-core" && linuxActionBusy) return;
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     const acceptNextCampaign = draftInFlight.current;
@@ -2442,7 +2443,8 @@ function App() {
         detailsOpen={detailsOpen}
         onToggleDetails={() => setDetailsOpen((value) => !value)}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-        onNewGoal={() => { backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
+        onNewGoal={() => { if (client.mode === "linux-core" && linuxActionBusy) return; backgroundAttached.current = true; setBackgroundView(false); handleNewGoal(); }}
+        newGoalDisabled={client.mode === "linux-core" && linuxActionBusy}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
         onCloseWindow={handleCloseWindow}

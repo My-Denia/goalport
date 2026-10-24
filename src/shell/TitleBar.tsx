@@ -18,6 +18,7 @@ interface TitleBarProps {
   onToggleDetails: () => void;
   onOpenDiagnostics: () => void;
   onNewGoal: () => void;
+  newGoalDisabled?: boolean;
   onOpenAbout: () => void;
   onReconnect: () => void;
   onCloseWindow: () => void;
@@ -35,7 +36,7 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, onOpenAbout, onReconnect, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
 
@@ -78,7 +79,7 @@ export function TitleBar({
               Reconnect
             </button>
           )}
-          <button className="tb-button" type="button" aria-label="New goal" onClick={onNewGoal}>
+          <button className="tb-button" type="button" aria-label="New goal" onClick={onNewGoal} disabled={newGoalDisabled}>
             <span aria-hidden="true">＋</span> New goal
           </button>
           <button
