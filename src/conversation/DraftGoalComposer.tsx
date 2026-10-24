@@ -251,8 +251,8 @@ export function DraftGoalComposer({
           ) : (
             <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy || inputsLocked}>Discard draft</button>
           )}
-          <button className="button button-primary" type="submit" aria-label={coordinationResult === "Sending." ? "Sending." : addressGone ? "Send a new goal" : retryLabel ?? "Send message"} disabled={!canSubmit || coordinationResult === "Sending."}>
-            {coordinationResult === "Sending." ? "Sending." : busy ? "Starting…" : addressGone ? "Send a new goal" : (retryLabel ?? "Send")}
+          <button className="button button-primary" type="submit" aria-label={coordinationResult === "Sending." ? "Sending." : discoverHint === "Saved plans could not be read. Send will try again." ? "Try again" : addressGone ? "Send a new goal" : retryLabel ?? "Send message"} disabled={!canSubmit || coordinationResult === "Sending."}>
+            {coordinationResult === "Sending." ? "Sending." : busy ? "Starting…" : discoverHint === "Saved plans could not be read. Send will try again." ? "Try again" : addressGone ? "Send a new goal" : (retryLabel ?? "Send")}
             <span aria-hidden="true">↗</span>
           </button>
         </div>
