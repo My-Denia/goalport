@@ -147,8 +147,8 @@ Honesty rules the client keeps:
   `The interrupted job stays unreplayed; the same request id cannot be admitted again.`
   If that job still holds the admission slot, a direct CLI run says to
   acknowledge it first: `A left job still holds the admission slot. Run acknowledge before starting another, so nothing was admitted.`
-  The workbench page releases that pointer before a new send, so the page does
-  not ask the user to run the command.
+  The workbench page releases that pointer before a valid send or continue,
+  so the page does not ask the user to run the command.
 - File changes are not implied by `--background` or by a read goal. Pass both
   `--write-instances` and `--write-turns` to opt into the existing write
   authorization. One confirmed subscription harness still cannot review itself:
