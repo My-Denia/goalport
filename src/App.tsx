@@ -2740,6 +2740,7 @@ function App() {
                     } : undefined}
                     onStopCoordination={client.mode === "linux-core" && linuxCoordinationLive && !linuxActionBusy ? () => {
                       const wasGone = workerGone;
+                      const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed.";
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
@@ -2756,8 +2757,9 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         const text = coordinationReplyLine(body, "Stop was sent.");
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
-                        setLinuxCoordinationLine(wasGone && !/unconfirmed/i.test(text || "") ? gone : (text || "Stop was sent."));
-                        if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "")) {
+                        const confirmed = /unconfirmed|not confirmed/i.test(text || "");
+                        setLinuxCoordinationLine(wasGone && !confirmed ? gone : wasUnconfirmed && !confirmed ? "This goal's exit is not confirmed." : (text || "Stop was sent."));
+                        if (!body || (body as { ok?: unknown }).ok === false || /unconfirmed/i.test(text || "") || (wasUnconfirmed && !confirmed)) {
                           linuxHoldLineRef.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
