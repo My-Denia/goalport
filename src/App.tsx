@@ -2178,17 +2178,21 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
-    void fetch("/goalport/ipc", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
-    }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
-      if (cancelled) return;
-      const sentence = (body as { payload?: { sentence?: unknown } } | null)?.payload?.sentence;
-      setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
-    }).catch(() => { if (!cancelled) setLinuxHarnessSentence(null); });
-    return () => { cancelled = true; };
-  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft]);
+    const check = () => {
+      void fetch("/goalport/ipc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
+      }).then(async (response) => (response.ok ? response.json() : null)).then((body) => {
+        if (cancelled) return;
+        const sentence = (body as { payload?: { sentence?: unknown } } | null)?.payload?.sentence;
+        setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
+      }).catch(() => { if (!cancelled) setLinuxHarnessSentence(null); });
+    };
+    check();
+    const timer = linuxHarnessSentence ? window.setInterval(check, 2000) : 0;
+    return () => { cancelled = true; if (timer) window.clearInterval(timer); };
+  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxHarnessSentence]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;

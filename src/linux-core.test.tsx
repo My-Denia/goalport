@@ -219,13 +219,15 @@ describe("Linux Core bridge", () => {
     expect(await screen.findByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    missingHarness = false;
+    await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
     expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
-    expect(screen.getByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Continue this goal" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue this goal" })).toBeTruthy();
     expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
     expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
   });
