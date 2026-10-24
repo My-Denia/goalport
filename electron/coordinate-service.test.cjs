@@ -562,6 +562,22 @@ test("authorize membership refuses an apiKey login even when it is discovered", 
   assert.equal(authorizeMembershipError(discovered, ["codex"]), null);
 });
 
+test("authorize membership refuses a discovered harness whose auth type is missing or unknown", () => {
+  const { authorizeMembershipError } = require("./coordinate-service.cjs");
+  const sentence = "Only harnesses signed in with their own subscription can be authorized.";
+  const discovered = {
+    ok: true,
+    providers: [
+      { instanceId: "codex", auth: { status: "authenticated", type: "chatgpt" } },
+      { instanceId: "pi", auth: { status: "authenticated", type: "unknown" } },
+      { instanceId: "bare", auth: { status: "authenticated" } },
+    ],
+  };
+  assert.equal(authorizeMembershipError(discovered, ["pi"]), sentence);
+  assert.equal(authorizeMembershipError(discovered, ["bare"]), sentence);
+  assert.equal(authorizeMembershipError(discovered, ["codex"]), null);
+});
+
 test("authorize membership refuses an instance the fresh discovery does not know", () => {
   const { authorizeMembershipError } = require("./coordinate-service.cjs");
   const discovered = {

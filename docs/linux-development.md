@@ -134,8 +134,10 @@ Honesty rules the client keeps:
   `GOALPORT_HARNESS_CHECKOUT` and `GOALPORT_HARNESS_SERVER_CWD` are ignored and
   stripped before the host or the detached worker sees an environment.
 - Only harnesses signed in with their own subscription can be authorized. An
-  apiKey login is refused with `Only harnesses signed in with their own
-  subscription can be authorized.` and never enters a turn budget.
+  apiKey login, or a sign-in whose type is missing or unknown, is refused with
+  `Only harnesses signed in with their own subscription can be authorized.`
+  and never enters a turn budget. Omitting `--instances` selects only confirmed
+  subscription logins, not every installed CLI.
 - A lost start reply stays `unconfirmed`. The admitted job keeps its durable
   slot and is not spawned again; `status` keeps printing `unconfirmed`.
   `acknowledge` is how you leave that job without replaying it, and its request

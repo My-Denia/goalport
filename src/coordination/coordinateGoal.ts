@@ -24,7 +24,7 @@ export interface SyntheticCatalogInstance {
   readonly authenticated?: boolean;
   readonly launchable?: boolean;
   readonly quota?: SyntheticQuota;
-  readonly billing?: "subscription" | "paid-api" | "included";
+  readonly billing?: "subscription" | "paid-api" | "included" | "unknown";
   /**
    * Persisted evidence that this harness's tools cannot run on this machine
    * (harness health, stamped at the failure). Present means blocked exactly
@@ -204,7 +204,7 @@ function modelUnnamed(instance: SyntheticCatalogInstance): boolean {
   if (instance.enabled === false) return false;
   if (instance.installed === false) return false;
   if (instance.launchable === false) return false;
-  if (instance.billing === "paid-api") return false;
+  if (instance.billing === "paid-api" || instance.billing === "unknown") return false;
   if (quotaWord(instance.quota) === "exhausted") return false;
   if (creditsBlocked(instance)) return false;
   return publishedModel(instance).length === 0;
@@ -215,7 +215,7 @@ function isUsable(instance: SyntheticCatalogInstance): boolean {
   if (instance.installed === false) return false;
   if (instance.authenticated === false) return false;
   if (instance.launchable === false) return false;
-  if (instance.billing === "paid-api") return false;
+  if (instance.billing === "paid-api" || instance.billing === "unknown") return false;
   if (quotaWord(instance.quota) === "exhausted") return false;
   if (publishedModel(instance).length === 0) return false;
   return true;

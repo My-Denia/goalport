@@ -151,7 +151,7 @@ function clampTurns(raw: string): number {
 /** Selectable-by-default rows: usable, not blocked on this machine, not paid-api. */
 function selectableDefaults(providers: readonly ProviderSnapshot[]): string[] {
   return catalogFromProviderSnapshots(providers).flatMap((instance) => {
-    if (instance.billing === "paid-api") return [];
+    if (instance.billing === "paid-api" || instance.billing === "unknown") return [];
     if (instance.environmentAvoided) return [];
     if (instance.enabled === false || instance.installed === false
       || instance.authenticated === false || instance.launchable === false) return [];
@@ -590,7 +590,7 @@ function App() {
       setSelectedInstances(scope && scope.instances.length > 0
         ? scope.instances.filter((instanceId) => {
           const catalog = catalogFromProviderSnapshots(discovery.providers).find((item) => item.instanceId === instanceId);
-          return catalog ? catalog.billing !== "paid-api" : false;
+          return catalog ? catalog.billing === "subscription" || catalog.billing === "included" : false;
         })
         : [...selectable]);
     })();
@@ -1505,7 +1505,7 @@ function App() {
         setPanelProviders(discovery.providers);
         const cleared = catalogFromProviderSnapshots(discovery.providers)
           .find((instance) => instance.instanceId === instanceId);
-        if (cleared && !cleared.environmentAvoided && cleared.billing !== "paid-api") {
+        if (cleared && !cleared.environmentAvoided && (cleared.billing === "subscription" || cleared.billing === "included")) {
           setSelectedInstances((current) => (current.includes(instanceId) ? current : [...current, instanceId]));
         }
       }

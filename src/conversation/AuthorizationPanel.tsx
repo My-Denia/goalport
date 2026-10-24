@@ -67,6 +67,9 @@ function rowState(instance: SyntheticCatalogInstance): { state: RowState; reason
   if (instance.billing === "paid-api") {
     return { state: "paid-api", reason: "bills through its own API key, so it cannot be selected." };
   }
+  if (instance.billing === "unknown") {
+    return { state: "unavailable", reason: "has no confirmed subscription sign-in, so it cannot be selected." };
+  }
   if (instance.authenticated === false) return { state: "unavailable", reason: "is not signed in, so it cannot be selected." };
   if (instance.installed === false) return { state: "unavailable", reason: "is not installed on this machine." };
   if (instance.enabled === false || instance.launchable === false) {

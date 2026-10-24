@@ -225,7 +225,8 @@ function authorizeMembershipError(discovered, requested) {
   const discoveredById = new Map(providers.map((provider) => [provider.instanceId, provider]));
   for (const instance of requested) {
     const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
-    if (!provider || provider?.auth?.type === "apiKey") {
+    const type = provider?.auth?.type;
+    if (!provider || (type !== "chatgpt" && type !== "subscription")) {
       return "Only harnesses signed in with their own subscription can be authorized.";
     }
   }

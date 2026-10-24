@@ -160,6 +160,7 @@ test("run refuses without --background and without durable consent, each with it
 test("apiKey membership is refused by the authorization bridge and by run", async (t) => {
   const apiKeyProviders = [{ instanceId: "codex", auth: { status: "authenticated", type: "apiKey" } }];
   assert.equal(authorizeMembershipError({ ok: true, providers: apiKeyProviders }, ["codex"]), APIKEY_SENTENCE);
+  assert.equal(authorizeMembershipError({ ok: true, providers: [{ instanceId: "pi", auth: { status: "authenticated", type: "unknown" } }] }, ["pi"]), APIKEY_SENTENCE);
   assert.equal(authorizeMembershipError({ ok: true, providers: SUBSCRIPTION_PROVIDERS }, ["codex"]), null);
   assert.equal(authorizeMembershipError({ ok: false, providers: [] }, ["codex"]), APIKEY_SENTENCE);
 
@@ -185,6 +186,20 @@ test("apiKey membership is refused by the authorization bridge and by run", asyn
   assert.equal(run.stderr.trim(), APIKEY_SENTENCE);
   assert.equal(f.launches.length, 0);
   assert.equal(fs.existsSync(jobsDirectory(f)), false);
+});
+
+test("omitted --instances selects only confirmed subscription logins", async (t) => {
+  const f = fixture(t, {
+    providers: [
+      ...SUBSCRIPTION_PROVIDERS.filter((provider) => provider.instanceId === "codex"),
+      { instanceId: "pi", displayName: "Pi", auth: { status: "authenticated", type: "unknown" }, models: [{ slug: "default", isDefault: true }] },
+    ],
+  });
+  await invoke(f, ["grant-access"]);
+  drain(f);
+  const run = await invoke(f, runArgs(f, { instances: null, requestId: "unknown-not-default" }));
+  assert.equal(run.code, 0, run.stderr);
+  assert.deepEqual(storeOf(f).getActiveStatus().admission.allowedInstances, ["codex"]);
 });
 
 test("run spawns the detached worker with the main-process config contract and a stripped environment", async (t) => {

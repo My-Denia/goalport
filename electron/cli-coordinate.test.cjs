@@ -413,7 +413,7 @@ test("a pi install with an enumerable model table is discovered with its built-i
     installed: true,
     availability: "available",
     status: "ready",
-    auth: { status: "authenticated" },
+    auth: { status: "authenticated", type: "unknown", label: "unknown" },
     models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],
   });
 });

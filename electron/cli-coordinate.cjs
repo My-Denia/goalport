@@ -289,7 +289,7 @@ async function piProvider(io) {
     // panel renders as a selectable row (any other status shows "not signed
     // in"), and a dead credential surfaces on the first turn through the
     // existing failed/health path instead of being guessed here.
-    auth: { status: "authenticated" },
+    auth: { status: "authenticated", type: "unknown", label: "unknown" },
     // The turn passes no --model, so pi runs on its own configured default
     // (mirrors the codex built-in default arm).
     models: [{ slug: "default", name: "pi built-in default", isDefault: true, isLegacy: false }],

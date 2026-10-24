@@ -307,11 +307,14 @@ function instanceList(text, providers) {
   if (typeof text === "string" && text.trim().length > 0) {
     return [...new Set(text.split(",").map((item) => item.trim()).filter(Boolean))];
   }
-  // Capability matching: with no explicit list, every harness that discovery
-  // proved signed in with its own subscription is offered. apiKey logins are
-  // never auto-authorized; the scope's rule stays subscription-only.
+  // Capability matching: with no explicit list, only a harness whose auth
+  // type is a confirmed subscription is offered. apiKey and unknown types
+  // are never auto-authorized.
   return [...new Set(providers
-    .filter((provider) => provider && provider.auth?.type !== "apiKey" && typeof provider.instanceId === "string")
+    .filter((provider) => {
+      const type = provider?.auth?.type;
+      return (type === "chatgpt" || type === "subscription") && typeof provider.instanceId === "string";
+    })
     .map((provider) => provider.instanceId))];
 }
 
