@@ -104,7 +104,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
         ) : goalCount === 0 && !runningJob ? (
-          <p className="nav-empty">No goals yet. Start one from the top bar.</p>
+          <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
         ) : overview ? (
           overview.goals.map((goal) => {
             const active = !backgroundOwnsView && goal.campaignId === snapshot.activeCampaignId;
