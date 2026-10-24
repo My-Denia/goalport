@@ -423,6 +423,7 @@ function App() {
   const [linuxHoldLine, setLinuxHoldLine] = useState(false);
   const [sidebarUnconfirmed, setSidebarUnconfirmed] = useState(false);
   const linuxHoldLineRef = useRef(false);
+  const sidebarFailed = useRef(false);
   const heldJobId = useRef<string | null>(null);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
@@ -939,9 +940,11 @@ function App() {
           setLinuxCoordinationLine(shown);
           const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
           linuxHoldLineRef.current = failed && !coordinationStartAdmitted(body);
+          if (failed && !coordinationStartAdmitted(body)) sidebarFailed.current = true;
           setLinuxHoldLine(failed && !coordinationStartAdmitted(body));
-          if (failed && !coordinationStartAdmitted(body) && shown !== "The left goal could not be released, so nothing was sent.") setSidebarUnconfirmed(true);
+          if (failed && !coordinationStartAdmitted(body) && shown !== "The left goal could not be released, so nothing was sent." && !shown.includes("nothing was admitted") && !shown.includes("nothing will be sent")) setSidebarUnconfirmed(true);
           if (coordinationStartAdmitted(body)) {
+            sidebarFailed.current = false;
             setLinuxLeftoverHeld(false);
             setSidebarUnconfirmed(false);
             linuxFreshDraft.current = false;
@@ -956,6 +959,7 @@ function App() {
           linuxActionSettled.current = statusEpoch;
           setLinuxCoordinationLine("The coordinated goal could not be sent.");
           linuxHoldLineRef.current = true;
+          sidebarFailed.current = true;
           setLinuxHoldLine(true);
           setSidebarUnconfirmed(true);
           setDraftError(null);
@@ -2221,6 +2225,7 @@ function App() {
         if (liveJob && typeof payload?.line === "string" && typeof payload.jobId === "string") {
           grantAllowed.current = false;
           linuxHoldLineRef.current = false;
+          sidebarFailed.current = false;
           heldJobId.current = null;
           setLinuxHoldLine(false);
           seenJobId.current = payload.jobId;
@@ -2549,7 +2554,7 @@ function App() {
             goal: linuxCoordinationGoal,
             viewing: !linuxShowingFreshDraft,
             locked: linuxActionBusy,
-            stateLabel: (linuxActionBusy || linuxGranting) && (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send.") ? linuxCoordinationLine : workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : linuxHoldLine ? "Failed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
+            stateLabel: (linuxActionBusy || linuxGranting) && (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send.") ? linuxCoordinationLine : workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : linuxHoldLine || sidebarFailed.current ? "Failed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
           onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
@@ -2762,6 +2767,7 @@ function App() {
                           setLinuxCoordinationLive(false);
                           setLinuxLeftoverHeld(false);
                           linuxHoldLineRef.current = false;
+                          sidebarFailed.current = false;
                           setLinuxHoldLine(false);
                           setSidebarUnconfirmed(false);
                           if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
@@ -2775,12 +2781,14 @@ function App() {
                           ? body.error.trim()
                           : "The job could not be left.";
                         linuxHoldLineRef.current = true;
+                        sidebarFailed.current = true;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine(text);
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
+                        sidebarFailed.current = true;
                         setLinuxHoldLine(true);
                         setLinuxCoordinationLine("The job could not be left.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
@@ -2817,9 +2825,9 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
+                        sidebarFailed.current = true;
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
-                        setSidebarUnconfirmed(true);
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
@@ -2850,11 +2858,13 @@ function App() {
                         const failed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
                         if ((failed && !coordinationStartAdmitted(body)) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
+                          if (shown === "The left goal could not be released, so nothing was sent." || !/unconfirmed/i.test(text || "")) sidebarFailed.current = true;
                           heldJobId.current = seenJobId.current;
                           setLinuxHoldLine(true);
-                          if (shown !== "The left goal could not be released, so nothing was sent.") setSidebarUnconfirmed(true);
+                          if (shown !== "The left goal could not be released, so nothing was sent." && /unconfirmed/i.test(text || "")) setSidebarUnconfirmed(true);
                         }
                         if (coordinationStartAdmitted(body)) {
+                          sidebarFailed.current = false;
                           setLinuxLeftoverHeld(false);
                           setSidebarUnconfirmed(false);
                           linuxFreshDraft.current = false;
@@ -2867,9 +2877,9 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         linuxHoldLineRef.current = true;
+                        sidebarFailed.current = true;
                         heldJobId.current = seenJobId.current;
                         setLinuxHoldLine(true);
-                        setSidebarUnconfirmed(true);
                         setLinuxCoordinationLine("Continue could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
