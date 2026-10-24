@@ -1568,6 +1568,7 @@ function App() {
   }
 
   function handleRevise(plan: SavedPlan) {
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     if (window.innerWidth <= 860) setNavCollapsed(true);
     closeDraft(false);
     setSelectedPlanId(null);
@@ -1598,6 +1599,7 @@ function App() {
   // harness. Nothing is sent until the user presses Send, and the new send is
   // a new round with its own grant — the failed round is never replayed.
   function handleSendAgainWithout(plan: SavedPlan) {
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     const blocked = plan.environmentBlocked;
     if (!blocked) return;
     if (window.innerWidth <= 860) setNavCollapsed(true);
@@ -1637,6 +1639,7 @@ function App() {
   // not replayed, and nothing is sent until Send. From the access panel the
   // draft already open stays put and the row becomes selectable.
   async function handleUseAgain(instanceId: string, continueFrom?: { workspacePath: string; goal: string; harness: string }) {
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     const bridge = window.goalportCore;
     if (!bridge?.coordinationUnblock) return;
     try {
@@ -1675,6 +1678,7 @@ function App() {
   // Revoking ends the authorization: a round already in flight finishes
   // settling, and any new send needs a fresh authorization first.
   async function handleStopAllowing() {
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     const bridge = window.goalportCore;
     if (!bridge?.coordinationRevoke) return;
     try {
@@ -1699,6 +1703,7 @@ function App() {
   // round's remnant draft, where it would be an invisible no-op: it always
   // takes the fresh change-mode draft path.
   function handleChangeHarnessAccess(source: { workspacePath: string; goal: string } | null, fromTerminal = false) {
+    if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     if (draftGoal && !fromTerminal) {
       setPanelChangeMode(true);
       return;
