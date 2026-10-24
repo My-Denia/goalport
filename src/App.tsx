@@ -2504,12 +2504,12 @@ function App() {
           }}
           navigationLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxCoordinationLive)}
           onSelectCampaign={(campaignId) => {
-            if (client.mode === "linux-core" && linuxActionBusy) return;
+            if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
             backgroundAttached.current = true; setBackgroundView(false);
             setSelectedPlanId(null);
             void selectCampaign(campaignId);
           }}
-          onSelectProject={(projectId) => { if (client.mode === "linux-core" && linuxActionBusy) return; void selectProject(projectId); }}
+          onSelectProject={(projectId) => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; void selectProject(projectId); }}
           onRenameCampaign={(campaignId, renameTitle) => { void handleRenameCampaign(campaignId, renameTitle); }}
           runningJob={backgroundJob ? {
             goal: backgroundJob.goal,
@@ -2521,7 +2521,7 @@ function App() {
             locked: linuxActionBusy,
             stateLabel: workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxCoordinationLive ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (client.mode === "linux-core" && linuxActionBusy) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
+          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
