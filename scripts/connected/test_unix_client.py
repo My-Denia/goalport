@@ -172,6 +172,17 @@ class CommandRoutingTests(unittest.TestCase):
         admitted = workbench.latest_coordination_record(admitted_dir)
         self.assertEqual(admitted["line"], "The goal was admitted.")
         self.assertEqual(admitted["jobId"], job)
+        gone_dir = directory / "gone"
+        (gone_dir / "coordination-jobs" / "jobs" / job).mkdir(parents=True)
+        (gone_dir / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": job}), encoding="utf-8")
+        (gone_dir / "coordination-jobs" / "jobs" / job / "startup-claim.json").write_text(json.dumps({"pid": 99}), encoding="utf-8")
+        previous_alive = workbench.worker_alive
+        workbench.worker_alive = lambda _pid: False
+        try:
+            gone = workbench.current_job(gone_dir)
+        finally:
+            workbench.worker_alive = previous_alive
+        self.assertEqual(gone["line"], "The worker is gone. Stop this goal before starting another.")
         self.assertEqual(live["line"], "Codex is planning…")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Stop this goal before starting another.")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")

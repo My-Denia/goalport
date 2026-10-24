@@ -141,6 +141,16 @@ def current_job(data_dir: Path) -> dict | None:
             return None
         progress_path = data_dir / "coordination-jobs" / "jobs" / job_id / "progress.json"
         if not progress_path.is_file():
+            claim_path = data_dir / "coordination-jobs" / "jobs" / job_id / "startup-claim.json"
+            pid = None
+            try:
+                claim = json.loads(claim_path.read_text(encoding="utf-8"))
+                if isinstance(claim, dict):
+                    pid = claim.get("pid")
+            except (OSError, json.JSONDecodeError, TypeError):
+                pid = None
+            if isinstance(pid, int) and pid > 0 and not worker_alive(pid):
+                return {"line": "The worker is gone. Stop this goal before starting another.", "jobId": job_id}
             return {"line": "The goal was admitted.", "jobId": job_id}
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
