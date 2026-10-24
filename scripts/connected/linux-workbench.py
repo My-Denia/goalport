@@ -371,7 +371,8 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     self._send(200, json.dumps({"ok": False, "error": "Grant is not wired on this workbench."}).encode(), "application/json")
                     return
                 code, out, err = continue_runner(prefix)
-                self._send(200, json.dumps({"ok": code == 0, "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
+                failure = err.strip() if isinstance(err, str) else ""
+                self._send(200, json.dumps({"ok": code == 0, "error": None if code == 0 else (failure or "Background Send consent could not be saved."), "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_latest":
                 self._send(200, json.dumps({
