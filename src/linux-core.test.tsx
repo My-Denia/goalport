@@ -194,6 +194,8 @@ describe("Linux Core bridge", () => {
     expect(await screen.findByText("Last coordinated goal: verified. Codex planned, Pi checked.")).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();

@@ -202,7 +202,11 @@ export function DraftGoalComposer({
           </label>
         ) : null}
         <div className="dialog-actions">
-          <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy}>Discard draft</button>
+          {activeGoalTitle ? (
+            draft.message.trim() ? <button className="button button-quiet" type="button" aria-label="Clear follow-up" onClick={onDiscard} disabled={busy}>Clear follow-up</button> : null
+          ) : (
+            <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy}>Discard draft</button>
+          )}
           <button className="button button-primary" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
             {busy ? "Starting…" : (retryLabel ?? "Send")}
             <span aria-hidden="true">↗</span>

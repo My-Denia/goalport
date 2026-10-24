@@ -1715,6 +1715,11 @@ function App() {
   }
 
   function handleDiscardDraft() {
+    if (client.mode === "linux-core" && (linuxCoordinationGoal || linuxCoordinationLive)) {
+      setDraftGoal((current) => current ? { ...current, message: "" } : current);
+      setDraftError(null);
+      return;
+    }
     closeDraft(true);
   }
 
