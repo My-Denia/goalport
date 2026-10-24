@@ -339,6 +339,7 @@ function App() {
   const linuxFreshDraft = useRef(false);
   const linuxStatusEpoch = useRef(0);
   const linuxActionSettled = useRef(0);
+  const leftRequestIds = useRef(new Set<string>());
   const [linuxShowingFreshDraft, setLinuxShowingFreshDraft] = useState(false);
   draftGoalRef.current = draftGoal;
   // Set when a handler opens a fresh draft whose panel must start in change
@@ -2668,6 +2669,7 @@ function App() {
                         linuxActionSettled.current = statusEpoch;
                         if (body && body.ok !== false && !(typeof body.error === "string" && body.error.trim())) {
                           setLinuxCoordinationLive(false);
+                          if (linuxCoordinationRequest) leftRequestIds.current.add(linuxCoordinationRequest);
                           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
                           return;
                         }
@@ -2700,7 +2702,7 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) setLinuxActionBusy(false); });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed ? () => {
+                    onContinueCoordination={client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       setLinuxActionBusy(true);
                       setLinuxCoordinationLine("Continuing.");
