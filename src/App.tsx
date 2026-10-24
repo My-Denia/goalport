@@ -2202,6 +2202,15 @@ function App() {
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
+    const previous = document.title;
+    const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
+    const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
+    document.title = short ? (linuxCoordinationLive ? `${short} — running` : short) : "GoalPort";
+    return () => { document.title = previous; };
+  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive]);
+
+  useEffect(() => {
+    if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
     let generation = 0;
     const check = () => {

@@ -209,6 +209,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
     expect(screen.getAllByRole("region", { name: "Name the two files" }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(document.title).toBe("Name the two files");
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
     fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
