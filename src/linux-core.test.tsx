@@ -183,7 +183,8 @@ describe("Linux Core bridge", () => {
     }));
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
-    expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
+    expect(screen.getByText("Continue stays in this folder. New goal can use another.")).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", true);
     expect(screen.getByText("Project folder")).toBeTruthy();
     expect(screen.queryByText("Workspace")).toBeNull();
     expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
@@ -209,6 +210,8 @@ describe("Linux Core bridge", () => {
     fireEvent.click(screen.getByRole("button", { name: "New goal" }));
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
     expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
+    expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();

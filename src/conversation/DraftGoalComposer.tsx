@@ -130,13 +130,13 @@ export function DraftGoalComposer({
             value={draft.workspace}
             onChange={(event) => onChange({ ...draft, workspace: event.target.value })}
             placeholder={workspacePlaceholder ?? "C:\\workspace\\your-project"}
-            disabled={busy}
+            disabled={busy || Boolean(activeGoalTitle)}
           />
           {canBrowse ? (
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy}>Browse…</button>
           ) : null}
         </div>
-        {workspaceHint ? <p className="draft-hint">{workspaceHint}</p> : null}
+        {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? "Continue stays in this folder. New goal can use another." : workspaceHint}</p> : null}
 
         {linuxCanStartCoordination && !draft.provider.trim() ? (
           activeGoalTitle ? null : <p className="draft-hint">{runtimeRequiredHint}</p>
