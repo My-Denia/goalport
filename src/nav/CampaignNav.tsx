@@ -112,7 +112,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
             <span className="campaign-item-copy">
               <strong>{runningJob.goal}</strong>
-              <small>{runningJob.stateLabel}</small>
+              <small>{runningJobDetail(runningJob.stateLabel)}</small>
             </span>
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
