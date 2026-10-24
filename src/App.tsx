@@ -2879,7 +2879,7 @@ function App() {
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed && !leftUnreplayed && !linuxHoldLine && !sidebarFailed.current && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed && !leftUnreplayed && !linuxHoldLine && !sidebarFailed.current && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationChange : null}
                     activeGoalTitle={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationGoal : null}
-                    stopLabel={workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Record the stop" : "Stop this goal"}
+                    stopLabel={workerGone || sidebarUnconfirmed || linuxCoordinationLine?.includes("exit is not confirmed") ? "Record the stop" : "Stop this goal"}
                     onLeaveGoal={workerGone || linuxCoordinationLine === "Leaving this unreplayed." ? () => {
                       if (linuxActionBusy) return;
                       const statusEpoch = ++linuxStatusEpoch.current;
@@ -2923,7 +2923,7 @@ function App() {
                         setLinuxCoordinationLine("The job could not be left.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onStopCoordination={client.mode === "linux-core" && (linuxCoordinationLive || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop.") ? () => {
+                    onStopCoordination={client.mode === "linux-core" && (linuxCoordinationLive || sidebarUnconfirmed || workerGone || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop.") ? () => {
                       if (linuxActionBusy) return;
                       const wasGone = workerGone;
                       const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet.";
@@ -2933,7 +2933,7 @@ function App() {
                       linuxHoldLineRef.current = false;
                       heldJobId.current = null;
                       setLinuxHoldLine(false);
-                      setLinuxCoordinationLine(workerGone || linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet." ? "Recording the stop." : "Stopping this goal.");
+                      setLinuxCoordinationLine(workerGone || sidebarUnconfirmed || linuxCoordinationLine?.includes("exit is not confirmed") ? "Recording the stop." : "Stopping this goal.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
