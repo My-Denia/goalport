@@ -128,8 +128,8 @@ export function DraftGoalComposer({
     <section className="draft-composer" aria-label={harnessWarning || (activeGoalTitle ? (coordinationResult?.startsWith("This goal's exit is not confirmed") ? `${activeGoalTitle} — not confirmed` : activeGoalTitle) : coordinationResult || "New goal draft")}>
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
+          <h2>{(!activeGoalTitle && harnessWarning) || activeGoalTitle || failureHeadline || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <p>{activeGoalTitle ? (coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning ? "Sign in another harness before sending." : failureHeadline ? "Nothing was admitted. The draft is still here." : "What would you like to work on?")}</p>
           {activeGoalTitle && goalChange ? (
             <details className="draft-hint">
               <summary>What changed</summary>
@@ -162,7 +162,7 @@ export function DraftGoalComposer({
           ) : null}
         </div>
         {workspaceHint ? <p className="draft-hint">{activeGoalTitle ? (onContinueCoordination ? "Continue stays in this folder. New goal can use another." : "This goal stays in this folder.") : workspaceHint}</p> : null}
-        {harnessWarning ? <p className="draft-hint">{harnessWarning}</p> : null}
+        {harnessWarning && activeGoalTitle ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
         {consentWarning ? <p className="draft-hint">{consentWarning} {onGrantConsent ? <button className="button button-small button-outline" type="button" onClick={onGrantConsent}>Allow spending subscription quota</button> : null}</p> : null}
