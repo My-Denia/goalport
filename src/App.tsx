@@ -2302,6 +2302,10 @@ function App() {
         const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
         const sentence = payload?.sentence;
         const consentStillMissing = payload?.consentMissing === true;
+        if (consentStillMissing && grantAllowed.current) {
+          grantAllowed.current = false;
+          setLinuxCoordinationLine("Background Send is not ready in this GoalPort window yet.");
+        }
         if (!(grantError.current && consentStillMissing)) {
           if (!consentStillMissing) grantError.current = false;
           setLinuxHarnessSentence(typeof sentence === "string" && sentence.trim() ? sentence.trim() : null);
