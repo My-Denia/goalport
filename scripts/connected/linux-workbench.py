@@ -127,42 +127,51 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     }
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path) -> tuple[list[str] | None, str | None]:
+def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None) -> tuple[list[str] | None, str | None]:
+    if not endpoint:
+        return None, "The Core socket is required, so nothing was admitted."
+    if not core_binary or not (core_binary.startswith("/") or Path(core_binary).is_absolute()):
+        return None, "The Core executable is required: pass --core-binary with an absolute path, so nothing was admitted."
+    return [
+        "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
+        "--data-dir", str(data_dir), "--pipe", endpoint, "--core-binary", core_binary,
+    ], None
+
+
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
     found = latest_coordination_record(data_dir)
     record = found.get("record") if isinstance(found, dict) else None
     request_id = record.get("requestId") if isinstance(record, dict) else None
     if data_dir is None or not isinstance(request_id, str) or not request_id:
         return None, "No saved coordinated goal to continue."
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    if error:
+        return None, error
     goal = record.get("goal") if isinstance(record.get("goal"), str) and record.get("goal") else "Continue the saved goal"
-    argv = [
-        "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
-        "--data-dir", str(data_dir),
-        "continue", "--from", request_id, "--goal", goal, "--background",
-    ]
+    argv = [*prefix, "continue", "--from", request_id, "--goal", goal, "--background"]
     workspace = record.get("workspacePath")
     if isinstance(workspace, str) and workspace:
         argv.extend(["--workspace", workspace])
     return argv, None
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
         return None, "A goal is required, so nothing was admitted."
     if not isinstance(workspace, str) or not (workspace.startswith("/") or Path(workspace).is_absolute()):
         return None, "The workspace must be an absolute path, so nothing was admitted."
-    argv = [
-        "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
-        "--data-dir", str(data_dir),
-        "run", "--goal", goal.strip(), "--workspace", workspace, "--background",
-    ]
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    if error:
+        return None, error
+    argv = [*prefix, "run", "--goal", goal.strip(), "--workspace", workspace, "--background"]
     if write is True:
         argv.extend(["--write-instances", "codex", "--write-turns", "1"])
     return argv, None
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None):
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -231,7 +240,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True,
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary,
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -243,7 +252,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_continue":
-                argv, error = coordination_continue_command(coordination_data, ROOT)
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -292,7 +301,8 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument("--timeout", type=float, default=30)
-    parser.add_argument("--coordination-data", type=Path, default=None, help="Profile directory that holds coordination-records.json. Read only.")
+    parser.add_argument("--coordination-data", type=Path, default=None, help="Profile directory. Defaults to ~/.goalport/linux-coordinate, the same place as the CLI.")
+    parser.add_argument("--core-binary", type=Path, default=None, help="Absolute goalport-core executable used when the page starts or continues a goal.")
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         raise SystemExit("The workbench bridge listens on 127.0.0.1 only")
@@ -302,14 +312,15 @@ def main(argv=None) -> int:
         raise SystemExit(f"Built renderer not found at {index}. Run pnpm build first.")
     unix_client = load_unix_client()
     endpoint = unix_client.resolve(args.endpoint)
-    coordination_data = args.coordination_data.resolve() if args.coordination_data else None
+    coordination_data = (args.coordination_data or (Path.home() / ".goalport" / "linux-coordinate")).resolve()
+    core_binary = str(args.core_binary.resolve()) if args.core_binary else None
 
     def continue_runner(argv: list[str]) -> tuple[int, str, str]:
         import subprocess
         completed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
         return completed.returncode, completed.stdout, completed.stderr
 
-    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner)
+    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"GoalPort workbench http://{args.host}:{args.port}  core {endpoint}", flush=True)
     try:
