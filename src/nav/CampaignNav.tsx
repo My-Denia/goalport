@@ -16,6 +16,7 @@ interface CampaignNavProps {
   projectOverride?: string;
   failedOpenId?: string;
   goalListUnreadable?: boolean;
+  newGoalEnabled?: boolean;
   plansUnreadable?: boolean;
 }
 
@@ -29,7 +30,7 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, plansUnreadable = false }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -81,7 +82,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
 
       <div className="sidebar-section-title">
         <span>Goals</span>
-        <span className="count-badge" aria-label={goalListUnreadable ? "The goal list could not be read. This is not the workbench connection." : campaignListUnavailable ? "Goal list unavailable" : undefined}>
+        <span className="count-badge" aria-label={goalListUnreadable ? `The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}` : campaignListUnavailable ? "Goal list unavailable" : undefined}>
           {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
@@ -104,7 +105,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
-        {goalListUnreadable ? <p className="nav-empty" role="status">The goal list could not be read. This is not the workbench connection.</p> : null}
+        {goalListUnreadable ? <p className="nav-empty" role="status">{`The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}`}</p> : null}
         {campaignListUnavailable && !projectOverride ? (
           <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
         ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
