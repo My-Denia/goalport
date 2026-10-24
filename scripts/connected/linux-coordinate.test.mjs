@@ -565,7 +565,7 @@ test("acknowledge leaves an interrupted job unreplayed and release keeps the slo
   // The same durable request id is never admitted again, and nothing respawns.
   const replay = await invoke(f, runArgs(f, { requestId: "interrupted-one" }));
   assert.equal(replay.code, 1);
-  assert.match(replay.stderr, /This interrupted send stays unreplayed\. Start a new send; the old turn is not repeated\./);
+  assert.match(replay.stderr, /The interrupted job stays unreplayed; the same request id cannot be admitted again\./);
   assert.equal(f.launches.length, 1);
 
   const released = await invoke(f, ["release", "--job", jobId]);
