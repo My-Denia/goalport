@@ -1703,7 +1703,7 @@ function App() {
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
       acceptNextCampaign,
-      workspace: snapshot.project.workspaceRoot || "",
+      workspace: client.mode === "linux-core" ? (linuxCoordinationWorkspace || "") : (snapshot.project.workspaceRoot || ""),
       provider: "",
       message: ""
     });

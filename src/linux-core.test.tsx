@@ -212,6 +212,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeTruthy();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
     expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
