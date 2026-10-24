@@ -269,6 +269,7 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   // A first send with no Runtime chosen only proceeds when this window can assign a harness.
+  const linuxRuntimeRequired = "Coordinated goals use linux-coordinate.mjs (status, result, continue). Choose a Runtime to start a single-harness goal in this workbench.";
   const coordinationAvailable = client.mode === "electron"
     && appInfo?.coordinationConfigured === true
     && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
@@ -876,7 +877,7 @@ function App() {
       const discover = bridge?.coordinateDiscover;
       const launch = bridge?.coordinateLaunch;
       if (!coordinationAvailable || !discover || !launch) {
-        setDraftError({ sentence: "Choose a Runtime before sending." });
+        setDraftError({ sentence: client.mode === "linux-core" ? linuxRuntimeRequired : "Choose a Runtime before sending." });
         return;
       }
       const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);
@@ -2461,6 +2462,7 @@ function App() {
                     error={draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
+                    runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     backgroundConsent={backgroundConsent}
                     onBackgroundConsentChange={window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined}

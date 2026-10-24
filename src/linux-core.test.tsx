@@ -161,6 +161,34 @@ describe("Linux Core bridge", () => {
     expect((await client.snapshot()).activeCampaignId).toBe("campaign-b");
   });
 
+  it("points an empty Linux draft at the coordinated CLI and does not invent a coordination bridge", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      connection: "connected" as const,
+      activeCampaignId: "",
+      campaigns: [],
+      notices: [],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+    render(<App />);
+    expect(await screen.findByText(/linux-coordinate\.mjs/)).toBeTruthy();
+    expect(screen.getByText(/status, result, continue/)).toBeTruthy();
+    expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/home/you/project" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
+    expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
+  });
+
   it("keeps Core connected when a request is refused", async () => {
     window.__GOALPORT_LINUX_CORE__ = true;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {

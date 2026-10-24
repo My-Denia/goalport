@@ -14,11 +14,12 @@ interface DraftRuntimePickerProps {
   provider: string;
   connected: boolean;
   coordinationAvailable: boolean;
+  runtimeRequiredHint?: string;
   onSelect: (provider: string) => void;
 }
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
-function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, onSelect }: DraftRuntimePickerProps) {
+function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
   return (
     <div className="runtime-picker draft-runtime-picker">
@@ -40,7 +41,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
               <strong>{selected ? selected.name : "Choose a Runtime"}</strong>
               <small>{coordinationAvailable
                 ? "Send without picking, or pick the single-harness path."
-                : "Choose a Runtime before sending."}</small>
+                : (runtimeRequiredHint ?? "Choose a Runtime before sending.")}</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
@@ -62,6 +63,7 @@ interface DraftGoalComposerProps {
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
   coordinationAvailable: boolean;
+  runtimeRequiredHint?: string;
   workspacePlaceholder?: string;
   backgroundConsent?: boolean;
   onBackgroundConsentChange?: (enabled: boolean) => void;
@@ -78,7 +80,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, workspacePlaceholder, backgroundConsent = false, onBackgroundConsentChange, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -132,6 +134,7 @@ export function DraftGoalComposer({
           provider={draft.provider}
           connected={connected}
           coordinationAvailable={coordinationAvailable}
+          runtimeRequiredHint={runtimeRequiredHint}
           onSelect={(provider) => onChange({ ...draft, provider })}
         />
 
