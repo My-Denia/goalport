@@ -1210,14 +1210,20 @@ class LinuxCoreClient implements CoreClient {
           preview: false,
           connection: "connected",
           goalOverview: overview,
-          notices: this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Goal list read failed:") && !notice.startsWith("Goal open failed:")),
+          notices: this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Goal list read failed:")),
         });
       }
       const snapshot = resolveCoreSnapshot(envelope.snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       if (!this.viewPinned && !this.viewCampaignId && snapshot.activeCampaignId) this.viewCampaignId = snapshot.activeCampaignId;
       this.revision = typeof envelope.revision === "string" ? envelope.revision : "";
-      return this.commitSnapshot(generation, { ...snapshot, preview: false, goalOverview: overview });
+      const openFailure = this.lastSnapshot.notices.filter((notice) => notice.startsWith("Goal open failed:"));
+      return this.commitSnapshot(generation, {
+        ...snapshot,
+        preview: false,
+        goalOverview: overview,
+        notices: [...openFailure, ...(snapshot.notices ?? []).filter((notice) => !notice.startsWith("Goal open failed:"))],
+      });
     } catch (error) {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       const message = errorMessage(error);
