@@ -473,10 +473,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!booted || draftGoal || selectedPlanId || snapshot.activeCampaignId.trim() || plans.length === 0) return;
+    if (!booted || plansUnreadable || draftGoal || selectedPlanId || snapshot.activeCampaignId.trim() || plans.length === 0) return;
     const newest = plans[0];
     if (newest) setSelectedPlanId(newest.requestId);
-  }, [booted, draftGoal, selectedPlanId, snapshot.activeCampaignId, plans]);
+  }, [booted, plansUnreadable, draftGoal, selectedPlanId, snapshot.activeCampaignId, plans]);
 
   // One discovery per runtime-less draft open powers the harness-access panel.
   // This writes only panel state: a discovery that resolves while the user is
