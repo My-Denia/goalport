@@ -2286,7 +2286,7 @@ function App() {
     const previous = document.title;
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
-    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this goal unreplayed.";
+    const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this unreplayed.";
     document.title = pending || linuxHoldLine ? linuxCoordinationLine : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : leftoverSlotLine ? (short ? `${short} — slot held` : leftoverSlotLine) : (short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : linuxShowingFreshDraft ? "New goal" : "GoalPort");
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld, linuxActionBusy, leftUnreplayed, backgroundConsent, linuxDiscoverChecked]);
@@ -2750,7 +2750,7 @@ function App() {
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
-                      setLinuxCoordinationLine("Leaving this goal unreplayed.");
+                      setLinuxCoordinationLine("Leaving this unreplayed.");
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
