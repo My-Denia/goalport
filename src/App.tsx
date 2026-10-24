@@ -3019,7 +3019,7 @@ function App() {
                       }).then(async (response) => response.json().catch(() => null)).then((body) => {
                         if (!body || (body as { ok?: unknown }).ok === false) {
                           const error = (body as { error?: unknown } | null)?.error;
-                          const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send is not ready in this GoalPort window yet.";
+                          const sentence = typeof error === "string" && error.trim() ? error.trim() : "Background Send was not allowed.";
                           grantError.current = true;
                           linuxHoldLineRef.current = true;
                           rememberFailure(sentence);
