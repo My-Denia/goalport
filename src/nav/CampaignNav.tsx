@@ -89,6 +89,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             type="button"
             disabled={runningJob.locked}
             title={runningJob.workspace ? `${runningJob.goal} — ${runningJob.stateLabel} — ${runningJob.workspace}` : `${runningJob.goal} — ${runningJob.stateLabel}`}
+            aria-label={runningJob.workspace ? `${runningJob.goal}, ${runningJob.stateLabel}, ${runningJob.workspace}` : undefined}
             onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
