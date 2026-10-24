@@ -2577,6 +2577,7 @@ function App() {
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : client.mode === "linux-core" && linuxCoordinationGoal ? {
             goal: linuxCoordinationGoal,
+            workspace: linuxCoordinationWorkspace || undefined,
             viewing: !linuxShowingFreshDraft,
             locked: linuxActionBusy,
             stateLabel: (linuxActionBusy || linuxGranting) && (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send.") ? linuxCoordinationLine : workerGone ? "Worker gone" : sidebarUnconfirmed ? "Not confirmed" : leftUnreplayed ? "Unreplayed" : linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy ? "Slot held" : linuxHoldLine || sidebarFailed.current ? "Failed" : linuxCoordinationLive ? "Running" : "Finished",
