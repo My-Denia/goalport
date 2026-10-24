@@ -2598,6 +2598,7 @@ function App() {
     planning && review && plan && check
       ? `${planning} planned and ${review} checked — the harnesses you authorized that can run.`
       : null;
+  const planActionsLocked = client.mode === "linux-core" && (linuxActionBusy || linuxGranting);
   const unblockAvailable = Boolean(window.goalportCore?.coordinationUnblock);
 
   if (bootstrap && bootstrap.phase !== "done" && bootstrap.phase !== "checking") {
@@ -2773,14 +2774,14 @@ function App() {
                 planningQuota={selectedPlan.planningQuota}
                 reviewQuota={selectedPlan.reviewQuota}
                 savedAt={selectedPlan.savedAt}
-                onRevise={selectedPlan.verdict === "revise" ? () => handleRevise(selectedPlan) : undefined}
+                onRevise={planActionsLocked ? undefined : selectedPlan.verdict === "revise" ? () => handleRevise(selectedPlan) : undefined}
                 environmentBlocked={selectedPlan.environmentBlocked ?? null}
                 environmentAlternatives={environmentAlternatives(selectedPlan.environmentBlocked)}
-                onSendAgainWithout={selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
+                onSendAgainWithout={planActionsLocked ? undefined : selectedPlan.environmentBlocked ? () => handleSendAgainWithout(selectedPlan) : undefined}
                 roundEvents={selectedPlan.roundEvents ?? []}
                 feedbackHistory={selectedPlan.feedbackHistory ?? []}
                 planRevisionHistory={selectedPlan.planRevisionHistory ?? []}
-                onUseAgain={selectedPlan.environmentBlocked && unblockAvailable
+                onUseAgain={planActionsLocked ? undefined : selectedPlan.environmentBlocked && unblockAvailable
                   ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId, {
                     workspacePath: selectedPlan.workspacePath,
                     goal: selectedPlan.goal,
@@ -2796,9 +2797,9 @@ function App() {
                 writeBudget={selectedPlanOverlay && selectedPlanOverlay.maxWriteTurns !== null
                   ? { remaining: selectedPlanOverlay.writeTurnsLeft, maxTurns: selectedPlanOverlay.maxWriteTurns } : null}
                 scopeExhausted={selectedPlanOverlay?.exhausted === true}
-                onAllowMoreTurns={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
-                onChangeAccess={selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
-                onStopAllowing={selectedPlanOverlay ? () => { void handleStopAllowing(); } : undefined}
+                onAllowMoreTurns={planActionsLocked ? undefined : selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
+                onChangeAccess={planActionsLocked ? undefined : selectedPlanOverlay ? () => handleChangeHarnessAccess(selectedPlan, true) : undefined}
+                onStopAllowing={planActionsLocked ? undefined : selectedPlanOverlay ? () => { void handleStopAllowing(); } : undefined}
               />
             </div>
           ) : draftActive ? (
