@@ -2683,7 +2683,7 @@ function App() {
             viewing: backgroundView,
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (client.mode === "linux-core" && linuxCoordinationGoal) { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); setBackgroundView(false); return; } if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
+          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (client.mode === "linux-core" && linuxCoordinationGoal) { setSelectedPlanId(null); linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); setBackgroundView(false); return; } if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
