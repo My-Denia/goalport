@@ -420,7 +420,7 @@ function App() {
   // close the draft: explicit navigation, Discard, or Core creating/moving
   // to a conversation (the snapshot-authority effect above).
   const [confirmedEmptyProfile, setConfirmedEmptyProfile] = useState(false);
-  const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(savedAdmissionUnsaid);
+  const [linuxCoordinationLine, setLinuxCoordinationLine] = useState<string | null>(savedAdmissionUnsaid() ?? (typeof sessionStorage !== "undefined" && sessionStorage.getItem("goalport.linux.leftSlot") === "1" ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : null));
   const workerGone = linuxCoordinationLine === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." || Boolean(linuxCoordinationLine?.includes("The worker is gone."));
   const [linuxCoordinationDetail, setLinuxCoordinationDetail] = useState<string | null>(null);
   const [linuxCoordinationChange, setLinuxCoordinationChange] = useState<string | null>(null);
@@ -2362,6 +2362,13 @@ function App() {
         const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
         const checked = typeof record.reviewHarness === "string" ? record.reviewHarness : "another";
         setLinuxCoordinationRequest(typeof record.requestId === "string" ? record.requestId : null);
+        if (leftUnconfirmedSlot.current || (typeof record.requestId === "string" && leftRequestIds.current.has(record.requestId))) {
+          if (typeof record.requestId === "string") leftRequestIds.current.add(record.requestId);
+          setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+          setLinuxCoordinationDetail(null);
+          setLinuxCoordinationChange(null);
+          return;
+        }
         const outcome = typeof record.outcome === "string" && record.outcome.trim() ? record.outcome.trim() : null;
         setLinuxCoordinationLine(outcome
           ? `${record.verdict}. ${outcome}`
