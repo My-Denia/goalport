@@ -2704,7 +2704,7 @@ function App() {
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
                     inputsLocked={client.mode === "linux-core" && linuxActionBusy}
-                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxHoldLine && !leftUnreplayed ? "This goal's exit is not confirmed, so another goal cannot start yet." : leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
+                    coordinationResult={client.mode === "linux-core" && (linuxActionBusy || linuxHoldLine || !linuxShowingFreshDraft) ? (sidebarUnconfirmed && !linuxActionBusy && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationDetail : null}
                     goalChange={client.mode === "linux-core" && !linuxShowingFreshDraft && !linuxCoordinationLive && !sidebarUnconfirmed ? linuxCoordinationChange : null}
@@ -2776,8 +2776,8 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
-                      if (linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy) return;
+                    onContinueCoordination={client.mode === "linux-core" && !sidebarUnconfirmed && !linuxHoldLine && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest) ? () => {
+                      if (sidebarUnconfirmed || linuxHoldLine || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxActionBusy) return;
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
