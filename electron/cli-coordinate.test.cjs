@@ -186,6 +186,22 @@ test("a process that never starts can be tried once later, and a started turn ca
   }
 });
 
+test("a POSIX Pi install is used when the pi command is not on PATH", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-pi-home-"));
+  try {
+    const launcher = path.join(home, ".pi", "agent", "bin", "pi");
+    fs.mkdirSync(path.dirname(launcher), { recursive: true });
+    fs.writeFileSync(launcher, "#!/bin/sh\n");
+    const found = launchSpec("pi", ["--offline", "--list-models"], { HOME: home, PATH: "/nonexistent" }, "linux");
+    assert.equal(found.file, launcher);
+    assert.deepEqual(found.args, ["--offline", "--list-models"]);
+    const missing = launchSpec("pi", ["--offline"], { HOME: path.join(home, "empty"), PATH: "/nonexistent" }, "linux");
+    assert.equal(missing.file, "pi");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
 test("a Windows cmd shim is quoted and launched through cmd.exe", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cli-"));
   try {

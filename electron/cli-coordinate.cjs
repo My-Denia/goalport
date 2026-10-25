@@ -99,8 +99,29 @@ function piWindowsLaunch(env = process.env, platform = process.platform, fsApi =
   return { file: path.resolve(nodeExe), prefixArgs: [cliJs] };
 }
 
+// Pi's installer puts the launcher in ~/.pi/agent/bin and does not add that
+// directory to the PATH of a non-interactive process. A bare `pi` then looks
+// missing even though the install is there. Windows keeps its PATH lookup;
+// this fallback is the POSIX launcher, which is an executable shell script.
+function piInstallLauncher(env = process.env, platform = process.platform, fsApi = fs) {
+  if (platform === "win32") return null;
+  const home = typeof env.HOME === "string" && env.HOME ? env.HOME : "";
+  if (!home) return null;
+  const candidate = path.join(home, ".pi", "agent", "bin", "pi");
+  try {
+    if (fsApi.statSync(candidate).isFile()) return candidate;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function launchSpec(file, args, env = process.env, platform = process.platform) {
-  const resolved = resolveCommand(file, env, platform);
+  let resolved = resolveCommand(file, env, platform);
+  if (file === "pi" && !path.isAbsolute(resolved)) {
+    const installed = piInstallLauncher(env, platform);
+    if (installed) resolved = installed;
+  }
   if (platform === "win32" && /\.(cmd|bat)$/i.test(resolved)) {
     const payload = [cmdEscapeCommand(resolved), ...args.map(cmdEscapeArgument)].join(" ");
     return {
@@ -133,7 +154,7 @@ function killProcessTree(child, options = {}) {
 }
 
 function defaultExec(file, args, options = {}) {
-  const spec = launchSpec(file, args);
+  const spec = launchSpec(file, args, options.env ?? process.env);
   return new Promise((resolve, reject) => {
     let child;
     try {
