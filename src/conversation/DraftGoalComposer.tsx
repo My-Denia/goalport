@@ -261,7 +261,7 @@ export function DraftGoalComposer({
         ) : null}
         {keepRunningHint ? <p className="draft-hint">{keepRunningHint}</p> : null}
         <div className="dialog-actions">
-          {onStopCoordination ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onStopCoordination}>{coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." ? coordinationResult : stopLabel}</button> : null}
+          {onStopCoordination ? <button className="button button-small button-outline" type="button" disabled={coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop."} onClick={onStopCoordination}>{coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." ? coordinationResult : stopLabel}</button> : null}
           {onLeaveGoal ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onLeaveGoal}>{coordinationResult === "Leaving this unreplayed." ? coordinationResult : "Leave it unreplayed"}</button> : null}
           {onContinueCoordination ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onContinueCoordination}>{coordinationResult === "Continuing." ? coordinationResult : stoppedResult ? "Continue as a new send" : coordinationResult?.startsWith("Continue returned without saying the goal was admitted.") ? "Try again" : addressGone ? "Continue the goal on screen" : "Continue this goal"}</button> : null}
           {activeGoalTitle ? (

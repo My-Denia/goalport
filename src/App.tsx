@@ -2395,9 +2395,9 @@ function App() {
       }).catch(() => { /* a failed read is not a missing goal; keep the last line */ }).finally(() => { inFlight = false; });
     };
     refresh();
-    const timer = window.setInterval(refresh, linuxCoordinationLive ? 2000 : 8000);
+    const timer = window.setInterval(refresh, linuxCoordinationLive || linuxActionBusy ? 2000 : 8000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [client.mode, linuxCoordinationLive]);
+  }, [client.mode, linuxCoordinationLive, linuxActionBusy]);
 
   const leftoverSlotLine = client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy
     ? (linuxCoordinationRequest && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !leftRequestIds.current.has(linuxCoordinationRequest)
