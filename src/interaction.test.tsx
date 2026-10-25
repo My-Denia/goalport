@@ -288,6 +288,37 @@ describe("modal focus never fights the snapshot poll (RC1 regression)", () => {
 });
 
 describe("empty-state and goal creation (HARD-02/03)", () => {
+  it("keeps empty-sidebar prose out of the collapsed rail", async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    try {
+      const empty = { ...DEMO_SNAPSHOT, campaigns: [], activeCampaignId: "", productConversation: null };
+      mountElectron(empty);
+      expect(await screen.findByText("No goals yet. Start one from the top bar.")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: /collapse navigation/i }));
+      expect(document.querySelector(".nav-empty")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /expand navigation/i }));
+      expect(screen.getByText("No goals yet. Start one from the top bar.")).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
+    }
+  });
+
+  it("names a collapsed goal without replacing its expanded status", async () => {
+    const previousWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    try {
+      mountElectron(DEMO_SNAPSHOT);
+      const open = await screen.findByRole("button", { name: /Build a durable preview/ });
+      expect(open.getAttribute("aria-label")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /collapse navigation/i }));
+      const closed = screen.getByRole("button", { name: "Build a durable preview" });
+      expect(closed.getAttribute("aria-label")).toBe("Build a durable preview");
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
+    }
+  });
+
   it("opens a narrow first-use form without the navigation covering it", async () => {
     const previousWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 560 });
@@ -308,6 +339,9 @@ describe("empty-state and goal creation (HARD-02/03)", () => {
     const empty = { ...DEMO_SNAPSHOT, campaigns: [], activeCampaignId: "", activeTask: { ...DEMO_SNAPSHOT.activeTask, id: "", title: "No task selected" }, timeline: [], decisions: [] };
     mountElectron(empty);
     expect(await screen.findByRole("textbox", { name: /message composer/i })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start a goal" }).closest(".timeline-scroll")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start a goal" }).closest(".draft-composer")).toBeNull();
+    expect(screen.getByRole("form", { name: "Start a goal" }).closest(".composer-dock")).toBeTruthy();
     expect(screen.getByRole("button", { name: /send message/i })).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: /goal name|goal title/i })).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();

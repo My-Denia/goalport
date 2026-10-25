@@ -235,7 +235,9 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Continue this goal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue this goal" }).closest(".dialog-actions")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".timeline-scroll")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".draft-composer")).toBeNull();
     expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
     expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
   });

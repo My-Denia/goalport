@@ -98,7 +98,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
           {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
-      {navigationLockedReason ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
+      {!collapsed && navigationLockedReason ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
 
       <div className="campaign-list">
         {runningJob ? (
@@ -118,11 +118,11 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
-        {goalListUnreadable ? <p className="nav-empty" role="status">{`The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}`}</p> : null}
+        {goalListUnreadable ? (collapsed ? null : <p className="nav-empty" role="status">{`The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}`}</p>) : null}
         {campaignListUnavailable && !projectOverride ? (
-          <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
+          collapsed ? null : <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
         ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
-          <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
+          collapsed ? null : <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
         ) : overview ? (
           overview.goals.map((goal) => {
             const active = !backgroundOwnsView && goal.campaignId === snapshot.activeCampaignId;
@@ -152,6 +152,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
                     title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open. Not the workbench. — ${goal.workspaceRoot}` : goal.workspaceRoot}
+                    aria-label={collapsed ? goal.title : undefined}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
@@ -211,6 +212,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
                     title={failedOpenId === campaign.id ? `${titleFor(campaign.id, campaign.title)} — Could not open. Not the workbench.` : collapsed ? titleFor(campaign.id, campaign.title) : undefined}
+                    aria-label={collapsed ? titleFor(campaign.id, campaign.title) : undefined}
                     disabled={navigationLocked}
                     onClick={() => { if (!navigationLocked) onSelectCampaign(campaign.id); }}
                   >
@@ -244,8 +246,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         )}
       </div>
 
-      {plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
-      {navigationLockedReason && plans.length > 0 ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
+      {!collapsed && plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
+      {!collapsed && navigationLockedReason && plans.length > 0 ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
       {plans.length > 0 ? (
         <>
           <div className="sidebar-section-title">

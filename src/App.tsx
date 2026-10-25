@@ -26,7 +26,7 @@ import { TitleBar } from "./shell/TitleBar";
 import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
-import { DraftGoalComposer, type GoalDraftValue } from "./conversation/DraftGoalComposer";
+import { DraftGoalComposer, GoalStatusHeading, type GoalDraftValue } from "./conversation/DraftGoalComposer";
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
@@ -2414,7 +2414,7 @@ function App() {
     const coreReadFailed = snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:"));
     const admissionUnsaidLine = lineSaysAdmissionUnsaid(linuxCoordinationLine);
     const addressNotice = !admissionUnsaidLine && !linuxActionBusy && !linuxGranting && !sidebarUnconfirmed && !leftUnreplayed && !linuxLeftoverHeld && !linuxHoldLine && !workerGone && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !coreReadFailed && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? activeNotice.sentence : "";
-    document.title = selectedPlan && (linuxActionBusy || linuxGranting) ? (pending ? linuxCoordinationLine : "Wait for this to finish.") : (addressNotice === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : addressNotice) || (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : linuxCoordinationLine?.includes("No further turn was sent.") ? (short ? `${short} — stopped` : "Stopped. No further turn was sent.") : pending ? linuxCoordinationLine : !linuxShowingFreshDraft && leftUnreplayed ? (short ? `${short} — unreplayed` : "The interrupted job stays unreplayed; the same request id cannot be admitted again.") : linuxHoldLine ? linuxCoordinationLine : !linuxShowingFreshDraft && sidebarUnconfirmed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : short ? `${short} — not confirmed` : "This goal's exit is not confirmed.") : leftoverSlotLine ? (short ? `${short} — slot held` : leftoverSlotLine) : !linuxShowingFreshDraft && sidebarFailed.current && failedLine.current ? failedLine.current : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : selectedPlan?.verdict === "stopped" ? "Stopped. No further turn was sent." : (short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : linuxShowingFreshDraft ? "New goal" : "GoalPort"));
+    document.title = (selectedPlan && (linuxActionBusy || linuxGranting) ? (pending ? linuxCoordinationLine : "Wait for this to finish.") : (addressNotice === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : addressNotice) || (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : linuxCoordinationLine?.includes("No further turn was sent.") ? (short ? `${short} — stopped` : "Stopped. No further turn was sent.") : pending ? linuxCoordinationLine : !linuxShowingFreshDraft && leftUnreplayed ? (short ? `${short} — unreplayed` : "The interrupted job stays unreplayed; the same request id cannot be admitted again.") : linuxHoldLine ? linuxCoordinationLine : !linuxShowingFreshDraft && sidebarUnconfirmed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : short ? `${short} — not confirmed` : "This goal's exit is not confirmed.") : leftoverSlotLine ? (short ? `${short} — slot held` : leftoverSlotLine) : !linuxShowingFreshDraft && sidebarFailed.current && failedLine.current ? failedLine.current : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : selectedPlan?.verdict === "stopped" ? "Stopped. No further turn was sent." : (short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : linuxShowingFreshDraft ? "New goal" : "GoalPort"))) ?? "GoalPort";
     return () => { document.title = previous; };
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld, linuxActionBusy, leftUnreplayed, backgroundConsent, linuxDiscoverChecked, activeNotice, snapshot, selectedPlan]);
 
@@ -2807,91 +2807,8 @@ function App() {
                 onStopAllowing={planActionsLocked ? undefined : selectedPlanOverlay ? () => { void handleStopAllowing(); } : undefined}
               />
             </div>
-          ) : draftActive ? (
-            <div className="timeline-scroll" tabIndex={-1} aria-label={backgroundConsent && linuxDiscoverChecked && !snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:")) && !(linuxActionBusy || linuxGranting || sidebarUnconfirmed || leftUnreplayed || linuxLeftoverHeld || linuxHoldLine || workerGone || linuxHarnessSentence || linuxConsentMissing) && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? (activeNotice.sentence === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : activeNotice.sentence) : lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : linuxCoordinationLine?.includes("No further turn was sent.") ? (linuxCoordinationGoal ? `${linuxCoordinationGoal} — stopped` : "Stopped. No further turn was sent.") : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && leftUnreplayed ? (linuxCoordinationGoal ? `${linuxCoordinationGoal} — unreplayed` : "The interrupted job stays unreplayed; the same request id cannot be admitted again.") : client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && sidebarUnconfirmed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : linuxCoordinationGoal ? `${linuxCoordinationGoal} — not confirmed` : "This goal's exit is not confirmed.") : leftoverSlotLine ? (client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal ? `${linuxCoordinationGoal} — slot held` : leftoverSlotLine) : client.mode === "linux-core" && !linuxShowingFreshDraft && sidebarFailed.current && failedLine.current ? failedLine.current : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : (leftUnreplayed && !linuxShowingFreshDraft ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal")}>
-              {coordination ? (
-                <CoordinationStatus
-                  goal={draftGoal?.message}
-                  planningHarness={coordination.planningHarness}
-                  reviewHarness={coordination.reviewHarness}
-                  planText={coordination.planText}
-                  reviewText={coordination.reviewText}
-                  executionText={coordination.executionText}
-                  auditText={coordination.auditText}
-                  executionHarness={coordination.executionHarness}
-                  auditHarness={coordination.auditHarness}
-                  verdict={coordination.verdict}
-                  stopReason={coordination.stopReason}
-                  planningQuota={coordination.planningQuota}
-                  reviewQuota={coordination.reviewQuota}
-                  environmentBlocked={coordination.environmentBlocked ?? null}
-                  environmentAlternatives={environmentAlternatives(coordination.environmentBlocked)}
-                  onSendAgainWithout={() => handleSendAgainWithout({
-                    requestId: draftGoal?.requestId ?? "",
-                    goal: draftGoal?.message ?? "",
-                    workspacePath: draftGoal?.workspace ?? "",
-                    ...coordination,
-                    savedAt: null,
-                  })}
-                  roundEvents={coordination.roundEvents ?? []}
-                  feedbackHistory={coordination.feedbackHistory ?? []}
-                  planRevisionHistory={coordination.planRevisionHistory ?? []}
-                  onUseAgain={coordination.environmentBlocked && unblockAvailable
-                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId, {
-                      workspacePath: draftGoal?.workspace ?? "",
-                      goal: draftGoal?.message ?? "",
-                      harness: coordination.environmentBlocked!.harness ?? coordination.environmentBlocked!.instanceId,
-                    }); }
-                    : undefined}
-                  roundSummary={draftOverlay
-                    ? roundSummaryLine(coordination.planningHarness, coordination.reviewHarness, coordination.planText, coordination.reviewText)
-                    : null}
-                  budget={draftOverlay && draftOverlay.turnsLeft !== null && draftOverlay.maxTurns !== null
-                    ? { remaining: draftOverlay.turnsLeft, maxTurns: draftOverlay.maxTurns }
-                    : null}
-                  writeBudget={draftOverlay && draftOverlay.maxWriteTurns !== null
-                    ? { remaining: draftOverlay.writeTurnsLeft, maxTurns: draftOverlay.maxWriteTurns } : null}
-                  scopeExhausted={draftOverlay?.exhausted === true}
-                  onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
-                  onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
-                  onStopAllowing={draftOverlay ? () => { void handleStopAllowing(); } : undefined}
-                />
-              ) : null}
-              {draftGoal?.revision ? (
-                <p className="revision-note">
-                  {draftGoal.revision.previousExecutionAudit || draftGoal.revision.previousExecutionReport
-                    ? "Continuing from a completed execution round. The earlier plan, changes and independent audit are below."
-                    : "Revising a saved plan. The earlier plan stays in Plans."}
-                  {draftGoal.revision.previousExecutionAudit
-                    ? `\n\nThe independent audit said:\n${draftGoal.revision.previousExecutionAudit}`
-                    : draftGoal.revision.reviewText
-                      ? `\n\nThe check said:\n${draftGoal.revision.reviewText}`
-                      : ""}
-                </p>
-              ) : null}
-              {draftGoal?.readyNote ? (
-                <p className="revision-note">{draftGoal.readyNote}</p>
-              ) : null}
-              {draftGoal?.avoid ? (
-                <p className="revision-note">
-                  This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
-                  {draftGoal.avoid.startedAt ? ` in the round started ${formatTimestamp(draftGoal.avoid.startedAt)}` : ""}.
-                </p>
-              ) : null}
-              {roundProgress !== null && roundProgress.requestId === draftGoal?.requestId ? (
-                <CoordinationProgress
-                  failures={roundProgress.failures}
-                  activity={roundProgress.activity}
-                  repair={roundProgress.repair === true}
-                  planRevision={roundProgress.planRevision === true}
-                  remaining={scopeMirror?.remaining ?? null}
-                  maxTurns={scopeMirror?.maxTurns ?? null}
-                  writeRemaining={scopeMirror?.write?.remaining ?? null}
-                  maxWriteTurns={scopeMirror?.write?.maxTurns ?? null}
-                  onStopAllowing={scopeBridgeReady ? () => { void handleStopAllowing(); } : undefined}
-                />
-              ) : (
-                <>
+) : draftActive ? (() => {
+            const draftComposer = (
                   <DraftGoalComposer
                     draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || "", provider: "", message: "" }}
                     runtimes={snapshot.runtimes}
@@ -3164,6 +3081,95 @@ function App() {
                     onSubmit={handleDraftSend}
                     onDiscard={handleDiscardDraft}
                   />
+            );
+            const drafting = !(roundProgress !== null && roundProgress.requestId === draftGoal?.requestId);
+            return (
+            <>
+            <div className="timeline-scroll" tabIndex={-1} aria-label={(backgroundConsent && linuxDiscoverChecked && !snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:")) && !(linuxActionBusy || linuxGranting || sidebarUnconfirmed || leftUnreplayed || linuxLeftoverHeld || linuxHoldLine || workerGone || linuxHarnessSentence || linuxConsentMissing) && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? (activeNotice.sentence === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : activeNotice.sentence) : lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : linuxCoordinationLine?.includes("No further turn was sent.") ? (linuxCoordinationGoal ? `${linuxCoordinationGoal} — stopped` : "Stopped. No further turn was sent.") : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && leftUnreplayed ? (linuxCoordinationGoal ? `${linuxCoordinationGoal} — unreplayed` : "The interrupted job stays unreplayed; the same request id cannot be admitted again.") : client.mode === "linux-core" && linuxHoldLine ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && sidebarUnconfirmed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : linuxCoordinationGoal ? `${linuxCoordinationGoal} — not confirmed` : "This goal's exit is not confirmed.") : leftoverSlotLine ? (client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal ? `${linuxCoordinationGoal} — slot held` : leftoverSlotLine) : client.mode === "linux-core" && !linuxShowingFreshDraft && sidebarFailed.current && failedLine.current ? failedLine.current : client.mode === "linux-core" && linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : client.mode === "linux-core" && linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : (leftUnreplayed && !linuxShowingFreshDraft ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && sidebarUnconfirmed ? `${linuxCoordinationGoal} — not confirmed` : client.mode === "linux-core" && !linuxShowingFreshDraft && linuxCoordinationGoal && !leftUnreplayed ? linuxCoordinationGoal : "New goal")) ?? "New goal"}>
+              {drafting ? <GoalStatusHeading {...draftComposer.props} /> : null}
+              {coordination ? (
+                <CoordinationStatus
+                  goal={draftGoal?.message}
+                  planningHarness={coordination.planningHarness}
+                  reviewHarness={coordination.reviewHarness}
+                  planText={coordination.planText}
+                  reviewText={coordination.reviewText}
+                  executionText={coordination.executionText}
+                  auditText={coordination.auditText}
+                  executionHarness={coordination.executionHarness}
+                  auditHarness={coordination.auditHarness}
+                  verdict={coordination.verdict}
+                  stopReason={coordination.stopReason}
+                  planningQuota={coordination.planningQuota}
+                  reviewQuota={coordination.reviewQuota}
+                  environmentBlocked={coordination.environmentBlocked ?? null}
+                  environmentAlternatives={environmentAlternatives(coordination.environmentBlocked)}
+                  onSendAgainWithout={() => handleSendAgainWithout({
+                    requestId: draftGoal?.requestId ?? "",
+                    goal: draftGoal?.message ?? "",
+                    workspacePath: draftGoal?.workspace ?? "",
+                    ...coordination,
+                    savedAt: null,
+                  })}
+                  roundEvents={coordination.roundEvents ?? []}
+                  feedbackHistory={coordination.feedbackHistory ?? []}
+                  planRevisionHistory={coordination.planRevisionHistory ?? []}
+                  onUseAgain={coordination.environmentBlocked && unblockAvailable
+                    ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId, {
+                      workspacePath: draftGoal?.workspace ?? "",
+                      goal: draftGoal?.message ?? "",
+                      harness: coordination.environmentBlocked!.harness ?? coordination.environmentBlocked!.instanceId,
+                    }); }
+                    : undefined}
+                  roundSummary={draftOverlay
+                    ? roundSummaryLine(coordination.planningHarness, coordination.reviewHarness, coordination.planText, coordination.reviewText)
+                    : null}
+                  budget={draftOverlay && draftOverlay.turnsLeft !== null && draftOverlay.maxTurns !== null
+                    ? { remaining: draftOverlay.turnsLeft, maxTurns: draftOverlay.maxTurns }
+                    : null}
+                  writeBudget={draftOverlay && draftOverlay.maxWriteTurns !== null
+                    ? { remaining: draftOverlay.writeTurnsLeft, maxTurns: draftOverlay.maxWriteTurns } : null}
+                  scopeExhausted={draftOverlay?.exhausted === true}
+                  onAllowMoreTurns={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
+                  onChangeAccess={draftOverlay ? () => handleChangeHarnessAccess(null, true) : undefined}
+                  onStopAllowing={draftOverlay ? () => { void handleStopAllowing(); } : undefined}
+                />
+              ) : null}
+              {draftGoal?.revision ? (
+                <p className="revision-note">
+                  {draftGoal.revision.previousExecutionAudit || draftGoal.revision.previousExecutionReport
+                    ? "Continuing from a completed execution round. The earlier plan, changes and independent audit are below."
+                    : "Revising a saved plan. The earlier plan stays in Plans."}
+                  {draftGoal.revision.previousExecutionAudit
+                    ? `\n\nThe independent audit said:\n${draftGoal.revision.previousExecutionAudit}`
+                    : draftGoal.revision.reviewText
+                      ? `\n\nThe check said:\n${draftGoal.revision.reviewText}`
+                      : ""}
+                </p>
+              ) : null}
+              {draftGoal?.readyNote ? (
+                <p className="revision-note">{draftGoal.readyNote}</p>
+              ) : null}
+              {draftGoal?.avoid ? (
+                <p className="revision-note">
+                  This send will not use {draftGoal.avoid.harness}, which could not run its tools on this machine
+                  {draftGoal.avoid.startedAt ? ` in the round started ${formatTimestamp(draftGoal.avoid.startedAt)}` : ""}.
+                </p>
+              ) : null}
+              {roundProgress !== null && roundProgress.requestId === draftGoal?.requestId ? (
+                <CoordinationProgress
+                  failures={roundProgress.failures}
+                  activity={roundProgress.activity}
+                  repair={roundProgress.repair === true}
+                  planRevision={roundProgress.planRevision === true}
+                  remaining={scopeMirror?.remaining ?? null}
+                  maxTurns={scopeMirror?.maxTurns ?? null}
+                  writeRemaining={scopeMirror?.write?.remaining ?? null}
+                  maxWriteTurns={scopeMirror?.write?.maxTurns ?? null}
+                  onStopAllowing={scopeBridgeReady ? () => { void handleStopAllowing(); } : undefined}
+                />
+              ) : (
+                <>
                   {draftGoal && draftGoal.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null ? (
                     <AuthorizationPanel
                       backgroundConsent={backgroundConsent}
@@ -3217,7 +3223,10 @@ function App() {
                 </>
               )}
             </div>
-          ) : confirmedEmptyProfile && !hasGoal ? (
+              {drafting ? <div className="composer-dock">{draftComposer}</div> : null}
+            </>
+            );
+          })() : confirmedEmptyProfile && !hasGoal ? (
             <section className="empty-goal" aria-label="No goal yet">
               <h2>No goal open</h2>
               <p>Start one when you are ready. Nothing is saved until you send it.</p>
