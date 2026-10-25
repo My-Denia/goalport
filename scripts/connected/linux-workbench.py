@@ -352,35 +352,40 @@ def leftover_left_job(data_dir: Path | None) -> str | None:
     return job_id
 
 
-def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else leftover_left_job(data_dir)
     if not isinstance(job_id, str) or not job_id:
         return None, "No coordinated goal to leave."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The goal id is invalid, so it was not left."
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "it was not left.")
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "it was not left.", database)
     if error:
         return None, error
     return [*prefix, "acknowledge", "--job", job_id], None
 
 
-def coordination_grant_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "Background Send was not allowed.")
+def coordination_grant_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "Background Send was not allowed.", database)
     if error:
         return None, error
     return [*prefix, "grant-access"], None
 
 
-def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None, refused: str = "nothing was admitted.") -> tuple[list[str] | None, str | None]:
+def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None, refused: str = "nothing was admitted.", database: str | None = None) -> tuple[list[str] | None, str | None]:
     if not endpoint:
         return None, f"The Core socket is required, so {refused}"
     if not core_binary or not (core_binary.startswith("/") or Path(core_binary).is_absolute()):
         return None, f"The Core executable is required: pass --core-binary with an absolute path, so {refused}"
-    return [
+    argv = [
         "node", str(repo_root / "scripts" / "connected" / "linux-coordinate.mjs"),
         "--data-dir", str(data_dir), "--pipe", endpoint, "--core-binary", core_binary,
-    ], None
+    ]
+    # The admission check compares this path with the database Core was started
+    # with. The profile directory is not that database when they differ.
+    if database:
+        argv.extend(["--database", database])
+    return argv, None
 
 
 KEEP_RUNNING_SENTENCE = "Keep working after closing must be explicitly selected."
@@ -397,7 +402,7 @@ def checked_instances(instances: object) -> tuple[str | None, str | None]:
     return ",".join(names), None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
     found = latest_coordination_record(data_dir)
@@ -407,7 +412,7 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
         return None, "No saved coordinated goal to continue."
     if request_id in left_request_ids(data_dir):
         return None, "The interrupted job stays unreplayed; the same request id cannot be admitted again."
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, database=database)
     if error:
         return None, error
     saved_goal = record.get("goal") if isinstance(record.get("goal"), str) and record.get("goal") else "Continue the saved goal"
@@ -434,7 +439,7 @@ def expand_workspace(workspace: str) -> str:
     return workspace
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
@@ -446,7 +451,7 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
         return None, "The workspace must be an absolute path, so nothing was admitted."
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary)
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, database=database)
     if error:
         return None, error
     argv = [*prefix, "run", "--goal", goal.strip(), "--workspace", workspace, "--background"]
@@ -460,20 +465,20 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     return argv, None
 
 
-def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else None
     if not isinstance(job_id, str) or not job_id:
         return None, "No running coordinated goal to stop."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The running goal id is invalid, so nothing was stopped."
-    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.")
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.", database)
     if error:
         return None, error
     return [*prefix, "stop", "--job", job_id], None
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None):
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -534,7 +539,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             message_type = request.get("messageType") or request.get("message_type")
             if message_type == "coordination_discover":
-                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "the signed-in harnesses could not be checked.")
+                prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "the signed-in harnesses could not be checked.", database)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -545,7 +550,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_acknowledge":
-                argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary)
+                argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary, database)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -557,7 +562,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "error": None if code == 0 else (failure or "The job could not be left."), "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_grant":
-                prefix, error = coordination_grant_command(coordination_data, ROOT, endpoint, core_binary)
+                prefix, error = coordination_grant_command(coordination_data, ROOT, endpoint, core_binary, database)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -577,7 +582,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"),
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"), database,
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -587,7 +592,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 left_job = leftover_left_job(coordination_data)
                 if left_job:
-                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.")
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.", database)
                     if error:
                         self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                         return
@@ -602,7 +607,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_stop":
-                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary)
+                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -614,7 +619,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             if message_type == "coordination_continue":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"))
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database)
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -626,7 +631,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 left_job = leftover_left_job(coordination_data)
                 if left_job:
-                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.")
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "nothing was sent.", database)
                     if error:
                         self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                         return
@@ -678,6 +683,7 @@ def main(argv=None) -> int:
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--coordination-data", type=Path, default=None, help="Profile directory. Defaults to ~/.goalport/linux-coordinate, the same place as the CLI.")
     parser.add_argument("--core-binary", type=Path, default=None, help="Absolute goalport-core executable used when the page starts or continues a goal.")
+    parser.add_argument("--database", type=Path, default=None, help="Absolute Core database, the same --db the running Core was started with.")
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         raise SystemExit("The workbench bridge listens on 127.0.0.1 only")
@@ -689,13 +695,14 @@ def main(argv=None) -> int:
     endpoint = unix_client.resolve(args.endpoint)
     coordination_data = (args.coordination_data or (Path.home() / ".goalport" / "linux-coordinate")).resolve()
     core_binary = str(args.core_binary.resolve()) if args.core_binary else None
+    database = str(args.database.resolve()) if args.database else None
 
     def continue_runner(argv: list[str]) -> tuple[int, str, str]:
         import subprocess
         completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=coordination_child_env())
         return completed.returncode, completed.stdout, completed.stderr
 
-    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary)
+    handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary, database)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"GoalPort workbench http://{args.host}:{args.port}  core {endpoint}", flush=True)
     try:
