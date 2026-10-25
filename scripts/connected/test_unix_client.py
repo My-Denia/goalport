@@ -143,6 +143,27 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["detail"], "Pi verified the added line and no other file changed.")
         self.assertEqual(found["record"]["change"], "Codex added pong under before.")
         self.assertNotIn("planText", found["record"])
+        stopped_dir = directory / "stopped-newest"
+        stopped_dir.mkdir()
+        (stopped_dir / "coordination-records.json").write_text(json.dumps([
+            {
+                "requestId": "coordinate-stopped",
+                "verdict": "failed",
+                "savedAt": "2026-10-25T08:21:43.982Z",
+                "stopReason": "Access stopped; the current turn may finish, but no further turn was sent.",
+                "goal": "Name files",
+            },
+            {
+                "requestId": "coordinate-verified",
+                "verdict": "verified",
+                "savedAt": "2026-10-25T07:37:53.926Z",
+                "stopReason": "older",
+                "goal": "Add pong",
+            },
+        ]), encoding="utf-8")
+        stopped = workbench.latest_coordination_record(stopped_dir)
+        self.assertEqual(stopped["record"]["requestId"], "coordinate-stopped")
+        self.assertEqual(stopped["record"]["outcome"], "Access stopped; the current turn may finish, but no further turn was sent.")
         self.assertEqual(workbench.subscription_harnesses("provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n"), ["codex", "pi"])
         blocked = "provider codex: authenticated (chatgpt)\nprovider pi: authenticated (subscription)\n  environment blocked since 2026-10-23T00:00:00Z: sandbox missing\n"
         self.assertEqual(workbench.subscription_harnesses(blocked), ["codex"])

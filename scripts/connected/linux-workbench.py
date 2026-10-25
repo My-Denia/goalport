@@ -268,8 +268,33 @@ def disk_unconfirmed(data_dir: Path | None, request_id: str | None = None) -> bo
     return False
 
 
+def newest_saved_record(records: list) -> dict | None:
+    """The record a person just finished. saveRecord puts that one first and stamps savedAt."""
+    dated = None
+    dated_at = ""
+    undated = None
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        stamp = item.get("savedAt")
+        if isinstance(stamp, str) and stamp:
+            if stamp >= dated_at:
+                dated = item
+                dated_at = stamp
+            continue
+        if undated is None:
+            undated = item
+    if dated is not None:
+        return dated
+    if undated is not None:
+        for item in reversed(records):
+            if isinstance(item, dict):
+                return item
+    return None
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
-    """Read the last saved coordinated-goal record. No tokens, no plan body."""
+    """Read the newest saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
@@ -279,9 +304,9 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, "reason": "coordinated result could not be read"}
-    if not isinstance(records, list) or not records or not isinstance(records[-1], dict):
+    last = newest_saved_record(records) if isinstance(records, list) else None
+    if last is None:
         return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir), "reason": "no coordinated result saved"}
-    last = records[-1]
     return {
         "ok": True,
         "record": {
