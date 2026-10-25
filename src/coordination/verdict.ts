@@ -32,7 +32,7 @@ export function outcomeLabel(verdict: CoordinationVerdict | null): string {
     case "revise":
       return "Needs revision";
     case "stopped":
-      return "Stopped. No further turn was sent.";
+      return "Stopped";
     case "failed":
       return "Failed";
     case "unconfirmed":

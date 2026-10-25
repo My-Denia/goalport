@@ -19,6 +19,8 @@ interface CampaignNavProps {
   goalListUnreadable?: boolean;
   newGoalEnabled?: boolean;
   plansUnreadable?: boolean;
+  /** The composer is already saying this, so the sidebar does not repeat it. */
+  plansSentenceVisible?: boolean;
 }
 
 /**
@@ -42,7 +44,7 @@ function runningJobDetail(label: string): string {
   return label;
 }
 
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false, plansSentenceVisible = true }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -246,7 +248,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         )}
       </div>
 
-      {!collapsed && plansUnreadable ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
+      {!collapsed && plansUnreadable && plansSentenceVisible ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
       {!collapsed && navigationLockedReason && plans.length > 0 ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
       {plans.length > 0 ? (
         <>

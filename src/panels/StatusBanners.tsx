@@ -104,7 +104,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
               </details>
             ) : null}
           </div>
-          <button type="button" aria-label={`Dismiss: ${activeNotice.sentence === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : activeNotice.sentence}`} onClick={onDismissNotice}>×</button>
+          <button type="button" aria-label="Dismiss notification" onClick={onDismissNotice}>×</button>
         </div>
       ) : null}
     </div>
