@@ -2945,7 +2945,7 @@ function App() {
                       || (linuxCoordinationRequest && leftRequestIds.current.has(linuxCoordinationRequest))
                       || linuxActionBusy
                     )}
-                    optionsRestored={optionsRestored && client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest) && !linuxCoordinationLive && !sidebarUnconfirmed}
+                    optionsRestored={optionsRestored && client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest) && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine)}
                     discoveredHarnesses={linuxSignedIn}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); } : undefined}

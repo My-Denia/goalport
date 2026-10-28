@@ -560,6 +560,58 @@ describe("Linux Core bridge", () => {
     expect(screen.getByText("Last used options restored")).toBeTruthy();
   });
 
+  it("keeps an unknown Continue draft without stale restore or Start controls", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    const calls: Array<{ messageType: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string; payload: Record<string, unknown> };
+      calls.push(body);
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({ ok: true, payload: { record: {
+          requestId: "saved-before-unknown",
+          verdict: "verified",
+          planningHarness: "Codex",
+          reviewHarness: "Pi",
+          goal: "Saved goal with uncertain continuation",
+          workspacePath: "/home/you/work",
+          outcome: "Verified",
+          rememberedIntent: { background: true, write: true },
+        }, reason: null } });
+      }
+      if (body.messageType === "coordination_continue") {
+        // Transport/JSON succeeded but did not establish admission.
+        return jsonResponse({ ok: true, payload: { stdout: "" } });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Saved goal with uncertain continuation" })).toBeTruthy();
+    expect(screen.getByText("Last used options restored")).toBeTruthy();
+    const textarea = screen.getByRole("textbox", { name: "Message composer" });
+    fireEvent.change(textarea, { target: { value: "Retain this exact follow-up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
+
+    await waitFor(() => expect(screen.getAllByText(/Continue returned without saying the goal was admitted\./).length).toBeGreaterThan(0));
+    expect(textarea).toHaveProperty("value", "Retain this exact follow-up");
+    expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull();
+    expect(screen.queryByLabelText("Allow Codex to change files in this workspace")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(calls.filter((call) => call.messageType === "coordination_continue")).toHaveLength(1);
+    expect(calls.filter((call) => call.messageType === "coordination_start")).toHaveLength(0);
+
+    // Unknown delivery keeps the draft but cannot advertise settled options.
+    expect(screen.queryByText("Last used options restored")).toBeNull();
+  });
+
+
   it("puts the fresh goal input before permission, without inventing discovery or subscription claims", async () => {
     window.__GOALPORT_LINUX_CORE__ = true;
     const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
