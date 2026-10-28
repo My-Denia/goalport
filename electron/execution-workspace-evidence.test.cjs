@@ -308,6 +308,40 @@ test("subdirectory and Unicode untracked paths retain before/after text observat
   }
 });
 
+test("an authorized workspace alias shares Git's canonical root without losing in-bound untracked files", async () => {
+  const dir = makeTempDir();
+  try {
+    const real = path.join(dir, "real-repo");
+    const alias = path.join(dir, "workspace-alias");
+    fs.mkdirSync(real);
+    initGitRepo(real);
+    fs.writeFileSync(path.join(real, "tracked.txt"), "baseline\n");
+    execFileSync("git", ["add", "."], { cwd: real, windowsHide: true });
+    execFileSync("git", ["commit", "-m", "baseline"], { cwd: real, windowsHide: true });
+    fs.symlinkSync(real, alias, process.platform === "win32" ? "junction" : "dir");
+    fs.writeFileSync(path.join(alias, "新增.txt"), "IN_BOUND_ALIAS_CONTENT");
+    const baseline = await captureWorkspaceBaseline(alias);
+    assert.equal(baseline.status, "available", JSON.stringify(baseline));
+    assert.equal(baseline.untrackedFiles[0].content, "IN_BOUND_ALIAS_CONTENT");
+    fs.writeFileSync(path.join(alias, "新增.txt"), "UPDATED_ALIAS_CONTENT");
+    const evidence = await captureWorkspaceEvidence(alias, baseline);
+    assert.equal(evidence.complete, true, JSON.stringify(evidence));
+    assert.equal(evidence.changed, true);
+    assert.equal(evidence.untrackedFiles[0].content, "UPDATED_ALIAS_CONTENT");
+
+    fs.mkdirSync(path.join(real, "src"));
+    fs.writeFileSync(path.join(real, "outside.txt"), "OUTSIDE_SUBDIR_NOT_CAPTURED");
+    fs.writeFileSync(path.join(real, "src", "child.txt"), "IN_BOUND_CHILD");
+    const child = await captureWorkspaceBaseline(path.join(alias, "src"));
+    assert.equal(child.complete, true, JSON.stringify(child));
+    assert.deepEqual(child.untrackedFiles.map((file) => file.path), ["child.txt"]);
+    assert.equal(child.untrackedFiles[0].content, "IN_BOUND_CHILD");
+    assert.ok(!JSON.stringify(child).includes("OUTSIDE_SUBDIR_NOT_CAPTURED"));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("status failures propagate incomplete/unknown instead of empty no-change evidence", async () => {
   const dir = makeTempDir();
   try {

@@ -150,9 +150,21 @@ function collectUntrackedSnapshots(
   repoRoot = workspacePath,
 ) {
   const snapshots = [];
-  const resolvedWorkspace = path.resolve(workspacePath);
-  const resolvedRepo = path.resolve(repoRoot);
   const retained = Math.min(fileList.length, maxFiles);
+  let resolvedWorkspace;
+  let resolvedRepo;
+  try {
+    // Git reports a canonical root even when the authorized workspace was
+    // opened through a junction or symlink. Compare both in that same frame;
+    // leaf reads below the authorized root still use no-follow validation.
+    resolvedWorkspace = fs.realpathSync(workspacePath);
+    resolvedRepo = fs.realpathSync(repoRoot);
+  } catch {
+    return {
+      snapshots: fileList.slice(0, retained).map((file) => ({ path: file, skipped: "read-error" })),
+      truncated: false, incomplete: true, omitted: Math.max(0, fileList.length - retained),
+    };
+  }
   for (let index = 0; index < retained; index += 1) {
     const repoRelative = fileList[index];
     const fullPath = path.resolve(resolvedRepo, repoRelative);
