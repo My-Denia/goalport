@@ -342,6 +342,27 @@ test("an authorized workspace alias shares Git's canonical root without losing i
   }
 });
 
+test("root mapping uses native identity when the JS resolver preserves an alias representation", () => {
+  const dir = makeTempDir();
+  const originalRealpath = fs.realpathSync;
+  try {
+    const real = path.join(dir, "real-root");
+    const alias = path.join(dir, "alias-root");
+    fs.mkdirSync(real);
+    fs.symlinkSync(real, alias, process.platform === "win32" ? "junction" : "dir");
+    fs.writeFileSync(path.join(real, "note.txt"), "NATIVE_ROOT_FILE_CONTENT");
+    // Model the observed 8.3 behavior without writing fixtures outside this
+    // test: the JS resolver preserves a lexical alias, native resolves it.
+    fs.realpathSync = Object.assign((value) => path.resolve(value), { native: originalRealpath.native });
+    const captured = collectUntrackedSnapshots(alias, ["note.txt"], 32, 8192, real);
+    assert.equal(captured.incomplete, false, JSON.stringify(captured));
+    assert.equal(captured.snapshots[0].content, "NATIVE_ROOT_FILE_CONTENT");
+  } finally {
+    fs.realpathSync = originalRealpath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("status failures propagate incomplete/unknown instead of empty no-change evidence", async () => {
   const dir = makeTempDir();
   try {

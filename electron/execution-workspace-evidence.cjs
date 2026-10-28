@@ -154,11 +154,12 @@ function collectUntrackedSnapshots(
   let resolvedWorkspace;
   let resolvedRepo;
   try {
-    // Git reports a canonical root even when the authorized workspace was
-    // opened through a junction or symlink. Compare both in that same frame;
-    // leaf reads below the authorized root still use no-follow validation.
-    resolvedWorkspace = fs.realpathSync(workspacePath);
-    resolvedRepo = fs.realpathSync(repoRoot);
+    // Match the native identity used by Git and launch-config.cjs: Windows
+    // JS realpath can preserve 8.3 names even after resolving junctions.
+    const canonicalRoot = (value) => (fs.realpathSync.native ?? fs.realpathSync)(value)
+      .replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+    resolvedWorkspace = canonicalRoot(workspacePath);
+    resolvedRepo = canonicalRoot(repoRoot);
   } catch {
     return {
       snapshots: fileList.slice(0, retained).map((file) => ({ path: file, skipped: "read-error" })),
