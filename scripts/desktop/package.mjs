@@ -15,7 +15,7 @@ export const COMPONENTS = ["goalport-core.exe", "goalport-core-launcher.exe", "g
 export const STAGED_APP_MODULES = Object.freeze([
   "main.cjs", "preload.cjs", "security-policy.cjs", "launch-config.cjs", "core-client.cjs",
   "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordinate-guard.cjs",
-  "coordination-scope.cjs", "coordination-record.cjs", "harness-health.cjs", "cli-coordinate.cjs",
+  "coordination-scope.cjs", "coordination-record.cjs", "harness-health.cjs", "cli-coordinate.cjs", "execution-workspace-evidence.cjs",
   "harness-runtime.cjs", "coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "coordination-core-guard.cjs",
   "background-send-consent.cjs"
 ]);

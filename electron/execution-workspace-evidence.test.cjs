@@ -199,7 +199,7 @@ test("pre-existing staged and unstaged edits are captured in beforeDiff, new edi
     fs.writeFileSync(path.join(dir, "newfile.txt"), "new file content\n");
 
     const evidence = await captureWorkspaceEvidence(dir, baseline);
-    assert.equal(evidence.status, "available");
+    assert.equal(evidence.status, "available", JSON.stringify({ node: process.version, capture: evidence }));
     assert.equal(evidence.changed, true);
     assert.match(evidence.beforeDiff, /pre-existing unstaged/);
     assert.match(evidence.afterDiff, /turn edit on file2/);
@@ -290,7 +290,7 @@ test("subdirectory and Unicode untracked paths retain before/after text observat
     fs.writeFileSync(path.join(workspace, "新增 before.txt"), "BEFORE_UNTRACKED_TEXT");
 
     const baseline = await captureWorkspaceBaseline(workspace);
-    assert.equal(baseline.status, "available");
+    assert.equal(baseline.status, "available", JSON.stringify({ node: process.version, capture: baseline }));
     assert.equal(baseline.untrackedFiles[0].path, "新增 before.txt");
     assert.equal(baseline.untrackedFiles[0].content, "BEFORE_UNTRACKED_TEXT");
     fs.writeFileSync(path.join(workspace, "新增 before.txt"), "AFTER_EXISTING_UNTRACKED_TEXT");
@@ -368,7 +368,7 @@ test("same-size binary modifications cannot certify unchanged bytes", async () =
     assert.equal(evidence.status, "incomplete");
     assert.equal(evidence.complete, false);
     assert.equal(evidence.changed, null);
-    assert.equal(evidence.untrackedFiles[0].binary, true);
+    assert.equal(evidence.untrackedFiles[0].binary, true, JSON.stringify({ node: process.version, capture: evidence }));
     fs.writeFileSync(path.join(dir, "new-text.txt"), "observable new text");
     const withNewText = await captureWorkspaceEvidence(dir, baseline);
     assert.equal(withNewText.changed, true);
