@@ -1122,6 +1122,20 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   background: rgba(26, 26, 31, 0.85);
 }
 .draft-workspace-row { margin-bottom: 2px; }
+.draft-workspace-row.compact-workspace-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0; border: 0; border-radius: 0;
+  background: transparent;
+}
+.draft-workspace-row.compact-workspace-row .compact-workspace-input {
+  flex: 1 1 auto; min-width: 0; width: 100%;
+  height: 22px; min-height: 0; border: 0; padding: 0; background: transparent;
+  color: var(--ink-soft); font: inherit; font-size: 13px;
+  text-overflow: ellipsis; white-space: nowrap; overflow: hidden;
+  cursor: default;
+}
+.options-restored-note { color: var(--accent) !important; font-size: 12px; }
+.draft-hint-note { color: var(--ink-muted); font-size: 12px; }
 .draft-background-consent {
   display: flex; align-items: center; gap: 8px;
   color: var(--ink-soft); font-size: 13px; line-height: 1.4;
@@ -1133,6 +1147,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   background: var(--panel); color: var(--ink); font: inherit; line-height: 1.6;
   user-select: text; -webkit-user-select: text;
 }
+.draft-composer-active .draft-composer-form textarea { min-height: 72px; }
 .draft-composer-form textarea::placeholder { color: var(--ink-faint); }
 .draft-composer-form textarea:focus { outline: 1px solid var(--accent); }
 .inspector-scroll, .diagnostics-drawer { overflow-x: hidden; min-width: 0; }

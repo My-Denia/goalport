@@ -1,4 +1,5 @@
 import { Menu } from "@base-ui/react/menu";
+import { shortGoalTitle } from "../conversation/shortGoalTitle";
 import type { AppInfo } from "../ipc";
 import { connectionLabel } from "../lib/display";
 import type { CoreSnapshot } from "../types";
@@ -8,6 +9,7 @@ interface TitleBarProps {
   browserPreview?: boolean;
   snapshot: CoreSnapshot;
   campaignTitle: string | null;
+  campaignTitleTooltip?: string | null;
   /** Folder name shown when a background job owns the window and Core has no project. */
   workspaceLabel?: string | null;
   workspaceTitle?: string | null;
@@ -24,6 +26,7 @@ interface TitleBarProps {
   onOpenAbout: () => void;
   onReconnect: () => void;
   connectionOverride?: string;
+  hideNeutralConnectionPill?: boolean;
   hideReconnect?: boolean;
   onCloseWindow: () => void;
 }
@@ -40,9 +43,10 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, newGoalDisabledReason = null, onOpenAbout, onReconnect, connectionOverride, hideReconnect = false, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, campaignTitleTooltip, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, newGoalDisabledReason = null, onOpenAbout, onReconnect, connectionOverride, hideNeutralConnectionPill = false, hideReconnect = false, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
+  const showConnectionPill = !hideNeutralConnectionPill || (snapshot.connection !== "connected" && !browserPreview);
 
   return (
     <header className="titlebar" role="banner">
@@ -67,17 +71,19 @@ export function TitleBar({
             {campaignTitle ? (
               <span className="titlebar-campaign-wrap">
                 <span className="titlebar-sep" aria-hidden="true">/</span>
-                <span className="titlebar-campaign" title={campaignTitle}>{campaignTitle}</span>
+                <span className="titlebar-campaign" title={campaignTitleTooltip || campaignTitle}>{shortGoalTitle(campaignTitle)}</span>
               </span>
             ) : null}
           </div>
         </div>
 
         <div className="titlebar-right">
-          <span className={`connection-pill ${connectionOverride ? "connection-neutral" : `connection-${browserPreview ? "preview" : snapshot.connection}`}`} role="status" title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))} aria-label={connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}>
-            <span className="status-dot" aria-hidden="true" />
-            <span className="connection-text">{connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}</span>
-          </span>
+          {showConnectionPill ? (
+            <span className={`connection-pill ${connectionOverride ? "connection-neutral" : `connection-${browserPreview ? "preview" : snapshot.connection}`}`} role="status" title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))} aria-label={connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}>
+              <span className="status-dot" aria-hidden="true" />
+              <span className="connection-text">{connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}</span>
+            </span>
+          ) : null}
           {connected || hideReconnect ? null : (
             <button className="tb-button" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>
               Reconnect

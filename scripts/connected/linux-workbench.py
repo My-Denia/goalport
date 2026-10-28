@@ -316,44 +316,106 @@ def newest_saved_record(records: list) -> dict | None:
     return None
 
 
-def retained_continuation_result(data_dir: Path, last: dict, records: list) -> dict:
-    """A stopped Continue can retain its proven parent result, not another goal's."""
-    if last.get("executionEvidence") is not None:
-        return last
+def find_matching_admission(data_dir: Path | None, request_id: object, workspace_path: object) -> tuple[dict | None, Path | None]:
+    """Find the single immutable admission matching requestId and workspacePath."""
+    if data_dir is None or not isinstance(request_id, str) or not request_id or not isinstance(workspace_path, str) or not workspace_path:
+        return None, None
+    jobs_dir = data_dir / "coordination-jobs" / "jobs"
+    if not jobs_dir.is_dir():
+        return None, None
+    matches = []
     try:
-        # Terminal settlement releases the active slot. Immutable admissions
-        # remain the link to the previous result after refresh/reopen.
-        matches = []
-        for job in (data_dir / "coordination-jobs" / "jobs").iterdir():
+        for job in jobs_dir.iterdir():
             if not job.is_dir():
                 continue
-            try:
-                admission = json.loads((job / "admission.json").read_text(encoding="utf-8"))
-                candidate = admission.get("input", {})
-                if isinstance(candidate, dict) and candidate.get("requestId") == last.get("requestId"):
-                    matches.append((candidate, job))
-            except (OSError, json.JSONDecodeError, AttributeError):
+            admission_file = job / "admission.json"
+            if not admission_file.is_file():
                 continue
-        if len(matches) != 1:
+            try:
+                admission = json.loads(admission_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            candidate = admission.get("input", {}) if isinstance(admission, dict) else {}
+            if (isinstance(candidate, dict)
+                    and candidate.get("requestId") == request_id
+                    and candidate.get("workspacePath") == workspace_path):
+                matches.append((candidate, job))
+    except (OSError, AttributeError):
+        return None, None
+    if len(matches) != 1:
+        return None, None
+    return matches[0]
+
+
+def project_remembered_intent(candidate: dict | None, workspace_path: object) -> dict | None:
+    """Project {background, write} from the record's own immutable admission.
+
+    No tokens, no scope generation, no remaining budget. Literal background true,
+    supported browser writer (Codex), matching workspace root, positive bounded integer turns.
+    """
+    if not isinstance(candidate, dict) or not isinstance(workspace_path, str) or not workspace_path:
+        return None
+    if candidate.get("backgroundConsent") is not True:
+        return None
+    background = True
+    write_auth = candidate.get("writeAuthorization")
+    write_valid = False
+    if isinstance(write_auth, dict):
+        instances = write_auth.get("instances")
+        root = write_auth.get("workspaceRoot")
+        max_turns = write_auth.get("maxTurns")
+        if (isinstance(instances, list)
+                and len(instances) > 0
+                and all(x == "codex" for x in instances)
+                and isinstance(root, str)
+                and root == workspace_path
+                and isinstance(max_turns, int)
+                and not isinstance(max_turns, bool)
+                and 1 <= max_turns <= 8):
+            write_valid = True
+        else:
+            return None
+    elif write_auth is not None:
+        return None
+    return {
+        "background": background,
+        "write": write_valid,
+    }
+
+
+def retained_continuation_result(data_dir: Path, last: dict, records: list) -> dict:
+    """Retain evidence through proven stopped continuations, never their options."""
+    current_record = last
+    seen = set()
+    for _ in range(len(records) + 1):
+        if current_record.get("executionEvidence") is not None:
+            return current_record
+        request_id = current_record.get("requestId")
+        if not isinstance(request_id, str) or request_id in seen:
             return last
-        current, job = matches[0]
-        progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
-        if not isinstance(progress, dict) or progress.get("state") != "stopped" or progress.get("pendingCommand"):
+        seen.add(request_id)
+        try:
+            current, job = find_matching_admission(data_dir, request_id, current_record.get("workspacePath"))
+            if current is None or job is None:
+                return last
+            progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+            if not isinstance(progress, dict) or progress.get("state") != "stopped" or progress.get("pendingCommand"):
+                return last
+            feedback = current.get("executionFeedback")
+            if not isinstance(feedback, dict) or not feedback.get("previousPlan"):
+                return last
+            parents = [item for item in records if isinstance(item, dict)
+                       and item.get("requestId") not in seen
+                       and item.get("workspacePath") == last.get("workspacePath")
+                       and item.get("planText") == feedback.get("previousPlan")
+                       and item.get("auditText") == feedback.get("previousExecutionAudit")]
+            parent = newest_saved_record(parents)
+            if parent is None:
+                return last
+            current_record = parent
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, AttributeError):
             return last
-        if current.get("workspacePath") != last.get("workspacePath"):
-            return last
-        feedback = current.get("executionFeedback")
-        if not isinstance(feedback, dict) or not feedback.get("previousPlan"):
-            return last
-        parents = [item for item in records if isinstance(item, dict)
-                   and item.get("requestId") != last.get("requestId")
-                   and item.get("workspacePath") == last.get("workspacePath")
-                   and item.get("planText") == feedback.get("previousPlan")
-                   and item.get("auditText") == feedback.get("previousExecutionAudit")
-                   and item.get("executionEvidence") is not None]
-        return newest_saved_record(parents) or last
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, AttributeError):
-        return last
+    return last
 
 
 def latest_coordination_record(data_dir: Path | None) -> dict:
@@ -370,6 +432,8 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     last = newest_saved_record(records) if isinstance(records, list) else None
     if last is None:
         return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir), "reason": "no coordinated result saved"}
+    current_admission, _job = find_matching_admission(data_dir, last.get("requestId"), last.get("workspacePath"))
+    remembered_intent = project_remembered_intent(current_admission, last.get("workspacePath"))
     retained = retained_continuation_result(data_dir, last, records)
     return {
         "ok": True,
@@ -389,6 +453,7 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "executionEvidence": retained.get("executionEvidence"),
             "auditInputEvidenceCoverage": retained.get("auditInputEvidenceCoverage"),
             "auditInputEvidenceText": retained.get("auditInputEvidenceText"),
+            "rememberedIntent": remembered_intent,
         },
         "reason": None,
         "leftRequestIds": left_request_ids(data_dir),

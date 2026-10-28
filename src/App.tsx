@@ -469,6 +469,9 @@ function App() {
   const heldJobId = useRef<string | null>(null);
   const [linuxDiscoverNonce, setLinuxDiscoverNonce] = useState(0);
   const [linuxWrite, setLinuxWrite] = useState(false);
+  const lastRestoredRecordId = useRef<string | null>(null);
+  const latestRecordRef = useRef<{ requestId?: unknown; rememberedIntent?: { background?: boolean; write?: boolean } | null } | null>(null);
+  const [optionsRestored, setOptionsRestored] = useState(false);
   useLayoutEffect(() => {
     // Only a full projection that actually arrived counts as evidence —
     // never the pre-connect placeholder, never a capacity acknowledgement.
@@ -929,6 +932,9 @@ function App() {
   // -----------------------------------------------------------------------
   async function handleDraftSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)) {
+      return;
+    }
     if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && linuxActionBusy)) return;
     const retrying = canExplicitlyRetry(draftGoal.intent);
     if (draftBlocked && !retrying) return;
@@ -1011,6 +1017,8 @@ function App() {
             linuxFreshDraft.current = false;
             setLinuxShowingFreshDraft(false);
             setLinuxCoordinationLive(true);
+            setOptionsRestored(false);
+            lastRestoredRecordId.current = null;
             setLinuxCoordinationGoal(message);
             setLinuxCoordinationWorkspace(workspace);
             replaceGoalRoute(null);
@@ -1840,6 +1848,10 @@ function App() {
       setLinuxHoldLine(false);
       setBackgroundView(false);
       setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
+      setBackgroundConsent(false);
+      setLinuxWrite(false);
+      setOptionsRestored(false);
+      lastRestoredRecordId.current = null;
     }
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
@@ -2368,11 +2380,16 @@ function App() {
           }
           setLinuxCoordinationRequest(null);
           setLinuxCoordinationLive(true);
+          setOptionsRestored(false);
           return;
         }
-        if (linuxFreshDraft.current) return;
+        if (linuxFreshDraft.current) {
+          setOptionsRestored(false);
+          return;
+        }
         setLinuxCoordinationLive(false);
         const record = payload?.record;
+        latestRecordRef.current = (record as { requestId?: unknown; rememberedIntent?: { background?: boolean; write?: boolean } | null }) ?? null;
         if (record && typeof record.goal === "string" && record.goal.trim()) setLinuxCoordinationGoal(record.goal);
         if (record && typeof record.workspacePath === "string" && record.workspacePath.trim()) {
           const goalFolder = record.workspacePath.trim();
@@ -2391,6 +2408,7 @@ function App() {
             setLinuxCoordinationRequest(null);
             setLinuxCoordinationLine("No coordinated result is saved for this workbench profile.");
           }
+          setOptionsRestored(false);
           return;
         }
         const planned = typeof record.planningHarness === "string" ? record.planningHarness : "One harness";
@@ -2402,7 +2420,22 @@ function App() {
           setLinuxCoordinationLine("The interrupted job stays unreplayed; the same request id cannot be admitted again.");
           setLinuxCoordinationDetail(null);
           setLinuxCoordinationChange(null);
+          setOptionsRestored(false);
           return;
+        }
+        const reqId = typeof record.requestId === "string" ? record.requestId : null;
+        if (reqId && !linuxFreshDraft.current && !sidebarUnconfirmed && lastRestoredRecordId.current !== reqId) {
+          lastRestoredRecordId.current = reqId;
+          const intent = (record as { rememberedIntent?: { background?: boolean; write?: boolean } | null })?.rememberedIntent;
+          if (intent && typeof intent.background === "boolean" && typeof intent.write === "boolean") {
+            setBackgroundConsent(intent.background);
+            setLinuxWrite(intent.write);
+            setOptionsRestored(true);
+          } else {
+            setBackgroundConsent(false);
+            setLinuxWrite(false);
+            setOptionsRestored(false);
+          }
         }
         if (leftUnconfirmedSlot.current) {
           leftUnconfirmedSlot.current = false;
@@ -2675,7 +2708,7 @@ function App() {
         newGoalDisabledReason={client.mode === "linux-core" && (sidebarUnconfirmed || workerGone) ? "Another goal cannot start yet." : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? "Wait for this to finish." : client.mode === "linux-core" && linuxCoordinationLive ? "This goal is still running." : null}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
-        connectionOverride={client.mode === "linux-core" ? "This status is not the workbench connection" : undefined}
+        hideNeutralConnectionPill={client.mode === "linux-core"}
         hideReconnect={client.mode === "linux-core"}
         onCloseWindow={handleCloseWindow}
       />
@@ -2726,7 +2759,34 @@ function App() {
             viewing: backgroundView,
             stateLabel: backgroundJob.state === "unconfirmed" ? "Interrupted" : backgroundJob.revoked ? "Stopped" : backgroundJob.live ? "Running" : "Finished",
           } : null}
-          onOpenRunningJob={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return; if (window.innerWidth <= 860) setNavCollapsed(true); if (client.mode === "linux-core" && linuxCoordinationGoal) { setSelectedPlanId(null); linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); setBackgroundView(false); return; } if (backgroundJob) setBackgroundView(true); else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); } }}
+          onOpenRunningJob={() => {
+            if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
+            if (window.innerWidth <= 860) setNavCollapsed(true);
+            if (client.mode === "linux-core" && linuxCoordinationGoal) {
+              setSelectedPlanId(null);
+              linuxFreshDraft.current = false;
+              setLinuxShowingFreshDraft(false);
+              setBackgroundView(false);
+              const rec = latestRecordRef.current;
+              const recId = typeof rec?.requestId === "string" ? rec.requestId : null;
+              if (recId && lastRestoredRecordId.current !== recId) {
+                lastRestoredRecordId.current = recId;
+                const intent = rec?.rememberedIntent;
+                if (intent && typeof intent.background === "boolean" && typeof intent.write === "boolean") {
+                  setBackgroundConsent(intent.background);
+                  setLinuxWrite(intent.write);
+                  setOptionsRestored(true);
+                } else {
+                  setBackgroundConsent(false);
+                  setLinuxWrite(false);
+                  setOptionsRestored(false);
+                }
+              }
+              return;
+            }
+            if (backgroundJob) setBackgroundView(true);
+            else { linuxFreshDraft.current = false; setLinuxShowingFreshDraft(false); }
+          }}
         />
 
         <main className="conversation-column" aria-label="Goal conversation">
@@ -2865,8 +2925,30 @@ function App() {
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     linuxCanStartCoordination={client.mode === "linux-core"}
+                    isLinuxActiveTarget={client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)}
+                    continueDisabled={client.mode === "linux-core" && Boolean(
+                      plansUnreadable
+                      || snapshot.connection !== "connected"
+                      || draftBusy
+                      || linuxGranting
+                      || sidebarUnconfirmed
+                      || linuxHoldLine
+                      || sidebarFailed.current
+                      || linuxCoordinationLive
+                      || !linuxDiscoverChecked
+                      || Boolean(linuxHarnessSentence)
+                      || linuxConsentMissing
+                      || !backgroundConsent
+                      || linuxSignedIn.length < 2
+                      || !linuxCoordinationRequest
+                      || leftUnreplayed
+                      || (linuxCoordinationRequest && leftRequestIds.current.has(linuxCoordinationRequest))
+                      || linuxActionBusy
+                    )}
+                    optionsRestored={optionsRestored && client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest) && !linuxCoordinationLive && !sidebarUnconfirmed}
+                    discoveredHarnesses={linuxSignedIn}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
-                    onLinuxWriteChange={client.mode === "linux-core" ? setLinuxWrite : undefined}
+                    onLinuxWriteChange={client.mode === "linux-core" && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); } : undefined}
                     inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
                     coordinationResult={backgroundConsent && linuxDiscoverChecked && !snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:")) && !(linuxActionBusy || linuxGranting || sidebarUnconfirmed || leftUnreplayed || linuxLeftoverHeld || linuxHoldLine || workerGone || linuxHarnessSentence || linuxConsentMissing) && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? activeNotice.sentence : client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || linuxCoordinationLine === "Background Send is allowed." || lineSaysAdmissionUnsaid(linuxCoordinationLine) || !linuxShowingFreshDraft) ? (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={client.mode === "linux-core" && linuxHoldLine && !leftUnreplayed ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && sidebarFailed.current ? failedLine.current : null}
@@ -2981,8 +3063,8 @@ function App() {
                         setLinuxCoordinationLine("Stop could not be sent.");
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    onContinueCoordination={client.mode === "linux-core" && (linuxCoordinationLine === "Continuing." || (!plansUnreadable && !sidebarUnconfirmed && !linuxHoldLine && !sidebarFailed.current && !linuxCoordinationLive && !linuxShowingFreshDraft && linuxCoordinationRequest && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && !linuxActionBusy && linuxDiscoverChecked && !leftUnreplayed && !leftRequestIds.current.has(linuxCoordinationRequest))) ? () => {
-                      if (plansUnreadable || linuxActionBusy || sidebarUnconfirmed || linuxHoldLine || sidebarFailed.current || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
+                    onContinueCoordination={client.mode === "linux-core" ? () => {
+                      if (snapshot.connection !== "connected" || draftBusy || linuxGranting || plansUnreadable || linuxActionBusy || sidebarUnconfirmed || linuxHoldLine || sidebarFailed.current || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2 || !linuxCoordinationRequest || leftUnreplayed || leftRequestIds.current.has(linuxCoordinationRequest)) {
                         if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
                           setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
                         }
@@ -3033,6 +3115,8 @@ function App() {
                           linuxFreshDraft.current = false;
                           setLinuxShowingFreshDraft(false);
                           setLinuxCoordinationLive(true);
+                          setOptionsRestored(false);
+                          lastRestoredRecordId.current = linuxCoordinationRequest;
                           if (draftGoal?.message.trim()) setLinuxCoordinationGoal(draftGoal.message.trim());
                           setDraftGoal((current) => current ? { ...current, message: "" } : current);
                         }
@@ -3095,8 +3179,8 @@ function App() {
                       }).finally(() => { linuxActionOpen.current = false; setLinuxGranting(false); });
                     } : undefined}
                     backgroundConsent={backgroundConsent}
-                    onBackgroundConsentChange={client.mode === "linux-core" || (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim()) ? setBackgroundConsent : undefined}
-                    keepRunningHint={client.mode === "linux-core" && linuxDiscoverChecked && !backgroundConsent && !linuxCoordinationLive && !linuxHarnessSentence && !linuxConsentMissing ? "Keep working after closing must be explicitly selected." : null}
+                    onBackgroundConsentChange={client.mode === "linux-core" ? (!linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setBackgroundConsent(enabled); } : undefined) : (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined)}
+                    keepRunningHint={client.mode === "linux-core" && linuxDiscoverChecked && !backgroundConsent && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) && !linuxHarnessSentence && !linuxConsentMissing ? "Keep working after closing must be explicitly selected." : null}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
                       if (value.provider.trim()) setBackgroundConsent(false);

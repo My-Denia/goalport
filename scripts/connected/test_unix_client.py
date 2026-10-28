@@ -61,6 +61,195 @@ class CommandRoutingTests(unittest.TestCase):
             (root / "coordination-records.json").write_text(json.dumps([stopped, parent]), encoding="utf-8")
             self.assertIsNone(workbench.latest_coordination_record(root)["record"]["executionEvidence"])
 
+    def test_remembered_intent_ordinary_completed_write_true_without_private_tokens(self):
+        with tempfile.TemporaryDirectory(prefix="gp-intent-write-") as temp:
+            root = Path(temp)
+            job = root / "coordination-jobs" / "jobs" / "job-1"
+            job.mkdir(parents=True)
+            admission = {
+                "input": {
+                    "requestId": "req-completed",
+                    "workspacePath": "/work/project",
+                    "goal": "Implement feature",
+                    "backgroundConsent": True,
+                    "writeAuthorization": {
+                        "instances": ["codex"],
+                        "workspaceRoot": "/work/project",
+                        "maxTurns": 2,
+                    },
+                    "privateControlToken": "SECRET_TOKEN_DO_NOT_LEAK",
+                    "remainingTurns": 7,
+                    "scopeGeneration": 4,
+                }
+            }
+            (job / "admission.json").write_text(json.dumps(admission), encoding="utf-8")
+            record = {
+                "requestId": "req-completed",
+                "workspacePath": "/work/project",
+                "goal": "Implement feature",
+                "verdict": "verified",
+                "outcome": "Done",
+                "savedAt": "2026-10-28T02:00:00Z",
+            }
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            res = workbench.latest_coordination_record(root)
+            self.assertTrue(res["ok"])
+            rec = res["record"]
+            self.assertEqual(rec["rememberedIntent"], {"background": True, "write": True})
+            record_dump = json.dumps(rec)
+            self.assertNotIn("SECRET_TOKEN_DO_NOT_LEAK", record_dump)
+            self.assertNotIn("remainingTurns", record_dump)
+            self.assertNotIn("scopeGeneration", record_dump)
+            self.assertNotIn("privateControlToken", record_dump)
+
+    def test_remembered_intent_readonly_stop_child_with_writer_parent(self):
+        with tempfile.TemporaryDirectory(prefix="gp-intent-readonly-") as temp:
+            root = Path(temp)
+            parent_job = root / "coordination-jobs" / "jobs" / "parent-job"
+            parent_job.mkdir(parents=True)
+            parent_adm = {
+                "input": {
+                    "requestId": "parent-req",
+                    "workspacePath": "/work/project",
+                    "backgroundConsent": True,
+                    "writeAuthorization": {"instances": ["codex"], "workspaceRoot": "/work/project", "maxTurns": 2},
+                }
+            }
+            (parent_job / "admission.json").write_text(json.dumps(parent_adm), encoding="utf-8")
+
+            child_job = root / "coordination-jobs" / "jobs" / "child-job"
+            child_job.mkdir(parents=True)
+            child_adm = {
+                "input": {
+                    "requestId": "child-req",
+                    "workspacePath": "/work/project",
+                    "backgroundConsent": True,
+                    "writeAuthorization": None,
+                    "executionFeedback": {"previousPlan": "plan 1", "previousExecutionAudit": "audit 1"},
+                }
+            }
+            (child_job / "admission.json").write_text(json.dumps(child_adm), encoding="utf-8")
+            (child_job / "progress.json").write_text(json.dumps({"state": "stopped", "outcome": {"status": "stopped"}}), encoding="utf-8")
+
+            parent_rec = {
+                "requestId": "parent-req", "workspacePath": "/work/project",
+                "planText": "plan 1", "auditText": "audit 1",
+                "executionEvidence": {"afterDiff": "+write"}, "savedAt": "2026-10-28T01:00:00Z"
+            }
+            child_rec = {
+                "requestId": "child-req", "workspacePath": "/work/project",
+                "goal": "Readonly follow-up", "verdict": "stopped",
+                "stopReason": "Access stopped; the current turn may finish, but no further turn was sent.",
+                "savedAt": "2026-10-28T02:00:00Z"
+            }
+            (root / "coordination-records.json").write_text(json.dumps([child_rec, parent_rec]), encoding="utf-8")
+
+            res = workbench.latest_coordination_record(root)
+            rec = res["record"]
+            self.assertEqual(rec["requestId"], "child-req")
+            self.assertEqual(rec["retainedFromRequestId"], "parent-req")
+            self.assertEqual(rec["executionEvidence"]["afterDiff"], "+write")
+            # Child's own admission had writeAuthorization: None, so write must be False!
+            self.assertEqual(rec["rememberedIntent"], {"background": True, "write": False})
+
+    def test_remembered_intent_missing_duplicate_malformed_workspace_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix="gp-intent-safe-") as temp:
+            root = Path(temp)
+            # Case 1: missing admission
+            record = {"requestId": "missing-req", "workspacePath": "/work/project", "verdict": "verified", "savedAt": "2026-10-28T01:00:00Z"}
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Case 2: workspace mismatch
+            job = root / "coordination-jobs" / "jobs" / "job-mismatch"
+            job.mkdir(parents=True)
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "missing-req", "workspacePath": "/different/workspace", "backgroundConsent": True}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Case 3: duplicate admissions
+            job2 = root / "coordination-jobs" / "jobs" / "job-dup"
+            job2.mkdir(parents=True)
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "missing-req", "workspacePath": "/work/project", "backgroundConsent": True}
+            }), encoding="utf-8")
+            (job2 / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "missing-req", "workspacePath": "/work/project", "backgroundConsent": True}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Case 4: malformed admission JSON
+            __import__("shutil").rmtree(job2)
+            (job / "admission.json").write_text("NOT_VALID_JSON{{{", encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+    def test_remembered_intent_unsupported_writer_and_malformed_write_auth(self):
+        with tempfile.TemporaryDirectory(prefix="gp-intent-unsupported-") as temp:
+            root = Path(temp)
+            job = root / "coordination-jobs" / "jobs" / "job-writer"
+            job.mkdir(parents=True)
+            record = {"requestId": "req-writer", "workspacePath": "/work/project", "verdict": "verified", "savedAt": "2026-10-28T01:00:00Z"}
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+
+            # Unsupported writer: Pi only (read-only)
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "req-writer", "workspacePath": "/work/project", "backgroundConsent": True,
+                          "writeAuthorization": {"instances": ["pi"], "workspaceRoot": "/work/project", "maxTurns": 2}}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Non-boolean background
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "req-writer", "workspacePath": "/work/project", "backgroundConsent": "true",
+                          "writeAuthorization": {"instances": ["codex"], "workspaceRoot": "/work/project", "maxTurns": 2}}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Invalid maxTurns (string)
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "req-writer", "workspacePath": "/work/project", "backgroundConsent": True,
+                          "writeAuthorization": {"instances": ["codex"], "workspaceRoot": "/work/project", "maxTurns": "2"}}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Invalid maxTurns (out of bounds > 8)
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "req-writer", "workspacePath": "/work/project", "backgroundConsent": True,
+                          "writeAuthorization": {"instances": ["codex"], "workspaceRoot": "/work/project", "maxTurns": 99}}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+            # Mismatched write root
+            (job / "admission.json").write_text(json.dumps({
+                "input": {"requestId": "req-writer", "workspacePath": "/work/project", "backgroundConsent": True,
+                          "writeAuthorization": {"instances": ["codex"], "workspaceRoot": "/other/path", "maxTurns": 2}}
+            }), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["rememberedIntent"])
+
+    def test_repeated_stopped_continues_keep_the_evidence_but_restore_only_the_current_choices(self):
+        with tempfile.TemporaryDirectory(prefix="gp-return-chain-") as temp:
+            root = Path(temp)
+            base = {"requestId": "base", "workspacePath": "/work", "planText": "base plan", "auditText": "base audit", "executionEvidence": {"afterDiff": "+pong2"}, "savedAt": "2026-10-28T00:00:00Z"}
+            middle = {"requestId": "middle", "workspacePath": "/work", "goal": "Stopped follow-up", "planText": "middle plan", "auditText": None, "verdict": "failed", "savedAt": "2026-10-28T01:00:00Z"}
+            latest = {"requestId": "latest", "workspacePath": "/work", "goal": "Continue then Stop again", "verdict": "failed", "stopReason": "No further turn was sent.", "savedAt": "2026-10-28T02:00:00Z"}
+            (root / "coordination-records.json").write_text(json.dumps([latest, middle, base]), encoding="utf-8")
+            for name, parent in (("middle", base), ("latest", middle)):
+                job = root / "coordination-jobs" / "jobs" / name
+                job.mkdir(parents=True)
+                admission = {"requestId": name, "workspacePath": "/work", "backgroundConsent": True, "writeAuthorization": None, "executionFeedback": {"previousPlan": parent["planText"], "previousExecutionAudit": parent["auditText"]}}
+                (job / "admission.json").write_text(json.dumps({"input": admission}), encoding="utf-8")
+                (job / "progress.json").write_text(json.dumps({"state": "stopped", "pendingCommand": None}), encoding="utf-8")
+            projected = workbench.latest_coordination_record(root)["record"]
+            self.assertEqual(projected["requestId"], "latest")
+            self.assertEqual(projected["retainedFromRequestId"], "base")
+            self.assertEqual(projected["executionEvidence"]["afterDiff"], "+pong2")
+            self.assertEqual(projected["rememberedIntent"], {"background": True, "write": False})
+            # A missing end of the chain must not borrow arbitrary evidence.
+            base.pop("executionEvidence")
+            (root / "coordination-records.json").write_text(json.dumps([latest, middle, base]), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["executionEvidence"])
+
     def test_independent_check_details_keep_the_actual_conclusion_beyond_the_summary(self):
         audit = "Evidence limitations\n" + "checked captured material\n" * 40 + "VERDICT: verified"
         self.assertEqual(workbench.check_detail({"auditText": audit}, None), audit)

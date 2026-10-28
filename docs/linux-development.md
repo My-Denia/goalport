@@ -208,6 +208,28 @@ Honesty rules the client keeps:
      while each continuation turn mints a fresh request ID and scope generation;
      live cross-continue budget/generation reuse remains a follow-up.
 
+## Returning to a coordinated goal
+
+The workbench keeps the saved result visible and presents a compact follow-up
+composer with one **Continue** action. A non-empty follow-up can be sent with
+Enter; an empty follow-up continues the existing goal only when Continue is
+explicitly clicked. **New goal** opens a fresh draft with background and file
+changes off.
+
+For a settled goal, the page restores its last selected background/file-change
+options from that request's own saved admission. These are remembered choices,
+not a new spending grant, remaining quota or a restored live turn budget. A
+read-only stopped follow-up does not inherit a parent round's write choice,
+even when it displays that parent's saved diff. While work is running or its
+exit is unknown, historical options are hidden rather than presented as current
+permissions. Existing consent, available-agent, workspace and live-scope checks
+still apply when Continue is clicked.
+
+Stopping prevents later turns; a current turn may still finish. Saved changes
+and their check material remain visible after returning, including through
+repeated stopped follow-ups. This does not undo files or prove every Linux
+child process has exited.
+
 ## Native acceptance
 
 The opt-in driver creates a disposable repository with a broken addition
