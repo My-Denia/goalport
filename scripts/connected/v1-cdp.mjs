@@ -110,7 +110,7 @@ export function createCdpClient(ws, { requestTimeoutMs = 30_000 } = {}) {
   return { ws, cdp, evaluate, close: () => end(new Error("CDP client closed")) };
 }
 
-export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectTimeoutMs = 10_000 } = {}) {
+export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectTimeoutMs = 10_000, pageUrl = null } = {}) {
   timeoutValue(requestTimeoutMs, "requestTimeoutMs");
   timeoutValue(connectTimeoutMs, "connectTimeoutMs");
   const deadline = Date.now() + 30_000;
@@ -118,7 +118,7 @@ export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectT
   while (Date.now() < deadline) {
     try {
       const raw = await (await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1000) })).json();
-      page = (Array.isArray(raw) ? raw : [raw]).find((item) => item.type === "page" && String(item.title || "").includes("GoalPort"));
+      page = (Array.isArray(raw) ? raw : [raw]).find((item) => item.type === "page" && (pageUrl ? item.url === pageUrl : String(item.title || "").includes("GoalPort")));
       if (page?.webSocketDebuggerUrl) break;
     } catch {
       page = null;

@@ -6,6 +6,8 @@ import {
   type CoordinateGoalInput,
   type CoordinateGoalState,
   type SyntheticCatalogInstance,
+  type ExecutionWorkspaceEvidence,
+  type AuditInputEvidenceCoverage,
 } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
 import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
@@ -47,6 +49,7 @@ export interface CoordinateLaunchResult {
   /** Independent WRITE counter from M6; turnsRemaining always means READ. */
   readonly writeTurnsRemaining?: number | null;
   readonly scopeExhausted?: boolean;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
 }
 
 export interface EnvironmentBlockedInfo {
@@ -101,6 +104,10 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly authorizedTurnsLeft?: number | null;
   /** True when the authorized scope ran out of model turns. */
   readonly scopeExhausted?: boolean;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  /** Exact captured-evidence section delivered to the auditor, after transport crops. */
+  readonly auditInputEvidenceText?: string | null;
 }
 
 function reportFromPlan(
@@ -464,6 +471,9 @@ async function runRecoveryRound(
   let executionText: string | null = null;
   let auditText: string | null = null;
   let executionFacts: string | undefined;
+  let executionEvidence: ExecutionWorkspaceEvidence | null = null;
+  let auditInputEvidenceCoverage: AuditInputEvidenceCoverage | null = null;
+  let auditInputEvidenceText: string | null = null;
   let environmentBlocked: EnvironmentBlockedInfo | null = null;
   let lastFailure: Failure | null = null;
   let turnsRemaining: number | null | undefined;
@@ -521,6 +531,9 @@ async function runRecoveryRound(
         executionText, auditText,
         executionHarness: assignments.execution ? harnessOf(assignments.execution) : null,
         auditHarness: assignments.audit ? harnessOf(assignments.audit) : null,
+        executionEvidence: executionEvidence ?? null,
+        auditInputEvidenceCoverage: auditInputEvidenceCoverage ?? null,
+        auditInputEvidenceText: auditInputEvidenceText ?? null,
         authorizedWriteTurnsLeft: writeTurnsRemaining ?? null,
       } : {}),
       ...(turnsRemaining === undefined ? {} : { authorizedTurnsLeft: turnsRemaining }),
@@ -563,9 +576,14 @@ async function runRecoveryRound(
         command = role === "execution" || role === "audit"
           ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
               planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
+              executionEvidence,
             })
           : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
         commands[role] = command;
+        if (role === "audit" && "auditInputEvidenceCoverage" in command) {
+          auditInputEvidenceCoverage = (command as { auditInputEvidenceCoverage?: AuditInputEvidenceCoverage }).auditInputEvidenceCoverage ?? null;
+          auditInputEvidenceText = (command as { auditInputEvidenceText?: string }).auditInputEvidenceText ?? null;
+        }
         // Initial lazy execution/audit assignment is not a takeover.
         if (role === "planning" || role === "review" || lastFailure?.role === role) {
           const harness = harnessOf(replacement);
@@ -613,12 +631,17 @@ async function runRecoveryRound(
       if (write) writeTurnsRemaining = result.writeTurnsRemaining ?? null;
       // Partial execution/audit text is retained even on scope terminal stops.
       if (role === "execution" || role === "audit") saveText(role, result.text.trim());
-      if (role === "execution") executionFacts = JSON.stringify({
-        commandId: launchCommand.commandId, instanceId: instance.instanceId,
-        workspace: input.workspacePath, sandbox: launchCommand.sandboxPolicy.type,
-        dispatched: result.dispatched ?? null, stopCode: result.stopCode ?? null,
-        turnsRemaining: result.turnsRemaining ?? null, writeTurnsRemaining: result.writeTurnsRemaining ?? null,
-      });
+      if (role === "execution") {
+        if (result.executionEvidence) {
+          executionEvidence = result.executionEvidence;
+        }
+        executionFacts = JSON.stringify({
+          commandId: launchCommand.commandId, instanceId: instance.instanceId,
+          workspace: input.workspacePath, sandbox: launchCommand.sandboxPolicy.type,
+          dispatched: result.dispatched ?? null, stopCode: result.stopCode ?? null,
+          turnsRemaining: result.turnsRemaining ?? null, writeTurnsRemaining: result.writeTurnsRemaining ?? null,
+        });
+      }
       if (result.scopeExhausted === true || result.stopCode === "scope-exhausted") {
         return finish({ stopReason: role === "execution"
           ? "All authorized workspace-change turns were used, so this stopped. Inspect any partial changes before sending again."

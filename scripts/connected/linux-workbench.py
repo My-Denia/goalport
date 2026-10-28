@@ -121,13 +121,20 @@ def worker_alive(pid: int) -> bool:
     return True
 
 
-def activity_line(progress: dict, pid: object, alive=worker_alive) -> str | None:
+def activity_line(progress: dict, pid: object, alive=worker_alive, is_revoked: bool = False) -> str | None:
     if isinstance(pid, int) and pid > 0 and not alive(pid):
         return "The worker is gone. Its exit is not confirmed, so another goal cannot start yet."
     outcome = progress.get("outcome")
     outcome_status = outcome.get("status") if isinstance(outcome, dict) else outcome
     if progress.get("state") == "unconfirmed" or outcome_status == "unconfirmed":
         return "This goal's exit is not confirmed, so another goal cannot start yet."
+    revoked = is_revoked or progress.get("revoked") is True or progress.get("state") == "revoked"
+    if revoked:
+        if progress.get("pendingCommand"):
+            return "Access stopped; the current turn may finish, but no further turn was sent."
+        if outcome_status == "stopped" or progress.get("state") == "stopped":
+            return "Stopped. No further turn was sent. Existing workspace edits remain."
+        return "Access stopped; no further turn was sent."
     display = progress.get("display") if isinstance(progress.get("display"), dict) else {}
     activity = display.get("activity") if isinstance(display.get("activity"), str) else None
     return activity or (progress.get("state") if isinstance(progress.get("state"), str) else None)
@@ -174,7 +181,9 @@ def current_job(data_dir: Path) -> dict | None:
             pid = claim.get("pid")
     except (OSError, json.JSONDecodeError, TypeError):
         pid = None
-    line = activity_line(progress, pid)
+    revocation_path = data_dir / "coordination-jobs" / "jobs" / job_id / "revocation.json"
+    is_revoked = revocation_path.is_file()
+    line = activity_line(progress, pid, is_revoked=is_revoked)
     if not line:
         return None
     return {"line": line, "jobId": job_id}
@@ -182,7 +191,16 @@ def current_job(data_dir: Path) -> dict | None:
 
 def live_fields(data_dir: Path | None) -> dict:
     job = current_job(data_dir) if data_dir is not None else None
-    return {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
+    fields = {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
+    if job and data_dir is not None:
+        try:
+            admission = json.loads((data_dir / "coordination-jobs" / "jobs" / job["jobId"] / "admission.json").read_text(encoding="utf-8"))
+            identity = admission.get("input", {}) if isinstance(admission, dict) else {}
+            if isinstance(identity.get("goal"), str) and isinstance(identity.get("workspacePath"), str):
+                fields["currentGoal"] = {"goal": identity["goal"], "workspacePath": identity["workspacePath"]}
+        except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+            pass  # Missing identity is unknown, never a fabricated saved result.
+    return fields
 
 
 def folded_text(record: dict, key: str, outcome: str | None) -> str | None:
@@ -196,7 +214,12 @@ def folded_text(record: dict, key: str, outcome: str | None) -> str | None:
 
 
 def check_detail(record: dict, outcome: str | None) -> str | None:
-    return folded_text(record, "auditText", outcome) or folded_text(record, "reviewText", outcome)
+    for key in ("auditText", "reviewText"):
+        text = record.get(key)
+        if isinstance(text, str) and text.strip() and text.strip() != outcome:
+            detail = text.strip()
+            return detail if len(detail) <= 24000 else detail[:24000] + "\n[Check text truncated for display.]"
+    return None
 
 
 def short_outcome(record: dict) -> str | None:
@@ -293,6 +316,46 @@ def newest_saved_record(records: list) -> dict | None:
     return None
 
 
+def retained_continuation_result(data_dir: Path, last: dict, records: list) -> dict:
+    """A stopped Continue can retain its proven parent result, not another goal's."""
+    if last.get("executionEvidence") is not None:
+        return last
+    try:
+        # Terminal settlement releases the active slot. Immutable admissions
+        # remain the link to the previous result after refresh/reopen.
+        matches = []
+        for job in (data_dir / "coordination-jobs" / "jobs").iterdir():
+            if not job.is_dir():
+                continue
+            try:
+                admission = json.loads((job / "admission.json").read_text(encoding="utf-8"))
+                candidate = admission.get("input", {})
+                if isinstance(candidate, dict) and candidate.get("requestId") == last.get("requestId"):
+                    matches.append((candidate, job))
+            except (OSError, json.JSONDecodeError, AttributeError):
+                continue
+        if len(matches) != 1:
+            return last
+        current, job = matches[0]
+        progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+        if not isinstance(progress, dict) or progress.get("state") != "stopped" or progress.get("pendingCommand"):
+            return last
+        if current.get("workspacePath") != last.get("workspacePath"):
+            return last
+        feedback = current.get("executionFeedback")
+        if not isinstance(feedback, dict) or not feedback.get("previousPlan"):
+            return last
+        parents = [item for item in records if isinstance(item, dict)
+                   and item.get("requestId") != last.get("requestId")
+                   and item.get("workspacePath") == last.get("workspacePath")
+                   and item.get("planText") == feedback.get("previousPlan")
+                   and item.get("auditText") == feedback.get("previousExecutionAudit")
+                   and item.get("executionEvidence") is not None]
+        return newest_saved_record(parents) or last
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, AttributeError):
+        return last
+
+
 def latest_coordination_record(data_dir: Path | None) -> dict:
     """Read the newest saved coordinated-goal record. No tokens, no plan body."""
     if data_dir is None:
@@ -307,10 +370,12 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     last = newest_saved_record(records) if isinstance(records, list) else None
     if last is None:
         return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir), "reason": "no coordinated result saved"}
+    retained = retained_continuation_result(data_dir, last, records)
     return {
         "ok": True,
         "record": {
             "requestId": last.get("requestId"),
+            "retainedFromRequestId": retained.get("requestId") if retained is not last else None,
             "verdict": last.get("verdict"),
             "stopReason": last.get("stopReason"),
             "planningHarness": last.get("planningHarness"),
@@ -319,8 +384,11 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
             "goal": last.get("goal"),
             "workspacePath": last.get("workspacePath"),
             "outcome": short_outcome(last),
-            "detail": check_detail(last, short_outcome(last)),
-            "change": folded_text(last, "executionText", short_outcome(last)),
+            "detail": check_detail(retained, short_outcome(retained)),
+            "change": folded_text(retained, "executionText", short_outcome(retained)),
+            "executionEvidence": retained.get("executionEvidence"),
+            "auditInputEvidenceCoverage": retained.get("auditInputEvidenceCoverage"),
+            "auditInputEvidenceText": retained.get("auditInputEvidenceText"),
         },
         "reason": None,
         "leftRequestIds": left_request_ids(data_dir),

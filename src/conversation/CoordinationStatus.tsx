@@ -2,6 +2,8 @@ import type { BackgroundStatus } from "../coordination/backgroundStatus";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
 import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
 import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
+import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
+import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
 
@@ -17,6 +19,9 @@ export interface CoordinationStatusProps {
   auditText?: string | null;
   executionHarness?: string | null;
   auditHarness?: string | null;
+  executionEvidence?: ExecutionWorkspaceEvidence | null;
+  auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  auditInputEvidenceText?: string | null;
   verdict: CoordinationVerdict | null;
   /** Presentation only: a background Stop with a proven settled outcome. */
   stoppedOutcome?: boolean;
@@ -179,7 +184,21 @@ function RetainedRoundSection({ round, heading }: { round: CoordinationRoundFact
         <dt>Review harness</dt><dd>{fact(round.reviewHarness)}</dd>
         <dt>Plan</dt><dd>{fact(round.planText)}</dd>
         <dt>Check</dt><dd>{fact(round.reviewText)}</dd>
-        <dt>Changes{round.executionHarness ? ` — ${round.executionHarness}` : ""}</dt><dd>{fact(round.executionText)}</dd>
+        {round.executionEvidence ? (
+          <dd>
+            <WorkspaceEvidenceDetails
+              evidence={round.executionEvidence}
+              executionText={round.executionText}
+              executionHarness={round.executionHarness}
+              auditInputEvidenceCoverage={round.auditInputEvidenceCoverage}
+              auditInputEvidenceText={round.auditInputEvidenceText}
+            />
+          </dd>
+        ) : (
+          <>
+            <dt>Changes{round.executionHarness ? ` — ${round.executionHarness}` : ""}</dt><dd>{fact(round.executionText)}</dd>
+          </>
+        )}
         <dt>Independent verification{round.auditHarness ? ` — ${round.auditHarness}` : ""}</dt><dd>{fact(round.auditText)}</dd>
         <dt>Stop reason</dt><dd>{fact(round.stopReason)}</dd>
       </dl>
@@ -203,6 +222,9 @@ export function CoordinationStatus({
   auditText,
   executionHarness,
   auditHarness,
+  executionEvidence,
+  auditInputEvidenceCoverage,
+  auditInputEvidenceText,
   verdict,
   stopReason,
   planningQuota,
@@ -229,7 +251,7 @@ export function CoordinationStatus({
   const saved = savedLabel(savedAt);
   // An assigned writer alone is not evidence it launched: the read-budget
   // feasibility stop assigns one before refusing all edits.
-  const executionEvidence = Boolean(executionText || auditHarness || auditText)
+  const hasExecutionActivity = Boolean(executionText || auditHarness || auditText || executionEvidence)
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
     <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
@@ -250,11 +272,17 @@ export function CoordinationStatus({
           above is the revised pass.
         </p>
       ) : null}
-      {verdict === "checked" && !executionHarness && !executionText ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
-      {executionEvidence ? (
+      {verdict === "checked" && !executionHarness && !executionText && !executionEvidence ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
+      {hasExecutionActivity ? (
         <article className="coordination-result" aria-label="Workspace changes result">
           <h3>Changes{executionHarness ? ` — ${executionHarness}` : ""}</h3>
-          <p>{fact(executionText ?? null)}</p>
+          <WorkspaceEvidenceDetails
+            evidence={executionEvidence}
+            executionText={executionText}
+            executionHarness={executionHarness}
+            auditInputEvidenceCoverage={auditInputEvidenceCoverage}
+            auditInputEvidenceText={auditInputEvidenceText}
+          />
           {(verdict === "failed" || (!auditText && verdict !== "verified")) && !stopReason.toLowerCase().includes("inspect")
             ? <p>Files may have changed. Inspect the workspace before sending a new goal; this write will not be retried automatically.</p> : null}
         </article>

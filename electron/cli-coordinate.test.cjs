@@ -1038,7 +1038,11 @@ test("a granted write turn consumes its grant, keeps the claim ledger semantics,
     assert.equal(second.text, "Carried out.");
     assert.equal(spawned.length, 1);
     const ledger = JSON.parse(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"));
-    assert.deepEqual(ledger["coordinate-execute-codex"], { ok: true, text: "Carried out.", errorText: "", messageDispatched: true });
+    assert.equal(ledger["coordinate-execute-codex"].ok, true);
+    assert.equal(ledger["coordinate-execute-codex"].text, "Carried out.");
+    assert.equal(ledger["coordinate-execute-codex"].errorText, "");
+    assert.equal(ledger["coordinate-execute-codex"].messageDispatched, true);
+    assert.ok(ledger["coordinate-execute-codex"].executionEvidence);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }

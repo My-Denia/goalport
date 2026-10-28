@@ -736,6 +736,38 @@ describe("explicitly authorized execution and independent audit", () => {
     expect(state.verdict).toBe("checked");
     expect(state.messageDispatched).toBe(true);
   });
+  it("carries executionEvidence from executor launch to audit prompt and final session state", async () => {
+    const evidence = {
+      status: "available" as const,
+      complete: true,
+      changed: true,
+      beforeDiff: "BEFORE_SESSION_AUDIT_MARKER",
+      afterDiff: "--- a/pong.txt\n+++ b/pong.txt\n@@ -0,0 +1 @@\n+pong\nAFTER_SESSION_AUDIT_MARKER",
+      untrackedFiles: [{ path: "new.txt", size: 24, content: "NEW_FILE_SESSION_AUDIT_MARKER", binary: false as const }],
+      comparisonBaseline: { headCommit: "2dbea545040c2bb3bdc66b95602975adc951d5a0", capturedAt: "2026-10-28T00:00:00Z" },
+      reason: "Changes observed",
+    };
+
+    const { state, transport } = await run([
+      planReply,
+      reviewReply,
+      { ...executeReply, executionEvidence: evidence },
+      auditReply,
+    ]);
+
+    expect(transport.calls).toHaveLength(4);
+    expect(state.verdict).toBe("verified");
+    expect(state.executionEvidence).toEqual(evidence);
+    // Audit turn (call 3) must have received the captured evidence in its prompt!
+    const auditPrompt = transport.calls[3]!.initialMessage.text;
+    expect(auditPrompt).toContain("Captured workspace evidence");
+    expect(auditPrompt).toContain("+pong");
+    expect(auditPrompt).toContain("BEFORE_SESSION_AUDIT_MARKER");
+    expect(auditPrompt).toContain("NEW_FILE_SESSION_AUDIT_MARKER");
+    expect(state.auditInputEvidenceCoverage).toBeDefined();
+    expect(state.auditInputEvidenceText).toContain("NEW_FILE_SESSION_AUDIT_MARKER");
+    expect(auditPrompt.endsWith(state.auditInputEvidenceText!)).toBe(true);
+  });
   it.each(["VERDICT: revise", "VERDICT: stop", "VERDICT: verified", "Looks fine."])("does not write without a checked review: %s", async (text) => {
     const { state, transport } = await run([planReply, ok(text)]);
     expect(transport.calls).toHaveLength(2);

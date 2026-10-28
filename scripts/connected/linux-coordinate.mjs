@@ -750,6 +750,13 @@ function commandResult(parsed, io, context) {
   if (typeof record.result === "string" && record.result) writeText(io, "result", record.result);
   if (typeof record.executionText === "string" && record.executionText) writeText(io, "execution", record.executionText);
   if (typeof record.auditText === "string" && record.auditText) writeText(io, "audit", record.auditText);
+  if (record.executionEvidence) {
+    const ev = record.executionEvidence;
+    const changedLabel = ev.changed === true ? "yes" : ev.changed === false ? "none" : "unknown";
+    write(io, `workspace changes: ${changedLabel} (status: ${ev.status})`);
+    if (ev.reason) write(io, `workspace evidence note: ${ev.reason}`);
+    if (typeof ev.afterDiff === "string" && ev.afterDiff) writeText(io, "workspace diff", ev.afterDiff);
+  }
   return 0;
 }
 

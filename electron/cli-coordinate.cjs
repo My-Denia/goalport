@@ -388,6 +388,11 @@ function isValidCommandId(text) {
   return /^[a-zA-Z0-9._-]+$/.test(commandId) ? commandId : "";
 }
 
+const {
+  captureWorkspaceBaseline,
+  captureWorkspaceEvidence,
+} = require("./execution-workspace-evidence.cjs");
+
 function commandIdOf(command) {
   return isValidCommandId(command?.commandId);
 }
@@ -769,6 +774,16 @@ async function runCliTurn(command, options = {}) {
     finishTurn(stateDir, commandId, replaced);
     return replaced;
   }
+  const isExecute = roleOfCommandId(commandId) === "execute";
+  const worktree = worktreeOf(command);
+  let baseline = null;
+  if (isExecute && worktree) {
+    try {
+      baseline = await (options.captureBaseline ?? captureWorkspaceBaseline)(worktree);
+    } catch {
+      baseline = null;
+    }
+  }
   const spawnTurn = options.spawnTurn ?? defaultSpawn;
   let spawned;
   try {
@@ -782,13 +797,37 @@ async function runCliTurn(command, options = {}) {
   } catch {
     spawned = { code: null, stdout: "", spawnError: true };
   }
+  let evidence = null;
+  if (isExecute && worktree) {
+    try {
+      evidence = await (options.captureEvidence ?? captureWorkspaceEvidence)(worktree, baseline, {
+        timedOut: spawned?.timedOut === true,
+        spawnError: spawned?.spawnError === true,
+      });
+    } catch {
+      evidence = null;
+    }
+  }
   if (spawned?.spawnError) {
     releaseTurn(stateDir, commandId);
     restoreGrant(stateDir, commandId);
-    return { ok: false, text: "", errorText: NOT_INSTALLED, messageDispatched: false, stopCode: "not-installed" };
+    return {
+      ok: false,
+      text: "",
+      errorText: NOT_INSTALLED,
+      messageDispatched: false,
+      stopCode: "not-installed",
+      ...(evidence ? { executionEvidence: evidence } : {}),
+    };
   }
   if (options.cancelled?.()) {
-    const replaced = { ok: false, text: "", errorText: REPLACED, messageDispatched: true };
+    const replaced = {
+      ok: false,
+      text: "",
+      errorText: REPLACED,
+      messageDispatched: true,
+      ...(evidence ? { executionEvidence: evidence } : {}),
+    };
     finishTurn(stateDir, commandId, replaced);
     return replaced;
   }
@@ -806,6 +845,7 @@ async function runCliTurn(command, options = {}) {
       messageDispatched: true,
       environmentBlocked: true,
       environmentDetail: environment,
+      ...(evidence ? { executionEvidence: evidence } : {}),
     };
     finishTurn(stateDir, commandId, blocked);
     // The evidence is persisted so discovery can steer later rounds away from
@@ -814,7 +854,13 @@ async function runCliTurn(command, options = {}) {
     return blocked;
   }
   if (spawned?.code === 0 && reply.text && !reply.failed) {
-    const done = { ok: true, text: reply.text, errorText: "", messageDispatched: true };
+    const done = {
+      ok: true,
+      text: reply.text,
+      errorText: "",
+      messageDispatched: true,
+      ...(evidence ? { executionEvidence: evidence } : {}),
+    };
     finishTurn(stateDir, commandId, done);
     clearHealthOnSuccess(stateDir, instanceOf(command), spawned?.stdout ?? "");
     return done;
@@ -842,6 +888,7 @@ async function runCliTurn(command, options = {}) {
     errorText: detail ? `${stopSentence} ${detail}` : stopSentence,
     messageDispatched: true,
     stopCode,
+    ...(evidence ? { executionEvidence: evidence } : {}),
   };
   finishTurn(stateDir, commandId, failed);
   // The stderr-signature fallback: when the bounded tail carries one of the
@@ -872,4 +919,6 @@ module.exports = {
   hasClaim,
   writeGrant,
   takeGrant,
+  captureWorkspaceBaseline,
+  captureWorkspaceEvidence,
 };

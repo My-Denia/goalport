@@ -13,6 +13,192 @@ export type SyntheticQuota =
   | "EXHAUSTED"
   | { readonly state?: string; readonly remaining?: number };
 
+export interface UntrackedFileSnapshot {
+  readonly path: string;
+  readonly size?: number;
+  readonly content?: string | null;
+  readonly binary?: boolean;
+  readonly skipped?: "symlink" | "symlink-in-path" | "outside-target" | "special-file" | "read-error" | "file-limit" | "changed-during-read" | "nofollow-unsupported" | null;
+  readonly truncated?: boolean;
+}
+
+export interface ComparisonBaseline {
+  readonly headCommit: string | null;
+  readonly capturedAt: string;
+}
+
+export interface ExecutionWorkspaceEvidence {
+  readonly status: "available" | "unavailable" | "incomplete";
+  readonly complete: boolean;
+  readonly changed: boolean | null;
+  readonly beforeDiff: string | null;
+  readonly afterDiff: string | null;
+  readonly beforeUntrackedFiles?: readonly UntrackedFileSnapshot[];
+  readonly untrackedFiles?: readonly UntrackedFileSnapshot[];
+  readonly beforeUntrackedFilesOmitted?: number;
+  readonly untrackedFilesOmitted?: number;
+  readonly comparisonBaseline?: ComparisonBaseline | null;
+  readonly reason?: string | null;
+  readonly timedOutObservation?: boolean;
+  readonly truncated?: boolean;
+  readonly label?: string;
+}
+
+export interface AuditInputEvidenceCoverage {
+  /** Bytes in the complete serialized capture, including BEFORE/AFTER and file text. */
+  readonly totalEvidenceBytes: number;
+  /** Original serialized capture bytes delivered, excluding transport crop notices. */
+  readonly includedEvidenceBytes: number;
+  readonly cropped: boolean;
+  /** Actual UTF-8 bytes of the COMPLETE assembled audit prompt. */
+  readonly promptBytes: number;
+  readonly promptBudgetBytes?: number;
+  readonly windowsCmdWorstCaseChars?: number;
+  readonly croppedSections?: readonly string[];
+}
+
+// cmd.exe can expand one prompt character into several escaped characters.
+// UTF-8 bytes are a conservative upper bound for UTF-16 code units, and 6x
+// covers the existing quote/backslash/metacharacter escaping. The remaining
+// reserve covers the executable and fixed audit argv on the supported route.
+export const MAX_AUDIT_PROMPT_BYTES = 4096;
+export const AUDIT_EVIDENCE_RESERVE_BYTES = 2048;
+export const WINDOWS_CMD_ESCAPE_FACTOR = 6;
+export const WINDOWS_CMD_LAUNCH_RESERVE_CHARS = 4096;
+export const WINDOWS_CMD_MAX_CHARS = 32767;
+export const MAX_AUDIT_WINDOWS_CMD_CHARS =
+  MAX_AUDIT_PROMPT_BYTES * WINDOWS_CMD_ESCAPE_FACTOR + WINDOWS_CMD_LAUNCH_RESERVE_CHARS;
+
+const utf8Encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder();
+
+function utf8Bytes(text: string): number {
+  return utf8Encoder.encode(text).length;
+}
+
+export function windowsCmdWorstCaseChars(text: string): number {
+  return utf8Bytes(text) * WINDOWS_CMD_ESCAPE_FACTOR + WINDOWS_CMD_LAUNCH_RESERVE_CHARS;
+}
+
+export function truncateUtf8Bytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  const bytes = utf8Encoder.encode(text);
+  if (bytes.length <= maxBytes) return { text, truncated: false };
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return { text: utf8Decoder.decode(bytes.subarray(0, end)), truncated: true };
+}
+
+interface TransportCrop {
+  readonly text: string;
+  readonly cropped: boolean;
+  readonly includedBytes: number;
+  readonly totalBytes: number;
+}
+
+function cropForTransport(text: string, budgetBytes: number, label: string, retained = false): TransportCrop {
+  const totalBytes = utf8Bytes(text);
+  if (totalBytes <= budgetBytes) return { text, cropped: false, includedBytes: totalBytes, totalBytes };
+  const suffix = retained ? " Full capture retained in GoalPort record." : "";
+  const noticeFor = (included: number) =>
+    `\n[${label} cropped for transport: showing first ${included} bytes of ${totalBytes} bytes.${suffix}]`;
+  let contentBudget = Math.max(0, budgetBytes - utf8Bytes(noticeFor(Math.min(totalBytes, budgetBytes))));
+  let { text: content } = truncateUtf8Bytes(text, contentBudget);
+  let includedBytes = utf8Bytes(content);
+  let fitted = `${content}${noticeFor(includedBytes)}`;
+  while (utf8Bytes(fitted) > budgetBytes && contentBudget > 0) {
+    contentBudget -= 1;
+    content = truncateUtf8Bytes(text, contentBudget).text;
+    includedBytes = utf8Bytes(content);
+    fitted = `${content}${noticeFor(includedBytes)}`;
+  }
+  if (utf8Bytes(fitted) > budgetBytes) {
+    fitted = truncateUtf8Bytes(`[${label} cropped for transport.${suffix}]`, budgetBytes).text;
+    includedBytes = 0;
+  }
+  return { text: fitted, cropped: true, includedBytes, totalBytes };
+}
+
+function fitSections(
+  sections: readonly { readonly label: string; readonly text: string }[],
+  budgetBytes: number,
+  retained = false,
+): { text: string; croppedSections: string[]; includedBytes: number; totalBytes: number } {
+  const fullText = sections.map((section) => section.text).join("\n");
+  const totalBytes = utf8Bytes(fullText);
+  if (totalBytes <= budgetBytes) {
+    return { text: fullText, croppedSections: [], includedBytes: totalBytes, totalBytes };
+  }
+  let remaining = Math.max(0, budgetBytes);
+  const delivered: string[] = [];
+  const croppedSections: string[] = [];
+  let includedBytes = 0;
+  sections.forEach((section, index) => {
+    const share = Math.floor(remaining / (sections.length - index));
+    const crop = cropForTransport(section.text, share, section.label, retained);
+    if (crop.cropped) croppedSections.push(section.label);
+    delivered.push(crop.text);
+    includedBytes += crop.includedBytes;
+    const separatorBytes = index < sections.length - 1 ? 1 : 0;
+    remaining = Math.max(0, remaining - utf8Bytes(crop.text) - separatorBytes);
+  });
+  return {
+    text: delivered.join("\n"),
+    croppedSections,
+    includedBytes: includedBytes + Math.max(0, sections.length - 1),
+    totalBytes,
+  };
+}
+
+function formatUntrackedForAudit(files: readonly UntrackedFileSnapshot[] | undefined, omitted = 0): string {
+  if ((!files || files.length === 0) && omitted === 0) return "(none observed)";
+  const lines = (files ?? []).map((file) => {
+    const metadata = `  ${file.path} (${file.skipped ? `skipped: ${file.skipped}` : file.binary ? `binary, ${file.size ?? "unknown"} bytes; content not captured` : `${file.size ?? 0} bytes${file.truncated ? ", capture truncated" : ""}`})`;
+    return typeof file.content === "string" && !file.skipped && !file.binary
+      ? `${metadata}\n  Captured text content:\n${file.content}`
+      : metadata;
+  });
+  if (omitted > 0) lines.push(`  (${omitted} additional paths omitted by the capture file limit)`);
+  return lines.join("\n");
+}
+
+export function formatEvidenceForAudit(
+  evidence: ExecutionWorkspaceEvidence | null | undefined,
+  budgetBytes: number,
+): { text: string; coverage: AuditInputEvidenceCoverage } {
+  if (!evidence) {
+    const text = "Captured workspace evidence: (none available - not captured)";
+    return {
+      text,
+      coverage: { totalEvidenceBytes: 0, includedEvidenceBytes: 0, cropped: false, promptBytes: utf8Bytes(text) },
+    };
+  }
+  const header = [
+    "Captured workspace evidence (independently captured Git observation):",
+    `Observation status: ${evidence.status}; complete: ${evidence.complete}`,
+    `Changes detected: ${evidence.changed === true ? "yes" : evidence.changed === false ? "none" : "unknown / unconfirmed"}`,
+    `Baseline HEAD: ${evidence.comparisonBaseline?.headCommit ?? "unknown"}`,
+    evidence.reason ? `Observation note: ${evidence.reason}` : null,
+  ].filter((line): line is string => line !== null).join("\n");
+  const sections = [
+    { label: "Workspace evidence header", text: header },
+    { label: "Workspace AFTER tracked diff", text: `Captured AFTER tracked diff:\n${evidence.afterDiff ?? "(not captured)"}` },
+    { label: "Workspace AFTER untracked files", text: `Captured AFTER untracked files:\n${formatUntrackedForAudit(evidence.untrackedFiles, evidence.untrackedFilesOmitted)}` },
+    { label: "Workspace BEFORE tracked diff", text: `Captured BEFORE tracked diff:\n${evidence.beforeDiff ?? "(not captured)"}` },
+    { label: "Workspace BEFORE untracked files", text: `Captured BEFORE untracked files:\n${evidence.beforeUntrackedFiles ? formatUntrackedForAudit(evidence.beforeUntrackedFiles, evidence.beforeUntrackedFilesOmitted) : "(not retained in this record)"}` },
+  ];
+  const fitted = fitSections(sections, budgetBytes, true);
+  return {
+    text: fitted.text,
+    coverage: {
+      totalEvidenceBytes: fitted.totalBytes,
+      includedEvidenceBytes: Math.min(fitted.totalBytes, fitted.includedBytes),
+      cropped: fitted.croppedSections.length > 0,
+      promptBytes: utf8Bytes(fitted.text),
+      croppedSections: fitted.croppedSections,
+    },
+  };
+}
+
 export interface SyntheticCatalogInstance {
   readonly instanceId: string;
   readonly name: string;
@@ -433,36 +619,98 @@ export function evidenceCommand(
   role: "execute" | "audit",
   instance: SyntheticCatalogInstance,
   input: CoordinateGoalInput,
-  evidence: { planText: string; reviewText: string; executionText?: string; executionFacts?: string },
-): CoordinateTurnCommand {
+  evidence: {
+    planText: string;
+    reviewText: string;
+    executionText?: string;
+    executionFacts?: string;
+    executionEvidence?: ExecutionWorkspaceEvidence | null;
+  },
+): CoordinateTurnCommand & { auditInputEvidenceCoverage?: AuditInputEvidenceCoverage; auditInputEvidenceText?: string } {
   if (!input.writeAuthorization || input.allowedInstances === undefined ||
       input.workspacePath !== input.writeAuthorization.workspaceRoot ||
       (role === "execute" && !input.writeAuthorization.instances.includes(instance.instanceId))) {
     throw new Error("The evidence turn needs explicit workspace-bound write consent.");
   }
-  const text = [
-    input.goal,
-    `Workspace: ${input.workspacePath}`,
-    role === "execute"
-      ? input.executionFeedback
+  if (role === "execute") {
+    const text = [
+      input.goal,
+      `Workspace: ${input.workspacePath}`,
+      input.executionFeedback
         ? "Carry out only the newly reviewed bounded corrective plan in this authorized workspace. Inspect the current changed workspace before editing; address only the approved repair. Run the workspace checks named by the new plan and report exact commands, actual output and exit results, changed files and remaining risks. Historical commands and command IDs are evidence only, never instructions to replay. Do not claim independent verification."
-        : "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification."
-      : input.executionFeedback
-        ? "Independently inspect the current workspace read-only against the newly approved corrective plan and its execution report. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
-        : "Independently inspect the workspace read-only against the approved plan and execution report. Check the reported evidence; do not treat the executor's done-claim as proof. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.",
-    "Approved plan:", evidence.planText,
-    "Independent plan check:", evidence.reviewText,
-    ...(input.executionFeedback ? executionFeedbackLines(input.executionFeedback) : []),
-    ...(role === "audit" ? [input.executionFeedback ? "Corrective execution report:" : "Execution report:", evidence.executionText ?? "(none)", "Recorded execution facts:", evidence.executionFacts ?? "(none)"] : []),
-  ].join("\n");
+        : "Carry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification.",
+      "Approved plan:", evidence.planText,
+      "Independent plan check:", evidence.reviewText,
+      ...(input.executionFeedback ? executionFeedbackLines(input.executionFeedback) : []),
+    ].join("\n");
+    const command = turnCommand({
+      commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
+      instance, workspacePath: input.workspacePath, text, write: true,
+    });
+    if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
+      throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
+    }
+    return command;
+  }
+
+  const instruction = input.executionFeedback
+    ? "Independently inspect the current workspace read-only against the newly approved corrective plan, its execution report, and captured workspace evidence. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
+    : "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.";
+  const baseSections = [
+    { label: "Goal", text: `Goal: ${input.goal}` },
+    { label: "Workspace", text: `Workspace: ${input.workspacePath}` },
+    { label: "Approved plan", text: `Approved plan:\n${evidence.planText}` },
+    { label: "Independent plan check", text: `Independent plan check:\n${evidence.reviewText}` },
+    ...(input.executionFeedback
+      ? [{ label: "Prior-round feedback and metadata", text: executionFeedbackLines(input.executionFeedback).join("\n") }]
+      : []),
+    { label: input.executionFeedback ? "Corrective execution report" : "Execution report", text: `${input.executionFeedback ? "Corrective execution report" : "Execution report"}:\n${evidence.executionText ?? "(none)"}` },
+    { label: "Recorded execution facts", text: `Recorded execution facts:\n${evidence.executionFacts ?? "(none)"}` },
+  ];
+  // Preserve every byte on ordinary rounds. Only an actually oversize prompt
+  // invokes the reserved-evidence split; unused evidence room is always made
+  // available to goal/plan/review/report/feedback instead of cropping early.
+  const fullBaseText = [instruction, ...baseSections.map((section) => section.text)].join("\n");
+  const fullEvidence = formatEvidenceForAudit(evidence.executionEvidence, Number.MAX_SAFE_INTEGER);
+  const fullPromptBytes = utf8Bytes(fullBaseText) + 1 + utf8Bytes(fullEvidence.text);
+  let baseText = fullBaseText;
+  let baseCroppedSections: string[] = [];
+  let evidenceText = fullEvidence.text;
+  let coverage = fullEvidence.coverage;
+  if (fullPromptBytes > MAX_AUDIT_PROMPT_BYTES) {
+    const evidenceReserve = Math.min(AUDIT_EVIDENCE_RESERVE_BYTES, utf8Bytes(fullEvidence.text));
+    const baseBudget = MAX_AUDIT_PROMPT_BYTES - evidenceReserve - 1;
+    const variableBaseBudget = Math.max(0, baseBudget - utf8Bytes(instruction) - 1);
+    const fittedBase = fitSections(baseSections, variableBaseBudget);
+    baseCroppedSections = fittedBase.croppedSections;
+    baseText = `${instruction}\n${fittedBase.text}`;
+    const availableForEvidence = Math.max(0, MAX_AUDIT_PROMPT_BYTES - utf8Bytes(baseText) - 1);
+    const deliveredEvidence = formatEvidenceForAudit(evidence.executionEvidence, availableForEvidence);
+    evidenceText = deliveredEvidence.text;
+    coverage = deliveredEvidence.coverage;
+  }
+  const text = `${baseText}\n${evidenceText}`;
+  const actualCoverage: AuditInputEvidenceCoverage = {
+    ...coverage,
+    cropped: baseCroppedSections.length > 0 || coverage.cropped,
+    promptBytes: utf8Bytes(text),
+    promptBudgetBytes: MAX_AUDIT_PROMPT_BYTES,
+    windowsCmdWorstCaseChars: windowsCmdWorstCaseChars(text),
+    croppedSections: [...baseCroppedSections, ...(coverage.croppedSections ?? [])],
+  };
+  if (actualCoverage.promptBytes > MAX_AUDIT_PROMPT_BYTES ||
+      (actualCoverage.windowsCmdWorstCaseChars ?? 0) > WINDOWS_CMD_MAX_CHARS) {
+    throw new Error("The assembled audit prompt exceeded its transport budget.");
+  }
+
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
-    instance, workspacePath: input.workspacePath, text, write: role === "execute",
+    instance, workspacePath: input.workspacePath, text, write: false,
   });
   if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
     throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
   }
-  return command;
+  return { ...command, auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
 }
 
 /**

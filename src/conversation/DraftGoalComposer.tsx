@@ -2,6 +2,8 @@ import { useRef, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
 import { useComposerInput } from "./useComposerInput";
+import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
+import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
 export interface GoalDraftValue {
   workspace: string;
@@ -68,6 +70,9 @@ interface DraftGoalComposerProps {
   failureHeadline?: string | null;
   goalDetail?: string | null;
   goalChange?: string | null;
+  goalEvidence?: ExecutionWorkspaceEvidence | null;
+  auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  auditInputEvidenceText?: string | null;
   activeGoalTitle?: string | null;
   onContinueCoordination?: () => void;
   onStopCoordination?: () => void;
@@ -101,12 +106,12 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function GoalStatusHeading({
-  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false
+  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false
 }: DraftGoalComposerProps) {
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
   const admissionUnsaidResult = Boolean(coordinationResult?.startsWith("The send returned without saying the goal was admitted.") || coordinationResult?.startsWith("Continue returned without saying the goal was admitted."));
-  const stoppedResult = Boolean(coordinationResult?.includes("No further turn was sent."));
+  const stoppedResult = Boolean(coordinationResult?.toLowerCase().includes("no further turn was sent."));
   const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
@@ -118,13 +123,18 @@ export function GoalStatusHeading({
   return (
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2>{coordinationResult === "That goal is no longer available." || coordinationResult?.startsWith("That address is no longer available.") || coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) || admissionUnsaidResult || stoppedResult ? missingGoalLabel : leftoverHint || failureHeadline || (!activeGoalTitle && (harnessWarning || consentWarning)) || activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
-          <p>{inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (onContinueCoordination ? "This stop is not resumed. Continue as a new send." : (activeGoalTitle || "No further turn was sent.")) : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "You can try again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? "Allow Background Send before sending." : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
-          {activeGoalTitle && goalChange ? (
-            <details className="draft-hint">
-              <summary>What changed</summary>
-              <p>{goalChange}</p>
-            </details>
+          <h2>{coordinationResult === "That goal is no longer available." || coordinationResult?.startsWith("That address is no longer available.") || coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send." || (coordinationResult === "Background Send is allowed." && !harnessWarning) || admissionUnsaidResult || (stoppedResult && !activeGoalTitle) ? missingGoalLabel : leftoverHint || failureHeadline || (!activeGoalTitle && (harnessWarning || consentWarning)) || activeGoalTitle || (inputsLocked && coordinationResult ? coordinationResult : "Start a goal")}</h2>
+          <p>{inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? `${coordinationResult} ${onContinueCoordination ? "This stop is not resumed. Continue as a new send." : coordinationResult?.includes("Existing workspace edits remain.") ? "" : "Existing workspace edits remain."}` : onContinueCoordination ? "This stop is not resumed. Continue as a new send." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "You can try again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? "Allow Background Send before sending." : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
+          {activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
+            <p className="workspace-evidence-label">Previous saved result; the stop message above describes the current job.</p>
+          ) : null}
+          {activeGoalTitle && (goalChange || goalEvidence) ? (
+            <WorkspaceEvidenceDetails
+              evidence={goalEvidence}
+              executionText={goalChange}
+              auditInputEvidenceCoverage={auditInputEvidenceCoverage}
+              auditInputEvidenceText={auditInputEvidenceText}
+            />
           ) : null}
           {activeGoalTitle && goalDetail ? (
             <details className="draft-hint">
@@ -145,7 +155,7 @@ export function DraftGoalComposer({
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const addressGone = coordinationResult === "That goal is no longer available." || Boolean(coordinationResult?.startsWith("That address is no longer available."));
   const admissionUnsaidResult = Boolean(coordinationResult?.startsWith("The send returned without saying the goal was admitted.") || coordinationResult?.startsWith("Continue returned without saying the goal was admitted."));
-  const stoppedResult = Boolean(coordinationResult?.includes("No further turn was sent."));
+  const stoppedResult = Boolean(coordinationResult?.toLowerCase().includes("no further turn was sent."));
   const folderHint = !workspaceHint || inFlightLine || (addressGone && (blockedFromSending || consentWarning || harnessWarning || !activeGoalTitle)) ? null : leftoverHint ? (activeGoalTitle ? "The next goal stays in this folder." : `You can change the folder before the next goal. ${workspaceHint}`) : activeGoalTitle ? (stoppedResult ? "The new send stays in this folder." : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start in this folder yet." : "The retry stays in this folder.") : onContinueCoordination ? (addressGone ? "Continue is the goal on screen, not the missing address." : "Continue stays in this folder. New goal can use another.") : onStopCoordination ? "This goal stays in this folder." : failureHeadline && (blockedFromSending || consentWarning || harnessWarning) ? null : addressGone ? "A new send stays in this folder. It does not open the missing address." : "A new send stays in this folder. New goal can use another.") : workspaceHint;
   const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy

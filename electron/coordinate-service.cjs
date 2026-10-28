@@ -142,6 +142,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
     }
   }
   const text = typeof ran?.text === "string" ? ran.text.trim() : "";
+  const executionEvidence = ran?.executionEvidence ?? null;
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
     // R1: on the new write chain — a scope with an explicit write dimension,
     // or the new execute/audit roles — a positive reply alone is not proof
@@ -171,6 +172,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
           environmentBlocked: false,
           environmentDetail: null,
           ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+          ...(executionEvidence ? { executionEvidence } : {}),
           ...metadata(),
         };
       }
@@ -182,6 +184,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
       text,
       errorText: "",
       dispatched: true,
+      ...(executionEvidence ? { executionEvidence } : {}),
       ...metadata(),
     };
   }
@@ -211,6 +214,7 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
     environmentBlocked,
     environmentDetail: environmentBlocked && typeof ran?.environmentDetail === "string" ? ran.environmentDetail : null,
     ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+    ...(executionEvidence ? { executionEvidence } : {}),
     ...metadata(),
   };
 }

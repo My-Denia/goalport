@@ -197,7 +197,7 @@ describe("Linux Core bridge", () => {
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
     expect(await screen.findByText("verified. The two files are named and nothing was edited.")).toBeTruthy();
     expect(screen.getByText("What was checked")).toBeTruthy();
-    expect(screen.getByText("What changed")).toBeTruthy();
+    expect(screen.getByText("Executor report")).toBeTruthy();
     await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
@@ -261,5 +261,98 @@ describe("Linux Core bridge", () => {
     expect(refused.connection).toBe("connected");
     expect(refused.commandOutcome?.kind).toBe("refused");
     expect(refused.notices[0]).toMatch(/^Core refused:/);
+  });
+
+  it("restores the first active goal on return before there is any saved result", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    window.history.replaceState(null, "", "/");
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: "", campaigns: [], notices: [] };
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.messageType === "coordination_latest") return jsonResponse({ ok: true, payload: {
+        record: null, line: "Codex is making changes…", jobId: "first-live",
+        currentGoal: { goal: "Append pong", workspacePath: "/work" }, reason: "no coordinated result saved",
+      } });
+      if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snapshot", snapshot: empty } });
+    }));
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Append pong" })).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/work");
+    expect(screen.getByRole("button", { name: "Stop this goal" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+  });
+
+  it("restores retained goal/result/evidence through live Stop polls and terminal or unconfirmed remounts", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    window.history.replaceState(null, "", "/");
+    const empty: CoreSnapshot = {
+      ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: "", campaigns: [], notices: [],
+    };
+    const record = {
+      requestId: "prior",
+      goal: "Retain previous pong",
+      workspacePath: "/work",
+      verdict: "verified",
+      planningHarness: "Codex",
+      reviewHarness: "Pi",
+      executionEvidence: {
+        status: "available", complete: true, changed: true,
+        beforeDiff: "CAPTURED_BEFORE_PONG_TOKEN",
+        afterDiff: "CAPTURED_PRIOR_PONG_TOKEN",
+        beforeUntrackedFiles: [],
+        untrackedFiles: [{ path: "pong.txt", size: 25, content: "CAPTURED_NEW_FILE_PONG_TOKEN", binary: false }],
+      },
+      auditInputEvidenceCoverage: { totalEvidenceBytes: 100, includedEvidenceBytes: 100, cropped: false, promptBytes: 1000 },
+      auditInputEvidenceText: "EXACT_PRIOR_AUDIT_INPUT_TOKEN",
+      change: "executor prior report",
+      detail: "prior audit",
+      outcome: "prior verified result",
+    };
+    let projection: "live" | "terminal" | "unconfirmed" = "live";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_latest") {
+        const live = projection === "live" ? {
+          line: "Access stopped; the current turn may finish, but no further turn was sent.", jobId: "job-current", record,
+        } : projection === "terminal" ? {
+          line: null, jobId: null, record: { ...record, verdict: "stopped", outcome: "Stopped. No further turn was sent. Existing workspace edits remain." },
+        } : {
+          line: "This goal's exit is not confirmed, so another goal cannot start yet.", jobId: "job-current",
+          record: { ...record, verdict: "unconfirmed", outcome: "previous unconfirmed result" },
+        };
+        return jsonResponse({ ok: true, payload: { ...live, reason: null } });
+      }
+      if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snapshot", snapshot: empty } });
+    }));
+
+    const first = render(<App />);
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter((call) => String(call[1]?.body).includes("coordination_latest")).length).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/work");
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("CAPTURED_NEW_FILE_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("EXACT_PRIOR_AUDIT_INPUT_TOKEN")).toBeTruthy();
+    expect(screen.getByText(/Previous saved result; the stop message above describes the current job/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/work");
+
+    first.unmount();
+    projection = "terminal";
+    const terminal = render(<App />);
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText(/Stopped\. No further turn was sent\. Existing workspace edits remain\./)).toBeTruthy();
+    terminal.unmount();
+
+    projection = "unconfirmed";
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("CAPTURED_NEW_FILE_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText(/This goal's exit is not confirmed/)).toBeTruthy();
   });
 });

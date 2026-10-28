@@ -1,3 +1,4 @@
+import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "./coordinateGoal";
 import type { CoordinationView } from "./requestCoordination";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -36,6 +37,9 @@ export interface CoordinationRoundFact {
   readonly result: string | null;
   readonly verdict: CoordinationVerdict | null;
   readonly stopReason: string;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  readonly auditInputEvidenceText?: string | null;
   /** Dispatch state for this pass only; SavedPlan.messageDispatched is Send-wide. */
   readonly messageDispatched: boolean | null;
   /** Completed recovery facts only; transient started events are never stored. */

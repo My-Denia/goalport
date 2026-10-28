@@ -62,7 +62,8 @@ The same renderer can talk to this Core through a local bridge. The bridge is a 
 pnpm build
 python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.sock \
   --core-binary "$PWD/target/debug/goalport-core" \
-  --coordination-data "$HOME/.goalport/linux-coordinate"
+  --coordination-data "$HOME/.goalport/linux-coordinate" \
+  --database /tmp/goalport-dev/core.sqlite
 ```
 
 Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Send stays off until Keep working after closing is selected. Switching goals and reading another goal from `detail` are independent.
@@ -110,7 +111,7 @@ $CLI $GLOBAL discover
 $CLI $GLOBAL grant-access      # durable consent to spend subscription quota
 $CLI $GLOBAL revoke-access     # withdraw that consent; existing jobs keep their honesty state
 $CLI $GLOBAL run --goal 'Plan the failing check' --workspace "$PWD" \
-  --instances codex,claude --turns 4 --background
+  --instances codex,pi --turns 4 --background
 $CLI $GLOBAL status --job JOB_ID
 $CLI $GLOBAL result --request-id REQUEST_ID
 $CLI $GLOBAL continue --from REQUEST_ID --goal 'Revise the plan' --background
@@ -168,8 +169,44 @@ Honesty rules the client keeps:
   the direct harness CLI child (SIGKILL), so tools that child already started,
   and its grandchildren, are not proven quiescent. The workbench checkbox and
   the CLI flags `--write-instances codex --write-turns 1` opt into one Codex
-  write turn. Pi stays read-only. Without that opt-in, the round is planning
-  and review only.
+  write turn. Pi stays read-only with `--no-tools`, `--no-mcp`, `--no-skills`,
+  `--no-context-files`, and `--no-session`. It inspects the approved plan,
+  executor report, and captured workspace diff read-only; it does not run machine
+  test commands. Without that write opt-in, the round is planning and review only.
+- Workspace changes vs. Executor report: GoalPort captures bounded read-only Git
+  evidence before and after write turns (`git diff --no-ext-diff --no-textconv HEAD -- .`).
+  NUL-framed status paths are converted from the real Git root to the authorized
+  workspace, including subdirectory and ordinary Unicode names. Before/after
+  untracked text is retained as well as tracked diffs; the UI shows that content.
+  Untracked reads reject linked path components, use `O_NOFOLLOW` where Node
+  supports it, and validate the opened descriptor against the ordinary in-bound
+  object before reading. Binary, skipped, truncated, omitted or failed reads are
+  incomplete/unknown coverage, never proof of unchanged bytes. Capture limits
+  remain 64 KiB per tracked diff, 32 retained untracked paths and 8 KiB per text
+  file; excess paths are counted rather than emitted without bound. What the
+  model outputs is an "Executor report" (not an independently captured diff).
+- Audit input: the COMPLETE assembled audit prompt is capped at 4096 UTF-8 bytes,
+  including goal, plan, review, reports, prior feedback/metadata and evidence,
+  with 2048 bytes reserved for evidence. Every cropped field has an inline
+  notice. The existing Windows `.cmd` escape shape is budgeted conservatively at
+  six times prompt bytes plus 4096 fixed-argv characters (28672 < 32767).
+  `coverage.promptBytes` is the actual assembled prompt size, not just evidence.
+  GoalPort retains the full bounded capture separately from the exact delivered
+  audit evidence subset and its honest material/transport coverage; the shared
+  UI exposes both. This does not claim the auditor ran machine tests.
+- Stopping a goal: `stop` durably revokes further turns for the admission. It
+  does not undo or rollback workspace modifications already written (existing
+  workspace edits remain).
+- Retained product follow-ups (not completed, not owner restrictions):
+  1. API key membership: `authorizeMembershipError` currently refuses `apiKey`
+     logins; integrating authorized API-key capacity into the coordination product
+     remains an active follow-up.
+  2. Coordinated-goal native session recovery: coordination turns currently run
+     with Codex `--ephemeral` and Pi `--no-session`; association with Core native
+     session recovery remains a retained follow-up.
+  3. Scope vs. consent reuse: continuing a goal reuses durable profile consent,
+     while each continuation turn mints a fresh request ID and scope generation;
+     live cross-continue budget/generation reuse remains a follow-up.
 
 ## Native acceptance
 

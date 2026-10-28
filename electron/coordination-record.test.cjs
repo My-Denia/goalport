@@ -586,3 +586,57 @@ test("plan-revision history restores evidence only, never budgets, scope, or per
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+test("full capture, exact delivered audit subset and coverage round-trip while legacy records remain valid", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-evidence-record-"));
+  try {
+    const evidence = {
+      status: "available",
+      complete: true,
+      changed: true,
+      beforeDiff: "--- a/pre.txt\n+++ b/pre.txt\n@@ -1 +1 @@\n-a\n+b\n",
+      afterDiff: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
+      beforeUntrackedFiles: [{ path: "before.txt", size: 7, content: "before\n", binary: false }],
+      untrackedFiles: [{ path: "test.txt", size: 12, content: "actual new text", binary: false }],
+      beforeUntrackedFilesOmitted: 1,
+      untrackedFilesOmitted: 2,
+      comparisonBaseline: { headCommit: "2dbea545040c2bb3bdc66b95602975adc951d5a0", capturedAt: "2026-10-28T00:00:00.000Z" },
+      reason: "Changes observed",
+      label: "Workspace observation",
+    };
+    const coverage = {
+      totalEvidenceBytes: 5000,
+      includedEvidenceBytes: 4000,
+      cropped: true,
+      promptBytes: 8000,
+      promptBudgetBytes: 8192,
+      windowsCmdWorstCaseChars: 12000,
+      croppedSections: ["Workspace AFTER tracked diff"],
+    };
+    const auditInputEvidenceText = "  exact delivered subset  \n[cropped]\n";
+    const saved = saveRecord(directory, record({
+      requestId: "evidence-roundtrip",
+      executionEvidence: evidence,
+      auditInputEvidenceCoverage: coverage,
+      auditInputEvidenceText,
+    }));
+    assert.deepEqual(saved.executionEvidence, evidence);
+    assert.deepEqual(saved.auditInputEvidenceCoverage, coverage);
+    assert.equal(saved.auditInputEvidenceText, auditInputEvidenceText);
+
+    const reloaded = readRecords(directory).find((r) => r.requestId === "evidence-roundtrip");
+    assert.deepEqual(reloaded.executionEvidence, evidence);
+    assert.deepEqual(reloaded.auditInputEvidenceCoverage, coverage);
+    assert.equal(reloaded.auditInputEvidenceText, auditInputEvidenceText);
+
+    // Verify record without evidence stays valid
+    const legacy = saveRecord(directory, record({ requestId: "legacy-no-evidence" }));
+    assert.equal(legacy.executionEvidence, undefined);
+    assert.equal(legacy.auditInputEvidenceCoverage, undefined);
+    assert.equal(legacy.auditInputEvidenceText, undefined);
+    const reloadedLegacy = readRecords(directory).find((r) => r.requestId === "legacy-no-evidence");
+    assert.equal(reloadedLegacy.executionEvidence, undefined);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});

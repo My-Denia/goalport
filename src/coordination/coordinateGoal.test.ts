@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
 import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT } from "../types";
-import { evidenceCommand, coordinateGoal, replacementCommand, usableInstanceIds, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
+import { evidenceCommand, formatEvidenceForAudit, coordinateGoal, replacementCommand, usableInstanceIds, MAX_AUDIT_PROMPT_BYTES, WINDOWS_CMD_MAX_CHARS, windowsCmdWorstCaseChars, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
 
-import { authorizeCoordinateWriteTurn, roleOfCommandId } from "./coordinateTurn";
+const { launchSpec, turnSpec } = createRequire(import.meta.url)("../../electron/cli-coordinate.cjs") as {
+  launchSpec(file: string, args: string[], env: NodeJS.ProcessEnv, platform: string): { file: string; args: string[]; verbatim: boolean };
+  turnSpec(command: CoordinateTurnCommand, env: NodeJS.ProcessEnv, platform: string): { args?: string[]; errorText?: string };
+};
+
+import { authorizeCoordinateWriteTurn, roleOfCommandId, type CoordinateTurnCommand } from "./coordinateTurn";
 import { verdictFromAudit, verdictFromReview, outcomeLabel } from "./verdict";
 
 const workspacePath = "/work/selected-goal";
@@ -628,6 +638,185 @@ describe("explicit write assembly and phase verdicts", () => {
     expect(repairAudit.initialMessage.text).toContain("Corrective execution report:");
     expect(repairAudit.initialMessage.text).toContain(sameEvidence.executionText);
     expect(evidenceCommand("execute", catalog[0]!, repairInput, sameEvidence)).toEqual(repairWriter);
+  });
+  it("delivers captured BEFORE/AFTER diffs and untracked text as the exact retained audit subset", () => {
+    const executionEvidence = {
+      status: "available" as const,
+      complete: true,
+      changed: true,
+      beforeDiff: "UNIQUE_BEFORE_TRACKED_MARKER",
+      afterDiff: "UNIQUE_AFTER_TRACKED_MARKER",
+      beforeUntrackedFiles: [{ path: "old.txt", size: 25, content: "UNIQUE_BEFORE_UNTRACKED_MARKER", binary: false as const }],
+      untrackedFiles: [{ path: "pong.txt", size: 26, content: "UNIQUE_NEW_FILE_CONTENT_MARKER", binary: false as const }],
+      comparisonBaseline: { headCommit: "abc", capturedAt: "2026-10-28T00:00:00Z" },
+    };
+    const audit = evidenceCommand("audit", catalog[1]!, input, {
+      planText: "plan", reviewText: "VERDICT: carry-out", executionText: "report", executionEvidence,
+    });
+    for (const marker of ["UNIQUE_BEFORE_TRACKED_MARKER", "UNIQUE_AFTER_TRACKED_MARKER", "UNIQUE_BEFORE_UNTRACKED_MARKER", "UNIQUE_NEW_FILE_CONTENT_MARKER"]) {
+      expect(audit.initialMessage.text).toContain(marker);
+      expect(audit.auditInputEvidenceText).toContain(marker);
+    }
+    expect(audit.initialMessage.text.endsWith(audit.auditInputEvidenceText!)).toBe(true);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(new TextEncoder().encode(audit.initialMessage.text).length);
+    expect(audit.auditInputEvidenceCoverage!.totalEvidenceBytes).toBeGreaterThan(100);
+    expect(audit.auditInputEvidenceCoverage!.includedEvidenceBytes).toBe(audit.auditInputEvidenceCoverage!.totalEvidenceBytes);
+    expect(audit.auditInputEvidenceCoverage!.cropped).toBe(false);
+  });
+  it("constructs the same audit with browser-native encoding and no global Buffer", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Buffer");
+    Object.defineProperty(globalThis, "Buffer", { value: undefined, configurable: true, writable: true });
+    try {
+      const audit = evidenceCommand("audit", catalog[1]!, input, {
+        planText: "plan 🎯", reviewText: "VERDICT: carry-out", executionText: "report",
+        executionEvidence: {
+          status: "available", complete: true, changed: true,
+          beforeDiff: "BEFORE_NO_BUFFER", afterDiff: "AFTER_NO_BUFFER",
+          untrackedFiles: [{ path: "新增.txt", content: "TEXT_WITHOUT_BUFFER", binary: false }],
+        },
+      });
+      expect(audit.initialMessage.text).toContain("TEXT_WITHOUT_BUFFER");
+      expect(audit.initialMessage.text).toContain("BEFORE_NO_BUFFER");
+      expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(new TextEncoder().encode(audit.initialMessage.text).length);
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "Buffer", descriptor);
+    }
+  });
+  it("does not crop any small evidence section when the complete capture fits its allocated budget", () => {
+    const evidence = {
+      status: "available" as const, complete: true, changed: true,
+      beforeDiff: "diff --git a/note.txt b/note.txt\nindex 90be1f3..5b816da 100644\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1,2 @@\n before\n+pong\n",
+      afterDiff: "diff --git a/note.txt b/note.txt\nindex 90be1f3..03e8786 100644\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1,3 @@\n before\n+pong\n+pong2\n",
+      beforeUntrackedFiles: [], untrackedFiles: [],
+      comparisonBaseline: { headCommit: "fb3e547623dc82d2a2d651bc73c50a231f1ee035", capturedAt: "2026-10-28T00:00:00Z" },
+    };
+    const full = formatEvidenceForAudit(evidence, 10000);
+    const exact = formatEvidenceForAudit(evidence, new TextEncoder().encode(full.text).length);
+    expect(exact.text).toBe(full.text);
+    expect(exact.coverage.cropped).toBe(false);
+  });
+
+  it("keeps a complete small Continue diff when only the prior reports exceed the prompt budget", () => {
+    const audit = evidenceCommand("audit", catalog[1]!, { ...input, executionFeedback: {
+      previousPlan: "prior plan".repeat(1000), previousPlanReview: "prior review".repeat(1000),
+      previousExecutionReport: "prior report".repeat(1000), previousExecutionAudit: "prior audit".repeat(1000), previousCommandIds: [],
+    } }, {
+      planText: "current plan".repeat(1000), reviewText: "review".repeat(1000), executionText: "executor report".repeat(1000),
+      executionEvidence: {
+        status: "available", complete: true, changed: true,
+        beforeDiff: "diff --git a/note.txt b/note.txt\n@@ -1 +1,2 @@\n before\n+pong\n",
+        afterDiff: "diff --git a/note.txt b/note.txt\n@@ -1 +1,3 @@\n before\n+pong\n+pong2\n",
+        beforeUntrackedFiles: [], untrackedFiles: [],
+        comparisonBaseline: { headCommit: "abc", capturedAt: "2026-10-28T00:00:00Z" },
+      },
+    });
+    expect(audit.auditInputEvidenceText).toContain("+pong2");
+    expect(audit.auditInputEvidenceText).not.toContain("cropped for transport");
+    expect(audit.auditInputEvidenceCoverage?.includedEvidenceBytes).toBe(audit.auditInputEvidenceCoverage?.totalEvidenceBytes);
+    expect(audit.auditInputEvidenceCoverage?.promptBytes).toBeLessThanOrEqual(MAX_AUDIT_PROMPT_BYTES);
+  });
+
+  it("bounds oversize goal/plan/review/report/feedback/metadata as well as evidence with visible crops", () => {
+    const feedback: ExecutionFeedback = {
+      previousPlan: "previous-plan".repeat(2000),
+      previousPlanReview: "previous-review".repeat(2000),
+      previousExecutionReport: "previous-report".repeat(2000),
+      previousExecutionAudit: "previous-audit".repeat(2000),
+      previousCommandIds: Array.from({ length: 1000 }, (_, index) => `coordinate-old-${index}`),
+    };
+    const audit = evidenceCommand("audit", catalog[1]!, { ...input, goal: "goal".repeat(5000), executionFeedback: feedback }, {
+      planText: "p".repeat(20000), reviewText: "r".repeat(20000), executionText: "e".repeat(20000),
+      executionFacts: "f".repeat(20000),
+      executionEvidence: {
+        status: "available", complete: true, changed: true,
+        beforeDiff: "b".repeat(20000), afterDiff: "a".repeat(20000),
+        untrackedFiles: [{ path: "new.txt", content: "n".repeat(20000), binary: false }],
+      },
+    });
+    const actualBytes = new TextEncoder().encode(audit.initialMessage.text).length;
+    expect(actualBytes).toBeLessThanOrEqual(MAX_AUDIT_PROMPT_BYTES);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(actualBytes);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).not.toBe(183);
+    expect(audit.auditInputEvidenceCoverage!.windowsCmdWorstCaseChars).toBe(windowsCmdWorstCaseChars(audit.initialMessage.text));
+    expect(audit.auditInputEvidenceCoverage!.windowsCmdWorstCaseChars!).toBeLessThanOrEqual(WINDOWS_CMD_MAX_CHARS);
+    for (const label of ["Goal", "Approved plan", "Independent plan check", "Prior-round feedback and metadata", "Corrective execution report", "Recorded execution facts", "Workspace AFTER tracked diff", "Workspace BEFORE tracked diff", "Workspace AFTER untracked files"]) {
+      expect(audit.auditInputEvidenceCoverage!.croppedSections).toContain(label);
+    }
+    expect(audit.initialMessage.text).toContain("[Goal cropped for transport:");
+    expect(audit.initialMessage.text).toContain("[Approved plan cropped for transport:");
+    expect(audit.initialMessage.text).toMatch(/\[Workspace .* cropped for transport:/);
+    expect(audit.initialMessage.text).toContain("Full capture retained in GoalPort record.]");
+  });
+  it("keeps multibyte/cmd-metacharacter audit text launchable through the actual Windows argv shape", () => {
+    const audit = evidenceCommand("audit", { instanceId: "codex", name: "Codex", defaultModel: "gpt-fixture" }, input, {
+      planText: "plan 🎯 & %PATH%", reviewText: "VERDICT: carry-out", executionText: "report <ok>",
+      executionEvidence: {
+        status: "available", complete: true, changed: true,
+        beforeDiff: "before 🎯", afterDiff: "🎯\"&%<>|^ ,;*?".repeat(1500),
+        untrackedFiles: [{ path: "新增.txt", content: "新增内容 & <text>".repeat(300), binary: false }],
+      },
+    });
+    const directory = mkdtempSync(join(tmpdir(), "goalport-audit-launch-"));
+    try {
+      const fixture = join(directory, "harmless.cmd");
+      writeFileSync(fixture, "@echo off\r\necho HARMLESS_AUDIT_FIXTURE\r\n");
+      const actual = turnSpec(audit, process.env, "linux");
+      expect(actual.errorText).toBeUndefined();
+      const spec = launchSpec(fixture, actual.args!, process.env, "win32");
+      const escapedChars = spec.args.join(" ").length;
+      expect(escapedChars).toBeLessThanOrEqual(WINDOWS_CMD_MAX_CHARS);
+      expect(windowsCmdWorstCaseChars(audit.initialMessage.text)).toBeLessThanOrEqual(WINDOWS_CMD_MAX_CHARS);
+      if (process.platform === "win32") {
+        const launched = spawnSync(spec.file, spec.args, { windowsVerbatimArguments: spec.verbatim, encoding: "utf8" });
+        expect(launched.error).toBeUndefined();
+        expect(launched.status).toBe(0);
+        expect(launched.stdout).toContain("HARMLESS_AUDIT_FIXTURE");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    }
+  });
+  it("bounds the COMPLETE audit prompt to transport-safe byte budget and handles multibyte evidence", () => {
+    // Generate large multibyte evidence (e.g. 50 KiB of emoji and Chinese text)
+    const multibyteChunk = "🎯 修复文件：测试数据 🌟\n";
+    const hugeDiff = multibyteChunk.repeat(2000); // ~50,000 bytes
+    const evidence = {
+      planText: "Approved repair plan for multibyte issue.",
+      reviewText: "VERDICT: carry-out",
+      executionText: "Executor says it modified the files.",
+      executionFacts: "executor facts",
+      executionEvidence: {
+        status: "available" as const,
+        complete: true,
+        changed: true,
+        beforeDiff: "",
+        afterDiff: hugeDiff,
+        untrackedFiles: [{ path: "test🎯.txt", size: 100 }],
+        comparisonBaseline: { headCommit: "2dbea545040c2bb3bdc66b95602975adc951d5a0", capturedAt: "2026-10-28T00:00:00Z" },
+        reason: "Changes observed",
+      },
+    };
+
+    const auditCmd = evidenceCommand("audit", catalog[1]!, input, evidence);
+    const promptText = auditCmd.initialMessage.text;
+    const promptBytes = Buffer.byteLength(promptText, "utf8");
+
+    // Must be bounded within the transport budget
+    expect(promptBytes).toBeLessThanOrEqual(MAX_AUDIT_PROMPT_BYTES);
+    expect(auditCmd.auditInputEvidenceCoverage!.promptBytes).toBe(promptBytes);
+
+    // Must retain visible crop notice
+    expect(promptText).toMatch(/\[Workspace .* cropped for transport:/);
+    expect(promptText).toContain("Full capture retained in GoalPort record.]");
+
+    // Audit coverage must accurately state what was included vs total
+    expect(auditCmd.auditInputEvidenceCoverage).toBeDefined();
+    expect(auditCmd.auditInputEvidenceCoverage!.cropped).toBe(true);
+    expect(auditCmd.auditInputEvidenceCoverage!.totalEvidenceBytes).toBeGreaterThan(16384);
+    expect(auditCmd.auditInputEvidenceCoverage!.includedEvidenceBytes).toBeLessThan(16384);
+
+    // Verify multibyte valid decode (no broken UTF-8 sequences)
+    expect(() => new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(promptText, "utf8"))).not.toThrow();
   });
   it.each([
     ["VERDICT: verified", "unconfirmed", "verified"],

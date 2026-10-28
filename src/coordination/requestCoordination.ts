@@ -4,6 +4,8 @@ import {
   type CoordinateGoalInput,
   type CoordinationWriteAuthorization,
   type ExecutionFeedback,
+  type ExecutionWorkspaceEvidence,
+  type AuditInputEvidenceCoverage,
 } from "./coordinateGoal";
 import {
   runCoordinateSession,
@@ -25,6 +27,9 @@ export interface CoordinationView {
   auditText?: string | null;
   executionHarness?: string | null;
   auditHarness?: string | null;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  readonly auditInputEvidenceText?: string | null;
   readonly authorizedWriteTurnsLeft?: number | null;
   result: string | null;
   verdict: CoordinationVerdict | null;
@@ -156,6 +161,9 @@ function roundFactFrom(sent: CoordinateSessionState): CoordinationRoundFact {
     auditText: sent.auditText ?? null,
     executionHarness: sent.executionHarness ?? null,
     auditHarness: sent.auditHarness ?? null,
+    executionEvidence: sent.executionEvidence ?? null,
+    auditInputEvidenceCoverage: sent.auditInputEvidenceCoverage ?? null,
+    auditInputEvidenceText: sent.auditInputEvidenceText ?? null,
     result: sent.result,
     verdict: sent.verdict,
     stopReason: sent.stopReason,
@@ -182,6 +190,9 @@ function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: bo
     ...(hasWriteConsent ? {
       executionText: sent.executionText, auditText: sent.auditText,
       executionHarness: sent.executionHarness, auditHarness: sent.auditHarness,
+      executionEvidence: sent.executionEvidence ?? null,
+      auditInputEvidenceCoverage: sent.auditInputEvidenceCoverage ?? null,
+      auditInputEvidenceText: sent.auditInputEvidenceText ?? null,
       authorizedWriteTurnsLeft: sent.authorizedWriteTurnsLeft,
     } : {}),
     authorizedTurnsLeft: sent.authorizedTurnsLeft,

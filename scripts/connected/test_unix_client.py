@@ -25,6 +25,47 @@ workbench_spec.loader.exec_module(workbench)
 
 
 class CommandRoutingTests(unittest.TestCase):
+    def test_first_live_goal_identity_survives_return_before_any_saved_result(self):
+        with tempfile.TemporaryDirectory(prefix="gp-first-live-") as temp:
+            root = Path(temp)
+            job = root / "coordination-jobs" / "jobs" / "first-job"
+            job.mkdir(parents=True)
+            (root / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": "first-job"}), encoding="utf-8")
+            (job / "progress.json").write_text(json.dumps({"state": "running", "display": {"activity": "Codex is planning…"}}), encoding="utf-8")
+            (job / "admission.json").write_text(json.dumps({"input": {"goal": "Append pong", "workspacePath": "/work", "priorPlan": "not a result"}}), encoding="utf-8")
+            result = workbench.latest_coordination_record(root)
+            self.assertIsNone(result["record"])
+            self.assertEqual(result["currentGoal"], {"goal": "Append pong", "workspacePath": "/work"})
+            self.assertNotIn("priorPlan", result["currentGoal"])
+
+    def test_stopped_continue_retains_only_its_parent_workspace_result(self):
+        with tempfile.TemporaryDirectory(prefix="gp-stop-retain-") as temp:
+            root = Path(temp)
+            job = root / "coordination-jobs" / "jobs" / "stop-job"
+            job.mkdir(parents=True)
+            parent = {"requestId": "parent", "workspacePath": "/work", "planText": "parent plan", "auditText": "parent audit", "executionEvidence": {"afterDiff": "+pong2"}, "savedAt": "2026-10-28T01:00:00Z"}
+            stopped = {"requestId": "stop", "workspacePath": "/work", "goal": "Read-only follow-up", "verdict": "failed", "stopReason": "Access stopped; the current turn may finish, but no further turn was sent.", "savedAt": "2026-10-28T02:00:00Z"}
+            (root / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": "stop-job"}), encoding="utf-8")
+            current = {"requestId": "stop", "workspacePath": "/work", "executionFeedback": {"previousPlan": "parent plan", "previousExecutionAudit": "parent audit"}}
+            (job / "admission.json").write_text(json.dumps({"input": current}), encoding="utf-8")
+            (job / "progress.json").write_text(json.dumps({"state": "stopped", "outcome": {"status": "stopped"}}), encoding="utf-8")
+            (root / "coordination-records.json").write_text(json.dumps([stopped, parent]), encoding="utf-8")
+            result = workbench.latest_coordination_record(root)["record"]
+            self.assertEqual(result["requestId"], "stop")
+            self.assertEqual(result["goal"], "Read-only follow-up")
+            self.assertEqual(result["retainedFromRequestId"], "parent")
+            self.assertEqual(result["executionEvidence"]["afterDiff"], "+pong2")
+            (root / "coordination-jobs" / "active-admission.json").unlink()
+            self.assertEqual(workbench.latest_coordination_record(root)["record"]["executionEvidence"]["afterDiff"], "+pong2")
+            parent["workspacePath"] = "/other"
+            (root / "coordination-records.json").write_text(json.dumps([stopped, parent]), encoding="utf-8")
+            self.assertIsNone(workbench.latest_coordination_record(root)["record"]["executionEvidence"])
+
+    def test_independent_check_details_keep_the_actual_conclusion_beyond_the_summary(self):
+        audit = "Evidence limitations\n" + "checked captured material\n" * 40 + "VERDICT: verified"
+        self.assertEqual(workbench.check_detail({"auditText": audit}, None), audit)
+        self.assertIn("truncated for display", workbench.check_detail({"auditText": "x" * 25000}, None))
+
     def test_overview_and_detail_do_not_select(self):
         overview = client.command_for(client.parser().parse_args(["overview"]))
         detail = client.command_for(client.parser().parse_args(["detail", "--campaign", "campaign-b"]))
@@ -129,6 +170,7 @@ class CommandRoutingTests(unittest.TestCase):
                 "messageDispatched": True,
                 "goal": "Add pong",
                 "planText": "do not send this body",
+                "auditInputEvidenceText": "exact audit evidence subset",
             },
         ]), encoding="utf-8")
         missing = workbench.latest_coordination_record(None)
@@ -142,6 +184,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
         self.assertEqual(found["record"]["detail"], "Pi verified the added line and no other file changed.")
         self.assertEqual(found["record"]["change"], "Codex added pong under before.")
+        self.assertEqual(found["record"]["auditInputEvidenceText"], "exact audit evidence subset")
         self.assertNotIn("planText", found["record"])
         stopped_dir = directory / "stopped-newest"
         stopped_dir.mkdir()
@@ -241,6 +284,9 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: False), "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.")
         self.assertEqual(workbench.activity_line({"state": "running", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "Codex is planning…")
         self.assertEqual(workbench.activity_line({"state": "unconfirmed", "display": {"activity": "Codex is planning…"}}, 99, lambda _pid: True), "This goal's exit is not confirmed, so another goal cannot start yet.")
+        self.assertEqual(workbench.activity_line({"state": "running", "pendingCommand": {"commandId": "cmd-1"}}, 99, lambda _pid: True, is_revoked=True), "Access stopped; the current turn may finish, but no further turn was sent.")
+        self.assertEqual(workbench.activity_line({"state": "stopped", "outcome": {"status": "stopped"}}, 99, lambda _pid: True, is_revoked=True), "Stopped. No further turn was sent. Existing workspace edits remain.")
+        self.assertEqual(workbench.activity_line({"state": "running"}, 99, lambda _pid: True, is_revoked=True), "Access stopped; no further turn was sent.")
         self.assertEqual(live["jobId"], job)
         self.assertEqual(live["record"]["verdict"], "verified")
         stop_argv, stop_error = workbench.coordination_stop_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core")

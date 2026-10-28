@@ -106,7 +106,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   min-width: 0;
 }
 
-.titlebar-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.titlebar-left { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 
 .titlebar-identity {
   display: flex; align-items: center; gap: 8px;
@@ -185,6 +185,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .goalport-shell {
   display: grid;
   grid-template-rows: var(--titlebar-h) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   height: 100%;
   overflow: hidden;
 }
@@ -207,7 +208,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   /* A definite row lets the conversation column's 1fr timeline row actually
      shrink; otherwise the composer can be pushed out of the viewport. */
   grid-template-rows: minmax(0, 1fr);
-  min-height: 0;
+  min-width: 0; min-height: 0;
   overflow: hidden;
 }
 .workspace-grid.nav-collapsed { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
@@ -404,7 +405,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
   min-width: 0; padding: 14px 22px 10px; flex: 0 0 auto;
 }
-.conversation-heading-main { min-width: 0; }
+.conversation-heading-main { flex: 1; min-width: 0; }
 .conversation-heading h2 {
   overflow: hidden; margin: 0 0 3px;
   color: var(--ink); font-size: 17px; font-weight: 700; letter-spacing: -0.015em;
@@ -415,6 +416,14 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   color: var(--ink-muted); font-size: 12.5px; line-height: 1.45;
   text-overflow: ellipsis; white-space: nowrap;
 }
+.conversation-heading .draft-hint > p { white-space: pre-wrap; max-height: 220px; overflow: auto; overflow-wrap: anywhere; user-select: text; }
+.workspace-evidence-container { min-width: 0; max-width: 100%; margin-top: 10px; user-select: text; }
+.workspace-evidence-container details { margin-top: 8px; }
+.workspace-evidence-container summary { color: var(--ink-soft); cursor: pointer; font-size: 12.5px; }
+.workspace-evidence-content { max-height: 340px; overflow: auto; padding: 10px 0; }
+.workspace-evidence-container p { white-space: normal; overflow-wrap: anywhere; margin: 6px 0; }
+.workspace-diff-view { max-width: 100%; max-height: 260px; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink-soft); font: 12px/1.5 ui-monospace, monospace; white-space: pre; }
+.workspace-executor-report > p { max-height: 220px; overflow: auto; white-space: pre-wrap; }
 .task-state {
   flex: 0 0 auto; margin-top: 3px; padding: 3px 8px; border-radius: 6px;
   font-size: 11px; font-weight: 750; letter-spacing: 0.05em; text-transform: uppercase;
@@ -1104,6 +1113,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 /* First-use draft composer. */
 .draft-composer { max-width: 640px; margin: 18px auto 0; width: 100%; }
 .composer-dock .draft-composer { margin: 0 auto; }
+.draft-composer .draft-hint { margin: 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.5; }
 .draft-composer details.draft-hint { margin: 8px 0 0; }
 .draft-composer details.draft-hint p { max-height: 8rem; overflow: auto; white-space: pre-wrap; }
 .draft-composer-form {
