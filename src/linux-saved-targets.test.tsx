@@ -5,6 +5,7 @@ import App from "./App";
 import { resetCoreClientForTests } from "./ipc";
 import { DEMO_SNAPSHOT } from "./types";
 import { CampaignNav } from "./nav/CampaignNav";
+import { BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import type { CoordinatedCurrentJob, SavedTargetResult } from "./coordination/savedTargetView";
 import { coordinatedRouteFromLocation, setCoordinatedRoute, replaceGoalRoute } from "./lib/goalRoute";
 
@@ -21,6 +22,8 @@ function fixture(hash = "#coordinated/result/a") {
   const root = (id: string): SavedTargetResult => ({ requestId: id, rootRequestId: id, rootLatestId: id, goal: `Goal ${id.toUpperCase()}`, workspacePath: `/work/${id}`, verdict: "verified", outcome: `Actual saved ${id.toUpperCase()}`, relationStatus: "legacy-root", relationUnavailableReason: null, rememberedIntent: { background: true, write: id === "a" }, detail: `Independent check ${id}`, change: `Executor report ${id}` });
   const records: Record<string, SavedTargetResult> = { a: root("a"), b: root("b") };
   let current: CoordinatedCurrentJob | null = null;
+  let allowanceJob: import("./coordination/backgroundStatus").BackgroundStatus | null = null;
+  let stopEffect: (() => void) | undefined;
   let pi: import("./coordination/catalogFromProviders").ProviderSnapshot | undefined;
   let harnesses: string[] | undefined;
   let held = false;
@@ -42,7 +45,7 @@ function fixture(hash = "#coordinated/result/a") {
       const roots = ["a", "b"].map(id => ({ requestId: records[id].rootLatestId ?? id, reason: records[id].rootLatestId ? null : "The latest result cannot be identified.", rootRequestId: id, title: records[id].goal, workspacePath: records[id].workspacePath, outcome: `Summary ${id.toUpperCase()}` }));
       return response({ ok: true, payload: { ok: true, roots, profileLatestId: "b", record: selected,
         history: Object.values(records).filter(r => r.rootRequestId === selected?.rootRequestId).map(r => ({ requestId: r.requestId, savedAt: r.requestId === "a" ? "2026-01-01" : "2026-01-02", outcome: r.outcome })),
-        currentJob: current, line: held ? null : current?.line, jobId: held ? null : current?.jobId, unconfirmedGoal: current?.line.includes("not confirmed"), leftoverHeld: held } });
+        currentJob: current, allowanceJob, line: held ? null : current?.line, jobId: held ? null : current?.jobId, unconfirmedGoal: current?.line.includes("not confirmed"), leftoverHeld: held } });
     }
     if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: harnesses ?? (pi ? ["codex"] : ["codex", "pi"]), pi: pi ? { ...pi, piCapacity: { ...pi.piCapacity, workspacePath: body.payload.workspaceRoot } } : undefined, consentMissing: false } });
     if (body.messageType === "coordination_continue" || body.messageType === "coordination_start") {
@@ -51,7 +54,7 @@ function fixture(hash = "#coordinated/result/a") {
       return response(admitted);
     }
     if (body.messageType === "coordination_acknowledge") { held = false; current = null; return response({ ok: true, payload: { stdout: "The interrupted job stays unreplayed; the same request id cannot be admitted again." } }); }
-    if (body.messageType === "coordination_stop") return response({ ok: true, payload: { stdout: "revoked: true\npending command: still-running\n" } });
+    if (body.messageType === "coordination_stop") { stopEffect?.(); return response({ ok: true, payload: { stdout: "revoked: true\npending command: still-running\n" } }); }
     if (body.messageType === "goal_overview") return response({ ok: true, payload: { overview: { revision: "fixture", truncated: false, goals: coreEnabled ? [{ campaignId: "campaign-core", projectId: "project-core", workspaceRoot: "/core", title: "Core goal", attention: "idle" }] : [], pending: [] } } });
     const snapshot = coreEnabled ? { ...empty, activeCampaignId: "campaign-core", campaigns: [{ ...DEMO_SNAPSHOT.campaigns[0], id: "campaign-core", title: "Core goal" }], productConversation: { ...DEMO_SNAPSHOT.productConversation!, title: "Core goal" } } : empty;
     return response({ ok: true, payload: { revision: "fixture", unchanged: false, snapshot } });
@@ -61,7 +64,7 @@ function fixture(hash = "#coordinated/result/a") {
     records.a.rootLatestId = "a2";
     records.a2 = { ...records.a, requestId: "a2", outcome: "Actual child A", relationStatus: "valid", continuation: { parentRequestId: "a", rootRequestId: "a", originalGoal: "Goal A", followUp: "New instruction" }, rememberedIntent: { background: true, write: false } };
   };
-  return { calls, records, tick, child, harnesses(value: string[]) { harnesses = value; }, pi(value: typeof pi) { pi = value; }, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
+  return { calls, records, tick, child, allowance(value: typeof allowanceJob) { allowanceJob = value; }, stop(effect: () => void) { stopEffect = effect; }, harnesses(value: string[]) { harnesses = value; }, pi(value: typeof pi) { pi = value; }, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
 }
 const text = () => screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
 const continuation = () => screen.getByRole("button", { name: "Continue this goal" });
@@ -367,6 +370,78 @@ it("a selected Pi goal without Codex stays unsent and explains the missing plann
   expect(screen.queryByText(/Selected roles: Codex plans/)).toBeNull();
   expect(screen.getAllByText(/Codex is needed/).length).toBeGreaterThan(0);
   expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+function liveFixture(hash = "#coordinated/result/a") {
+  const f = fixture(hash);
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+  f.pi({ instanceId: "pi", displayName: "Pi", driver: "pi", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "unknown", type: "apiKey" }, models: [], piCapacity: { offer: pair, catalog: [{ provider: "Fixture", model: "alpha" }] } });
+  f.records.a.piCapacity = pair; f.records.a.verdict = "checked"; f.records.a.statusLabel = "Plan checked";
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: pair };
+  const liveRead = { mode: "live-read-once" as const, ready: true, initialRequestId: "a", fromRequestId: "a", rootRequestId: "a", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: "2026-01-01T00:15:00Z", reason: null };
+  const job: CoordinatedCurrentJob = { jobId: "job-a", requestId: "a", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, followUpMode: "live-read-once", liveRead, line: "Ready for one follow-up. No model is running." };
+  f.job(job);
+  return { ...f, jobValue: job, liveRead };
+}
+
+it("live Ready has one composer Continue, empty Enter does not send, explicit empty Continue keeps caller ID through lost ACK and matching status", async () => {
+  const f = liveFixture(); render(<App />);
+  await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(screen.getAllByRole("button", { name: /Continue this goal/ })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: /New send for this goal/ })).toBeNull();
+  fireEvent.keyDown(text(), { key: "Enter" });
+  expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(0);
+  f.reply(new Error("lost fixture ack"));
+  f.job({ ...f.jobValue, liveRead: { ...f.liveRead, ready: false, reason: "unconfirmed" } });
+  fireEvent.change(text(), { target: { value: "Keep this exact draft" } });
+  fireEvent.click(continuation());
+  await screen.findByText(/follow-up and request id are kept/);
+  const call = f.calls.find(c => c.messageType === "coordination_continue")!;
+  expect(call.payload).toMatchObject({ fromRequestId: "a", followUp: "Keep this exact draft", write: false, background: true, instances: "codex,pi" });
+  expect(typeof call.payload.liveRequestId).toBe("string");
+  expect(text().value).toBe("Keep this exact draft"); expect(text()).toHaveProperty("disabled", true);
+  f.job({ ...f.jobValue, liveRead: { ...f.liveRead, ready: false, childRequestId: String(call.payload.liveRequestId), reason: "busy" } });
+  await f.tick(); await waitFor(() => expect(text().value).toBe(""));
+  expect(f.calls.filter(c => c.messageType === "coordination_start")).toHaveLength(0);
+  expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1);
+});
+
+it("Ready B cannot spend A's result or end B when inspecting A; New goal on matching idle result waits for terminal release", async () => {
+  const f = liveFixture("#coordinated/result/b"); render(<App />);
+  await screen.findByRole("heading", { name: "Goal B" });
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: /^New goal(?:\.|$)/ })).toHaveProperty("disabled", true);
+  fireEvent.click(screen.getByRole("button", { name: "Goal A, /work/a" }));
+  await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  f.stop(() => {
+    f.job(null);
+    f.allowance({ jobId: "job-a", requestId: "a", goal: "Goal A", workspacePath: "/work/a", state: "stopped", active: false, live: false, revoked: true, workerPid: null, pendingCommand: null, completedCommands: [], counters: null, progress: null, readMaxTurns: 4, writeMaxTurns: null, followUpMode: "live-read-once", outcome: { status: "stopped", allowanceEnd: "idle-stopped" } });
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
+  expect(f.calls.find(c => c.messageType === "coordination_stop")?.payload).toEqual({ jobId: "job-a", onlyIfReadyFromRequestId: "a" });
+  expect(f.calls.filter(c => c.messageType === "coordination_start" || c.messageType === "coordination_continue")).toHaveLength(0);
+  expect(text().value).toBe("");
+});
+
+it("malformed or stale live acknowledgement refuses Continue with no fresh Start fallback and preserves dirty draft/focus", async () => {
+  const f = liveFixture(); f.job({ ...f.jobValue, liveRead: { ...f.liveRead, rootRequestId: "b" } });
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  fireEvent.change(text(), { target: { value: "Do not lose this" } }); text().focus(); await f.tick();
+  expect(continuation()).toHaveProperty("disabled", true); fireEvent.click(continuation());
+  expect(text().value).toBe("Do not lose this"); expect(document.activeElement).toBe(text());
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toHaveLength(0);
+});
+
+it("a waiting new-mode row without fresh RAM Ready never claims a running model or renders a second Continue", () => {
+  const job: import("./coordination/backgroundStatus").BackgroundStatus = { jobId: "job", requestId: "a", goal: "Goal A", state: "running", active: true, live: true, revoked: false, workerPid: 1, pendingCommand: null, completedCommands: [], counters: null, readMaxTurns: 4, writeMaxTurns: null, outcome: null, progress: { activity: "Ready for one follow-up. No model is running." }, phase: "awaiting-followup", followUpMode: "live-read-once" };
+  render(<BackgroundCoordinationStatus job={job} onStopAllowing={() => {}} onContinue={() => {}} />);
+  expect(screen.getByText(/open allowance is not confirmed/)).toBeTruthy();
+  expect(screen.queryByText(/running on its own/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /Continue|New send/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 });
 
 it("goal route helper keeps coordinated selection separate from Core replacement and rejects malformed routes", () => {

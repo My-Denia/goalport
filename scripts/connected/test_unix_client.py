@@ -27,6 +27,65 @@ workbench_spec.loader.exec_module(workbench)
 
 
 class CommandRoutingTests(unittest.TestCase):
+    def test_live_bridge_stable_id_before_active_refusal_and_guarded_stop_never_creates_marker(self):
+        with tempfile.TemporaryDirectory(prefix="gp-live-bridge-") as temp:
+            root = Path(temp)
+            job = root / "coordination-jobs" / "jobs" / "fixture-job"
+            job.mkdir(parents=True)
+            pair = {"provider": "Fixture", "model": "alpha", "useExistingCapacity": True}
+            a = {"requestId": "initial", "goal": "Original", "workspacePath": "/work", "allowedInstances": ["codex", "pi"], "maxTurns": 4, "piCapacity": pair, "backgroundConsent": True, "writeAuthorization": None}
+            record = {"requestId": "initial", "goal": "Original", "workspacePath": "/work", "piCapacity": pair, "verdict": "checked", "planText": "Plan", "reviewText": "Check", "savedAt": "2026-01-01"}
+            (job / "admission.json").write_text(json.dumps({"schema": "goalport.coordination-job-admission.v1", "jobId": "fixture-job", "input": a, "followUpMode": "live-read-once"}), encoding="utf-8")
+            (job / "progress.json").write_text(json.dumps({"schema": "goalport.coordination-job-progress.v1", "jobId": "fixture-job", "state": "running", "phase": "awaiting-followup", "revoked": False, "pendingCommand": None, "completedCommands": [], "display": {"activity": "Ready"}}), encoding="utf-8")
+            (root / "coordination-jobs" / "active-admission.json").write_text(json.dumps({"jobId": "fixture-job"}), encoding="utf-8")
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            args = dict(data_dir=root, repo_root=Path("/repo"), endpoint="/tmp/fixture.sock", core_binary="/fixture/core", from_request_id="initial", background=True, write=False)
+            argv, error = workbench.coordination_continue_command(**args, live_request_id="caller-child", follow_up="  exact follow-up  ")
+            self.assertIsNone(error)
+            self.assertEqual(argv[argv.index("--live-request-id") + 1], "caller-child")
+            self.assertEqual(argv[argv.index("--goal") + 1], "exact follow-up")
+            self.assertNotIn("--request-id", argv)
+            self.assertIsNotNone(workbench.coordination_continue_command(**args)[1])
+            self.assertIsNotNone(workbench.coordination_continue_command(**{**args, "from_request_id": "other"}, live_request_id="caller-child")[1])
+            stop, error = workbench.coordination_stop_command(root, Path("/repo"), "/tmp/fixture.sock", "/fixture/core", expected_job_id="fixture-job", only_if_ready_from="initial")
+            self.assertIsNone(error)
+            self.assertEqual(stop[-2:], ["--only-if-ready-from", "initial"])
+            self.assertFalse((job / "revocation.json").exists())
+            self.assertNotIn("liveRead", workbench.live_fields(root)["currentJob"])
+            unavailable = workbench.acknowledged_saved_payload(root, "initial", Path("/repo"), "/tmp/fixture.sock", "/fixture/core", None, None)
+            self.assertIsNone(unavailable["currentJob"]["liveRead"])
+            self.assertIn("not confirmed", unavailable["currentJob"]["line"])
+            busy = {"jobId": "fixture-job", "requestId": "initial", "workspacePath": "/work", "followUpMode": "live-read-once", "live": True, "phase": "awaiting-followup", "progress": {"activity": "Ready"}, "liveRead": {"ready": False, "reason": "busy", "pending": False, "childRequestId": None}}
+            checked = workbench.acknowledged_saved_payload(root, "initial", Path("/repo"), "/tmp/fixture.sock", "/fixture/core", None, lambda argv: (0, "job projection: " + json.dumps(busy), ""))
+            self.assertEqual(checked["currentJob"]["line"], "Checking the open allowance. No model is running.")
+
+    def test_live_owned_context_child_relation_local_failure_and_idle_checked_result_label(self):
+        with tempfile.TemporaryDirectory(prefix="gp-live-context-") as temp:
+            root = Path(temp); job = root / "coordination-jobs" / "jobs" / "fixture-job"; job.mkdir(parents=True)
+            pair = {"provider": "Fixture", "model": "alpha", "useExistingCapacity": True}
+            a = {"requestId": "initial", "goal": "Original", "workspacePath": "/work", "allowedInstances": ["codex", "pi"], "maxTurns": 4, "piCapacity": pair, "backgroundConsent": True, "writeAuthorization": None}
+            admission = {"schema": "goalport.coordination-job-admission.v1", "jobId": "fixture-job", "input": a, "followUpMode": "live-read-once"}
+            record = {"requestId": "initial", "goal": "Original", "workspacePath": "/work", "piCapacity": pair, "verdict": "checked", "planText": "Plan", "reviewText": "Check", "savedAt": "2026-01-01"}
+            progress = {"schema": "goalport.coordination-job-progress.v1", "jobId": "fixture-job", "state": "stopped", "pendingCommand": None, "revoked": True, "completedCommands": [], "outcome": {"status": "stopped", "allowanceEnd": "idle-stopped", "report": record}}
+            (job / "admission.json").write_text(json.dumps(admission), encoding="utf-8")
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            def write_progress():
+                (job / "progress.json").write_text(json.dumps(progress), encoding="utf-8")
+            write_progress(); self.assertEqual(workbench.saved_status_label(root, record), "Plan checked")
+            progress["outcome"] = {"status": "stopped"}; write_progress(); self.assertEqual(workbench.saved_status_label(root, record), "Stopped; existing changes remain")
+            progress.update(state="completed", revoked=False, outcome={"status": "completed", "allowanceEnd": "expired", "report": record}); write_progress(); self.assertEqual(workbench.saved_status_label(root, record), "Plan checked")
+            c = {"requestId": "child", "fromRequestId": "initial", "rootRequestId": "initial", "originalGoal": "Original", "followUp": "More", "workspacePath": "/work", "piCapacity": pair, "backgroundConsent": True, "write": False, "initialPlan": "Plan", "initialReview": "Check", "acceptedAt": "2026-01-01T00:00:00Z", "phase": "completed"}
+            child = {**record, "requestId": "child", "savedAt": "2026-01-02", "continuation": {"parentRequestId": "initial", "rootRequestId": "initial", "originalGoal": "Original", "followUp": "More"}}
+            progress["liveFollowUp"] = c; progress["outcome"] = {"status": "completed"}; write_progress()
+            (root / "coordination-records.json").write_text(json.dumps([record, child]), encoding="utf-8")
+            owned, _ = workbench.find_matching_admission(root, "child", "/work")
+            self.assertEqual(owned["requestId"], "child"); self.assertIsNone(owned["writeAuthorization"])
+            self.assertEqual(workbench.project_remembered_intent(owned, "/work"), {"background": True, "write": False, "piCapacity": pair})
+            progress["liveFollowUp"] = {"bad": True}; write_progress()
+            self.assertEqual(workbench.find_matching_admission(root, "child", "/work"), (None, None))
+            selected = workbench.latest_coordination_record(root, "child")["record"]
+            self.assertEqual(selected["requestId"], "child"); self.assertIsNone(selected["rememberedIntent"])
+
     def test_pi_capacity_projection_is_typed_separate_from_subscription_names_and_own_intent(self):
         pair = {"provider": "Fixture", "model": "alpha", "useExistingCapacity": True}
         pi = {"instanceId": "pi", "auth": {"type": "apiKey", "status": "unknown"}, "piCapacity": {"offer": pair, "catalog": [{"provider": "Fixture", "model": "alpha"}]}}

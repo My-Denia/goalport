@@ -104,6 +104,30 @@ async function invoke(f, argv, options = {}) {
   return { code, ...drain(f) };
 }
 
+test("live CLI uses caller child ID through real fake-control frames, no fresh admission/discovery/spawn on refusal, idempotent after lost reply", { skip: process.platform !== "linux" }, async t => {
+  const f = fixture(t, { discover: async () => { throw Error("live Continue must not perform host discovery"); } });
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const store = createCoordinationJobStore(f.dataDir, { bootstrapReady: true });
+  const start = store.startAdmission({ requestId: "initial", goal: "Original", workspacePath: f.workspace, allowedInstances: ["codex", "pi"], maxTurns: 4, backgroundConsent: true, piCapacity: pair }, { followUpMode: "live-read-once" });
+  const owner = store.claimWorker(start.jobId).ownerToken;
+  saveRecord(f.dataDir, { requestId: "initial", goal: "Original", workspacePath: f.workspace, verdict: "checked", stopReason: "Checked", planningHarness: "Codex", reviewHarness: "Pi", planningQuota: null, reviewQuota: null, planText: "Full plan", reviewText: "Full check", result: "Checked", piCapacity: pair });
+  let accepted = null, operations = 0;
+  const endpoint = jobControlEndpoint(controlEndpointFor(f.pipe, { platform: "linux", env: f.env }), start.jobId);
+  const server = await store.startControlServer({ jobId: start.jobId, endpoint,
+    getLiveReadStatus: () => ({ mode: "live-read-once", ready: !accepted, initialRequestId: "initial", fromRequestId: "initial", rootRequestId: "initial", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: accepted?.requestId ?? null, expiresAt: "2026-01-01T00:15:00Z", reason: accepted ? "busy" : null }),
+    beforeGuardedRevoke: () => { if (accepted) throw Error("active fixture"); },
+    onContinue: payload => { operations++; accepted = { ...payload, rootRequestId: "initial", originalGoal: "Original", workspacePath: f.workspace, piCapacity: pair, backgroundConsent: true, write: false, initialPlan: "Full plan", initialReview: "Full check", acceptedAt: "2026-01-01T00:00:00Z", phase: "accepted" }; store.recordLiveFollowUpAccepted(start.jobId, accepted, owner); },
+  }); t.after(() => server.close());
+  const missing = await invoke(f, ["continue", "--from", "initial", "--background"]); assert.equal(missing.code, 1); assert.match(missing.stderr, /caller request id/);
+  const long = await invoke(f, ["continue", "--from", "initial", "--background", "--live-request-id", "child", "--goal", "😀".repeat(3000)]); assert.equal(long.code, 1); assert.match(long.stderr, /too long/); assert.equal(operations, 0);
+  const args = ["continue", "--from", "initial", "--background", "--live-request-id", "child", "--goal", "  exact follow-up  "];
+  const first = await invoke(f, args); assert.equal(first.code, 0, first.stderr); assert.match(first.stdout, /live accepted request: child/); assert.equal(accepted.requestId, "child"); assert.equal(accepted.followUp, "exact follow-up");
+  const again = await invoke(f, args); assert.equal(again.code, 0, again.stderr); assert.equal(operations, 1);
+  const conflict = await invoke(f, [...args.slice(0, -1), "different"]); assert.equal(conflict.code, 1); assert.match(conflict.stderr, /different follow-up/);
+  const guarded = await invoke(f, ["stop", "--job", start.jobId, "--only-if-ready-from", "initial"]); assert.equal(guarded.code, 1); assert.equal(store.getStatus(start.jobId).revoked, false);
+  assert.equal(fs.readdirSync(path.join(f.dataDir, "coordination-jobs", "jobs")).length, 1); assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
 function runArgs(f, overrides = {}) {
   const args = [
     "run",

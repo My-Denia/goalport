@@ -216,6 +216,8 @@ def live_fields(data_dir: Path | None) -> dict:
             if (_saved_targets.valid_id(identity.get("requestId")) and isinstance(identity.get("goal"), str)
                     and isinstance(identity.get("workspacePath"), str)):
                 current.update({"requestId": identity["requestId"], "goal": identity["goal"], "workspacePath": identity["workspacePath"], "identityConfirmed": True})
+                if admission.get("followUpMode") == "live-read-once":
+                    current["followUpMode"] = "live-read-once"
                 descriptor = identity.get("continuation")
                 if "continuation" not in identity:
                     current["rootRequestId"] = identity["requestId"]
@@ -343,6 +345,47 @@ def newest_saved_record(records: list) -> dict | None:
     return None
 
 
+def owned_live_context(admission: dict, progress: dict, records: list) -> dict | None:
+    """Optional context is local, never a reason to repair base state."""
+    a = admission.get("input", {})
+    c = progress.get("liveFollowUp")
+    fields = {"requestId", "fromRequestId", "rootRequestId", "originalGoal", "followUp", "workspacePath", "piCapacity", "backgroundConsent", "write", "initialPlan", "initialReview", "acceptedAt", "phase"}
+    descriptor = a.get("continuation") or {}
+    if (admission.get("followUpMode") != "live-read-once" or not isinstance(c, dict) or set(c) != fields
+            or a.get("allowedInstances") != ["codex", "pi"] or a.get("maxTurns") != 4
+            or a.get("backgroundConsent") is not True or a.get("writeAuthorization") is not None
+            or not _saved_targets.valid_id(c.get("requestId")) or c["requestId"] == a.get("requestId")
+            or c.get("fromRequestId") != a.get("requestId") or c.get("rootRequestId") != descriptor.get("rootRequestId", a.get("requestId"))
+            or c.get("originalGoal") != descriptor.get("originalGoal", a.get("goal")) or c.get("workspacePath") != a.get("workspacePath")
+            or c.get("piCapacity") != a.get("piCapacity") or not isinstance(c.get("piCapacity"), dict) or set(c["piCapacity"]) != {"provider", "model", "useExistingCapacity"}
+            or c["piCapacity"].get("useExistingCapacity") is not True or any(not isinstance(c["piCapacity"].get(k), str) or not c["piCapacity"][k].strip() for k in ("provider", "model"))
+            or c.get("backgroundConsent") is not True or c.get("write") is not False
+            or not isinstance(c.get("followUp"), str) or c["followUp"] != c["followUp"].strip()
+            or not isinstance(c.get("originalGoal"), str) or len(c["originalGoal"]) + len(c["followUp"]) > 100000
+            or any(not isinstance(c.get(k), str) or not c[k].strip() for k in ("initialPlan", "initialReview", "acceptedAt"))
+            or c.get("phase") not in {"accepted", "running", "completed", "unconfirmed"}):
+        return None
+    from datetime import datetime
+    try:
+        datetime.fromisoformat(c["acceptedAt"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    initial = [r for r in records if isinstance(r, dict) and r.get("requestId") == a.get("requestId")]
+    child = [r for r in records if isinstance(r, dict) and r.get("requestId") == c["requestId"]]
+    if (len(initial) != 1 or len(child) > 1 or initial[0].get("verdict") != "checked"
+            or initial[0].get("planText") != c["initialPlan"] or initial[0].get("reviewText") != c["initialReview"]
+            or initial[0].get("workspacePath") != a.get("workspacePath") or initial[0].get("piCapacity") != a.get("piCapacity")):
+        return None
+    targets = SavedTargets(records)
+    if (targets.selected(a.get("requestId")) or {}).get("rootRequestId") != c["rootRequestId"] or (child and (targets.selected(c["requestId"]) or {}).get("rootRequestId") != c["rootRequestId"]):
+        return None
+    if child and (child[0].get("workspacePath") != a.get("workspacePath") or child[0].get("goal") != c["originalGoal"]
+                  or child[0].get("piCapacity") != a.get("piCapacity") or child[0].get("continuation") != {
+                      "parentRequestId": a["requestId"], "rootRequestId": c["rootRequestId"], "originalGoal": c["originalGoal"], "followUp": c["followUp"]}):
+        return None
+    return c
+
+
 def find_matching_admission(data_dir: Path | None, request_id: object, workspace_path: object) -> tuple[dict | None, Path | None]:
     """Find the single immutable admission matching requestId and workspacePath."""
     if data_dir is None or not isinstance(request_id, str) or not request_id or not isinstance(workspace_path, str) or not workspace_path:
@@ -367,6 +410,16 @@ def find_matching_admission(data_dir: Path | None, request_id: object, workspace
                     and candidate.get("requestId") == request_id
                     and candidate.get("workspacePath") == workspace_path):
                 matches.append((candidate, job))
+            elif isinstance(candidate, dict) and candidate.get("workspacePath") == workspace_path:
+                try:
+                    progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+                    child = owned_live_context(admission, progress, read_saved_records(data_dir))
+                    if child and child["requestId"] == request_id and sum(r.get("requestId") == request_id for r in read_saved_records(data_dir) if isinstance(r, dict)) == 1:
+                        contextual = {**candidate, "requestId": child["requestId"], "goal": child["originalGoal"], "priorPlan": child["initialPlan"], "priorReview": child["initialReview"], "continuation": {"parentRequestId": candidate["requestId"], "rootRequestId": child["rootRequestId"], "originalGoal": child["originalGoal"], "followUp": child["followUp"]}}
+                        contextual.pop("executionFeedback", None)
+                        matches.append((contextual, job))
+                except (OSError, ValueError, AttributeError, TypeError):
+                    pass
     except (OSError, AttributeError):
         return None, None
     if len(matches) != 1:
@@ -463,6 +516,29 @@ def saved_status_label(data_dir: Path, record: dict) -> str:
     if job is not None:
         try:
             progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+            admission = json.loads((job / "admission.json").read_text(encoding="utf-8"))
+            a = admission.get("input", {})
+            outcome = progress.get("outcome") or {}
+            marker = outcome.get("allowanceEnd")
+            report = outcome.get("report") if isinstance(outcome.get("report"), dict) else {}
+            relation = SavedTargets(read_saved_records(data_dir)).selected(record.get("requestId"))
+            pair = a.get("piCapacity")
+            pair_valid = isinstance(pair, dict) and set(pair) == {"provider", "model", "useExistingCapacity"} and pair.get("useExistingCapacity") is True and all(isinstance(pair.get(k), str) and pair[k] == pair[k].strip() and pair[k] for k in ("provider", "model"))
+            slot = data_dir / "coordination-jobs" / "active-admission.json"
+            active_for_record = json.loads(slot.read_text(encoding="utf-8")).get("jobId") == job.name if slot.exists() else False
+            idle_state = (marker == "idle-stopped" and progress.get("state") == "stopped") or (marker == "expired" and progress.get("state") == "completed")
+            if (admission.get("followUpMode") == "live-read-once" and a.get("requestId") == record.get("requestId")
+                    and a.get("allowedInstances") == ["codex", "pi"] and a.get("maxTurns") == 4 and a.get("backgroundConsent") is True and a.get("writeAuthorization") is None
+                    and pair_valid and pair == record.get("piCapacity") and record.get("verdict") == "checked" and a.get("goal") == record.get("goal")
+                    and relation and relation.get("rootRequestId") == (a.get("continuation") or {}).get("rootRequestId", a.get("requestId"))
+                    and report.get("verdict") == "checked" and all(isinstance(report.get(k), str) and report[k].strip() == record.get(k) for k in ("planText", "reviewText"))
+                    and idle_state and outcome.get("status") == progress.get("state") and progress.get("pendingCommand") is None
+                    and "liveFollowUp" not in progress and isinstance(progress.get("completedCommands"), list)
+                    and type(progress.get("revoked")) is bool and not active_for_record
+                    and progress.get("schema") == "goalport.coordination-job-progress.v1" and progress.get("jobId") == job.name
+                    and admission.get("schema") == "goalport.coordination-job-admission.v1" and admission.get("jobId") == job.name
+                    and (marker != "idle-stopped" or progress.get("revoked") is True)):
+                return "Plan checked"
             if progress.get("state") == "stopped":
                 return "Stopped; existing changes remain"
             if progress.get("state") == "unconfirmed":
@@ -529,6 +605,52 @@ def latest_coordination_record(data_dir: Path | None, request_id: object = None)
         return {"ok": True, "record": None, **common, "reason": "That saved goal is no longer available or cannot be identified." if request_id is not None else "No coordinated result saved."}
     history = [{"requestId": e["record"].get("requestId"), "savedAt": e["record"].get("savedAt"), "outcome": short_outcome(e["record"])} for e in targets.entries if selected["rootRequestId"] and e["rootRequestId"] == selected["rootRequestId"]]
     return {"ok": True, "record": project_saved_record(data_dir, selected, records, targets), "history": history, "reason": None, **common}
+
+
+def acknowledged_saved_payload(data_dir, request_id, repo_root, endpoint, core_binary, database, runner):
+    """Only the claimed worker callback can add live readiness, never disk phase."""
+    payload = latest_coordination_record(data_dir, request_id)
+    current = payload.get("currentJob")
+    job_id = current.get("jobId") if isinstance(current, dict) and current.get("followUpMode") == "live-read-once" else None
+    if job_id is None and isinstance(payload.get("record"), dict):
+        record = payload["record"]
+        _, job_path = find_matching_admission(data_dir, record.get("requestId"), record.get("workspacePath"))
+        if job_path is not None:
+            try:
+                a = json.loads((job_path / "admission.json").read_text(encoding="utf-8"))
+                if a.get("followUpMode") == "live-read-once":
+                    job_id = job_path.name
+            except (OSError, ValueError):
+                pass
+    if isinstance(current, dict) and current.get("followUpMode") == "live-read-once":
+        current = {**current, "liveRead": None, "line": "The open allowance is not confirmed. Your result is kept."}
+        payload["currentJob"] = current
+        payload["line"] = current["line"]
+    if not job_id or runner is None:
+        return payload
+    prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, database=database)
+    if error:
+        return payload
+    try:
+        code, out, _ = runner([*prefix, "status", "--job", job_id, "--json-status"])
+        rows = [json.loads(line[len("job projection: "):]) for line in out.splitlines() if line.startswith("job projection: ")]
+        if code != 0 or len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get("jobId") != job_id or rows[0].get("followUpMode") != "live-read-once":
+            return payload
+        status = rows[0]
+        payload["allowanceJob"] = status
+        if isinstance(current, dict) and status.get("requestId") == current.get("requestId") and status.get("workspacePath") == current.get("workspacePath"):
+            current["liveRead"] = status.get("liveRead") if status.get("live") is True else None
+            live = current["liveRead"]
+            if isinstance(live, dict) and live.get("ready") is True:
+                current["line"] = "Ready for one follow-up. No model is running."
+                payload["line"] = current["line"]
+            elif isinstance(live, dict) and live.get("reason") == "busy":
+                checking_idle = status.get("phase") == "awaiting-followup" and live.get("childRequestId") is None and not live.get("pending")
+                current["line"] = "Checking the open allowance. No model is running." if checking_idle else (status.get("progress") or {}).get("activity") or "The follow-up is in progress."
+                payload["line"] = current["line"]
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return payload
 
 
 def pi_capacity_snapshot(stdout: str) -> dict | None:
@@ -644,7 +766,7 @@ def checked_instances(instances: object) -> tuple[str | None, str | None]:
     return ",".join(names), None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None, from_request_id: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None, from_request_id: object = None, live_request_id: object = None) -> tuple[list[str] | None, str | None]:
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
     if not _saved_targets.valid_id(from_request_id):
@@ -661,8 +783,26 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
         return None, error
     if not record.get("rootRequestId"):
         return None, record.get("relationUnavailableReason") or "The saved goal relationship is unavailable."
-    if record.get("rootLatestId") != request_id:
+    if record.get("rootLatestId") != request_id and live_request_id is None:
         return None, "Open the latest result and choose Continue again."
+    active = live_fields(data_dir).get("currentJob")
+    if (isinstance(active, dict) and active.get("followUpMode") == "live-read-once") or live_request_id is not None:
+        accepted_match = False
+        candidate, owner_job = find_matching_admission(data_dir, request_id, record.get("workspacePath"))
+        if owner_job is not None:
+            try:
+                a = json.loads((owner_job / "admission.json").read_text(encoding="utf-8"))
+                p = json.loads((owner_job / "progress.json").read_text(encoding="utf-8"))
+                child = owned_live_context(a, p, read_saved_records(data_dir))
+                accepted_match = bool(child and child["fromRequestId"] == request_id and child["requestId"] == live_request_id and child["followUp"] == (follow_up or "").strip())
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        if ((not accepted_match and record.get("rootLatestId") != request_id)
+                or (not accepted_match and (not isinstance(active, dict) or active.get("requestId") != request_id or active.get("followUpMode") != "live-read-once"))
+                or not _saved_targets.valid_id(live_request_id) or live_request_id == request_id or write is not False
+                or (instances is not None and instances != "codex,pi") or (follow_up is not None and not isinstance(follow_up, str))):
+            return None, "The live follow-up does not match the original allowance; nothing was sent."
+        return [*prefix, "continue", "--from", request_id, "--background", "--live-request-id", live_request_id, "--goal", (follow_up or "").strip()], None
     if current_job(data_dir) is not None or disk_unconfirmed(data_dir) or leftover_left_job(data_dir):
         return None, "Current work has not settled, so nothing was admitted."
     if follow_up is not None and not isinstance(follow_up, str):
@@ -719,7 +859,7 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     return argv, None
 
 
-def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None, only_if_ready_from: object = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else None
     if not isinstance(job_id, str) or not job_id:
@@ -731,7 +871,9 @@ def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: 
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.", database)
     if error:
         return None, error
-    return [*prefix, "stop", "--job", job_id], None
+    if only_if_ready_from is not None and not _saved_targets.valid_id(only_if_ready_from):
+        return None, "The initial result is unavailable; nothing was stopped."
+    return [*prefix, "stop", "--job", job_id, *(["--only-if-ready-from", only_if_ready_from] if only_if_ready_from is not None else [])], None
 
 
 def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None):
@@ -842,7 +984,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 self._send(200, json.dumps({
                     "ok": True,
-                    "payload": latest_coordination_record(coordination_data, payload.get("requestId")),
+                    "payload": acknowledged_saved_payload(coordination_data, payload.get("requestId"), ROOT, endpoint, core_binary, database, continue_runner),
                 }).encode(), "application/json")
                 return
             if message_type == "coordination_start":
@@ -873,7 +1015,11 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_stop":
-                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
+                stop_payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                if "onlyIfReadyFromRequestId" in stop_payload and not _saved_targets.valid_id(stop_payload["onlyIfReadyFromRequestId"]):
+                    self._send(200, json.dumps({"ok": False, "error": "The guarded idle result is invalid; nothing was stopped."}).encode(), "application/json")
+                    return
+                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"), (request.get("payload") or {}).get("onlyIfReadyFromRequestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -888,7 +1034,11 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 if "piCapacity" in payload:
                     self._send(200, json.dumps({"ok": False, "error": "Continue retains the saved goal's Pi route; it cannot be edited here."}).encode(), "application/json")
                     return
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"))
+                live = "liveRequestId" in payload
+                if live and (not _saved_targets.valid_id(payload.get("liveRequestId")) or set(payload) - {"liveRequestId", "fromRequestId", "followUp", "write", "background", "instances"}):
+                    self._send(200, json.dumps({"ok": False, "error": "The live follow-up cannot change its original allowance."}).encode(), "application/json")
+                    return
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write", False) if live else payload.get("write") is True, payload.get("background", False) if live else payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"), payload.get("liveRequestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -968,7 +1118,7 @@ def main(argv=None) -> int:
 
     def continue_runner(argv: list[str]) -> tuple[int, str, str]:
         import subprocess
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=coordination_child_env())
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=15 if "--live-request-id" in argv else 60, env=coordination_child_env())
         return completed.returncode, completed.stdout, completed.stderr
 
     handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary, database)

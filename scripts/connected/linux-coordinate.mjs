@@ -27,7 +27,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import fs, { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
@@ -38,7 +38,7 @@ import { parseArgs } from "node:util";
 const require = createRequire(import.meta.url);
 const { createBackgroundHost } = require("../../electron/coordination-background.cjs");
 const { createBackgroundSendConsentStore } = require("../../electron/background-send-consent.cjs");
-const { controlEndpointFor } = require("../../electron/coordination-job.cjs");
+const { controlEndpointFor, createCoordinationJobStore } = require("../../electron/coordination-job.cjs");
 const { createCoreConnection } = require("../../electron/core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy, resolveUnixSocket } = require("../../electron/launch-config.cjs");
 const { harnessLaunchConfigured } = require("../../electron/harness-runtime.cjs");
@@ -82,7 +82,7 @@ const USAGE = [
   "  status [--job ID]        Print the live projection exactly as stored.",
   "  stop [--job ID]          Durably revoke access and print the real state.",
   "  result [--request-id ID] Print the saved verdict, plan and review.",
-  "  continue --from ID       Admit a new goal carrying the saved plan/review.",
+  "  continue --from ID       Continue the selected result (Ready reuses its live allowance)." ,
   "  acknowledge [--job ID]   Leave an interrupted job without replaying it.",
   "  release [--job ID]       Free the profile slot after a confirmed terminal job.",
   "",
@@ -97,6 +97,8 @@ const USAGE = [
   "  --pi-capacity JSON        Exact configured {provider,model,useExistingCapacity:true}; required for fresh Pi goals.",
   "  --request-id ID          Caller-stable request id for a retry of the same admission.",
   "  --from ID                Saved request id that continue revises.",
+  "  --live-request-id ID     Stable caller child ID, required for a Ready live allowance.",
+  "  --only-if-ready-from ID  Stop only the matching idle allowance (New goal)." ,
   "  --job ID                 Job id (defaults to the active/newest job).",
   "  --core-binary PATH       Absolute goalport-core executable (run/continue).",
   "  --database PATH          Absolute Core database (default <data-dir>/core.sqlite).",
@@ -120,6 +122,9 @@ const OPTIONS = {
   "pi-capacity": { type: "string" },
   job: { type: "string" },
   "request-id": { type: "string" },
+  "live-request-id": { type: "string" },
+  "only-if-ready-from": { type: "string" },
+  "json-status": { type: "boolean" },
   from: { type: "string" },
   "data-dir": { type: "string" },
   pipe: { type: "string" },
@@ -658,6 +663,42 @@ function requestWasLeft(dataDir, requestId) {
 async function commandContinue(parsed, io, context) {
   const from = typeof parsed.values.from === "string" ? parsed.values.from.trim() : "";
   if (!from) return refuse(io, "continue needs --from with the request id of a saved record, so nothing was admitted.");
+  // Live branches terminate here on EVERY refusal/unknown. They never reach
+  // the fresh-admission path (and never generate a child UUID).
+  const liveId = parsed.values["live-request-id"];
+  const liveStore = createCoordinationJobStore(context.dataDir, { bootstrapReady: true });
+  const active = liveStore.getActiveStatus();
+  if (active?.followUpMode === "live-read-once" || liveId !== undefined) {
+    const resolved = readHost(context, io);
+    if (!resolved.ok) return refuse(io, resolved.message);
+    if (typeof liveId !== "string" || !/^[A-Za-z0-9._-]{1,256}$/.test(liveId) || liveId === from) return refuse(io, "Live Continue needs its original caller request id; nothing was sent.");
+    if (parsed.values.background !== true || parsed.values["write-instances"] !== undefined || parsed.values["write-turns"] !== undefined || parsed.values["pi-capacity"] !== undefined || parsed.values.turns !== undefined || parsed.values["request-id"] !== undefined) return refuse(io, "Live Continue cannot change the original allowance.");
+    const followUp = typeof parsed.values.goal === "string" ? parsed.values.goal.trim() : "";
+    const own = ownAdmissionForRequest(context.dataDir, from);
+    if (!own || (parsed.values.workspace !== undefined && workspaceKey(parsed.values.workspace) !== workspaceKey(own.workspacePath)) || (parsed.values.instances !== undefined && parsed.values.instances !== own.allowedInstances.join(","))) return refuse(io, "Continue must keep the original folder and harnesses.");
+    const jobsRoot = path.join(context.dataDir, "coordination-jobs", "jobs");
+    const acceptedOwners = fs.existsSync(jobsRoot) ? fs.readdirSync(jobsRoot).filter(id => /^[0-9a-f-]{36}$/i.test(id)).flatMap(id => {
+      const status = liveStore.getStatus(id);
+      if (status.requestId !== from) return [];
+      const child = liveStore.readOwnedLiveFollowUpContext(id);
+      return child ? [{ jobId: id, child }] : [];
+    }) : [];
+    if (acceptedOwners.length) {
+      if (acceptedOwners.length !== 1 || acceptedOwners[0].child.requestId !== liveId || acceptedOwners[0].child.followUp !== followUp) return refuse(io, "The allowance already accepted a different follow-up.");
+      const projection = await resolved.host.continueLive(acceptedOwners[0].jobId, { requestId: liveId, fromRequestId: from, followUp });
+      writeProjection(io, projection); write(io, `live accepted request: ${liveId}`); return 0;
+    }
+    if (!active || active.requestId !== from || active.followUpMode !== "live-read-once") return refuse(io, "The original live worker is unavailable; nothing was sent.");
+    const targets = savedTargets(context.dataDir), selected = targets.selected(from);
+    if (!selected?.rootRequestId || targets.head(selected.rootRequestId) !== from) return refuse(io, "Open the latest initial result; nothing was sent.");
+    try {
+      const projection = await resolved.host.continueLive(active.jobId, { requestId: liveId, fromRequestId: from, followUp });
+      if ((projection?.acceptedRequestId ?? projection?.liveRead?.childRequestId) !== liveId) return refuse(io, "The follow-up acceptance is not confirmed. Keep this request id and check status.");
+      writeProjection(io, projection);
+      write(io, `live accepted request: ${liveId}`);
+      return 0;
+    } catch (error) { return refuse(io, error?.message || "The follow-up acceptance is not confirmed; do not resend with a new id."); }
+  }
   const targets = savedTargets(context.dataDir);
   const selected = targets.selected(from);
   if (!selected) return refuse(io, "That saved result is missing or ambiguous, so nothing was admitted.");
@@ -709,7 +750,8 @@ async function commandStatus(parsed, io, context) {
   const projection = await currentJob(resolved.host, parsed.values.job, io);
   if (projection === undefined) return 1;
   if (projection === null) return refuse(io, NO_JOB_SENTENCE);
-  writeProjection(io, projection);
+  if (parsed.values["json-status"]) write(io, `job projection: ${JSON.stringify(projection)}`);
+  else writeProjection(io, projection);
   return 0;
 }
 
@@ -721,7 +763,7 @@ async function commandStop(parsed, io, context) {
   if (current === null) return refuse(io, NO_JOB_SENTENCE);
   let projection;
   try {
-    projection = await resolved.host.revoke(current.jobId);
+    projection = await resolved.host.revoke(current.jobId, parsed.values["only-if-ready-from"] === undefined ? undefined : { onlyIfReadyFromRequestId: parsed.values["only-if-ready-from"] });
   } catch (error) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "The stop could not be recorded.");
   }

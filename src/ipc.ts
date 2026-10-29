@@ -346,7 +346,8 @@ declare global {
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
-      backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundRevoke?: (jobId: string, payload?: { onlyIfReadyFromRequestId: string }) => Promise<BackgroundStatus>;
+      backgroundContinue?: (jobId: string, payload: { requestId: string; fromRequestId: string; followUp: string }) => Promise<BackgroundStatus>;
       backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
       backgroundReleaseTerminal?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {

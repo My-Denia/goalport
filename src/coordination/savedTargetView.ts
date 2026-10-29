@@ -1,6 +1,8 @@
 import { normalizePiCapacity, samePiPair, type PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "./coordinateGoal";
 import type { SavedTargetContinuation, SavedTargetRelationStatus } from "./continuation";
+import type { BackgroundStatus } from "./backgroundStatus";
+import type { LiveReadStatus } from "./liveRead";
 
 /** Public workbench projection only. No admission/scope/control material. */
 export interface SavedTargetResult {
@@ -38,6 +40,8 @@ export interface CoordinatedCurrentJob {
   rootRequestId?: string;
   goal?: string;
   workspacePath?: string;
+  followUpMode?: "live-read-once";
+  liveRead?: LiveReadStatus | null;
   identityConfirmed: boolean;
   line: string;
 }
@@ -47,6 +51,7 @@ export interface SavedTargetPayload {
   roots?: SavedTargetSummary[];
   history?: { requestId: string; savedAt?: string; outcome?: string }[];
   currentJob?: CoordinatedCurrentJob | null;
+  allowanceJob?: BackgroundStatus | null;
   currentGoal?: { goal?: string; workspacePath?: string };
   line?: string | null;
   jobId?: string | null;

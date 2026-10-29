@@ -187,7 +187,7 @@ test("the offline staging check covers every required electron module, including
   // explicit staging list; this runs offline, against source, with no
   // packaging run and no Windows.
   const covered = stagedDependenciesCoverGraph();
-  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs"]) {
+  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs", "live-read-once.cjs"]) {
     assert.ok(STAGED_APP_MODULES.includes(name), `${name} must stay on the staging list`);
     assert.ok(covered.includes(name), `${name} must be reachable from the staged entry points`);
   }
@@ -220,6 +220,10 @@ test("staged Pi admission loads from the explicit app list without the repositor
   for (const name of STAGED_APP_MODULES) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
   const admission = createRequire(import.meta.url)(resolve(stage, "pi-capacity-admission.cjs"));
   assert.equal(typeof admission.piAdmissionContext, "function");
+  const live = createRequire(import.meta.url)(resolve(stage, "live-read-once.cjs"));
+  assert.equal(live.MODE, "live-read-once");
+  assert.equal(typeof live.ownedContext, "function");
+  assert.equal(typeof createRequire(import.meta.url)(resolve(stage, "coordination-worker.cjs")).runWorker, "function");
 });
 
 test("connected CLI entry re-exports the one Electron-local saved-target resolver", () => {

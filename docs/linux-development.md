@@ -116,7 +116,9 @@ $CLI $GLOBAL run --goal 'Plan the failing check' --workspace "$PWD" \
   --instances codex,pi --pi-capacity "$PI_CAPACITY" --turns 4 --background
 $CLI $GLOBAL status --job JOB_ID
 $CLI $GLOBAL result --request-id REQUEST_ID
-$CLI $GLOBAL continue --from REQUEST_ID --goal 'Revise the plan' --background
+# Ready live allowance: ONE stable caller child ID (the UI supplies this).
+$CLI $GLOBAL continue --from REQUEST_ID --live-request-id FOLLOWUP_ID --goal 'Revise the plan' --background
+# For a settled result/new allowance, omit --live-request-id.
 $CLI $GLOBAL stop --job JOB_ID
 $CLI $GLOBAL acknowledge --job JOB_ID   # leave an interrupted job, never replayed
 $CLI $GLOBAL release --job JOB_ID       # free the profile slot after a confirmed finish
@@ -255,9 +257,58 @@ Honesty rules the client keeps:
   2. Coordinated-goal native session recovery: coordination turns currently run
      with Codex `--ephemeral` and Pi `--no-session`; association with Core native
      session recovery remains a retained follow-up.
-  3. Scope vs. consent reuse: continuing a goal reuses durable profile consent,
-     while each continuation turn mints a fresh request ID and scope generation;
-     live cross-continue budget/generation reuse remains a follow-up.
+  3. Scope vs. consent reuse: ordinary settled/legacy/write continuations create
+     a fresh allowance. The bounded live-read-once path below instead retains one
+     worker-local readonly scope. Crash/restart and write-scope recovery remain
+     follow-ups; saved counters never restore access.
+
+## One follow-up on an open readonly allowance
+
+New explicit Codex→Pi, background, four-read admissions with a recorded Pi
+capacity and no file-change authorization can keep the original worker and RAM
+scope after a saved **Plan checked** result. The current work row says **Ready**,
+not that a model is running. Closing/returning or reading status sends no model
+turn and never extends the fixed 15-minute idle window. The saved-result composer
+is the single Continue action: empty Enter sends nothing, explicit Continue may
+have no additional instruction. Other saved goals remain readable, not spendable.
+
+Continue must match that same initial/latest result, folder, root and requested
+pair. It rechecks Core coverage, background capability and original membership,
+but does not authorize another scope, admit another job or spawn another worker.
+The full saved initial plan/check accompanies it. The new result has a stable
+caller child ID and the initial job as parent. The original runtime cancellation
+key and numeric RAM scope generation remain separate and unchanged. There is one
+follow-up, not a queue or an automatic third round.
+
+The complete live control JSON frame—including schema, internal credential, IDs,
+UTF-8, escaping and newline—is limited to 8192 bytes in each direction. The browser
+receives no control credential. Oversize text is refused unchanged, never cropped
+or silently sent through a fresh admission. Fresh continuations retain their
+separate 100,000-character/assembled-byte bounds. Live checks have a 10-second
+worker budget, 12-second control timeout and 15-second CLI/HTTP operation budget.
+Unknown delivery keeps the draft and original child ID. Reconcile that ID through
+status; do not invent a retry ID or replay a turn.
+
+Stop wakes the idle worker immediately. New goal uses an idle-only guarded revoke,
+then waits up to five seconds for the matching terminal job, no pending command
+and released slot before opening an empty safe draft. If active work wins that
+race, New goal does not stop it and keeps the current view. The stopped/expired
+unused allowance is separate from its checked result; no child report is invented.
+A later intentional Continue is labeled as a **new allowance**, not recovered
+remaining access. Inspecting another goal never ends the current allowance.
+
+Mode metadata lives outside immutable normalized input; waiting uses existing
+`running` state with `awaiting-followup` phase. Accepted-child context is validated
+locally: malformed context disables that continuation without repairing data or
+creating a profile-wide malformed admission. Genuine malformed base progress,
+prior admissions and unknown owners keep their existing refusal rules. Rollback
+means disabling new emission in a compatible build while retaining readers and
+live workers through settlement—not an old-binary checkout, kill or reset. Old
+structural reader compatibility does not promise old UI support.
+
+Current-source independent review and bounded real product acceptance remain
+required. This is not native provider-session reuse, billing/quota measurement,
+restart recovery, general API coverage or overall-goal completion.
 
 ## Returning to a coordinated goal
 

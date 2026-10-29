@@ -8,7 +8,21 @@ function ownAdmissionForRequest(directory, requestId, platform=process.platform)
   const jobsRoot=path.join(directory,'coordination-jobs','jobs');
   if(!fs.existsSync(jobsRoot)) return null;
   const store=createCoordinationJobStore(directory,{bootstrapReady:true,platform});
-  const matches=fs.readdirSync(jobsRoot).filter(id=>/^[0-9a-f-]{36}$/i.test(id)).map(id=>store.getStatus(id).admission).filter(a=>a.requestId===requestId);
+  const recordsFile=path.join(directory,'coordination-records.json');
+  let records;
+  try { records=fs.existsSync(recordsFile)?JSON.parse(fs.readFileSync(recordsFile,'utf8')):[]; }
+  catch { records=null; } // Exact immutable-admission lookup does not depend on optional child context.
+  const matches=[];
+  for(const jobId of fs.readdirSync(jobsRoot).filter(id=>/^[0-9a-f-]{36}$/i.test(id))) {
+    const status=store.getStatus(jobId), a=status.admission;
+    if(a.requestId===requestId) { matches.push(a); continue; }
+    const child=store.readOwnedLiveFollowUpContext(jobId,records);
+    if(!child || child.requestId!==requestId || !Array.isArray(records) || records.filter(r=>r.requestId===requestId).length!==1) continue;
+    const contextual = { ...a, requestId:child.requestId, goal:child.originalGoal, priorPlan:child.initialPlan, priorReview:child.initialReview,
+      continuation:{parentRequestId:a.requestId,rootRequestId:child.rootRequestId,originalGoal:child.originalGoal,followUp:child.followUp} };
+    delete contextual.executionFeedback;
+    matches.push(contextual);
+  }
   return matches.length===1 ? matches[0] : null;
 }
 // Resolves the existing parent/admission, never a caller-supplied legacy flag.

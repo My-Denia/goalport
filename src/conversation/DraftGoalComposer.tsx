@@ -1,5 +1,5 @@
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
-import { useRef, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
 import { useComposerInput } from "./useComposerInput";
@@ -89,6 +89,8 @@ interface DraftGoalComposerProps {
   savedResultLabel?: string | null;
   savedResultOutcome?: string | null;
   continueDisabledReason?: string | null;
+  continueLabel?: string;
+  liveAllowanceHint?: string | null;
   onLeaveGoal?: () => void;
   linuxCanStartCoordination?: boolean;
   linuxWrite?: boolean;
@@ -175,9 +177,16 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const allowanceExplained = useRef(false);
+  const [showAllowanceExplanation, setShowAllowanceExplanation] = useState(false);
+  useEffect(() => {
+    const eligible = !isLinuxActiveTarget && linuxCanStartCoordination && piCapacityChecked && backgroundConsent && !linuxWrite;
+    if (eligible && !allowanceExplained.current) { allowanceExplained.current = true; setShowAllowanceExplanation(true); }
+    else if (!eligible) setShowAllowanceExplanation(false);
+  }, [isLinuxActiveTarget, linuxCanStartCoordination, piCapacityChecked, backgroundConsent, linuxWrite]);
 
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const addressGone = coordinationResult === "That goal is no longer available." || Boolean(coordinationResult?.startsWith("That address is no longer available."));
@@ -225,7 +234,7 @@ export function DraftGoalComposer({
           ? `Allow ${capitalize(discoveredHarnesses[0])} to work`
           : "Allow background work";
 
-  const continueButtonLabel = coordinationResult === "Continuing." ? "Continuing…" : "Continue";
+  const continueButtonLabel = coordinationResult === "Continuing." ? "Continuing…" : continueLabel || "Continue";
 
   const handleFormSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -287,7 +296,7 @@ export function DraftGoalComposer({
           id="draft-message"
           aria-label="Message composer"
           value={draft.message}
-          onChange={(event) => onChange({ ...draft, message: event.target.value })}
+          onChange={(event) => { setShowAllowanceExplanation(false); onChange({ ...draft, message: event.target.value }); }}
           onCompositionStart={input.onCompositionStart}
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
@@ -310,7 +319,9 @@ export function DraftGoalComposer({
           {piCapacityReason ? <div role="status">{piCapacityReason}</div> : null}
         </div> : null}
         {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
-        {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
+        {showAllowanceExplanation ? <p className="draft-hint">After a checked read-only result, this allowance can stay open for one follow-up, for up to 15 minutes.</p> : null}
+        {liveAllowanceHint ? <p className="draft-hint" role="status">{liveAllowanceHint}</p> : null}
+        {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome && continueDisabledReason !== liveAllowanceHint ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
 
         {error ? (
           <div className="dialog-note" role="alert">
