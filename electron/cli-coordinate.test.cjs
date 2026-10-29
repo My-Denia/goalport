@@ -1067,6 +1067,19 @@ test("Pi stdin selector is exactly audit/Pi/Linux/readOnly; other turns remain a
   }
   const input = command("pi", "default", "coordinate-audit-selector");
   assert.equal(turnSpec(input, {}, "linux").args.at(-1), input.initialMessage.text);
+  for (const instance of ["pi", "codex", "claude"]) {
+    for (const role of ["plan", "review", "execute", "audit"]) {
+      const input = command(instance, "default", `coordinate-${role}-argv`);
+      input.initialMessage.text = "字😀".repeat(700);
+      assert.ok(Buffer.byteLength(input.initialMessage.text) > 4096);
+      for (const platform of ["linux", "win32"]) {
+        const spec = turnSpec(input, {}, platform);
+        assert.equal(spec.errorText, undefined, `${instance}/${role}/${platform}`);
+        assert.equal(spec.args.at(-1), input.initialMessage.text);
+        assert.equal("stdinBody" in spec, false);
+      }
+    }
+  }
   for (const promptDelivery of [null, undefined, "argv", "other", {}, false]) {
     assert.ok(turnSpec({ ...input, promptDelivery }, {}, "linux").errorText);
   }
@@ -1102,9 +1115,45 @@ test("present invalid selector/oversize refuses before claims and preserves an o
   }
 });
 
-test("production stdin seam sends exact >4KiB UTF-8 bytes and EOF to a real non-model Node child", async () => {
-  const body = Buffer.from(` \n${"中文😀'\"$&|<>^%`\\\n".repeat(420)} \n\t`, "utf8");
-  assert.ok(body.length > 4096 && body.length < 32768);
+function mixedWidthAuditPrompt() {
+  const prefix = ` \n${"aé字😀'\"$&|<>^%`\\\n".repeat(1000)}`;
+  const tail = "\nAUDIT_INPUT_END_字😀 \n\t";
+  return prefix + "x".repeat(32768 - Buffer.byteLength(prefix + tail, "utf8")) + tail;
+}
+
+test("mixed-width Pi stdin accepts exactly 32768 bytes after refusing one extra byte without consuming authorization", { skip: process.platform !== "linux" }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-stdin-boundary-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const text = mixedWidthAuditPrompt();
+  assert.equal(Buffer.byteLength(text, "utf8"), 32768);
+  const input = { ...command("pi", "default", "coordinate-audit-boundary"), promptDelivery: "stdin", initialMessage: { text } };
+  writeGrant(directory, input.commandId);
+  let spawns = 0;
+  const options = { stateDir: directory, spawnTurn: async spec => {
+    spawns++;
+    assert.deepEqual(spec.stdinBody, Buffer.from(text, "utf8"));
+    assert.equal(spec.args.includes(text), false);
+    return { code: 0, stdout: "Boundary audit complete.", childStarted: true, inputEnded: true };
+  } };
+
+  const refused = await runCliTurn({ ...input, initialMessage: { text: text + "x" } }, options);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.messageDispatched, false);
+  assert.match(refused.errorText, /32,768-byte limit/);
+  assert.equal(spawns, 0);
+  assert.equal(fs.existsSync(path.join(directory, `claim-${input.commandId}`)), false);
+  assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), `${input.commandId}\n`);
+
+  const accepted = await runCliTurn(input, options);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.messageDispatched, true);
+  assert.deepEqual(accepted.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes: 32768, inputEnded: true });
+  assert.equal(spawns, 1);
+});
+
+test("production stdin seam sends exact 32768-byte mixed-width UTF-8 input and EOF to a real non-model Node child", async () => {
+  const body = Buffer.from(mixedWidthAuditPrompt(), "utf8");
+  assert.equal(body.length, 32768);
   let registered = false;
   let ends = 0;
   const result = await defaultSpawn({ file: process.execPath, args: ["-e", "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write(JSON.stringify({body:Buffer.concat(b).toString('base64'),eof:true})))"],
@@ -1120,7 +1169,9 @@ test("production stdin seam sends exact >4KiB UTF-8 bytes and EOF to a real non-
   assert.equal(result.inputEnded, true);
   const read = JSON.parse(result.stdout);
   assert.equal(read.eof, true);
-  assert.deepEqual(Buffer.from(read.body, "base64"), body);
+  const received = Buffer.from(read.body, "base64");
+  assert.deepEqual(received, body);
+  assert.equal(received.toString("utf8").endsWith("\nAUDIT_INPUT_END_字😀 \n\t"), true);
   assert.equal(ends, 1);
 });
 

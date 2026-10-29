@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, within } from "@testing-library/react";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
@@ -31,6 +31,80 @@ describe("WorkspaceEvidenceDetails", () => {
     expect(screen.queryByText(/Only part of the workspace material was supplied/)).toBeNull();
     rerender(<WorkspaceEvidenceDetails evidence={{ ...evidence, untrackedFiles: [{ path: "binary.bin", binary: true, size: 80 }] }} auditInputEvidenceCoverage={{ ...coverage, promptDelivery: "stdin" }} />);
     expect(screen.getByText(/Only part of the workspace material was supplied; omitted content was not delivered in this prompt/)).toBeTruthy();
+  });
+
+  it("keeps complete multi-file capture readable when the delivered subset is cropped", () => {
+    const files = [
+      { path: "first.txt", content: "FIRST_BEGIN\nfirst file body\nFIRST_END" },
+      { path: "second.txt", content: "SECOND_BEGIN\nsecond file body\nSECOND_END" },
+    ];
+    const evidence: ExecutionWorkspaceEvidence = {
+      status: "available", complete: true, changed: true, beforeDiff: "", afterDiff: "",
+      untrackedFiles: files,
+    };
+    const fullMaterial = files.map(file => `${file.path}\n${file.content}`).join("\n");
+    const coverage: AuditInputEvidenceCoverage = {
+      totalEvidenceBytes: fullMaterial.length, includedEvidenceBytes: fullMaterial.length,
+      cropped: false, promptBytes: fullMaterial.length + 200, promptBudgetBytes: 32768, promptDelivery: "stdin",
+    };
+    const { rerender } = render(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={coverage} auditInputEvidenceText={fullMaterial} />);
+    const auditDetails = () => within(screen.getByText("What the independent audit received").closest("details")!);
+    expect(auditDetails().getByText(/FIRST_BEGIN/, { selector: "pre" }).textContent).toBe(fullMaterial);
+    expect(auditDetails().getByText(/No captured-material section was cropped for transport/)).toBeTruthy();
+    expect(auditDetails().queryByText(/Only part of the workspace material was supplied/)).toBeNull();
+
+    const retainedPrefix = "first.txt\nFIRST_BEGIN\nfirst file body\n";
+    const croppedMaterial = `${retainedPrefix}[AFTER untracked files cropped for transport; full capture retained]`;
+    rerender(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={{
+      ...coverage, includedEvidenceBytes: retainedPrefix.length, cropped: true, croppedSections: ["AFTER untracked files"],
+      promptBytes: croppedMaterial.length + 200,
+    }} auditInputEvidenceText={croppedMaterial} />);
+
+    for (const file of files) {
+      const capturedFile = screen.getByText(file.path).closest("li")!;
+      expect(within(capturedFile).getByText(/_BEGIN/, { selector: "pre" }).textContent).toBe(file.content);
+    }
+    const delivered = auditDetails().getByText(/FIRST_BEGIN/, { selector: "pre" });
+    expect(delivered.textContent).toBe(croppedMaterial);
+    expect(delivered.textContent).not.toContain("FIRST_END");
+    expect(delivered.textContent).not.toMatch(/second\.txt|SECOND_BEGIN|SECOND_END/);
+    expect(auditDetails().getByText(/Only part of the workspace material was supplied/)).toBeTruthy();
+    expect(auditDetails().getByText(/Cropped: AFTER untracked files/)).toBeTruthy();
+    expect(auditDetails().queryByText(/No captured-material section was cropped for transport/)).toBeNull();
+  });
+
+  it.each<{ name: string; evidence: ExecutionWorkspaceEvidence; disclosure: RegExp }>([
+    {
+      name: "unavailable capture",
+      evidence: { status: "unavailable", complete: false, changed: null, beforeDiff: null, afterDiff: null, reason: "Git capture was unavailable." },
+      disclosure: /Git capture was unavailable/,
+    },
+    {
+      name: "truncated file capture",
+      evidence: {
+        status: "incomplete", complete: false, changed: true, beforeDiff: "", afterDiff: "",
+        untrackedFiles: [{ path: "large.txt", size: 16000, content: "RETAINED_FILE_PREFIX", truncated: true }],
+      },
+      disclosure: /16000 bytes, capture truncated/,
+    },
+    {
+      name: "omitted capture paths",
+      evidence: {
+        status: "incomplete", complete: false, changed: true, beforeDiff: "", afterDiff: "",
+        untrackedFiles: [{ path: "retained.txt", size: 4, content: "kept" }], untrackedFilesOmitted: 3,
+      },
+      disclosure: /3 additional paths were omitted by the capture file limit/,
+    },
+  ])("discloses $name even when transport is uncropped", ({ evidence, disclosure }) => {
+    const material = JSON.stringify(evidence);
+    render(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={{
+      totalEvidenceBytes: material.length, includedEvidenceBytes: material.length, cropped: false,
+      promptBytes: material.length + 200, promptDelivery: "stdin",
+    }} auditInputEvidenceText={material} />);
+    expect(screen.getByText(disclosure, { selector: "p, li" })).toBeTruthy();
+    const delivered = within(screen.getByText("What the independent audit received").closest("details")!);
+    expect(delivered.getByText(/No captured-material section was cropped for transport/)).toBeTruthy();
+    expect(delivered.getByText(/Only part of the workspace material was supplied; omitted content was not delivered in this prompt/)).toBeTruthy();
   });
 
   it("renders captured workspace diff, untracked files, and crop coverage when evidence is present", () => {
@@ -85,5 +159,20 @@ describe("WorkspaceEvidenceDetails", () => {
     expect(screen.getByText(/complete assembled prompt was 12000 UTF-8 bytes/)).toBeTruthy();
     expect(screen.getByText("Executor report — Codex")).toBeTruthy();
     expect(screen.getByText("Executor claims it did everything.")).toBeTruthy();
+  });
+
+  it("keeps old records without coverage or transport metadata readable without inventing delivery claims", () => {
+    const evidence: ExecutionWorkspaceEvidence = {
+      status: "available", complete: true, changed: true, beforeDiff: "", afterDiff: "+LEGACY_DIFF_END",
+      untrackedFiles: [{ path: "legacy.txt", content: "LEGACY_FILE_END" }],
+    };
+    const retainedSubset = "LEGACY_AUDIT_BEGIN\nLEGACY_AUDIT_END";
+    render(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceText={retainedSubset} />);
+    expect(screen.getByText("+LEGACY_DIFF_END")).toBeTruthy();
+    expect(screen.getByText("LEGACY_FILE_END")).toBeTruthy();
+    const delivered = within(screen.getByText("What the independent audit received").closest("details")!);
+    expect(delivered.getByText(/LEGACY_AUDIT_BEGIN/, { selector: "pre" }).textContent).toBe(retainedSubset);
+    expect(delivered.queryByText(/Selected prompt transport|Audit delivery contains|UTF-8 bytes|No captured-material section was cropped/)).toBeNull();
+    expect(delivered.queryByText(/Pi trims edge whitespace|exact delivered evidence subset was not retained/)).toBeNull();
   });
 });
