@@ -407,6 +407,8 @@ def project_remembered_intent(candidate: dict | None, workspace_path: object) ->
     return {
         "background": background,
         "write": write_valid,
+        **({"piCapacity": candidate["piCapacity"]} if "piCapacity" in candidate else {}),
+        **({"legacyPi": True} if "piCapacity" not in candidate and "pi" in candidate.get("allowedInstances", []) else {}),
     }
 
 
@@ -489,6 +491,8 @@ def project_saved_record(data_dir: Path, entry: dict, records: list, targets: Sa
         "auditInputEvidenceCoverage": retained.get("auditInputEvidenceCoverage"),
         "auditInputEvidenceText": retained.get("auditInputEvidenceText"),
         "rememberedIntent": project_remembered_intent(admission, last.get("workspacePath")),
+        **({"piCapacity": last["piCapacity"]} if "piCapacity" in last else {}),
+        **({"requestedPiCapacity": last["requestedPiCapacity"]} if "requestedPiCapacity" in last else {}),
     })
     return projected
 
@@ -525,6 +529,19 @@ def latest_coordination_record(data_dir: Path | None, request_id: object = None)
         return {"ok": True, "record": None, **common, "reason": "That saved goal is no longer available or cannot be identified." if request_id is not None else "No coordinated result saved."}
     history = [{"requestId": e["record"].get("requestId"), "savedAt": e["record"].get("savedAt"), "outcome": short_outcome(e["record"])} for e in targets.entries if selected["rootRequestId"] and e["rootRequestId"] == selected["rootRequestId"]]
     return {"ok": True, "record": project_saved_record(data_dir, selected, records, targets), "history": history, "reason": None, **common}
+
+
+def pi_capacity_snapshot(stdout: str) -> dict | None:
+    """Typed secretless CLI projection; never infer billing from credential type."""
+    for line in stdout.splitlines():
+        if line.startswith("pi capacity: "):
+            try:
+                value = json.loads(line.removeprefix("pi capacity: "))
+                if isinstance(value, dict) and value.get("instanceId") == "pi" and isinstance(value.get("piCapacity"), dict):
+                    return value
+            except json.JSONDecodeError:
+                pass
+    return None
 
 
 def subscription_harnesses(stdout: str) -> list[str]:
@@ -613,6 +630,7 @@ def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | Non
 
 
 KEEP_RUNNING_SENTENCE = "Keep working after closing must be explicitly selected."
+PI_CAPACITY_ABSENT = object()
 
 
 def checked_instances(instances: object) -> tuple[str | None, str | None]:
@@ -673,7 +691,7 @@ def expand_workspace(workspace: str) -> str:
     return workspace
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None, database: str | None = None, pi_capacity: object = PI_CAPACITY_ABSENT) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
@@ -689,6 +707,8 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     if error:
         return None, error
     argv = [*prefix, "run", "--goal", goal.strip(), "--workspace", workspace, "--background"]
+    if pi_capacity is not PI_CAPACITY_ABSENT:
+        argv.extend(["--pi-capacity", json.dumps(pi_capacity, ensure_ascii=False, separators=(",", ":"))])
     if write is True:
         argv.extend(["--write-instances", "codex", "--write-turns", "1"])
     names, names_error = checked_instances(instances)
@@ -782,8 +802,14 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 if continue_runner is None:
                     self._send(200, json.dumps({"ok": False, "error": "Discover is not wired on this workbench."}).encode(), "application/json")
                     return
-                code, out, err = continue_runner([*prefix, "discover"])
-                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
+                payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                workspace = payload.get("workspaceRoot")
+                args = [*prefix, "discover"]
+                if isinstance(workspace, str) and workspace.strip():
+                    args.extend(["--workspace", expand_workspace(workspace.strip())])
+                code, out, err = continue_runner(args)
+                pi = pi_capacity_snapshot(out)
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": None if pi else subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "pi": pi, "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_acknowledge":
                 argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
@@ -822,7 +848,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"), database,
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"), database, payload.get("piCapacity", PI_CAPACITY_ABSENT),
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -859,6 +885,9 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             if message_type == "coordination_continue":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                if "piCapacity" in payload:
+                    self._send(200, json.dumps({"ok": False, "error": "Continue retains the saved goal's Pi route; it cannot be edited here."}).encode(), "application/json")
+                    return
                 argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")

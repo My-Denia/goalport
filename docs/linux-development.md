@@ -107,11 +107,13 @@ Then, from the repository root:
 CLI="node scripts/connected/linux-coordinate.mjs"
 GLOBAL="--data-dir /tmp/goalport-dev --pipe /tmp/goalport-dev/core.sock --core-binary $PWD/target/debug/goalport-core"
 
-$CLI $GLOBAL discover
-$CLI $GLOBAL grant-access      # durable consent to spend subscription quota
+$CLI $GLOBAL discover --workspace "$PWD"
+# Copy the exact configured offer from discovery; these are example identifiers.
+PI_CAPACITY='{"provider":"your-configured-provider","model":"your-exact-model","useExistingCapacity":true}'
+$CLI $GLOBAL grant-access      # durable background harness access, not billing proof
 $CLI $GLOBAL revoke-access     # withdraw that consent; existing jobs keep their honesty state
 $CLI $GLOBAL run --goal 'Plan the failing check' --workspace "$PWD" \
-  --instances codex,pi --turns 4 --background
+  --instances codex,pi --pi-capacity "$PI_CAPACITY" --turns 4 --background
 $CLI $GLOBAL status --job JOB_ID
 $CLI $GLOBAL result --request-id REQUEST_ID
 $CLI $GLOBAL continue --from REQUEST_ID --goal 'Revise the plan' --background
@@ -128,6 +130,26 @@ harness was found; it does not say nothing is installed. Consent and capability 
 granting access never claims a harness is signed in, and a signed-in harness
 never grants access to spend quota.
 
+Pi offers one bounded configured requested pair: the first raw enabled-model
+entry must match the offline catalog exactly (literal colon model IDs win before
+stripping one recognized reasoning suffix). An unresolved/wildcard/unqualified
+first entry is unavailable, not skipped. With no scope, an exact saved pair may
+be offered; native automatic/auth-dependent fallback is not reproduced.
+Reasoning remains managed by Pi, not pinned by this descriptor. Discovery before
+a folder is provisional; changing folders rechecks it without a model prompt.
+Discovery and each fresh bound Pi turn use the same install/CWD/environment and
+`--offline --no-extensions --no-mcp --no-skills --no-context-files -na --list-models`.
+The six-column table is strictly parsed, case-exact and bounded (256 KiB stdout,
+16 KiB private stderr, 8 seconds). Each fresh turn adds one offline metadata
+process before its claim, then requests exact `--provider`/`--model`; a valid
+stored claim performs no subprocess or replay. Requested identity is not
+wire/server identity, authentication, billing, quota or a native session handle.
+External configuration changes between the check and native resolution remain
+an explicit limitation; no config locks, auth checks or fallback model calls
+are added. Malformed saved route metadata keeps the result visible but disables
+its Continue; a malformed prior admission still refuses all new jobs in the
+profile under the existing strict policy, without migration or repair.
+
 Honesty rules the client keeps:
 
 - `--background` is required for `run` and `continue` and is never defaulted;
@@ -137,12 +159,17 @@ Honesty rules the client keeps:
   GoalPort window yet.` Ambient `GOALPORT_COORDINATE_SEND`,
   `GOALPORT_HARNESS_CHECKOUT` and `GOALPORT_HARNESS_SERVER_CWD` are ignored and
   stripped before the host or the detached worker sees an environment.
-- Only harnesses signed in with their own subscription can be authorized. An
-  apiKey login, or a sign-in whose type is missing or unknown, is refused with
-  `Only harnesses signed in with their own subscription can be authorized.`
-  and is not auto-selected. Naming it with `--instances` still uses it; that
-  does not make the sign-in a confirmed subscription. Omitting `--instances`
-  selects only confirmed subscription logins.
+- Linux Pi is deliberately not auto-selected, including OAuth or mixed installs.
+  Its billing is **not confirmed**; credential kind is not a billing mode. A new
+  Pi goal requires the exact configured `--pi-capacity` descriptor and literal
+  `useExistingCapacity:true`. This expresses use of existing authorized capacity,
+  not a purchase, dollar ceiling, quota measurement or write permission. Other
+  harness membership rules are unchanged. Continue derives Pi's route from the
+  unique selected result's own admission, not from today's default; route edits
+  refuse. A server-verified legacy Continue remains explicitly unpinned (known
+  API-key-only legacy eligibility is still refused, using the existing type-only
+  credential classifier summary, not an inferred billing mode). No renderer legacy flag can
+  enable a fresh route-less Pi goal.
 - A request that was left unreplayed cannot be continued or started again
   with the same request id. The CLI and the workbench refuse with
   `The interrupted job stays unreplayed; the same request id cannot be admitted again.`
@@ -222,9 +249,9 @@ Honesty rules the client keeps:
   does not undo or rollback workspace modifications already written (existing
   workspace edits remain).
 - Retained product follow-ups (not completed, not owner restrictions):
-  1. API key membership: `authorizeMembershipError` currently refuses `apiKey`
-     logins; integrating authorized API-key capacity into the coordination product
-     remains an active follow-up.
+  1. Commercial API billing and usage remain unmeasured. Pi's explicit configured
+     route is a bounded requested-capacity integration, not all-API completion;
+     other harnesses retain their existing membership rules.
   2. Coordinated-goal native session recovery: coordination turns currently run
      with Codex `--ephemeral` and Pi `--no-session`; association with Core native
      session recovery remains a retained follow-up.

@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { normalizePiCapacity, normalizeRequestedPiCapacity } = require("./pi-capacity.mjs");
 const path = require("node:path");
 const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
@@ -230,6 +231,7 @@ function coordinationRoundFactOf(value) {
   }
   return {
     ...fact,
+    ...(normalizeRequestedPiCapacity(value.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(value.requestedPiCapacity) } : {}),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
     ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),
@@ -369,6 +371,8 @@ function normalize(input) {
     ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     ...(continuation === undefined ? {} : { continuation }),
+    ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: normalizePiCapacity(input.piCapacity) ?? input.piCapacity } : {}),
+    ...(normalizeRequestedPiCapacity(input.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(input.requestedPiCapacity) } : {}),
     savedAt: savedAtOf(input.savedAt),
   };
 }
@@ -394,6 +398,7 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
       throw new Error("The continuation descriptor is malformed.");
     }
   }
+  if (input && Object.hasOwn(input, "piCapacity") && !normalizePiCapacity(input.piCapacity)) throw new Error("The requested Pi capacity is malformed.");
   const record = normalize(input);
   if (!record) {
     throw new Error("The plan could not be saved.");

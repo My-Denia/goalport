@@ -32,6 +32,8 @@ function defaultChildPath() {
 }
 
 function createHarnessRuntime(options = {}) {
+  const admittedPiCapacity = options.piCapacity === undefined ? undefined : require("./pi-capacity.mjs").normalizePiCapacity(options.piCapacity);
+  if (admittedPiCapacity) Object.freeze(admittedPiCapacity);
   const childPath = options.childPath ?? defaultChildPath();
   const nodeBin = options.nodeBin ?? process.execPath;
   const useBundledNode = options.nodeBin == null || options.nodeBin === process.execPath;
@@ -202,6 +204,9 @@ function createHarnessRuntime(options = {}) {
     }
     return runCliTurn(command, {
       stateDir,
+      ...(admittedPiCapacity === undefined ? {} : { piCapacity: admittedPiCapacity }),
+      env: options.env,
+      metadataExec: options.metadataExec,
       cancelled: () => Boolean(token && cancelledGenerations.has(token)),
       spawnTurn: options.spawnTurn,
       register(child) {
@@ -220,6 +225,7 @@ function createHarnessRuntime(options = {}) {
 
   return {
     discover(generation) {
+      if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, providers: [], errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       if (localCli) {
         // The probes run off the main thread; a rejection here means a CLI
         // could not be asked at all, which is "no harness assigned", not a
@@ -235,6 +241,7 @@ function createHarnessRuntime(options = {}) {
       return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.", generation);
     },
     prepare(command, generation) {
+      if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, messageDispatched: false, errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       const safe = command && typeof command === "object" ? { ...command } : {};
       delete safe.initialMessage;
       if (localCli) {
@@ -251,6 +258,7 @@ function createHarnessRuntime(options = {}) {
     },
     run(command, generation) {
       const body = command && typeof command === "object" ? command : {};
+      if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, text: "", messageDispatched: false, errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       if (localCli) return localRun(body, generation);
       return request("run", { command: body }, 660000, "The harness did not finish, so this stopped.", generation);
     },

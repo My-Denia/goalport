@@ -21,6 +21,8 @@ function fixture(hash = "#coordinated/result/a") {
   const root = (id: string): SavedTargetResult => ({ requestId: id, rootRequestId: id, rootLatestId: id, goal: `Goal ${id.toUpperCase()}`, workspacePath: `/work/${id}`, verdict: "verified", outcome: `Actual saved ${id.toUpperCase()}`, relationStatus: "legacy-root", relationUnavailableReason: null, rememberedIntent: { background: true, write: id === "a" }, detail: `Independent check ${id}`, change: `Executor report ${id}` });
   const records: Record<string, SavedTargetResult> = { a: root("a"), b: root("b") };
   let current: CoordinatedCurrentJob | null = null;
+  let pi: import("./coordination/catalogFromProviders").ProviderSnapshot | undefined;
+  let harnesses: string[] | undefined;
   let held = false;
   let offline = false;
   let coreEnabled = false;
@@ -42,7 +44,7 @@ function fixture(hash = "#coordinated/result/a") {
         history: Object.values(records).filter(r => r.rootRequestId === selected?.rootRequestId).map(r => ({ requestId: r.requestId, savedAt: r.requestId === "a" ? "2026-01-01" : "2026-01-02", outcome: r.outcome })),
         currentJob: current, line: held ? null : current?.line, jobId: held ? null : current?.jobId, unconfirmedGoal: current?.line.includes("not confirmed"), leftoverHeld: held } });
     }
-    if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"], consentMissing: false } });
+    if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: harnesses ?? (pi ? ["codex"] : ["codex", "pi"]), pi: pi ? { ...pi, piCapacity: { ...pi.piCapacity, workspacePath: body.payload.workspaceRoot } } : undefined, consentMissing: false } });
     if (body.messageType === "coordination_continue" || body.messageType === "coordination_start") {
       if (admitted instanceof Error) throw admitted;
       admissionEffect?.();
@@ -59,7 +61,7 @@ function fixture(hash = "#coordinated/result/a") {
     records.a.rootLatestId = "a2";
     records.a2 = { ...records.a, requestId: "a2", outcome: "Actual child A", relationStatus: "valid", continuation: { parentRequestId: "a", rootRequestId: "a", originalGoal: "Goal A", followUp: "New instruction" }, rememberedIntent: { background: true, write: false } };
   };
-  return { calls, records, tick, child, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
+  return { calls, records, tick, child, harnesses(value: string[]) { harnesses = value; }, pi(value: typeof pi) { pi = value; }, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
 }
 const text = () => screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
 const continuation = () => screen.getByRole("button", { name: "Continue this goal" });
@@ -291,6 +293,79 @@ it.each(["invalid", "head-tie"])("%s preserves the saved result but refuses cont
   render(<App />); await screen.findByRole("heading", { name: "Goal A" });
   expect(screen.getByText("Actual saved A")).toBeTruthy();
   expect(continuation()).toHaveProperty("disabled", true);
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+const requestedPi = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+const configuredPi = { instanceId: "pi", installed: true, enabled: true, availability: "available", auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: { ...requestedPi, model: "beta" }, catalog: [{ provider: "Fixture", model: "alpha" }, { provider: "Fixture", model: "beta" }] } };
+
+it("restores apiKey-classified OWN requested route despite changed defaults; polls preserve dirty draft and do not reread native metadata", async () => {
+  const f = fixture(); f.pi(configuredPi);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  const choice = await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(choice).toHaveProperty("checked", true);
+  expect(screen.getByText(/Requested: Fixture\/alpha/)).toBeTruthy();
+  expect(screen.queryByText(/Requested: Fixture\/beta/)).toBeNull();
+  fireEvent.change(text(), { target: { value: "Keep own draft" } });
+  const before = f.calls.filter(c => c.messageType === "coordination_discover").length;
+  await f.tick(); expect(text().value).toBe("Keep own draft");
+  expect(f.calls.filter(c => c.messageType === "coordination_discover").length).toBe(before);
+  fireEvent.click(screen.getByRole("button", { name: "Goal B, /work/b" }));
+  await screen.findByRole("heading", { name: "Goal B" });
+  fireEvent.click(screen.getByRole("button", { name: "Goal A, /work/a" }));
+  await screen.findByRole("heading", { name: "Goal A" });
+  expect(text().value).toBe("Keep own draft");
+  expect(screen.getByRole("checkbox", { name: "Use Pi's configured capacity for this goal" })).toHaveProperty("checked", true);
+  fireEvent.click(continuation());
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1));
+  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload.fromRequestId).toBe("a");
+  expect(f.calls.some(c => c.messageType === "coordination_start")).toBe(false);
+});
+it("saved unavailable or malformed requested Pi route preserves actual result but disables Continue without falling back", async () => {
+  const f = fixture(); f.pi({ ...configuredPi, availability: "unavailable" });
+  f.records.a.piCapacity = requestedPi; f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(screen.getByText("Actual saved A")).toBeTruthy();
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByRole("checkbox", { name: "Use Pi's configured capacity for this goal" })).toHaveProperty("checked", true);
+  fireEvent.change(text(), { target: { value: "Unsent" } }); fireEvent.keyDown(text(), { key: "Enter" });
+  expect(text().value).toBe("Unsent"); expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+it("New goal starts Pi intent off and selects only the current configured offer", async () => {
+  const f = fixture("#coordinated/new"); f.pi(configuredPi);
+  render(<App />);
+  const choice = await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(choice).toHaveProperty("checked", false);
+  expect(screen.getByText(/Requested: Fixture\/beta/)).toBeTruthy();
+  fireEvent.click(choice); expect(choice).toHaveProperty("checked", true);
+  await f.tick(); expect(choice).toHaveProperty("checked", true);
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+it("a selected Pi goal sends only Codex and Pi even with Claude signed in", async () => {
+  const f = fixture(); f.pi(configuredPi); f.harnesses(["claude", "codex"]);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(screen.getByText(/Selected roles: Codex plans · Pi independently checks/)).toBeTruthy();
+  fireEvent.click(continuation());
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1));
+  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload.instances).toBe("codex,pi");
+});
+it("a selected Pi goal without Codex stays unsent and explains the missing planner", async () => {
+  const f = fixture(); f.pi(configuredPi); f.harnesses(["claude"]);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.queryByText(/Selected roles: Codex plans/)).toBeNull();
+  expect(screen.getAllByText(/Codex is needed/).length).toBeGreaterThan(0);
   expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
 });
 

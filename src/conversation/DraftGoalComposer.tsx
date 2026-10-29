@@ -1,3 +1,4 @@
+import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useRef, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
 import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
@@ -91,6 +92,11 @@ interface DraftGoalComposerProps {
   onLeaveGoal?: () => void;
   linuxCanStartCoordination?: boolean;
   linuxWrite?: boolean;
+  piCapacity?: PiCapacitySelection;
+  piCapacityChecked?: boolean;
+  piCapacityReason?: string | null;
+  piLegacy?: boolean;
+  onPiCapacityChange?: (enabled: boolean) => void;
   inputsLocked?: boolean;
   onLinuxWriteChange?: (value: boolean) => void;
   workspacePlaceholder?: string;
@@ -169,7 +175,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -292,6 +298,17 @@ export function DraftGoalComposer({
           disabled={busy || inputsLocked}
         />
 
+        {linuxCanStartCoordination && (piCapacity || piCapacityReason || piLegacy) ? <div className="draft-hint" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+          <span>{piCapacityChecked
+            ? (discoveredHarnesses.includes("codex") ? `Selected roles: Codex plans${linuxWrite ? " / writes" : ""} · Pi independently checks` : "Codex is needed to plan with this Pi capacity.")
+            : piLegacy ? "Legacy harness selection · Pi route not recorded" : "Available choice: Codex + Pi"}</span>
+          {piCapacity ? <>
+            <div title={`${piCapacity.provider}/${piCapacity.model}`}>Requested: {piCapacity.provider}/{piCapacity.model} · Billing not confirmed</div>
+            <label><input type="checkbox" aria-label="Use Pi's configured capacity for this goal" checked={piCapacityChecked} disabled={busy || inputsLocked || !onPiCapacityChange || Boolean(piCapacityReason)} onChange={event => onPiCapacityChange?.(event.target.checked)} /> Use Pi's configured capacity for this goal</label>
+            <details><summary>Technical details</summary>Reasoning settings remain managed by Pi; GoalPort pins the requested pair only. This is not proof of the effective server model, authentication, quota or billing.</details>
+          </> : piLegacy ? <div>Pi route not recorded · Continue is unpinned</div> : null}
+          {piCapacityReason ? <div role="status">{piCapacityReason}</div> : null}
+        </div> : null}
         {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
         {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
 
@@ -318,7 +335,7 @@ export function DraftGoalComposer({
                 <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onGrantConsent}>
                   {grantButtonLabel}
                 </button>
-                <span className="draft-hint-note"> {discoveredHarnesses.length > 0 ? "Uses your existing subscriptions. Nothing runs until you send a goal." : "Available agents work only after you send a goal."}</span>
+                <span className="draft-hint-note"> {discoveredHarnesses.length > 0 ? "Uses your existing harness access. Nothing runs until you send a goal." : "Available agents work only after you send a goal."}</span>
               </>
             ) : null}
           </p>

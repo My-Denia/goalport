@@ -27,6 +27,21 @@ workbench_spec.loader.exec_module(workbench)
 
 
 class CommandRoutingTests(unittest.TestCase):
+    def test_pi_capacity_projection_is_typed_separate_from_subscription_names_and_own_intent(self):
+        pair = {"provider": "Fixture", "model": "alpha", "useExistingCapacity": True}
+        pi = {"instanceId": "pi", "auth": {"type": "apiKey", "status": "unknown"}, "piCapacity": {"offer": pair, "catalog": [{"provider": "Fixture", "model": "alpha"}]}}
+        stdout = 'provider codex: authenticated (chatgpt)\nprovider pi: unknown (apiKey)\npi capacity: ' + json.dumps(pi) + '\n'
+        self.assertEqual(workbench.subscription_harnesses(stdout), ["codex"])
+        self.assertEqual(workbench.pi_capacity_snapshot(stdout), pi)
+        self.assertIsNone(workbench.pi_capacity_snapshot('pi capacity: broken'))
+        own = {"backgroundConsent": True, "allowedInstances": ["codex", "pi"], "writeAuthorization": None, "piCapacity": pair}
+        self.assertEqual(workbench.project_remembered_intent(own, "/work"), {"background": True, "write": False, "piCapacity": pair})
+        legacy = {k: v for k, v in own.items() if k != "piCapacity"}
+        self.assertTrue(workbench.project_remembered_intent(legacy, "/work")["legacyPi"])
+        argv, error = workbench.coordination_start_command(Path('/fixture/profile'), Path('/repo'), 'Inspect only', '/work', endpoint='/tmp/core.sock', core_binary='/bin/fixture-core', background=True, instances='codex,pi', pi_capacity=pair)
+        self.assertIsNone(error)
+        self.assertEqual(json.loads(argv[argv.index('--pi-capacity') + 1]), pair)
+
     def test_first_live_goal_identity_survives_return_before_any_saved_result(self):
         with tempfile.TemporaryDirectory(prefix="gp-first-live-") as temp:
             root = Path(temp)

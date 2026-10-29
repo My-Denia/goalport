@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { finished } from "node:stream/promises";
@@ -186,7 +187,7 @@ test("the offline staging check covers every required electron module, including
   // explicit staging list; this runs offline, against source, with no
   // packaging run and no Windows.
   const covered = stagedDependenciesCoverGraph();
-  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs"]) {
+  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs"]) {
     assert.ok(STAGED_APP_MODULES.includes(name), `${name} must stay on the staging list`);
     assert.ok(covered.includes(name), `${name} must be reachable from the staged entry points`);
   }
@@ -197,6 +198,34 @@ test("removing any one staged module name turns the offline dependency check red
     const withoutOne = STAGED_APP_MODULES.filter((candidate) => candidate !== name);
     assert.throws(() => stagedDependenciesCoverGraph(withoutOne), new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
   }
+});
+
+test("offline staging follows quoted relative CJS and MJS leaves without script-tree dependencies", (t) => {
+  const temp = mkdtempSync(resolve(tmpdir(), "goalport-stage-graph-"));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  mkdirSync(resolve(temp, "nested"));
+  writeFileSync(resolve(temp, "entry.cjs"), "require ( './nested/child.cjs' );\n");
+  writeFileSync(resolve(temp, "nested/child.cjs"), 'require("../rules.mjs");\n');
+  writeFileSync(resolve(temp, "rules.mjs"), "export const value = true;\n");
+  const names = ["entry.cjs", "nested/child.cjs", "rules.mjs"];
+  assert.deepEqual(stagedDependenciesCoverGraph(names, ["entry.cjs"], temp), [...names].sort());
+  assert.throws(() => stagedDependenciesCoverGraph(names.filter(x => x !== "rules.mjs"), ["entry.cjs"], temp), /rules\.mjs/);
+  writeFileSync(resolve(temp, "nested/child.cjs"), "require('../../outside.cjs');\n");
+  assert.throws(() => stagedDependenciesCoverGraph(names, ["entry.cjs"], temp), /outside\.cjs/);
+});
+
+test("staged Pi admission loads from the explicit app list without the repository script tree", (t) => {
+  const stage = mkdtempSync(resolve(tmpdir(), "goalport-pi-stage-load-"));
+  t.after(() => rmSync(stage, { recursive: true, force: true }));
+  for (const name of STAGED_APP_MODULES) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
+  const admission = createRequire(import.meta.url)(resolve(stage, "pi-capacity-admission.cjs"));
+  assert.equal(typeof admission.piAdmissionContext, "function");
+});
+
+test("connected CLI entry re-exports the one Electron-local saved-target resolver", () => {
+  const canonical = createRequire(import.meta.url)("../../electron/saved-targets.cjs");
+  const compatibility = createRequire(import.meta.url)("../connected/saved-targets.cjs");
+  assert.equal(compatibility, canonical);
 });
 
 test("C2 offline staging includes detached owner and shared engine without Windows packaging", () => {

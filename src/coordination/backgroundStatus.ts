@@ -1,3 +1,4 @@
+import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import type { CoordinationView } from "./requestCoordination";
 /** Read-only presentation facts. The host/store still decides admission. */
 export interface BackgroundHeldWorkspaces {
@@ -11,6 +12,7 @@ export interface BackgroundHeldWorkspaces {
 
 /** Permission-free IPC projection. Controls require a fresh acknowledged connection. */
 export interface BackgroundStatus {
+  readonly piCapacity?: PiCapacitySelection;
   jobId: string;
   requestId: string;
   goal: string;

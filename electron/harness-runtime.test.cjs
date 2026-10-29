@@ -237,7 +237,15 @@ test("an unconfigured runtime reads installed CLIs and does not spawn the checko
   });
   const discovered = await runtime.discover();
   assert.equal(discovered.ok, true);
-  assert.deepEqual(discovered.providers, []);
+  if (process.platform === "linux") {
+    // The route-aware projection keeps a plain unavailable choice visible,
+    // without claiming the failed probe proved an install or sign-in.
+    assert.deepEqual(discovered.providers.map(p => p.instanceId), ["pi"]);
+    assert.equal(discovered.providers[0].availability, "unavailable");
+    assert.equal(discovered.providers[0].piCapacity.offer, undefined);
+    assert.deepEqual(discovered.providers[0].piCapacity.catalog, []);
+    assert.equal(discovered.providers[0].auth.status, "unknown");
+  } else assert.deepEqual(discovered.providers, []);
   // codex, claude, pi — every harness the discovery layer probes.
   assert.equal(probes, 3);
   const ran = await runtime.run({ commandId: "coordinate-plan-1", type: "goalport.coordinateTurn" });

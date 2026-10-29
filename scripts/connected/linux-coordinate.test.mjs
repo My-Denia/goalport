@@ -216,8 +216,9 @@ test("write flags are opt-in, subscription-only, and never inferred", async (t) 
     instances: "codex,pi",
     requestId: "use-pi",
   }));
-  assert.equal(named.code, 0, named.stderr);
-  assert.deepEqual(storeOf(unknownWriter).getActiveStatus().admission.allowedInstances, ["codex", "pi"]);
+  assert.equal(named.code, 1, named.stderr);
+  assert.match(named.stderr, /configured capacity/);
+  assert.equal(fs.existsSync(jobsDirectory(unknownWriter)), false);
   const refused = await invoke(unknownWriter, runArgs(unknownWriter, {
     instances: "codex,pi",
     requestId: "write-pi",
@@ -226,7 +227,7 @@ test("write flags are opt-in, subscription-only, and never inferred", async (t) 
   }));
   assert.equal(refused.code, 1);
   assert.match(refused.stderr, /Pi runs read-only turns/);
-  assert.equal(unknownWriter.launches.length, 1);
+  assert.equal(unknownWriter.launches.length, 0);
 
   const admitted = fixture(t);
   await invoke(admitted, ["grant-access"]);
@@ -642,6 +643,25 @@ test("acknowledge leaves an interrupted job unreplayed and release keeps the slo
   assert.equal(released.code, 0, released.stderr);
   assert.match(released.stdout, /^active: false$/m);
   assert.match(released.stdout, /The profile admission slot is not held by this job\./);
+});
+
+test("configured Pi run admits exact intent once and Continue retains own pair after injected defaults change", async t => {
+  const f = fixture(t, { providers: [SUBSCRIPTION_PROVIDERS[0]] });
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const pi = { instanceId: "pi", installed: true, enabled: true, auth: { status: "unknown", type: "apiKey" }, models: [{ slug: "default", isDefault: true }], piCapacity: { offer: pair, workspacePath: f.workspace, catalog: [{ provider: "Fixture", model: "alpha" }, { provider: "Fixture", model: "beta" }] } };
+  f.providers.push(pi);
+  await invoke(f, ["grant-access"]);
+  const run = await invoke(f, [...runArgs(f, { instances: "codex,pi", requestId: "bound-parent" }), "--pi-capacity", JSON.stringify(pair)]);
+  assert.equal(run.code, 0, run.stderr);
+  const store = storeOf(f), id = jobIdOf(run), owner = store.claimWorker(id).ownerToken;
+  assert.deepEqual(store.getStatus(id).admission.piCapacity, pair);
+  const saved = { requestId: "bound-parent", workspacePath: f.workspace, goal: "Plan the fixture change", planningHarness: "Codex", reviewHarness: "Pi", planText: "Real fixture plan", reviewText: "Fixture check", result: "Checked", verdict: "checked", stopReason: "Checked", planningQuota: "unknown", reviewQuota: "unknown", piCapacity: pair };
+  saveRecord(f.dataDir, saved); store.recordOutcome(id, { status: "completed", report: saved }, owner); store.releaseAdmission(id, owner);
+  pi.piCapacity.offer = { ...pair, model: "beta" };
+  const next = await invoke(f, ["continue", "--from", "bound-parent", "--instances", "codex,pi", "--request-id", "bound-child", "--background"]);
+  assert.equal(next.code, 0, next.stderr);
+  assert.deepEqual(store.getStatus(jobIdOf(next)).admission.piCapacity, pair);
+  assert.equal(f.launches.length, 2);
 });
 
 test("discover prints consent, capability and apiKey auth type as separate facts", async (t) => {

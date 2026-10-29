@@ -43,6 +43,8 @@ const { createCoreConnection } = require("../../electron/core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy, resolveUnixSocket } = require("../../electron/launch-config.cjs");
 const { harnessLaunchConfigured } = require("../../electron/harness-runtime.cjs");
 const { authorizeMembershipError } = require("../../electron/coordinate-service.cjs");
+const { normalizePiCapacity } = require("../../electron/pi-capacity.mjs");
+const { piAdmissionContext, ownAdmissionForRequest } = require("../../electron/pi-capacity-admission.cjs");
 const { readRecords, normalizeRecord } = require("../../electron/coordination-record.cjs");
 const { resolveSavedTargets, workspaceKey } = require("./saved-targets.cjs");
 
@@ -92,6 +94,7 @@ const USAGE = [
   "  --write-instances a,b    Opt-in write harnesses. Never inferred. Requires --write-turns.",
   "  --write-turns N          Write turn cap, 1..8. Requires --write-instances.",
   "  --background             Explicit keep-working-after-closing consent (required for run/continue).",
+  "  --pi-capacity JSON        Exact configured {provider,model,useExistingCapacity:true}; required for fresh Pi goals.",
   "  --request-id ID          Caller-stable request id for a retry of the same admission.",
   "  --from ID                Saved request id that continue revises.",
   "  --job ID                 Job id (defaults to the active/newest job).",
@@ -102,7 +105,7 @@ const USAGE = [
   "  --help                   This help.",
   "",
   "Consent: --background is never defaulted and is not write consent. The durable",
-  "consent store is the only grant. Unknown and apiKey logins are never authorized.",
+  "consent store is the only grant. Pi's explicit configured choice does not confirm billing.",
   "A job whose exit could not be confirmed stays unconfirmed and is never replayed.",
 ].join("\n");
 
@@ -114,6 +117,7 @@ const OPTIONS = {
   "write-instances": { type: "string" },
   "write-turns": { type: "string" },
   background: { type: "boolean" },
+  "pi-capacity": { type: "string" },
   job: { type: "string" },
   "request-id": { type: "string" },
   from: { type: "string" },
@@ -265,6 +269,7 @@ function createHost(options, io) {
     ordinaryScope: () => null,
     endpoint: () => options.controlEndpoint,
     workerPath: options.workerPath,
+    discover: options.discover,
     snapshot: options.snapshot,
     config: () => ({
       connectPath: options.connectPath,
@@ -305,7 +310,7 @@ function discoveryProblemText(discovered) {
 async function readDiscovery(io, context) {
   let discovered;
   try {
-    discovered = await context.discover({ stateDir: path.join(context.dataDir, "harness-state") });
+    discovered = await context.discover({ stateDir: path.join(context.dataDir, "harness-state"), cwd: context.workspace || process.cwd(), provisional: !context.workspace, routeAwarePi: true });
   } catch (error) {
     return { ok: false, message: discoveryProblemText({ errorText: error?.message }) };
   }
@@ -323,7 +328,7 @@ function instanceList(text, providers) {
   return [...new Set(providers
     .filter((provider) => {
       const type = provider?.auth?.type;
-      return (type === "chatgpt" || type === "subscription") && typeof provider.instanceId === "string";
+      return !(provider.instanceId === "pi" && provider.piCapacity) && (type === "chatgpt" || type === "subscription") && typeof provider.instanceId === "string";
     })
     .map((provider) => provider.instanceId))];
 }
@@ -465,7 +470,7 @@ async function commandDiscover(parsed, io, context) {
   if (context.strippedKeys.length > 0) {
     write(io, `note: ignored ${context.strippedKeys.join(", ")}; the durable consent store is the only grant.`);
   }
-  const discovered = await readDiscovery(io, context);
+  const discovered = await readDiscovery(io, { ...context, workspace: parsed.values.workspace });
   if (!discovered.ok) return refuse(io, discovered.message);
   if (!discovered.providers.length) {
     write(io, "No signed-in subscription harness was found on this machine.");
@@ -475,6 +480,7 @@ async function commandDiscover(parsed, io, context) {
     const status = typeof provider?.auth?.status === "string" ? provider.auth.status : "unknown";
     const type = typeof provider?.auth?.type === "string" ? provider.auth.type : "unknown";
     write(io, `provider ${provider.instanceId}: ${status} (${type})`);
+    if (provider.instanceId === "pi" && provider.piCapacity) write(io, `pi capacity: ${JSON.stringify(provider)}`);
     if (Array.isArray(provider.models) && provider.models.length > 0) {
       const models = provider.models.map((model) => model?.slug ?? model?.name).filter((model) => typeof model === "string" && model);
       if (models.length > 0) write(io, `  models: ${models.join(", ")}`);
@@ -535,7 +541,7 @@ async function startAdmission(parsed, io, context, selection) {
   const selectedWrite = writeSelection(parsed, selection.workspace);
   if (!selectedWrite.ok) return refuse(io, selectedWrite.message);
 
-  const discovered = await readDiscovery(io, context);
+  const discovered = await readDiscovery(io, { ...context, workspace: selection.workspace });
   if (!discovered.ok) return refuse(io, discovered.message);
   const instances = instanceList(selection.instancesText, discovered.providers);
   if (instances.length === 0) return refuse(io, "No signed-in subscription harness was found on this machine, so nothing was admitted.");
@@ -548,7 +554,17 @@ async function startAdmission(parsed, io, context, selection) {
   if (selectedWrite.write?.instances.includes("pi")) {
     return refuse(io, "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.");
   }
-  const membership = authorizeMembershipError(discoveredMembership, instances)
+  let piContext;
+  let requestedPi = selection.piCapacity;
+  if (parsed.values["pi-capacity"] !== undefined) {
+    try { requestedPi = JSON.parse(parsed.values["pi-capacity"]); } catch { return refuse(io, "The requested Pi capacity is malformed."); }
+    if (!normalizePiCapacity(requestedPi)) return refuse(io, "The requested Pi capacity is malformed.");
+  }
+  if (instances.includes("pi")) {
+    try { piContext = piAdmissionContext({ allowedInstances: instances, workspacePath: selection.workspace, ...(selection.continuation ? { continuation: selection.continuation } : {}), ...(requestedPi !== undefined ? { piCapacity: requestedPi } : {}) }, context.dataDir, discoveredMembership); }
+    catch (error) { return refuse(io, error.message); }
+  } else if (requestedPi !== undefined) return refuse(io, "Pi capacity needs Pi selected for this goal.");
+  const membership = authorizeMembershipError(discoveredMembership, instances, piContext)
     || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);
   if (instances.length < 2) {
@@ -581,6 +597,7 @@ async function startAdmission(parsed, io, context, selection) {
       ...(selectedWrite.write ? { write: selectedWrite.write } : {}),
       ...(selection.executionFeedback ? { executionFeedback: selection.executionFeedback } : {}),
       ...(selection.continuation ? { continuation: selection.continuation } : {}),
+      ...(piContext?.piCapacity ? { piCapacity: piContext.piCapacity } : {}),
     });
   } catch (error) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "GoalPort could not confirm this background start.");
@@ -669,12 +686,15 @@ async function commandContinue(parsed, io, context) {
     previousExecutionAudit: record.auditText ?? null,
     previousCommandIds: [],
   };
+  let own;
+  try { own = ownAdmissionForRequest(context.dataDir, from); } catch { /* The strict host still refuses malformed prior admissions. */ }
   const code = await startAdmission(parsed, io, context, {
     goal: originalGoal,
     continuation: { parentRequestId: from, rootRequestId: root.requestId, originalGoal, followUp },
     workspace,
-    instancesText: parsed.values.instances,
+    instancesText: parsed.values.instances ?? (own?.allowedInstances?.includes("pi") ? own.allowedInstances.join(",") : undefined),
     executionFeedback,
+    ...(Object.hasOwn(record, "piCapacity") ? { piCapacity: record.piCapacity } : {}),
   });
   // Only a real admission earns the note: a refused start replays nothing.
   if (code === 0 && record.verdict === "unconfirmed") {

@@ -26,6 +26,7 @@ import { TitleBar } from "./shell/TitleBar";
 import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
 import { Composer } from "./conversation/Composer";
+import { normalizePiCapacity, samePiPair, selectedPiEligible, type PiCapacitySelection } from "../electron/pi-capacity.mjs";
 import { DraftGoalComposer, GoalStatusHeading, type GoalDraftValue } from "./conversation/DraftGoalComposer";
 import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
@@ -435,8 +436,13 @@ function App() {
   const [linuxCoordinationLive, setLinuxCoordinationLive] = useState(false);
   const [linuxCoordinationGoal, setLinuxCoordinationGoal] = useState<string | null>(null);
   const [linuxCoordinationWorkspace, setLinuxCoordinationWorkspace] = useState<string | null>(null);
-  const [linuxHarnessSentence, setLinuxHarnessSentence] = useState<string | null>(null);
-  const [linuxSignedIn, setLinuxSignedIn] = useState<string[]>([]);
+  const [linuxHarnessProblem, setLinuxHarnessSentence] = useState<string | null>(null);
+  const linuxHarnessProblemRef = useRef(linuxHarnessProblem);
+  linuxHarnessProblemRef.current = linuxHarnessProblem;
+  const [linuxBaseHarnesses, setLinuxSignedIn] = useState<string[]>([]);
+  const linuxRouteAwareDiscovery = useRef(false);
+  const [linuxPiSnapshot, setLinuxPiSnapshot] = useState<ProviderSnapshot | null>(null);
+  const [linuxPiSelection, setLinuxPiSelection] = useState<PiCapacitySelection | undefined>();
   const [linuxDiscoverChecked, setLinuxDiscoverChecked] = useState(false);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
   const [linuxLeftoverHeld, setLinuxLeftoverHeld] = useState(false);
@@ -483,10 +489,18 @@ function App() {
   const [savedReadError, setSavedReadError] = useState<string | null>(null);
   const coordinatedDrafts = useConversationDrafts();
   const coordinatedText = useRef<Record<string, string>>({});
-  const coordinatedOptions = useRef(new Map<string, { background: boolean; write: boolean; restored: boolean; dirty: boolean; sourceRequestId: string | null }>());
+  const coordinatedOptions = useRef(new Map<string, { background: boolean; write: boolean; piCapacity?: PiCapacitySelection; restored: boolean; dirty: boolean; sourceRequestId: string | null }>());
   const coordinatedDraftKey = useRef("coordinated:new");
   const localAdmission = useRef<{ requestId: string; rootId: string; viewId: string | null } | null>(null);
   const [selectionRefresh, setSelectionRefresh] = useState(0);
+  const piOwnGoal = coordinatedRoute !== null && coordinatedRoute.kind !== "new";
+  const linuxLegacyPi = piOwnGoal && savedTarget?.rememberedIntent?.legacyPi === true;
+  const piAvailable = selectedPiEligible(linuxPiSnapshot, linuxPiSelection, linuxLegacyPi);
+  const linuxSignedIn = linuxPiSelection
+    ? [...(linuxBaseHarnesses.includes("codex") ? ["codex"] : []), ...(piAvailable ? ["pi"] : [])]
+    : [...new Set([...linuxBaseHarnesses, ...(piAvailable && linuxLegacyPi ? ["pi"] : [])])];
+  const linuxPiProblem = linuxPiSelection && (!piAvailable || (!piOwnGoal && !samePiPair(linuxPiSelection, linuxPiSnapshot?.piCapacity?.offer))) ? "This goal\u0027s requested Pi route is unavailable; its choice is kept." : null;
+  const linuxHarnessSentence = linuxHarnessProblem || linuxPiProblem || (linuxPiSelection && !linuxSignedIn.includes("codex") ? "Codex is needed to plan with this Pi capacity; nothing was sent." : null) || (linuxPiSnapshot && linuxSignedIn.length < 2 ? "Use Pi\u0027s configured capacity to add independent checking, or recheck the folder if unavailable." : null);
   const savedContinueReason = coordinatedRoute && coordinatedRoute.kind !== "new" ? savedReadError || (savedTarget ? continuationUnavailable(savedTarget) : "Loading the selected result…") : null;
 
   function stashCoordinatedDraft() {
@@ -496,7 +510,7 @@ function App() {
     coordinatedText.current[key] = text;
     coordinatedDrafts.update(key, text);
     const previous = coordinatedOptions.current.get(key);
-    coordinatedOptions.current.set(key, { background: backgroundConsent, write: linuxWrite, restored: optionsRestored, dirty: previous?.dirty ?? false, sourceRequestId: previous?.sourceRequestId ?? null });
+    coordinatedOptions.current.set(key, { background: backgroundConsent, write: linuxWrite, piCapacity: linuxPiSelection, restored: optionsRestored, dirty: previous?.dirty ?? false, sourceRequestId: previous?.sourceRequestId ?? null });
   }
   function openCoordinated(route: CoordinatedRoute, replace = false, fromLocation = false) {
     // A deliberate view transition relinquishes auto-follow for the submitted
@@ -523,6 +537,7 @@ function App() {
     setLinuxCoordinationCoverage(null);
     setLinuxCoordinationAuditInput(null);
     setOptionsRestored(false);
+    setLinuxPiSelection(undefined);
     lastRestoredRecordId.current = null;
     setDraftGoal({ requestId: freshRequestId(), baselineCampaignId: snapshotRef.current.activeCampaignId,
       workspace: route.kind === "new" ? linuxCoordinationWorkspace || snapshotRef.current.project.workspaceRoot || "" : "", provider: "", message: "" });
@@ -531,6 +546,7 @@ function App() {
       const choices = coordinatedOptions.current.get("coordinated:new");
       setBackgroundConsent(choices?.background ?? false);
       setLinuxWrite(choices?.write ?? false);
+      setLinuxPiSelection(choices?.piCapacity);
       setDraftGoal(current => current ? { ...current, message: coordinatedText.current["coordinated:new"] ?? "" } : current);
     }
     setSelectionRefresh(value => value + 1);
@@ -739,7 +755,8 @@ function App() {
       setSelectedInstances(scope && scope.instances.length > 0
         ? scope.instances.filter((instanceId) => {
           const catalog = catalogFromProviderSnapshots(discovery.providers).find((item) => item.instanceId === instanceId);
-          return catalog ? catalog.billing === "subscription" || catalog.billing === "included" || catalog.billing === "unknown" : false;
+          if (instanceId === "pi" && normalizePiCapacity(selectedPlan?.piCapacity)) return true; // Own displayed choice stays checked even when unavailable.
+          return catalog ? catalog.billing === "subscription" || catalog.billing === "included" || (catalog.billing === "unknown" && !catalog.piCapacity) : false;
         })
         : [...selectable]);
     })();
@@ -1061,7 +1078,7 @@ function App() {
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent, instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
+          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent, ...(linuxPiSelection ? { piCapacity: linuxPiSelection } : {}), instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
         }).then(async (response) => response.json()).then((body) => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
@@ -1093,7 +1110,7 @@ function App() {
               workspacePath: workspace, identityConfirmed: true, line: shown });
             const childKey = `coordinated:${identity.requestId}`;
             coordinatedText.current[childKey] = "";
-            coordinatedOptions.current.set(childKey, { background: backgroundConsent, write: linuxWrite, restored: false, dirty: true, sourceRequestId: identity.requestId });
+            coordinatedOptions.current.set(childKey, { background: backgroundConsent, write: linuxWrite, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: identity.requestId });
             if ((coordinatedText.current[submittedKey] ?? submittedText) === submittedText) {
               coordinatedText.current[submittedKey] = "";
               coordinatedDrafts.update(submittedKey, "");
@@ -1934,7 +1951,7 @@ function App() {
     if (client.mode === "linux-core") {
       openCoordinated({ kind: "new" });
       coordinatedOptions.current.set("coordinated:new", { background: false, write: false, restored: false, dirty: false, sourceRequestId: null });
-      setBackgroundConsent(false); setLinuxWrite(false); setOptionsRestored(false);
+      setBackgroundConsent(false); setLinuxWrite(false); setLinuxPiSelection(undefined); setOptionsRestored(false);
       return;
     }
     if (window.innerWidth <= 860) setNavCollapsed(true);
@@ -2464,7 +2481,7 @@ function App() {
         const existingChoices = coordinatedOptions.current.get(key);
         if (!existingChoices || (!existingChoices.dirty && existingChoices.sourceRequestId !== exact.requestId)) {
           const intent = exact.rememberedIntent;
-          coordinatedOptions.current.set(key, { background: intent?.background === true, write: intent?.write === true, restored: Boolean(intent), dirty: false, sourceRequestId: exact.requestId });
+          coordinatedOptions.current.set(key, { background: intent?.background === true, write: intent?.write === true, piCapacity: normalizePiCapacity(intent?.piCapacity) ?? undefined, restored: Boolean(intent), dirty: false, sourceRequestId: exact.requestId });
         }
         const optionViewKey = `${key}:${exact.requestId}`;
         if (lastRestoredRecordId.current !== optionViewKey) {
@@ -2472,6 +2489,7 @@ function App() {
           const choices = coordinatedOptions.current.get(key)!;
           setBackgroundConsent(choices.background);
           setLinuxWrite(choices.write);
+          setLinuxPiSelection(choices.piCapacity);
           setOptionsRestored(choices.restored && !live && !unconfirmed);
         }
         const recordLeft = leftRequestIds.current.has(exact.requestId);
@@ -2516,14 +2534,15 @@ function App() {
     let cancelled = false;
     let generation = 0;
     let inFlight = false;
-    const check = () => {
+    const check = (periodic = false) => {
+      if (periodic && linuxRouteAwareDiscovery.current) return; // New Pi metadata is never a status poll.
       if (inFlight) return;
       inFlight = true;
       const request = ++generation;
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messageType: "coordination_discover", payload: {} }),
+        body: JSON.stringify({ messageType: "coordination_discover", payload: { workspaceRoot: draftGoalRef.current?.workspace || undefined } }),
       }).then(async (response) => response.json().catch(() => null)).then((body) => {
         if (cancelled || request !== generation) return;
         const unchecked = "The signed-in harnesses could not be checked, so nothing will be sent.";
@@ -2534,7 +2553,9 @@ function App() {
           setLinuxDiscoverChecked(true);
           return;
         }
-        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown } }).payload;
+        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown; pi?: ProviderSnapshot } }).payload;
+        if (payload?.pi !== undefined) linuxRouteAwareDiscovery.current = true;
+        setLinuxPiSnapshot(payload?.pi ?? null);
         const sentence = payload?.sentence;
         const consentStillMissing = payload?.consentMissing === true;
         if (consentStillMissing && grantAllowed.current) {
@@ -2545,7 +2566,7 @@ function App() {
           if (!consentStillMissing) grantError.current = false;
           const names = Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : [];
           const reported = typeof sentence === "string" && sentence.trim() ? sentence.trim() : null;
-          setLinuxHarnessSentence(reported ?? (names.length === 0 ? "No signed-in subscription harness was found on this machine, so nothing will be sent." : names.length < 2 ? "An independent check needs a second logged-in harness, so nothing will be sent." : null));
+          setLinuxHarnessSentence(payload?.pi ? reported : reported ?? (names.length === 0 ? "No signed-in subscription harness was found on this machine, so nothing will be sent." : names.length < 2 ? "An independent check needs a second logged-in harness, so nothing will be sent." : null));
         }
         setLinuxConsentMissing(consentStillMissing);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
@@ -2553,9 +2574,10 @@ function App() {
       }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } }).finally(() => { inFlight = false; });
     };
     check();
-    const timer = window.setInterval(check, linuxHarnessSentence ? 2000 : 8000);
+    let legacyTicks = 0;
+    const timer = window.setInterval(() => { legacyTicks++; if (linuxHarnessProblemRef.current || legacyTicks % 4 === 0) check(true); }, 2000); // Legacy: 2s blocked / 8s healthy. New metadata is never polled.
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxHarnessSentence, linuxDiscoverNonce]);
+  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxDiscoverNonce, draftGoal?.workspace]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
@@ -2935,6 +2957,15 @@ function App() {
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     linuxCanStartCoordination={client.mode === "linux-core"}
+                    piCapacity={client.mode === "linux-core" ? (linuxPiSelection ?? (piOwnGoal ? normalizePiCapacity(savedTarget?.piCapacity) ?? undefined : linuxPiSnapshot?.piCapacity?.offer)) : undefined}
+                    piCapacityChecked={Boolean(linuxPiSelection)}
+                    piCapacityReason={linuxPiProblem || (piOwnGoal && savedTarget?.piCapacity && !linuxPiSelection ? savedContinueReason : null) || linuxPiSnapshot?.piCapacity?.reason}
+                    piLegacy={Boolean(linuxLegacyPi)}
+                    onPiCapacityChange={client.mode === "linux-core" && !piOwnGoal && !linuxCoordinationLive && !currentWorkReason ? (enabled) => {
+                      const selection = enabled ? normalizePiCapacity(linuxPiSnapshot?.piCapacity?.offer) ?? undefined : undefined;
+                      setLinuxPiSelection(selection);
+                      coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
+                    } : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
@@ -2966,7 +2997,7 @@ function App() {
                     optionsRestored={optionsRestored && !currentWorkReason && client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest) && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine)}
                     discoveredHarnesses={linuxSignedIn}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
-                    onLinuxWriteChange={client.mode === "linux-core" && !currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: enabled, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined}
+                    onLinuxWriteChange={client.mode === "linux-core" && !currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: enabled, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined}
                     inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
                     coordinationResult={backgroundConsent && linuxDiscoverChecked && !snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:")) && !(linuxActionBusy || linuxGranting || sidebarUnconfirmed || leftUnreplayed || linuxLeftoverHeld || linuxHoldLine || workerGone || linuxHarnessSentence || linuxConsentMissing) && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? activeNotice.sentence : client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || linuxCoordinationLine === "Background Send is allowed." || lineSaysAdmissionUnsaid(linuxCoordinationLine) || !linuxShowingFreshDraft) ? (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={isSavedView ? null : client.mode === "linux-core" && linuxHoldLine && !leftUnreplayed ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && sidebarFailed.current ? failedLine.current : null}
@@ -3149,7 +3180,7 @@ function App() {
                           }
                           coordinatedText.current[submittedKey] = "";
                           coordinatedDrafts.update(submittedKey, "");
-                          coordinatedOptions.current.set(submittedKey, { background: backgroundConsent, write: linuxWrite, restored: false, dirty: true, sourceRequestId: identity?.requestId ?? submittedView });
+                          coordinatedOptions.current.set(submittedKey, { background: backgroundConsent, write: linuxWrite, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: identity?.requestId ?? submittedView });
                           if (coordinatedDraftKey.current === submittedKey) {
                             setDraftGoal(current => current?.message === submittedText ? { ...current, message: "" } : current);
                           }
@@ -3166,8 +3197,8 @@ function App() {
                     } : undefined}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
-                    harnessWarning={client.mode === "linux-core" && !linuxCoordinationLive && !linuxActionBusy ? linuxHarnessSentence : null}
-                    signedInHint={client.mode === "linux-core" && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
+                    harnessWarning={client.mode === "linux-core" && !linuxCoordinationLive && !linuxActionBusy ? (linuxPiSnapshot ? linuxHarnessProblem : linuxHarnessSentence) : null}
+                    signedInHint={client.mode === "linux-core" && !linuxPiSnapshot && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
                     discoverHint={draftError ? null : client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : plansUnreadable && !linuxCoordinationLive && !linuxActionBusy ? "Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
                     leftoverHint={leftoverSlotLine}
@@ -3213,11 +3244,12 @@ function App() {
                       }).finally(() => { linuxActionOpen.current = false; setLinuxGranting(false); });
                     } : undefined}
                     backgroundConsent={backgroundConsent}
-                    onBackgroundConsentChange={client.mode === "linux-core" ? (!currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setBackgroundConsent(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: enabled, write: linuxWrite, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined) : (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined)}
+                    onBackgroundConsentChange={client.mode === "linux-core" ? (!currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setBackgroundConsent(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: enabled, write: linuxWrite, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined) : (window.goalportCore?.backgroundStart && !draftGoal?.provider.trim() ? setBackgroundConsent : undefined)}
                     keepRunningHint={client.mode === "linux-core" && linuxDiscoverChecked && !backgroundConsent && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) && !linuxHarnessSentence && !linuxConsentMissing ? "Keep working after closing must be explicitly selected." : null}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
                       if (client.mode === "linux-core") {
+                        if (draftGoal?.workspace !== value.workspace) { setLinuxPiSelection(undefined); setLinuxPiSnapshot(null); setLinuxDiscoverChecked(false); }
                         coordinatedText.current[coordinatedDraftKey.current] = value.message;
                         coordinatedDrafts.update(coordinatedDraftKey.current, value.message);
                       }

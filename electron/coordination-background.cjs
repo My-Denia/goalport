@@ -5,6 +5,8 @@ const { spawn } = require("node:child_process");
 const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity, jobControlEndpoint } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
+const { discoverCliProviders } = require("./cli-coordinate.cjs");
+const { piAdmissionContext } = require("./pi-capacity-admission.cjs");
 
 const HOST_REFUSAL_CODES = new Set([
   "background-unavailable",
@@ -51,7 +53,8 @@ function projection(status, live = false) {
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null,
-    ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}) };
+    ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}),
+    ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}) };
 }
 function createBackgroundHost(options) {
   // The host admits and compares folders on ONE platform identity (the host's
@@ -174,6 +177,7 @@ function createBackgroundHost(options) {
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
           ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
+          ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: input.piCapacity } : {}),
         };
         try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {
@@ -193,6 +197,13 @@ function createBackgroundHost(options) {
         throw preflightRefusal(error);
       }
 
+      if ((platform === "linux" || admissionInput.piCapacity) && admissionInput.allowedInstances.includes("pi")) {
+        try {
+          const discovered = await (options.discover ?? discoverCliProviders)({ cwd: admissionInput.workspacePath, routeAwarePi: true, env: options.env });
+          const context = piAdmissionContext(admissionInput, profileDirectory, discovered, platform);
+          if (context.piCapacity) admissionInput.piCapacity = context.piCapacity;
+        } catch (error) { throw codedRefusal("background-invalid-admission", error.message, error); }
+      }
       let admitted;
       try { admitted = s.startAdmission(admissionInput); }
       catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }

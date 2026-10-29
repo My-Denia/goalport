@@ -29,7 +29,7 @@ async function runWorker(config, deps = {}) {
   const store = deps.store ?? createCoordinationJobStore(config.directory, { bootstrapReady: true });
   const scope = deps.scope ?? require("./coordination-scope.cjs");
   const engine = deps.engine ?? require(config.enginePath);
-  const runtime = deps.runtime ?? createHarnessRuntime({ stateDir: config.stateDir });
+  let runtime;
   const core = deps.core ?? workerCore(config);
   const env = deps.env ?? process.env;
   const claim = store.claimWorker(config.jobId);
@@ -50,12 +50,14 @@ async function runWorker(config, deps = {}) {
   const consentStore = deps.consentStore ?? createBackgroundSendConsentStore(config.directory);
   const consentReader = deps.consentReader ?? (() => consentStore.read());
   const admitted = claim.status.admission;
+  runtime = deps.runtime ?? createHarnessRuntime({ stateDir: config.stateDir, cliProbe: { cwd: admitted.workspacePath, routeAwarePi: process.platform === "linux" || !!admitted.piCapacity }, ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}) });
   const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
     ...(admitted.writeAuthorization ? { write: admitted.writeAuthorization } : {}), priorPlan: admitted.priorPlan,
     priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
     ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true,
-    ...(admitted.continuation ? { continuation: admitted.continuation } : {}) };
+    ...(admitted.continuation ? { continuation: admitted.continuation } : {}),
+    ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}) };
   const owner = claim.ownerToken;
   let control, storageFailed = false, liveResult = null;
   const counters = () => { const s = scope.current(); return { readTurnsRemaining: s?.remaining ?? null, writeTurnsRemaining: s?.write?.remaining ?? null }; };
@@ -69,15 +71,20 @@ async function runWorker(config, deps = {}) {
   }
   try {
     await gate();
-    const authorization = await authorizeCoordination({ instances: input.readInstances, maxTurns: input.readMaxTurns, ...(input.write ? { write: input.write } : {}) }, scope, () => (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir }));
+    const freshDiscovery = await (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir, cwd: admitted.workspacePath, routeAwarePi: process.platform === "linux" || !!admitted.piCapacity });
+    const piContext = (process.platform === "linux" || admitted.piCapacity) && admitted.allowedInstances.includes("pi")
+      ? require("./pi-capacity-admission.cjs").piAdmissionContext(admitted, config.directory, freshDiscovery)
+      : undefined;
+    const authorization = await authorizeCoordination({ instances: input.readInstances, maxTurns: input.readMaxTurns, ...(input.write ? { write: input.write } : {}) }, scope, () => freshDiscovery, piContext);
     if (!authorization.ok) throw new Error(authorization.errorText);
-    const discovery = await discoverCoordination(env, runtime, input.requestId, consentReader);
+    const discovery = await discoverCoordination(env, { ...runtime, discover: async () => freshDiscovery }, input.requestId, consentReader);
     if (!discovery.connected || !discovery.sendAuthorized) throw new Error(discovery.stopReason || "Background Send is not enabled.");
     persist({ phase: "running", counters: counters(), display: { activity: "Organizing this goal…", failures: [] } });
     control = await store.startControlServer({ jobId: config.jobId, endpoint: config.controlEndpoint });
     const failures = [];
     liveResult = await engine.requestCoordination({
       ...engine.backgroundEngineInput(input),
+      ...(piContext?.legacyPiContinuation ? { legacyPiContinuation: true } : {}),
       // Host capability, not persisted admission/renderer authority. The CLI
       // independently checks the actual platform and final audit command.
       ...(process.platform === "linux" ? { auditPromptTransport: "linux-pi-stdin" } : {}),
@@ -163,6 +170,7 @@ async function runWorker(config, deps = {}) {
         goal: input.goal,
         savedAt: new Date().toISOString(),
         ...(input.continuation ? { continuation: input.continuation } : {}),
+        ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}),
       });
     } catch {
       recordSaveFailed = true;

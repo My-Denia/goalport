@@ -21,8 +21,8 @@ async function scenario(t, options = {}) {
   let authorizations = 0;
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
-  const roster = options.providers ?? providers;
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), backgroundConsent: true });
+  const roster = (options.providers ?? providers).map(provider => options.piCapacity && provider.instanceId === "pi" ? { ...provider, auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: options.piCapacity, catalog: [{ provider: options.piCapacity.provider, model: options.piCapacity.model }], workspacePath: directory } } : provider);
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), ...(options.piCapacity ? { piCapacity: options.piCapacity } : {}), backgroundConsent: true });
   if (options.storeDecorator) {
     options.store = options.storeDecorator(options.store ?? store, start);
   }
@@ -70,20 +70,32 @@ async function scenario(t, options = {}) {
   }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
   return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue, requestCoordinationInputValue };
 }
+test("bound Pi own admission reaches engine, actual launch facts and saved requested projection without a provider", async t => {
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const r = await scenario(t, { providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, readOnly: true, captureRequest: true, runtimeRun: async command => ({ ok: true, messageDispatched: true, text: command.commandId.includes("review") ? "VERDICT: carry-out" : "A bounded fixture plan", ...(command.modelSelection.instanceId === "pi" ? { requestedPiCapacity: { provider: "Fixture", model: "alpha" } } : {}) }) });
+  assert.deepEqual(r.requestCoordinationInputValue.piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.status.completedCommands[1].facts.requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.launches[1].modelSelection, { instanceId: "pi", provider: "Fixture", model: "alpha" });
+});
+
 test("Linux worker derives capability after the closed builder; real stdin facts survive completed or pending command", { skip: process.platform !== "linux" }, async t => {
   const { runCliTurn, defaultSpawn } = require("./cli-coordinate.cjs");
   const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
   for (const unknown of [false, true]) {
     let auditChild;
     let childClosed;
     let actualInput;
     const ran = await scenario(t, {
-      providers: [providers[0], pi], allowedInstances: ["codex", "pi"], captureRequest: true,
+      providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, captureRequest: true,
       runtimeRun: async (command, stateDir) => {
         const role = command.commandId.split("-")[1];
         if (role !== "audit") return { ok: true, messageDispatched: true, text: role === "review" ? "VERDICT: carry-out" : "Bounded plan and report", ...(role === "execute" ? { executionEvidence: { status: "available", complete: true, changed: true, beforeDiff: "before", afterDiff: "+real captured change\n".repeat(420) } } : {}) };
         actualInput = command.initialMessage.text;
-        return runCliTurn(command, { stateDir, spawnTurn: spec => defaultSpawn({ ...spec, file: process.execPath,
+        return runCliTurn(command, { stateDir, piCapacity, metadataExec: async () => ({ code: 0, stdout: "provider model context max-out thinking images\nFixture alpha 128K 16K yes yes\n" }), spawnTurn: spec => defaultSpawn({ ...spec, file: process.execPath,
           args: ["-e", unknown ? "setInterval(()=>{},1000)" : "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write('Read '+Buffer.concat(b).length+' host bytes.\\nVERDICT: verified'))"],
           register(child) {
             auditChild = child;

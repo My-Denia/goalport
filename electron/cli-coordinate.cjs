@@ -7,6 +7,41 @@ const path = require("node:path");
 const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
+const { normalizePiCapacity, samePiPair, parsePiCatalog, projectPiSettings, configuredPiOffer } = require("./pi-capacity.mjs");
+const PI_RESOURCE_ARGS = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-context-files", "-na"];
+
+function piLaunch(args, env = process.env, platform = process.platform) {
+  const launch = piWindowsLaunch(env, platform);
+  return launch ? { file: launch.file, args: [...launch.prefixArgs, ...args] } : { file: "pi", args };
+}
+
+// The same offline install/resource/CWD/environment seam for discovery and
+// each fresh bound turn. No auth/model-body reader or provider request.
+async function readPiMetadata(options = {}) {
+  const env = { ...scrub(options.env ?? process.env), NO_COLOR: "1" };
+  const cwd = options.cwd ?? process.cwd();
+  const launch = piLaunch([...PI_RESOURCE_ARGS, "--list-models"], env, options.platform ?? process.platform);
+  let catalog = null;
+  try {
+    const result = await (options.execFile ?? defaultExec)(launch.file, launch.args, { env, cwd, timeoutMs: 8000, bounded: true });
+    if (result.code === 0 && !result.truncated && !result.timedOut
+        && Buffer.byteLength(String(result.stderr ?? "")) <= 16384) catalog = parsePiCatalog(result.stdout);
+  } catch { /* plain unavailable; never expose potentially private stderr */ }
+  if (!catalog) return { catalog: [], reason: "Configured Pi route could not be read; no turn was sent.", workspacePath: cwd, provisional: options.provisional === true };
+  let settings = {};
+  if (options.readSettings !== false) {
+    const read = options.readFile ?? ((file) => fs.readFileSync(file, "utf8"));
+    const home = env.HOME || env.USERPROFILE || options.home || os.homedir();
+    const agent = env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent");
+    for (const file of [path.join(agent, "settings.json"), path.join(cwd, ".pi", "settings.json")]) {
+      try { const raw = JSON.parse(read(file)); const projected = projectPiSettings(raw); if (!Object.hasOwn(raw, "enabledModels")) { delete projected.scopeCount; delete projected.firstEnabledModel; } settings = { ...settings, ...projected }; } catch { /* no configured offer guessed */ }
+    }
+  }
+  // Reconstitute only the allowlisted first scope; never retain other values.
+  const safe = { ...settings, enabledModels: settings.scopeCount ? [settings.firstEnabledModel] : [] };
+  return { catalog, ...configuredPiOffer(safe, catalog), ...(typeof settings.scopeCount === "number" ? { scopeCount: settings.scopeCount } : {}), workspacePath: cwd, provisional: options.provisional === true };
+}
+
 const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
 const STARTED = "A model turn was started, so this stopped.";
@@ -161,6 +196,7 @@ function defaultExec(file, args, options = {}) {
       child = spawn(spec.file, spec.args, {
         stdio: ["ignore", "pipe", "pipe"],
         env: scrub(options.env ?? process.env),
+        ...(options.cwd ? { cwd: options.cwd } : {}),
         windowsVerbatimArguments: spec.verbatim,
       });
     } catch (error) {
@@ -170,9 +206,9 @@ function defaultExec(file, args, options = {}) {
     let stdout = "";
     let stderr = "";
     child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => { stdout += chunk; });
+    child.stdout?.on("data", (chunk) => { stdout += chunk; if (options.bounded && Buffer.byteLength(stdout) > 262144) { killProcessTree(child); finish(reject, new Error("Metadata output exceeded its limit")); } });
     child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.stderr?.on("data", (chunk) => { stderr += chunk; if (options.bounded && Buffer.byteLength(stderr) > 16384) { killProcessTree(child); finish(reject, new Error("Metadata error output exceeded its limit")); } });
     let settled = false;
     const finish = (settle, value) => {
       if (settled) return;
@@ -188,7 +224,7 @@ function defaultExec(file, args, options = {}) {
     // A nonzero exit still hands back the output: the login-status text is
     // parsed downstream regardless of the exit code, as the old synchronous
     // probe did.
-    child.on("close", () => finish(resolve, { stdout, stderr }));
+    child.on("close", (code) => finish(resolve, { stdout, stderr, ...(options.bounded ? { code } : {}) }));
   });
 }
 
@@ -298,16 +334,17 @@ function classifyPiAuth(raw) {
     return {
       status: "authenticated",
       type: "subscription",
+      credentialKind: apiKey.length ? "mixed" : "oauth-only",
       label: `oauth: ${subscription.join(", ")}`,
     };
   }
-  if (apiKey.length > 0) return { status: "authenticated", type: "apiKey", label: "API key" };
+  if (apiKey.length > 0) return { status: "authenticated", type: "apiKey", credentialKind: "apiKey-only", label: "API key" };
   return null;
 }
 
-async function piAuth(io) {
-  const candidates = [path.join(io.home, ".pi", "agent", "auth.json")];
-  try {
+async function piAuth(io, agentDir) {
+  const candidates = [path.join(agentDir ?? path.join(io.home, ".pi", "agent"), "auth.json")];
+  if (!agentDir) try {
     const located = await io.execFile(process.platform === "win32" ? "where" : "which", ["pi"]);
     const first = String(located.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
     if (first) candidates.unshift(path.resolve(path.dirname(first), "..", "auth.json"));
@@ -326,7 +363,7 @@ async function piAuth(io) {
   return { status: "authenticated", type: "unknown", label: "unknown" };
 }
 
-async function piProvider(io) {
+async function legacyPiProvider(io) {
   // Offline model table proves the install. Auth type is read only from the
   // type field of Pi's auth record (oauth vs api_key). Token material is
   // never parsed into the snapshot.
@@ -354,13 +391,33 @@ async function piProvider(io) {
   });
 }
 
+async function piProvider(io) {
+  const metadata = await readPiMetadata(io);
+  // Reuse the pre-existing type-only summary for legacy membership, never
+  // infer this route\'s billing from it or expose credential values.
+  const env = io.env ?? process.env;
+  const home = env.HOME || env.USERPROFILE || io.home || os.homedir();
+  // The route-aware path already knows the native agent directory. Reuse
+  // the classifier there, without another where/which install heuristic.
+  const agentDir = env.PI_CODING_AGENT_DIR || path.join(home, ".pi", "agent");
+  const legacySummary = io.piAuthSummary ?? await piAuth(io, agentDir);
+  const authSummary = legacySummary.type === "unknown" && legacySummary.status === "authenticated"
+    ? { ...legacySummary, status: "unknown" }
+    : legacySummary;
+  return { ...provider({ instanceId: "pi", displayName: "Pi", driver: "pi", auth: authSummary, models: [{ slug: "default", name: "Pi requested choice", isDefault: true, isLegacy: false }] }),
+    installed: metadata.catalog.length ? true : undefined,
+    availability: metadata.catalog.length ? "available" : "unavailable",
+    piCapacity: metadata };
+}
+
 async function discoverCliProviders(io = {}) {
   const probe = {
-    execFile: io.execFile ?? ((file, args) => defaultExec(file, args, { timeoutMs: io.timeoutMs, env: io.env })),
+    ...io,
+    execFile: io.execFile ?? ((file, args, extra = {}) => defaultExec(file, args, { timeoutMs: io.timeoutMs, env: io.env, ...extra })),
     readFile: io.readFile ?? ((file) => fs.readFileSync(file, "utf8")),
     home: io.home ?? os.homedir(),
   };
-  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe), piProvider(probe)])).filter(Boolean);
+  const providers = (await Promise.all([codexProvider(probe), claudeProvider(probe), (io.routeAwarePi === true || (io.routeAwarePi !== false && process.platform === "linux") ? piProvider(probe) : legacyPiProvider(probe))])).filter(Boolean);
   // Harnesses blocked on this machine are still discovered, but the snapshot
   // carries the stamped evidence. Without a state dir or a health record every
   // provider object stays exactly as it was.
@@ -469,6 +526,10 @@ function turnSpec(command, env = process.env, platform = process.platform) {
     // default, unconstrained tools.
     if (writes) {
       return { errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox." };
+    }
+    if (command.modelSelection?.provider !== undefined) {
+      const launch = piLaunch(["-p", "--no-session", ...PI_RESOURCE_ARGS, "--no-tools", "--mode", "text", "--provider", command.modelSelection.provider, "--model", model, ...(stdinBody ? [] : [prompt])], env, platform);
+      return { ...launch, cwd: worktree, ...(stdinBody ? { stdinBody } : {}) };
     }
     // Read-only flags from the documented CLI surface only, with --no-tools
     // as the forced no-side-effect level; no --model, so pi runs on its own
@@ -850,11 +911,18 @@ async function runCliTurn(command, options = {}) {
   const stateDir = typeof options.stateDir === "string" ? options.stateDir : "";
   const commandId = commandIdOf(command);
   if (!stateDir || !commandId) return refused;
+  const bound = options.piCapacity === undefined ? null : normalizePiCapacity(options.piCapacity);
+  const pi = instanceOf(command) === "pi";
+  const route = command?.modelSelection;
+  if ((options.piCapacity !== undefined && !bound) || (pi && ((bound && (!samePiPair(bound, route) || route?.provider === undefined)) || (!bound && route?.provider !== undefined)))) {
+    return { ...refused, errorText: "The Pi command does not match this goal's admitted requested route, so nothing was sent." };
+  }
+  const turnEnv = bound && pi ? { ...scrub(options.env ?? process.env), NO_COLOR: "1" } : (options.env ?? process.env);
   const deliveryProblem = promptDeliveryProblem(command);
   if (deliveryProblem) return { ...refused, errorText: deliveryProblem };
   // Encoding happens once, even on this early-validation path. Production
   // uses the actual process platform, never options supplied by a caller.
-  const selectedSpec = command?.promptDelivery === "stdin" ? turnSpec(command) : null;
+  const selectedSpec = command?.promptDelivery === "stdin" ? turnSpec(command, turnEnv) : null;
   if (selectedSpec?.errorText) return { ...refused, errorText: selectedSpec.errorText };
   if (hasClaim(stateDir, commandId)) return storedResult(stateDir, commandId);
   if (!grantLines(stateDir).includes(commandId)) return refused;
@@ -866,8 +934,12 @@ async function runCliTurn(command, options = {}) {
     ? guardCoordinateWriteCommand(command)
     : guardCoordinateCommand(command);
   if (problem) return { ok: false, text: "", errorText: problem, messageDispatched: false };
-  const spec = selectedSpec ?? turnSpec(command);
+  const spec = selectedSpec ?? turnSpec(command, turnEnv);
   if (spec.errorText) return { ok: false, text: "", errorText: spec.errorText, messageDispatched: false };
+  if (bound && pi) {
+    const metadata = await readPiMetadata({ env: turnEnv, cwd: worktreeOf(command), execFile: options.metadataExec, readSettings: false });
+    if (!metadata.catalog.some(pair => samePiPair(pair, bound))) return { ...refused, errorText: "The goal's requested Pi route is unavailable, so nothing was sent." };
+  }
   const claimed = claimTurn(stateDir, commandId);
   if (!claimed.fresh) return claimed.result;
   if (!takeGrant(stateDir, commandId)) {
@@ -896,7 +968,7 @@ async function runCliTurn(command, options = {}) {
       file: spec.file,
       args: spec.args,
       cwd: spec.cwd,
-      env: scrub(options.env ?? process.env),
+      env: scrub(turnEnv),
       register: options.register,
       ...(spec.stdinBody ? { stdinBody: spec.stdinBody, cancelled: options.cancelled } : {}),
     });
@@ -910,9 +982,10 @@ async function runCliTurn(command, options = {}) {
   const stdinUnknown = Boolean(spec.stdinBody && (spawned?.deliveryUnknown ||
     (spawned?.spawnError && spawned?.childStarted !== false) ||
     (!spawned?.spawnError && (spawned?.childStarted !== true || spawned?.inputEnded !== true))));
-  const transportFacts = spec.stdinBody ? {
-    auditInputTransport: { instanceId: "pi", promptDelivery: "stdin", inputBytes: spec.stdinBody.length, inputEnded: spawned?.inputEnded === true && !stdinUnknown },
-  } : {};
+  const transportFacts = {
+    ...(bound && pi ? { requestedPiCapacity: { provider: bound.provider, model: bound.model } } : {}),
+    ...(spec.stdinBody ? { auditInputTransport: { instanceId: "pi", promptDelivery: "stdin", inputBytes: spec.stdinBody.length, inputEnded: spawned?.inputEnded === true && !stdinUnknown } } : {}),
+  };
   let evidence = null;
   if (isExecute && worktree) {
     try {
@@ -959,6 +1032,11 @@ async function runCliTurn(command, options = {}) {
     };
     finishTurn(stateDir, commandId, replaced);
     return replaced;
+  }
+  if (bound && pi && /(?:unknown (?:provider|model)|custom model|fallback model|model[^\n]*not found)/i.test(String(spawned?.stderr ?? ""))) {
+    const failed = { ...refused, messageDispatched: true, errorText: "Pi could not confirm the requested route; no fallback was accepted.", ...transportFacts };
+    finishTurn(stateDir, commandId, failed);
+    return failed;
   }
   const reply = replyFrom(instanceOf(command), spawned?.stdout ?? "");
   // Environment-blocked turns exit 0 with an honest text reply (the model
@@ -1034,6 +1112,9 @@ async function runCliTurn(command, options = {}) {
 
 module.exports = {
   discoverCliProviders,
+  readPiMetadata,
+  PI_RESOURCE_ARGS,
+  piLaunch,
   runCliTurn,
   codexModel,
   codexReply,
