@@ -68,6 +68,8 @@ export interface AuditInputEvidenceCoverage {
   /** Actual UTF-8 bytes of the COMPLETE assembled audit prompt. */
   readonly promptBytes: number;
   readonly promptBudgetBytes?: number;
+  /** Descriptive only; the runtime independently guards the command selector. */
+  readonly promptDelivery?: "stdin" | "argv";
   readonly windowsCmdWorstCaseChars?: number;
   readonly croppedSections?: readonly string[];
 }
@@ -78,6 +80,8 @@ export interface AuditInputEvidenceCoverage {
 // reserve covers the executable and fixed audit argv on the supported route.
 export const MAX_AUDIT_PROMPT_BYTES = 4096;
 export const AUDIT_EVIDENCE_RESERVE_BYTES = 2048;
+export const LINUX_PI_AUDIT_PROMPT_BYTES = 32768;
+export const LINUX_PI_AUDIT_EVIDENCE_RESERVE_BYTES = 16384;
 export const WINDOWS_CMD_ESCAPE_FACTOR = 6;
 export const WINDOWS_CMD_LAUNCH_RESERVE_CHARS = 4096;
 export const WINDOWS_CMD_MAX_CHARS = 32767;
@@ -255,6 +259,8 @@ export interface ExecutionFeedback {
 
 export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
+  /** In-memory worker capability; never an admission, grant, or UI setting. */
+  readonly auditPromptTransport?: "linux-pi-stdin";
   readonly writeAuthorization?: CoordinationWriteAuthorization;
   readonly goal: string;
   readonly workspacePath: string;
@@ -705,6 +711,11 @@ export function evidenceCommand(
     return command;
   }
 
+  // Re-derive for the final selected instance on EVERY initial/replacement
+  // audit. A non-Pi replacement cannot inherit the previous Pi's capacity.
+  const stdin = input.auditPromptTransport === "linux-pi-stdin" && instance.instanceId === "pi";
+  const promptBudget = stdin ? LINUX_PI_AUDIT_PROMPT_BYTES : MAX_AUDIT_PROMPT_BYTES;
+  const evidenceReservation = stdin ? LINUX_PI_AUDIT_EVIDENCE_RESERVE_BYTES : AUDIT_EVIDENCE_RESERVE_BYTES;
   const instruction = input.executionFeedback
     ? "Independently inspect the current workspace read-only against the newly approved corrective plan, its execution report, and captured workspace evidence. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
     : "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.";
@@ -734,14 +745,14 @@ export function evidenceCommand(
   let baseCroppedSections: string[] = [];
   let evidenceText = fullEvidence.text;
   let coverage = fullEvidence.coverage;
-  if (fullPromptBytes > MAX_AUDIT_PROMPT_BYTES) {
-    const evidenceReserve = Math.min(AUDIT_EVIDENCE_RESERVE_BYTES, utf8Bytes(fullEvidence.text));
-    const baseBudget = MAX_AUDIT_PROMPT_BYTES - evidenceReserve - 1;
+  if (fullPromptBytes > promptBudget) {
+    const evidenceReserve = Math.min(evidenceReservation, utf8Bytes(fullEvidence.text));
+    const baseBudget = promptBudget - evidenceReserve - 1;
     const variableBaseBudget = Math.max(0, baseBudget - utf8Bytes(instruction) - 1);
     const fittedBase = fitSections(baseSections, variableBaseBudget);
     baseCroppedSections = fittedBase.croppedSections;
     baseText = `${instruction}\n${fittedBase.text}`;
-    const availableForEvidence = Math.max(0, MAX_AUDIT_PROMPT_BYTES - utf8Bytes(baseText) - 1);
+    const availableForEvidence = Math.max(0, promptBudget - utf8Bytes(baseText) - 1);
     const deliveredEvidence = formatEvidenceForAudit(evidence.executionEvidence, availableForEvidence);
     evidenceText = deliveredEvidence.text;
     coverage = deliveredEvidence.coverage;
@@ -751,12 +762,14 @@ export function evidenceCommand(
     ...coverage,
     cropped: baseCroppedSections.length > 0 || coverage.cropped,
     promptBytes: utf8Bytes(text),
-    promptBudgetBytes: MAX_AUDIT_PROMPT_BYTES,
-    windowsCmdWorstCaseChars: windowsCmdWorstCaseChars(text),
+    promptBudgetBytes: promptBudget,
+    // Old absent-capability records keep their exact legacy key set.
+    ...(stdin ? { promptDelivery: "stdin" as const } : {}),
+    ...(!stdin ? { windowsCmdWorstCaseChars: windowsCmdWorstCaseChars(text) } : {}),
     croppedSections: [...baseCroppedSections, ...(coverage.croppedSections ?? [])],
   };
-  if (actualCoverage.promptBytes > MAX_AUDIT_PROMPT_BYTES ||
-      (actualCoverage.windowsCmdWorstCaseChars ?? 0) > WINDOWS_CMD_MAX_CHARS) {
+  if (actualCoverage.promptBytes > promptBudget ||
+      (!stdin && (actualCoverage.windowsCmdWorstCaseChars ?? 0) > WINDOWS_CMD_MAX_CHARS)) {
     throw new Error("The assembled audit prompt exceeded its transport budget.");
   }
 
@@ -767,7 +780,7 @@ export function evidenceCommand(
   if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
     throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
   }
-  return { ...command, auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
+  return { ...command, ...(stdin ? { promptDelivery: "stdin" as const } : {}), auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
 }
 
 /**

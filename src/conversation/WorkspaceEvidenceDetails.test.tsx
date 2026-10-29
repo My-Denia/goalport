@@ -18,6 +18,21 @@ describe("WorkspaceEvidenceDetails", () => {
     expect(screen.getByText("I changed some files.")).toBeTruthy();
   });
 
+  it("discloses optional stdin bytes without claiming byte-identical model input; absent stays legacy", () => {
+    const evidence: ExecutionWorkspaceEvidence = { status: "available", complete: true, changed: true, beforeDiff: "", afterDiff: "+actual text" };
+    const coverage = { totalEvidenceBytes: 10000, includedEvidenceBytes: 10000, cropped: false, promptBytes: 13000, promptBudgetBytes: 32768 };
+    const { rerender } = render(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={coverage} auditInputEvidenceText="unchanged subset" />);
+    expect(screen.queryByText(/Selected prompt transport/)).toBeNull();
+    expect(screen.queryByText(/had only part of the workspace material/)).toBeNull();
+    rerender(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={{ ...coverage, promptDelivery: "stdin" }} auditInputEvidenceText="unchanged subset" />);
+    expect(screen.getByText(/13000 UTF-8 bytes within its 32768-byte budget/)).toBeTruthy();
+    expect(screen.getByText(/Selected prompt transport: stdin/)).toBeTruthy();
+    expect(screen.getByText(/Pi trims edge whitespace/)).toBeTruthy();
+    expect(screen.queryByText(/had only part of the workspace material/)).toBeNull();
+    rerender(<WorkspaceEvidenceDetails evidence={{ ...evidence, untrackedFiles: [{ path: "binary.bin", binary: true, size: 80 }] }} auditInputEvidenceCoverage={{ ...coverage, promptDelivery: "stdin" }} />);
+    expect(screen.getByText(/had only part of the workspace material; omitted content was not checked/)).toBeTruthy();
+  });
+
   it("renders captured workspace diff, untracked files, and crop coverage when evidence is present", () => {
     const evidence: ExecutionWorkspaceEvidence = {
       status: "available",

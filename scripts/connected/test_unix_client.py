@@ -40,6 +40,37 @@ class CommandRoutingTests(unittest.TestCase):
             self.assertEqual(result["currentGoal"], {"goal": "Append pong", "workspacePath": "/work"})
             self.assertNotIn("priorPlan", result["currentGoal"])
 
+    def test_optional_stdin_coverage_stays_with_selected_and_retained_material(self):
+        with tempfile.TemporaryDirectory(prefix="gp-stdin-coverage-") as temp:
+            root = Path(temp)
+            coverage = {"totalEvidenceBytes": 12000, "includedEvidenceBytes": 12000,
+                        "cropped": False, "promptBytes": 15000, "promptBudgetBytes": 32768,
+                        "promptDelivery": "stdin", "croppedSections": []}
+            parent = {"requestId": "a", "goal": "Original A", "workspacePath": "/a", "savedAt": "01",
+                      "verdict": "verified", "executionEvidence": {"afterDiff": "+actual material"},
+                      "planText": "Actual plan", "auditText": "Actual check", "auditInputEvidenceCoverage": coverage,
+                      "auditInputEvidenceText": "  exact host subset\n"}
+            child = {"requestId": "a2", "goal": "Original A", "workspacePath": "/a", "savedAt": "03",
+                     "verdict": "stopped", "continuation": {"parentRequestId": "a", "rootRequestId": "a",
+                     "originalGoal": "Original A", "followUp": "Read only"}}
+            other = {"requestId": "b", "goal": "Original B", "workspacePath": "/b", "savedAt": "04", "verdict": "checked"}
+            job = root / "coordination-jobs" / "jobs" / "stopped-child"
+            job.mkdir(parents=True)
+            (job / "admission.json").write_text(json.dumps({"input": {"requestId": "a2", "workspacePath": "/a",
+                "executionFeedback": {"previousPlan": "Actual plan", "previousExecutionAudit": "Actual check"}}}), encoding="utf-8")
+            (job / "progress.json").write_text(json.dumps({"state": "stopped", "pendingCommand": None}), encoding="utf-8")
+            file = root / "coordination-records.json"
+            file.write_text(json.dumps([parent, child, other]), encoding="utf-8")
+            before = file.read_bytes()
+            for request_id in ("a", "a2"):
+                selected = workbench.latest_coordination_record(root, request_id)["record"]
+                self.assertEqual(selected["auditInputEvidenceCoverage"], coverage)
+                self.assertEqual(selected["auditInputEvidenceText"], "  exact host subset\n")
+                self.assertNotIn("windowsCmdWorstCaseChars", selected["auditInputEvidenceCoverage"])
+            self.assertEqual(workbench.latest_coordination_record(root, "a2")["record"]["retainedFromRequestId"], "a")
+            self.assertIsNone(workbench.latest_coordination_record(root, "b")["record"]["auditInputEvidenceCoverage"])
+            self.assertEqual(file.read_bytes(), before)
+
     def test_stopped_continue_retains_only_its_parent_workspace_result(self):
         with tempfile.TemporaryDirectory(prefix="gp-stop-retain-") as temp:
             root = Path(temp)

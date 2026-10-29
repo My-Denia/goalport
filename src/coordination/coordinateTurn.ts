@@ -18,6 +18,8 @@ export interface CoordinateTurnCommand {
     | { readonly type: "root"; readonly branch?: string }
     | { readonly type: "existing_worktree"; readonly worktreePath: string; readonly branch?: string };
   readonly initialMessage: { readonly text: string };
+  /** Narrow runtime selector, not permission or descriptive coverage. */
+  readonly promptDelivery?: "stdin";
 }
 
 export type CoordinateTurnAuthorization =

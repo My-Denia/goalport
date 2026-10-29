@@ -28,6 +28,14 @@ export type CoordinationStopCode =
   | "scope-exhausted"
   | "scope-revoked";
 
+export interface AuditInputTransport {
+  readonly instanceId: "pi";
+  readonly promptDelivery: "stdin";
+  /** Host UTF-8 bytes and stream-end confirmation, not model consumption. */
+  readonly inputBytes: number;
+  readonly inputEnded: boolean;
+}
+
 export interface CoordinateLaunchResult {
   readonly text: string;
   readonly errorText: string;
@@ -52,6 +60,7 @@ export interface CoordinateLaunchResult {
   readonly writeTurnsRemaining?: number | null;
   readonly scopeExhausted?: boolean;
   readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputTransport?: AuditInputTransport;
 }
 
 export interface EnvironmentBlockedInfo {

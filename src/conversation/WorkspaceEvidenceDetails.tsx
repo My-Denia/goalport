@@ -42,6 +42,13 @@ export function WorkspaceEvidenceDetails({
 }: WorkspaceEvidenceDetailsProps) {
   if (!evidence && !executionText) return null;
 
+  const incompleteMaterial = Boolean(auditInputEvidenceCoverage?.cropped || (evidence && (
+    !evidence.complete || evidence.truncated || evidence.status !== "available" ||
+    evidence.untrackedFilesOmitted || evidence.beforeUntrackedFilesOmitted ||
+    [...(evidence.untrackedFiles ?? []), ...(evidence.beforeUntrackedFiles ?? [])]
+      .some(file => file.binary || file.skipped || file.truncated)
+  )));
+
   const changedSummary = evidence
     ? evidence.changed === true
       ? " — changes observed"
@@ -92,10 +99,12 @@ export function WorkspaceEvidenceDetails({
             {auditInputEvidenceCoverage || auditInputEvidenceText ? (
               <details className="workspace-audit-input">
                 <summary>What the independent audit received</summary>
+                {incompleteMaterial ? <p>The independent check had only part of the workspace material; omitted content was not checked.</p> : null}
                 {auditInputEvidenceCoverage ? (
                   <p className="workspace-evidence-crop-note">
                     Audit delivery contains {auditInputEvidenceCoverage.includedEvidenceBytes} of {auditInputEvidenceCoverage.totalEvidenceBytes} original captured-material bytes; crop notices are additional.
                     The complete assembled prompt was {auditInputEvidenceCoverage.promptBytes} UTF-8 bytes{auditInputEvidenceCoverage.promptBudgetBytes ? ` within its ${auditInputEvidenceCoverage.promptBudgetBytes}-byte budget` : ""}.
+                    {auditInputEvidenceCoverage.promptDelivery ? ` Selected prompt transport: ${auditInputEvidenceCoverage.promptDelivery}.${auditInputEvidenceCoverage.promptDelivery === "stdin" ? " GoalPort writes host UTF-8 bytes and EOF; Pi trims edge whitespace before building its message." : ""}` : ""}
                     {auditInputEvidenceCoverage.croppedSections && auditInputEvidenceCoverage.croppedSections.length > 0
                       ? ` Cropped: ${auditInputEvidenceCoverage.croppedSections.join(", ")}.`
                       : " No captured-material section was cropped for transport."}

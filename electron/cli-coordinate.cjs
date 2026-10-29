@@ -418,12 +418,29 @@ function instanceOf(command) {
   return typeof instanceId === "string" ? instanceId : "";
 }
 
+// This selector grants no authority. Validate it before even a stored-claim
+// lookup; a malformed repeat must not touch or replace the original claim.
+function promptDeliveryProblem(command, platform = process.platform) {
+  if (!command || !("promptDelivery" in Object(command))) return null;
+  if (command.promptDelivery !== "stdin" || roleOfCommandId(command.commandId) !== "audit" ||
+      instanceOf(command) !== "pi" || platform !== "linux" || command.sandboxPolicy?.type !== "readOnly") {
+    return "This prompt transport is only available for a read-only Pi audit on Linux, so nothing was sent.";
+  }
+  return null;
+}
+
 function turnSpec(command, env = process.env, platform = process.platform) {
+  const deliveryProblem = promptDeliveryProblem(command, platform);
+  if (deliveryProblem) return { errorText: deliveryProblem };
   const model = modelOf(command);
   const worktree = worktreeOf(command);
   const prompt = promptOf(command);
   if (!worktree || !prompt.trim() || !model) {
     return { errorText: "The read-only session was not prepared, so nothing was sent." };
+  }
+  const stdinBody = command?.promptDelivery === "stdin" ? Buffer.from(prompt, "utf8") : null;
+  if (stdinBody && stdinBody.length > 32768) {
+    return { errorText: "The Pi audit input exceeded its 32,768-byte limit, so nothing was sent." };
   }
   if (creditGated(model)) return { errorText: CREDITS };
   // The explicitly authorized write branch flips exactly one flag per harness
@@ -467,7 +484,8 @@ function turnSpec(command, env = process.env, platform = process.platform) {
     return {
       file: "pi",
       cwd: worktree,
-      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", prompt],
+      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...(stdinBody ? [] : [prompt])],
+      ...(stdinBody ? { stdinBody } : {}),
     };
   }
   return { errorText: NOT_INSTALLED };
@@ -702,7 +720,88 @@ function restoreGrant(stateDir, commandId) {
   writeGrant(stateDir, commandId);
 }
 
+// The optional spawn seam exercises actual stream/setup races without a model.
+// Production always uses node:child_process.spawn.
+function spawnStdinTurn(spec, spawnProcess = spawn) {
+  return new Promise((resolve) => {
+    let child;
+    let childStarted = false;
+    let inputEnded = false;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let closed = false;
+    let timer;
+    const observeChild = () => {
+      if (typeof child?.pid === "number") childStarted = true;
+    };
+    const finish = (extra, cleanup = false) => {
+      observeChild();
+      if (cleanup) clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      resolve({ code: null, stdout, stderr, childStarted, inputEnded, ...extra });
+    };
+    // An input failure does not mean the process exited. Keep both the existing
+    // registered Stop handle and the ordinary timeout until child close.
+    const unknown = () => finish({ deliveryUnknown: true });
+    try {
+      const launched = launchSpec(spec.file, spec.args, spec.env);
+      child = spawnProcess(launched.file, launched.args, {
+        cwd: spec.cwd, env: spec.env, stdio: ["pipe", "pipe", "pipe"],
+        windowsVerbatimArguments: launched.verbatim,
+      });
+    } catch {
+      finish({ spawnError: true, childStarted: false }, true);
+      return;
+    }
+    observeChild();
+    try {
+      child.on("spawn", () => { childStarted = true; });
+      child.on("error", () => {
+        observeChild();
+        if (!childStarted) finish({ spawnError: true, childStarted: false }, true);
+        else unknown();
+      });
+      child.on("close", (code) => {
+        closed = true;
+        observeChild();
+        if (!inputEnded) finish({ code, deliveryUnknown: true }, true);
+        else finish({ code, timedOut: false }, true);
+      });
+      child.stdin.on("error", unknown);
+      child.stdin.on("close", () => { if (!inputEnded && !closed) unknown(); });
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", chunk => { stdout = (stdout + chunk).slice(-200000); });
+      child.stdout.on("error", unknown);
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-4096); });
+      child.stderr.on("error", unknown);
+      timer = setTimeout(() => {
+        killProcessTree(child);
+        finish({ timedOut: true, ...(!inputEnded ? { deliveryUnknown: true } : {}) });
+      }, spec.timeoutMs ?? 660000);
+      spec.register?.(child);
+      // Exactly one body and EOF, with no argv copy or appended newline. The
+      // callback confirms the host stream operation, not model consumption.
+      child.stdin.end(spec.stdinBody, error => {
+        try {
+          if (error || spec.cancelled?.()) unknown();
+          else if (!settled) inputEnded = true;
+        } catch { unknown(); }
+      });
+    } catch {
+      // If setup failed before the ordinary timer was installed, retain its
+      // cleanup responsibility as well. Never downgrade a returned child to
+      // a proven no-child spawn failure merely because registration threw.
+      if (!timer && !closed) timer = setTimeout(() => { killProcessTree(child); }, spec.timeoutMs ?? 660000);
+      unknown();
+    }
+  });
+}
+
 function defaultSpawn(spec) {
+  if (Buffer.isBuffer(spec.stdinBody)) return spawnStdinTurn(spec);
   return new Promise((resolve) => {
     let child;
     try {
@@ -751,6 +850,12 @@ async function runCliTurn(command, options = {}) {
   const stateDir = typeof options.stateDir === "string" ? options.stateDir : "";
   const commandId = commandIdOf(command);
   if (!stateDir || !commandId) return refused;
+  const deliveryProblem = promptDeliveryProblem(command);
+  if (deliveryProblem) return { ...refused, errorText: deliveryProblem };
+  // Encoding happens once, even on this early-validation path. Production
+  // uses the actual process platform, never options supplied by a caller.
+  const selectedSpec = command?.promptDelivery === "stdin" ? turnSpec(command) : null;
+  if (selectedSpec?.errorText) return { ...refused, errorText: selectedSpec.errorText };
   if (hasClaim(stateDir, commandId)) return storedResult(stateDir, commandId);
   if (!grantLines(stateDir).includes(commandId)) return refused;
   // The guard follows the id's role: only an execute-role command may carry
@@ -761,7 +866,7 @@ async function runCliTurn(command, options = {}) {
     ? guardCoordinateWriteCommand(command)
     : guardCoordinateCommand(command);
   if (problem) return { ok: false, text: "", errorText: problem, messageDispatched: false };
-  const spec = turnSpec(command);
+  const spec = selectedSpec ?? turnSpec(command);
   if (spec.errorText) return { ok: false, text: "", errorText: spec.errorText, messageDispatched: false };
   const claimed = claimTurn(stateDir, commandId);
   if (!claimed.fresh) return claimed.result;
@@ -793,10 +898,21 @@ async function runCliTurn(command, options = {}) {
       cwd: spec.cwd,
       env: scrub(options.env ?? process.env),
       register: options.register,
+      ...(spec.stdinBody ? { stdinBody: spec.stdinBody, cancelled: options.cancelled } : {}),
     });
   } catch {
-    spawned = { code: null, stdout: "", spawnError: true };
+    // A custom adapter can throw after spawning. Only the default adapter's
+    // explicit no-child result proves that retry/refund is safe for stdin.
+    spawned = spec.stdinBody
+      ? { code: null, stdout: "", deliveryUnknown: true }
+      : { code: null, stdout: "", spawnError: true };
   }
+  const stdinUnknown = Boolean(spec.stdinBody && (spawned?.deliveryUnknown ||
+    (spawned?.spawnError && spawned?.childStarted !== false) ||
+    (!spawned?.spawnError && (spawned?.childStarted !== true || spawned?.inputEnded !== true))));
+  const transportFacts = spec.stdinBody ? {
+    auditInputTransport: { instanceId: "pi", promptDelivery: "stdin", inputBytes: spec.stdinBody.length, inputEnded: spawned?.inputEnded === true && !stdinUnknown },
+  } : {};
   let evidence = null;
   if (isExecute && worktree) {
     try {
@@ -808,6 +924,17 @@ async function runCliTurn(command, options = {}) {
       evidence = null;
     }
   }
+  if (stdinUnknown) {
+    const unknown = {
+      ok: false,
+      text: replyFrom(instanceOf(command), spawned?.stdout ?? "").text,
+      errorText: "The audit input delivery could not be confirmed. This turn will not be replayed.",
+      messageDispatched: null,
+      ...transportFacts,
+    };
+    finishTurn(stateDir, commandId, unknown);
+    return unknown;
+  }
   if (spawned?.spawnError) {
     releaseTurn(stateDir, commandId);
     restoreGrant(stateDir, commandId);
@@ -817,6 +944,7 @@ async function runCliTurn(command, options = {}) {
       errorText: NOT_INSTALLED,
       messageDispatched: false,
       stopCode: "not-installed",
+      ...transportFacts,
       ...(evidence ? { executionEvidence: evidence } : {}),
     };
   }
@@ -826,6 +954,7 @@ async function runCliTurn(command, options = {}) {
       text: "",
       errorText: REPLACED,
       messageDispatched: true,
+      ...transportFacts,
       ...(evidence ? { executionEvidence: evidence } : {}),
     };
     finishTurn(stateDir, commandId, replaced);
@@ -859,6 +988,7 @@ async function runCliTurn(command, options = {}) {
       text: reply.text,
       errorText: "",
       messageDispatched: true,
+      ...transportFacts,
       ...(evidence ? { executionEvidence: evidence } : {}),
     };
     finishTurn(stateDir, commandId, done);
@@ -888,6 +1018,7 @@ async function runCliTurn(command, options = {}) {
     errorText: detail ? `${stopSentence} ${detail}` : stopSentence,
     messageDispatched: true,
     stopCode,
+    ...transportFacts,
     ...(evidence ? { executionEvidence: evidence } : {}),
   };
   finishTurn(stateDir, commandId, failed);
@@ -915,6 +1046,8 @@ module.exports = {
   launchSpec,
   killProcessTree,
   defaultExec,
+  defaultSpawn,
+  spawnStdinTurn,
   isValidCommandId,
   hasClaim,
   writeGrant,

@@ -205,6 +205,8 @@ export async function requestCoordination(
     readonly workspacePath: string;
     readonly goal: string;
     readonly sendKey: string;
+    /** Host-only in-memory transport capability; absent keeps legacy argv. */
+    readonly auditPromptTransport?: "linux-pi-stdin";
     readonly priorPlan?: string | null;
     readonly priorReview?: string | null;
     readonly avoidInstances?: readonly string[];
@@ -260,6 +262,7 @@ export async function requestCoordination(
   const catalog = catalogFromProviderSnapshots(discovery.providers);
   const goalInput = {
     catalog,
+    auditPromptTransport: input.auditPromptTransport,
     goal: input.goal,
     workspacePath: input.workspacePath,
     sendKey: input.sendKey,
@@ -356,6 +359,7 @@ export async function requestCoordination(
     ])];
     const revisionInput: CoordinateGoalInput = {
       catalog,
+      auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,
       workspacePath: input.workspacePath,
       // A fresh identity namespace keeps every revised command id distinct
@@ -455,6 +459,7 @@ export async function requestCoordination(
     };
     const correctiveInput: CoordinateGoalInput = {
       catalog,
+      auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,
       workspacePath: input.workspacePath,
       // After a plan revision the repair keeps the revised chain's active

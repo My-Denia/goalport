@@ -187,15 +187,37 @@ Honesty rules the client keeps:
   remain 64 KiB per tracked diff, 32 retained untracked paths and 8 KiB per text
   file; excess paths are counted rather than emitted without bound. What the
   model outputs is an "Executor report" (not an independently captured diff).
-- Audit input: the COMPLETE assembled audit prompt is capped at 4096 UTF-8 bytes,
-  including goal, plan, review, reports, prior feedback/metadata and evidence,
-  with 2048 bytes reserved for evidence. Every cropped field has an inline
-  notice. The existing Windows `.cmd` escape shape is budgeted conservatively at
-  six times prompt bytes plus 4096 fixed-argv characters (28672 < 32767).
-  `coverage.promptBytes` is the actual assembled prompt size, not just evidence.
-  GoalPort retains the full bounded capture separately from the exact delivered
-  audit evidence subset and its honest material/transport coverage; the shared
-  UI exposes both. This does not claim the auditor ran machine tests.
+- Audit input: on Linux, a final read-only Pi audit uses piped stdin, with a
+  32768-byte COMPLETE UTF-8 prompt budget and 16384-byte evidence reservation.
+  That includes goal, plan, review, reports, prior feedback/metadata and evidence.
+  Material that fits is preserved in full; overflow uses labeled crop notices.
+  The worker derives this capability in memory; there is no transport setting
+  or admission/grant field. Every replacement derives its own transport: other
+  audit harnesses, Windows Pi and callers without the capability keep the legacy
+  4096-byte complete prompt / 2048-byte evidence reservation and conservative
+  Windows `.cmd` limit (six times prompt bytes plus 4096 fixed-argv characters).
+  Plan/review/execute have not acquired a new 4096-byte cap.
+- The Linux Pi runtime independently requires the canonical audit command ID,
+  Pi instance, actual Linux platform, readOnly sandbox, explicit stdin selector
+  and at most 32768 UTF-8 bytes before claiming a turn. Isolation flags remain
+  `-p --no-session --no-context-files --no-extensions --no-mcp --no-skills -na
+  --no-tools --mode text`. The body is written once with EOF, never copied into
+  argv, an `@file`, a shell or a temporary prompt file. An input failure after
+  child creation is unknown: charge/claim remain, there is no replay, refund,
+  restored grant or argv/provider fallback. Only a proven no-child spawn failure
+  remains not-sent. Existing Stop and timeout still own the registered child.
+- `coverage.promptBytes` counts the actual COMPLETE assembled prompt, not just
+  evidence. Optional `coverage.promptDelivery` describes the selected transport;
+  stdin coverage omits hypothetical Windows command size. Optional runtime
+  `auditInputTransport` in completed-command (or unconfirmed pending) facts records
+  Pi/stdin, actual host input bytes and successful stream end. Stream end is not
+  proof of model consumption: Pi 1.4's piped reader trims edge whitespace before
+  building the initial message. These are not billed-token counts or a full
+  provider-wire capture. GoalPort retains the full bounded capture separately
+  from its exact host-delivered evidence subset. The existing details show both,
+  including incomplete/binary/skipped material. Uncropped transport does not
+  turn an incomplete capture into full workspace coverage. Older records omit
+  transport fields and remain readable. This does not claim Pi ran machine tests.
 - Stopping a goal: `stop` durably revokes further turns for the admission. It
   does not undo or rollback workspace modifications already written (existing
   workspace edits remain).
@@ -245,7 +267,8 @@ actual planning input. New children store the original goal plus a separate
 closed continuation descriptor. Continuations refuse combined goal/follow-up
 over 100,000 JS string characters or an actually assembled role prompt over
 100,000 UTF-8 bytes before sending that role; earlier sent results remain.
-The audit's separate existing 4096-byte limit and visible crop notices remain.
+The audit's separate transport limit (32768 bytes for eligible Linux Pi stdin,
+4096 bytes for legacy argv) and visible crop notices still apply.
 These are product transport limits, not claims about all OS argv limits.
 
 For a settled goal, the page initializes background/file-change options from

@@ -25,6 +25,7 @@ function fixture(hash = "#coordinated/result/a") {
   let offline = false;
   let coreEnabled = false;
   let admitted: unknown = { ok: false, error: "Fixture refusal" };
+  let admissionEffect: (() => void) | undefined;
   const calls: { messageType: string; payload: Record<string, unknown> }[] = [];
   const polls: (() => void)[] = [];
   vi.spyOn(window, "setInterval").mockImplementation((handler, ms) => {
@@ -44,6 +45,7 @@ function fixture(hash = "#coordinated/result/a") {
     if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"], consentMissing: false } });
     if (body.messageType === "coordination_continue" || body.messageType === "coordination_start") {
       if (admitted instanceof Error) throw admitted;
+      admissionEffect?.();
       return response(admitted);
     }
     if (body.messageType === "coordination_acknowledge") { held = false; current = null; return response({ ok: true, payload: { stdout: "The interrupted job stays unreplayed; the same request id cannot be admitted again." } }); }
@@ -57,7 +59,7 @@ function fixture(hash = "#coordinated/result/a") {
     records.a.rootLatestId = "a2";
     records.a2 = { ...records.a, requestId: "a2", outcome: "Actual child A", relationStatus: "valid", continuation: { parentRequestId: "a", rootRequestId: "a", originalGoal: "Goal A", followUp: "New instruction" }, rememberedIntent: { background: true, write: false } };
   };
-  return { calls, records, tick, child, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown) { admitted = value; } };
+  return { calls, records, tick, child, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
 }
 const text = () => screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
 const continuation = () => screen.getByRole("button", { name: "Continue this goal" });
@@ -196,12 +198,12 @@ it.each(["refusal", "network", "unknown"])("%s keeps text and choices and never 
 });
 
 it("admitted reply binds its new ID; only its eventual saved child advances locally; B completion never steals A", async () => {
-  const f = fixture(); f.reply({ ok: true, payload: { stdout: "job: job-a2\nrequest: a2\nThe goal was admitted with request id a2; its worker runs detached.\n" } });
+  const f = fixture(); f.reply({ ok: true, payload: { stdout: "job: job-a2\nrequest: a2\nThe goal was admitted with request id a2; its worker runs detached.\n" } }, () => f.job({ jobId: "job-a2", requestId: "a2", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, line: "Codex is planning…" }));
   render(<App />); await screen.findByRole("heading", { name: "Goal A" });
   fireEvent.change(text(), { target: { value: "New instruction" } });
   fireEvent.click(continuation());
   await waitFor(() => expect(text().value).toBe(""));
-  expect(screen.getByText("Current work — Goal A")).toBeTruthy();
+  await waitFor(() => expect(screen.getByText("Current work — Goal A")).toBeTruthy());
   f.job({ jobId: "job-a2", requestId: "a2", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, line: "Codex is planning…" });
   await f.tick();
   expect(window.location.hash).toBe("#coordinated/result/a");

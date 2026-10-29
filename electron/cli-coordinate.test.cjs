@@ -6,6 +6,8 @@ const path = require("node:path");
 const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, piWindowsLaunch, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
 const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
+const { defaultSpawn, spawnStdinTurn } = require("./cli-coordinate.cjs");
+const { EventEmitter, once } = require("node:events");
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -1045,6 +1047,193 @@ test("a granted write turn consumes its grant, keeps the claim ledger semantics,
     assert.ok(ledger["coordinate-execute-codex"].executionEvidence);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("Pi stdin selector is exactly audit/Pi/Linux/readOnly; other turns remain argv", () => {
+  for (const role of ["plan", "review", "execute", "audit"]) {
+    for (const instance of ["pi", "codex", "claude"]) for (const platform of ["linux", "win32"]) {
+      for (const sandbox of ["readOnly", "workspaceWrite"]) {
+        const input = { ...command(instance, "default", `coordinate-${role}-matrix`), sandboxPolicy: { type: sandbox }, promptDelivery: "stdin" };
+        const spec = turnSpec(input, {}, platform);
+        const eligible = role === "audit" && instance === "pi" && platform === "linux" && sandbox === "readOnly";
+        assert.equal(!spec.errorText, eligible, JSON.stringify({ role, instance, platform, sandbox }));
+        if (eligible) {
+          assert.deepEqual(spec.args, ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text"]);
+          assert.equal(spec.stdinBody.toString(), input.initialMessage.text);
+        }
+      }
+    }
+  }
+  const input = command("pi", "default", "coordinate-audit-selector");
+  assert.equal(turnSpec(input, {}, "linux").args.at(-1), input.initialMessage.text);
+  for (const promptDelivery of [null, undefined, "argv", "other", {}, false]) {
+    assert.ok(turnSpec({ ...input, promptDelivery }, {}, "linux").errorText);
+  }
+  assert.equal(turnSpec({ ...input, promptDelivery: "stdin", initialMessage: { text: "😀".repeat(8192) } }, {}, "linux").stdinBody.length, 32768);
+  assert.ok(turnSpec(Object.assign(Object.create({ promptDelivery: null }), input), {}, "linux").errorText);
+  assert.ok(turnSpec({ ...input, promptDelivery: "stdin", initialMessage: { text: "字".repeat(10923) } }, {}, "linux").errorText);
+});
+
+test("present invalid selector/oversize refuses before claims and preserves an old claim", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-stdin-guard-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = command("pi", "default", "coordinate-audit-guard");
+  writeGrant(directory, input.commandId);
+  let spawns = 0;
+  const options = { stateDir: directory, spawnTurn: async () => { spawns++; return { code: 0, stdout: "Original." }; } };
+  for (const promptDelivery of [null, undefined, "argv"]) {
+    assert.equal((await runCliTurn({ ...input, promptDelivery }, options)).messageDispatched, false);
+    assert.equal(fs.existsSync(path.join(directory, `claim-${input.commandId}`)), false);
+    assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), `${input.commandId}\n`);
+  }
+  const original = await runCliTurn(input, options);
+  const ledger = fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8");
+  const rejected = await runCliTurn({ ...input, promptDelivery: null }, options);
+  assert.equal(rejected.messageDispatched, false);
+  assert.equal(fs.readFileSync(path.join(directory, "sent-turns.json"), "utf8"), ledger);
+  assert.deepEqual(await runCliTurn(input, options), original);
+  assert.equal(spawns, 1);
+  if (process.platform === "linux") {
+    const big = { ...input, commandId: "coordinate-audit-big", promptDelivery: "stdin", initialMessage: { text: "😀".repeat(8193) } };
+    writeGrant(directory, big.commandId);
+    assert.equal((await runCliTurn(big, options)).messageDispatched, false);
+    assert.equal(fs.existsSync(path.join(directory, `claim-${big.commandId}`)), false);
+  }
+});
+
+test("production stdin seam sends exact >4KiB UTF-8 bytes and EOF to a real non-model Node child", async () => {
+  const body = Buffer.from(` \n${"中文😀'\"$&|<>^%`\\\n".repeat(420)} \n\t`, "utf8");
+  assert.ok(body.length > 4096 && body.length < 32768);
+  let registered = false;
+  let ends = 0;
+  const result = await defaultSpawn({ file: process.execPath, args: ["-e", "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write(JSON.stringify({body:Buffer.concat(b).toString('base64'),eof:true})))"],
+    cwd: process.cwd(), env: process.env, stdinBody: body,
+    register(child) {
+      registered = typeof child.pid === "number";
+      const end = child.stdin.end.bind(child.stdin);
+      child.stdin.end = (...args) => { assert.equal(registered, true); ends++; return end(...args); };
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(result.childStarted, true);
+  assert.equal(result.inputEnded, true);
+  const read = JSON.parse(result.stdout);
+  assert.equal(read.eof, true);
+  assert.deepEqual(Buffer.from(read.body, "base64"), body);
+  assert.equal(ends, 1);
+});
+
+test("real async ENOENT has no pid/spawn proof and remains proven not-sent", async () => {
+  const result = await defaultSpawn({ file: path.join(os.tmpdir(), "goalport-missing-executable-stdin-289641"), args: [], env: process.env, stdinBody: Buffer.from("not sent") });
+  assert.equal(result.spawnError, true);
+  assert.equal(result.childStarted, false);
+  assert.equal(result.inputEnded, false);
+  assert.notEqual(result.deliveryUnknown, true);
+});
+
+test("real child closes stdin after pid proof: EPIPE stays unknown and registered Stop handle survives", { skip: process.platform !== "linux" }, async () => {
+  let child;
+  let closed;
+  const result = await defaultSpawn({ file: process.execPath,
+    args: ["-e", "require('node:fs').closeSync(0);process.stdout.write('closed');setInterval(()=>{},1000)"],
+    cwd: process.cwd(), env: process.env, stdinBody: Buffer.from("字😀".repeat(4000)),
+    register(proc) {
+      child = proc;
+      closed = once(proc, "close");
+      const end = proc.stdin.end.bind(proc.stdin);
+      proc.stdin.end = (...args) => { proc.stdout.once("data", chunk => { assert.equal(String(chunk), "closed"); end(...args); }); return proc.stdin; };
+    },
+    timeoutMs: 5000,
+  });
+  try {
+    assert.equal(result.childStarted, true);
+    assert.equal(result.deliveryUnknown, true);
+    assert.equal(result.inputEnded, false);
+    assert.equal(child.exitCode, null);
+  } finally { child.kill("SIGKILL"); await closed; }
+});
+
+function controlledStdinChild() {
+  const child = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdout = new EventEmitter(); child.stdout.setEncoding = () => {};
+  child.stderr = new EventEmitter(); child.stderr.setEncoding = () => {};
+  child.kill = () => { child.emit("close", null); return true; };
+  return child;
+}
+
+test("stdin setup/end/early-close/timeout races settle once; unknown cannot become success", async () => {
+  for (const failure of ["register", "listener", "end-throw", "end-callback", "early-close", "timeout"]) {
+    const child = controlledStdinChild();
+    child.stdin.end = (_body, cb) => {
+      if (failure === "end-throw") throw Error("end failed");
+      if (failure === "end-callback") queueMicrotask(() => cb(Error("EPIPE")));
+      if (failure === "early-close") queueMicrotask(() => child.emit("close", 0));
+    };
+    if (failure === "listener") child.stdout.setEncoding = () => { throw Error("setup failed"); };
+    const pending = spawnStdinTurn({ file: "unused", args: [], stdinBody: Buffer.from("body"), timeoutMs: 0,
+      register() { if (failure === "register") throw Error("register failed"); },
+    }, () => { queueMicrotask(() => child.emit("spawn")); return child; });
+    const result = await pending;
+    assert.equal(result.deliveryUnknown, true, failure);
+    assert.equal(result.inputEnded, false, failure);
+    assert.notEqual(result.spawnError, true, failure);
+    child.emit("close", 0);
+    assert.equal(result.deliveryUnknown, true);
+  }
+});
+
+test("Stop before confirmed input-end remains unknown, and post-error timeout still owns cleanup", async () => {
+  for (const failInput of [false, true]) {
+    const child = controlledStdinChild();
+    let stopped = false;
+    let kill;
+    const killed = new Promise(resolve => { kill = resolve; });
+    child.kill = () => { kill(); child.emit("close", null); return true; };
+    child.stdin.end = (_body, callback) => {
+      stopped = true;
+      queueMicrotask(() => callback(failInput ? Error("EPIPE") : null));
+    };
+    const result = await spawnStdinTurn({ file: "unused", args: [], stdinBody: Buffer.from("body"), timeoutMs: 0, cancelled: () => stopped }, () => {
+      queueMicrotask(() => child.emit("spawn")); return child;
+    });
+    assert.equal(result.deliveryUnknown, true);
+    assert.equal(result.inputEnded, false);
+    await killed; // ordinary timer's actual kill event, not a sleep/poll
+    child.emit("close", 0);
+    assert.equal(result.deliveryUnknown, true);
+  }
+});
+
+test("stdin actual runtime facts persist once; throws and after-child errors keep claim/grant consumed", { skip: process.platform !== "linux" }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-stdin-result-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const outcome of ["success", "unknown", "throw", "missing-start-proof", "adapter-spawnerror", "nochild"]) {
+    const input = { ...command("pi", "default", `coordinate-audit-${outcome}`), promptDelivery: "stdin", initialMessage: { text: " 中文😀\n" } };
+    writeGrant(directory, input.commandId);
+    let calls = 0;
+    const options = { stateDir: directory, cancelled: () => outcome === "unknown" && calls > 0,
+      spawnTurn: async spec => {
+        calls++;
+        assert.equal(spec.args.includes(input.initialMessage.text), false);
+        assert.equal(spec.stdinBody.toString(), input.initialMessage.text);
+        if (outcome === "throw") throw Error("adapter spawned then threw");
+        if (outcome === "missing-start-proof") return { code: 0, stdout: "Claimed success", inputEnded: true };
+        if (outcome === "adapter-spawnerror") return { code: null, stdout: "", spawnError: true };
+        if (outcome === "nochild") return defaultSpawn({ ...spec, file: path.join(directory, "no-executable") });
+        return { code: 0, stdout: "Partial or complete audit.", childStarted: true, inputEnded: outcome === "success", ...(outcome === "unknown" ? { deliveryUnknown: true } : {}) };
+      } };
+    const result = await runCliTurn(input, options);
+    assert.equal(result.messageDispatched, outcome === "nochild" ? false : outcome === "success" ? true : null);
+    assert.deepEqual(result.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes: Buffer.byteLength(input.initialMessage.text), inputEnded: outcome === "success" });
+    assert.equal(fs.existsSync(path.join(directory, `claim-${input.commandId}`)), outcome !== "nochild");
+    const grants = fs.existsSync(path.join(directory, "send-authorization")) ? fs.readFileSync(path.join(directory, "send-authorization"), "utf8") : "";
+    assert.equal(grants.includes(input.commandId), outcome === "nochild");
+    if (outcome !== "nochild") {
+      assert.deepEqual(await runCliTurn(input, options), result);
+      assert.equal(calls, 1);
+    }
   }
 });
 

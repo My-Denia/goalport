@@ -654,6 +654,61 @@ describe("explicit write assembly and phase verdicts", () => {
     expect(repairAudit.initialMessage.text).toContain(sameEvidence.executionText);
     expect(evidenceCommand("execute", catalog[0]!, repairInput, sameEvidence)).toEqual(repairWriter);
   });
+  it("Linux Pi delivers full formatted multi-file material >4KiB within 32KiB; legacy remains cropped", () => {
+    const pi = { ...catalog[1]!, instanceId: "pi", name: "Pi" };
+    const afterDiff = ["diff --git a/src/one.ts b/src/one.ts", ...Array.from({ length: 110 }, (_, n) => `+export const rule${n} = '中文😀: preserve actual file content';`), "diff --git a/src/two.ts b/src/two.ts", "+export const finalBeyondOldEnvelope = 'tail-marker';"].join("\n");
+    const executionEvidence = { status: "available" as const, complete: true, changed: true, beforeDiff: "baseline-marker", afterDiff,
+      untrackedFiles: [{ path: "checks.txt", size: 21, content: "untracked-tail-marker" }] };
+    const material = { planText: "approved-plan-marker", reviewText: "check-marker VERDICT: carry-out", executionText: "actual-report-marker", executionFacts: "facts-marker", executionEvidence };
+    const host = { ...input, auditPromptTransport: "linux-pi-stdin" as const };
+    const audit = evidenceCommand("audit", pi, host, material);
+    const full = formatEvidenceForAudit(executionEvidence, Number.MAX_SAFE_INTEGER);
+    expect(full.coverage.totalEvidenceBytes).toBeGreaterThan(4096);
+    expect(audit.auditInputEvidenceText).toBe(full.text);
+    expect(audit.auditInputEvidenceCoverage).toMatchObject({ totalEvidenceBytes: full.coverage.totalEvidenceBytes, includedEvidenceBytes: full.coverage.totalEvidenceBytes, cropped: false, promptBudgetBytes: 32768, promptDelivery: "stdin", croppedSections: [] });
+    const bytes = new TextEncoder().encode(audit.initialMessage.text).length;
+    expect(bytes).toBeGreaterThan(8192);
+    expect(bytes).toBeLessThan(24576);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(bytes);
+    expect(audit.auditInputEvidenceCoverage).not.toHaveProperty("windowsCmdWorstCaseChars");
+    expect(windowsCmdWorstCaseChars(audit.initialMessage.text)).toBeGreaterThan(WINDOWS_CMD_MAX_CHARS);
+    expect(audit.promptDelivery).toBe("stdin");
+    for (const marker of [afterDiff, "baseline-marker", "untracked-tail-marker", "approved-plan-marker", "actual-report-marker", "facts-marker"]) expect(audit.initialMessage.text).toContain(marker);
+    const legacy = evidenceCommand("audit", pi, input, material);
+    expect(legacy).not.toHaveProperty("promptDelivery");
+    expect(legacy.auditInputEvidenceCoverage).not.toHaveProperty("promptDelivery");
+    expect(legacy.auditInputEvidenceCoverage!.promptBudgetBytes).toBe(4096);
+    expect(legacy.auditInputEvidenceCoverage!.cropped).toBe(true);
+    expect(legacy.initialMessage.text).toContain("cropped for transport");
+    // Capacity must not leak from this selection into a different instance,
+    // then must become available again when Pi is selected anew.
+    const other = evidenceCommand("audit", catalog[1]!, host, material);
+    expect(other.auditInputEvidenceCoverage!.promptBudgetBytes).toBe(4096);
+    expect(other).not.toHaveProperty("promptDelivery");
+    expect(evidenceCommand("audit", pi, host, material)).toEqual(audit);
+  });
+  it("32KiB overflow has finite labeled crop and leaves execute/plan/review uncapped at 4KiB", () => {
+    const pi = { ...catalog[1]!, instanceId: "pi", name: "Pi" };
+    const host = { ...input, auditPromptTransport: "linux-pi-stdin" as const, goal: "goal-material ".repeat(3000) };
+    const material = { planText: "plan-material ".repeat(3000), reviewText: "review-material ".repeat(3000), executionText: "report-material ".repeat(3000), executionEvidence: { status: "incomplete" as const, complete: false, changed: true, beforeDiff: "前😀".repeat(12000), afterDiff: "後😀".repeat(12000), untrackedFiles: [{ path: "binary", binary: true, size: 50 }] } };
+    const audit = evidenceCommand("audit", pi, host, material);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBeLessThanOrEqual(32768);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(new TextEncoder().encode(audit.initialMessage.text).length);
+    expect(audit.auditInputEvidenceCoverage!.cropped).toBe(true);
+    expect(audit.auditInputEvidenceCoverage!.croppedSections!.length).toBeGreaterThan(0);
+    expect(audit.initialMessage.text).toContain("cropped for transport");
+    expect(audit.auditInputEvidenceText).toContain("Workspace AFTER tracked diff cropped");
+    expect(audit.auditInputEvidenceCoverage).not.toHaveProperty("windowsCmdWorstCaseChars");
+    expect(new TextDecoder("utf8", { fatal: true }).decode(new TextEncoder().encode(audit.initialMessage.text))).toBe(audit.initialMessage.text);
+    const execute = evidenceCommand("execute", catalog[0]!, host, material);
+    expect(execute.initialMessage.text).toContain(material.planText);
+    expect(execute.initialMessage.text.length).toBeGreaterThan(4096);
+    expect(execute).not.toHaveProperty("promptDelivery");
+    for (const planned of coordinateGoal(host).commands) {
+      expect(planned.initialMessage.text.length).toBeGreaterThan(4096);
+      expect(planned).not.toHaveProperty("promptDelivery");
+    }
+  });
   it("delivers captured BEFORE/AFTER diffs and untracked text as the exact retained audit subset", () => {
     const executionEvidence = {
       status: "available" as const,

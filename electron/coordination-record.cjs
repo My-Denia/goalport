@@ -145,13 +145,15 @@ function auditCoverageOf(value) {
     cropped: value.cropped === true,
     promptBytes: typeof value.promptBytes === "number" ? value.promptBytes : 0,
     ...(typeof value.promptBudgetBytes === "number" ? { promptBudgetBytes: value.promptBudgetBytes } : {}),
+    ...(value.promptDelivery === "stdin" || value.promptDelivery === "argv" ? { promptDelivery: value.promptDelivery } : {}),
     ...(typeof value.windowsCmdWorstCaseChars === "number" ? { windowsCmdWorstCaseChars: value.windowsCmdWorstCaseChars } : {}),
     ...(Array.isArray(value.croppedSections) ? { croppedSections: value.croppedSections.filter((item) => typeof item === "string") } : {}),
   };
 }
 
 // Exact transport material is not trimmed: leading/trailing whitespace and
-// every crop marker are part of what the auditor actually received.
+// every crop marker are part of the host-delivered subset. Pi's piped-stdin
+// reader trims edge whitespace before constructing its model message.
 function auditInputTextOf(value) {
   if (value === null) return null;
   return typeof value === "string" ? value : undefined;

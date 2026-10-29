@@ -78,6 +78,9 @@ async function runWorker(config, deps = {}) {
     const failures = [];
     liveResult = await engine.requestCoordination({
       ...engine.backgroundEngineInput(input),
+      // Host capability, not persisted admission/renderer authority. The CLI
+      // independently checks the actual platform and final audit command.
+      ...(process.platform === "linux" ? { auditPromptTransport: "linux-pi-stdin" } : {}),
       beforePlanRevision: async checkpoint => {
         await gate();
         const s = scope.current();
