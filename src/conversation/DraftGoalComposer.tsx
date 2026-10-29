@@ -301,7 +301,7 @@ export function DraftGoalComposer({
         {linuxCanStartCoordination && (piCapacity || piCapacityReason || piLegacy) ? <div className="draft-hint" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
           <span>{piCapacityChecked
             ? (discoveredHarnesses.includes("codex") ? `Selected roles: Codex plans${linuxWrite ? " / writes" : ""} · Pi independently checks` : "Codex is needed to plan with this Pi capacity.")
-            : piLegacy ? "Legacy harness selection · Pi route not recorded" : "Available choice: Codex + Pi"}</span>
+            : piLegacy ? "Legacy harness selection" : "Available choice: Codex + Pi"}</span>
           {piCapacity ? <>
             <div title={`${piCapacity.provider}/${piCapacity.model}`}>Requested: {piCapacity.provider}/{piCapacity.model} · Billing not confirmed</div>
             <label><input type="checkbox" aria-label="Use Pi's configured capacity for this goal" checked={piCapacityChecked} disabled={busy || inputsLocked || !onPiCapacityChange || Boolean(piCapacityReason)} onChange={event => onPiCapacityChange?.(event.target.checked)} /> Use Pi's configured capacity for this goal</label>
