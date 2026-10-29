@@ -1,5 +1,7 @@
 import {
   coordinateGoal,
+  assertContinuationPrompt,
+  ContinuationPromptLimitError,
   evidenceCommand,
   eligibleInstances,
   replacementCommand,
@@ -200,6 +202,7 @@ async function runLegacyRound(
   planning: CoordinateTurnCommand,
   review: CoordinateTurnCommand,
 ): Promise<CoordinateSessionState> {
+  assertContinuationPrompt(input, planning.initialMessage.text);
   const planned = await transport.launch(planning);
   const planError = classifyProviderError(planned.errorText);
   const planEnvironment = environmentFromLaunch(planned, "planning", planning.modelSelection.instanceId, plan.planningHarness);
@@ -234,7 +237,17 @@ async function runLegacyRound(
     );
   }
 
-  const checked = await transport.launch(withPlanText(review, planText));
+  const reviewCommand = withPlanText(review, planText);
+  try {
+    assertContinuationPrompt(input, reviewCommand.initialMessage.text);
+  } catch (error) {
+    if (!(error instanceof ContinuationPromptLimitError)) throw error;
+    return reportFromPlan({ ...plan, commands: [planning] }, {
+      verdict: "stopped", planText, messageDispatched: planned.dispatched ?? null,
+      stopReason: `${error.message} The review was not sent; the earlier planning result is retained.`,
+    });
+  }
+  const checked = await transport.launch(reviewCommand);
   const reviewText = checked.text.trim();
   const reviewEnvironment = environmentFromLaunch(checked, "review", review.modelSelection.instanceId, plan.reviewHarness);
   if (reviewEnvironment !== null || checked.errorText.trim().length > 0) {
@@ -573,12 +586,17 @@ async function runRecoveryRound(
         }
         instance = replacement;
         assignments[role] = replacement;
-        command = role === "execution" || role === "audit"
-          ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
-              planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
-              executionEvidence,
-            })
-          : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+        try {
+          command = role === "execution" || role === "audit"
+            ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
+                planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
+                executionEvidence,
+              })
+            : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+        } catch (error) {
+          if (!(error instanceof ContinuationPromptLimitError)) throw error;
+          return finish({ verdict: "stopped", stopReason: `${error.message} The ${role} was not sent; earlier results and dispatch facts are retained.` });
+        }
         commands[role] = command;
         if (role === "audit" && "auditInputEvidenceCoverage" in command) {
           auditInputEvidenceCoverage = (command as { auditInputEvidenceCoverage?: AuditInputEvidenceCoverage }).auditInputEvidenceCoverage ?? null;
@@ -589,7 +607,6 @@ async function runRecoveryRound(
           const harness = harnessOf(replacement);
           replacementEvent = { kind: "continued", role, instanceId: replacement.instanceId, harness,
             sentence: `${harness} is ${roleLabel(role)} instead.` };
-          emitEvent?.({ ...replacementEvent });
         }
       }
       if (role === "execution") {
@@ -608,8 +625,15 @@ async function runRecoveryRound(
         }
       }
       const harness = harnessOf(instance);
-      emitEvent?.({ kind: "started", role, instanceId: instance.instanceId, harness });
       const launchCommand = role === "review" && planText !== null ? withPlanText(command, planText) : command;
+      try {
+        assertContinuationPrompt(input, launchCommand.initialMessage.text);
+      } catch (error) {
+        if (!(error instanceof ContinuationPromptLimitError)) throw error;
+        return finish({ verdict: "stopped", stopReason: `${error.message} The ${role} was not sent; earlier results and dispatch facts are retained.` });
+      }
+      if (replacementEvent) emitEvent?.({ ...replacementEvent });
+      emitEvent?.({ kind: "started", role, instanceId: instance.instanceId, harness });
       launched.push(launchCommand);
       let result: CoordinateLaunchResult;
       if (write) {

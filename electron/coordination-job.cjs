@@ -9,6 +9,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { coreConnectEndpoint, endpointSocketLeafName } = require("./launch-config.cjs");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor } = require("./coordination-continuation.cjs");
 
 const STORE_DIRECTORY = "coordination-jobs";
 const JOBS_DIRECTORY = "jobs";
@@ -169,6 +170,49 @@ function normalizeExecutionFeedback(value) {
   };
 }
 
+function normalizeContinuation(value) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw refusal("invalid-admission", "continuation must be an object.");
+  const keys = Object.keys(value);
+  if (keys.length !== 4 || !keys.every((key) => ["parentRequestId", "rootRequestId", "originalGoal", "followUp"].includes(key))) {
+    throw refusal("invalid-admission", "continuation must contain exactly parentRequestId, rootRequestId, originalGoal, and followUp.");
+  }
+  const parentRequestId = optionalText(value.parentRequestId, "continuation.parentRequestId");
+  if (!parentRequestId || !/^[A-Za-z0-9._-]+$/.test(parentRequestId) || parentRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.parentRequestId contains invalid characters.");
+  }
+  const rootRequestId = optionalText(value.rootRequestId, "continuation.rootRequestId");
+  if (!rootRequestId || !/^[A-Za-z0-9._-]+$/.test(rootRequestId) || rootRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.rootRequestId contains invalid characters.");
+  }
+  if (typeof value.originalGoal !== "string") {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a string.");
+  }
+  const originalGoal = value.originalGoal.trim();
+  if (originalGoal.length === 0) {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a non-empty string.");
+  }
+  if (originalGoal.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.originalGoal exceeds 100,000 characters.");
+  }
+  if (typeof value.followUp !== "string") {
+    throw refusal("invalid-admission", "continuation.followUp must be a string.");
+  }
+  const followUp = value.followUp.trim();
+  if (followUp.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.followUp exceeds 100,000 characters.");
+  }
+  if (originalGoal.length + followUp.length > 100_000) {
+    throw refusal("invalid-admission", "The combined length of originalGoal and followUp exceeds 100,000 characters.");
+  }
+  return {
+    parentRequestId,
+    rootRequestId,
+    originalGoal,
+    followUp,
+  };
+}
+
 // This whitelist is the immutable caller-provided admission. It is not a live
 // scope and is never reconstructed from coordination-records.json or history.
 function normalizeAdmissionInput(input, platform = process.platform) {
@@ -219,6 +263,8 @@ function normalizeAdmissionInput(input, platform = process.platform) {
   };
   const executionFeedback = normalizeExecutionFeedback(input.executionFeedback);
   if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
+  const continuation = normalizeContinuation(input.continuation);
+  if (continuation !== undefined) normalized.continuation = continuation;
   return normalized;
 }
 

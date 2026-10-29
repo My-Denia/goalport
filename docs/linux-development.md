@@ -148,8 +148,10 @@ Honesty rules the client keeps:
   `The interrupted job stays unreplayed; the same request id cannot be admitted again.`
   If that job still holds the admission slot, a direct CLI run says to
   acknowledge it first: `A left job still holds the admission slot. Run acknowledge before starting another, so nothing was admitted.`
-  The workbench page releases that pointer before a valid send or continue,
-  so the page does not ask the user to run the command.
+  The workbench keeps New goal and Continue disabled while that slot is held.
+  Its existing Leave it unreplayed action applies to the current job, not to
+  a different saved result being read. The page does not ask the user to run
+  a shell command.
 - File changes are not implied by `--background` or by a read goal. Pass both
   `--write-instances` and `--write-turns` to opt into the existing write
   authorization. One confirmed subscription harness still cannot review itself:
@@ -210,20 +212,64 @@ Honesty rules the client keeps:
 
 ## Returning to a coordinated goal
 
+The workbench lists one entry per validated coordinated goal, with its original
+title, folder and outcome. Clicking an entry opens that goal's latest saved
+result; Earlier results selects an exact older result in the same compact area.
+Legacy records without a continuation descriptor remain independent entries,
+even when their titles and folders match. Invalid relationships remain readable
+but cannot Continue; duplicate identities and tied latest results are not guessed.
+No record migration or historical relinking is performed.
+
+The exact selected result lives in `#coordinated/result/<requestId>`; a fresh draft
+uses `#coordinated/new`. Refresh, back and forward keep this selection, not the
+profile's newest result. A missing, malformed or ambiguous address stays
+unavailable instead of falling back to another goal or a new Start. Core campaign
+addresses remain separate; explicitly opening a Core goal leaves the coordinated
+fragment.
+
 The workbench keeps the saved result visible and presents a compact follow-up
 composer with one **Continue** action. A non-empty follow-up can be sent with
 Enter; an empty follow-up continues the existing goal only when Continue is
 explicitly clicked. **New goal** opens a fresh draft with background and file
 changes off.
 
-For a settled goal, the page restores its last selected background/file-change
-options from that request's own saved admission. These are remembered choices,
+A newer result from another window does not replace a pinned result: the page
+shows Newer result available and disables Continue until you explicitly open
+that result and click again. The CLI rechecks the exact selected ID and latest
+result within its validated goal before admission; it never substitutes the
+profile latest. `continue --from ID --goal TEXT` treats TEXT as the follow-up,
+not a new original goal. Omit `--goal` for an empty follow-up. The selected
+record supplies the folder; a different `--workspace` override is refused.
+The derived original goal, follow-up and previous plan/check/report/audit are
+actual planning input. New children store the original goal plus a separate
+closed continuation descriptor. Continuations refuse combined goal/follow-up
+over 100,000 JS string characters or an actually assembled role prompt over
+100,000 UTF-8 bytes before sending that role; earlier sent results remain.
+The audit's separate existing 4096-byte limit and visible crop notices remain.
+These are product transport limits, not claims about all OS argv limits.
+
+For a settled goal, the page initializes background/file-change options from
+that viewed request's own saved admission when its choices are not dirty. These are remembered choices,
 not a new spending grant, remaining quota or a restored live turn budget. A
 read-only stopped follow-up does not inherit a parent round's write choice,
 even when it displays that parent's saved diff. While work is running or its
 exit is unknown, historical options are hidden rather than presented as current
 permissions. Existing consent, available-agent, workspace and live-scope checks
-still apply when Continue is clicked.
+still apply when Continue is clicked. Unsent follow-up text and dirty choices
+survive A→B→A navigation in the resident page and are shared by earlier results
+within A. The URL preserves selection across reload; unsent text is not promised
+across a browser/process restart. Refused, lost or unconfirmed admission replies
+retain text and choices; HTTP success alone does not count as admission.
+
+Current work is separate from the selected saved result. While B is running,
+revoked-but-current, unknown or held, A remains readable and labeled Saved result;
+New goal and Continue are disabled with the current-work reason. The compact
+current-work strip names B when its admission identity is known. Its Stop/Leave
+actions target B's actual job, never A. With no provable identity the strip says
+Current work — not confirmed and does not invent a named Stop target. Viewing
+B's root shows Previous result alongside the current-work strip. B finishing
+never selects B over A or overwrites A's draft/options. Only a locally confirmed
+admission can advance its own selected view when its new saved result arrives.
 
 Stopping prevents later turns; a current turn may still finish. Saved changes
 and their check material remain visible after returning, including through

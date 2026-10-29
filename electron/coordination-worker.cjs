@@ -54,7 +54,8 @@ async function runWorker(config, deps = {}) {
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
     ...(admitted.writeAuthorization ? { write: admitted.writeAuthorization } : {}), priorPlan: admitted.priorPlan,
     priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
-    ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true };
+    ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true,
+    ...(admitted.continuation ? { continuation: admitted.continuation } : {}) };
   const owner = claim.ownerToken;
   let control, storageFailed = false, liveResult = null;
   const counters = () => { const s = scope.current(); return { readTurnsRemaining: s?.remaining ?? null, writeTurnsRemaining: s?.write?.remaining ?? null }; };
@@ -152,7 +153,14 @@ async function runWorker(config, deps = {}) {
     // outcome order unchanged.
     let recordSaveFailed = false;
     try {
-      (deps.saveRecord ?? saveRecord)(config.directory, { ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal, savedAt: new Date().toISOString() });
+      (deps.saveRecord ?? saveRecord)(config.directory, {
+        ...liveResult,
+        requestId: input.requestId,
+        workspacePath: input.workspaceRoot,
+        goal: input.goal,
+        savedAt: new Date().toISOString(),
+        ...(input.continuation ? { continuation: input.continuation } : {}),
+      });
     } catch {
       recordSaveFailed = true;
     }

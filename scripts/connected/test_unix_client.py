@@ -1,5 +1,7 @@
 """Wire-level checks for the thin Linux operator client; no vendor process."""
 import contextlib
+import http.client
+from http.server import ThreadingHTTPServer
 import importlib.util
 import io
 import json
@@ -284,7 +286,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(dist, ignore_errors=True))
         (dist / "index.html").write_text("<head><title>GoalPort</title></head>", encoding="utf-8")
         (dist / "app.js").write_text("console.log('goalport')", encoding="utf-8")
-        outside = dist.parent / "secret.txt"
+        outside = dist.parent / f"{dist.name}-secret.txt"
         outside.write_text("secret", encoding="utf-8")
         self.addCleanup(outside.unlink)
         fake = FakeUnix()
@@ -293,6 +295,7 @@ class CommandRoutingTests(unittest.TestCase):
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
 
         def exchange(method, path, body=None, headers=None):
@@ -358,6 +361,7 @@ class CommandRoutingTests(unittest.TestCase):
                 "reviewHarness": "Pi",
                 "messageDispatched": True,
                 "goal": "Add pong",
+                "workspacePath": "/work/pong",
                 "planText": "do not send this body",
                 "auditInputEvidenceText": "exact audit evidence subset",
             },
@@ -371,6 +375,8 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(found["record"]["reviewHarness"], "Pi")
         self.assertNotIn("planText", found["record"])
         self.assertEqual(found["record"]["outcome"], "note.txt now has before and pong.")
+        self.assertEqual(found["record"]["statusLabel"], "Changes verified")
+        self.assertEqual(next(item for item in found["roots"] if item["requestId"] == found["record"]["requestId"])["statusLabel"], "Changes verified")
         self.assertEqual(found["record"]["detail"], "Pi verified the added line and no other file changed.")
         self.assertEqual(found["record"]["change"], "Codex added pong under before.")
         self.assertEqual(found["record"]["auditInputEvidenceText"], "exact audit evidence subset")
@@ -463,7 +469,7 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(workbench.leftover_left_job(left_dir), job)
         self.assertTrue(workbench.latest_coordination_record(left_dir)["leftoverHeld"])
         (left_dir / "coordination-records.json").write_text(json.dumps([{"requestId": "coordinate-left", "goal": "Left"}]), encoding="utf-8")
-        continued, continue_error = workbench.coordination_continue_command(left_dir, Path("/tmp"), endpoint="/tmp/core.sock", core_binary="/tmp/goalport-core", background=True)
+        continued, continue_error = workbench.coordination_continue_command(left_dir, Path("/tmp"), endpoint="/tmp/core.sock", core_binary="/tmp/goalport-core", background=True, from_request_id="coordinate-left")
         self.assertIsNone(continued)
         self.assertEqual(continue_error, "The interrupted job stays unreplayed; the same request id cannot be admitted again.")
         argv, error = workbench.coordination_acknowledge_command(left_dir, Path("/tmp"), "/tmp/core.sock", "/tmp/goalport-core")
@@ -487,17 +493,22 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertEqual(idle_error, "No running coordinated goal to stop.")
         first = workbench.latest_coordination_record(directory / "empty")
         self.assertIsNone(first["record"])
-        argv, error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", background=True)
+        locked, locked_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", background=True, from_request_id="coordinate-verified")
+        self.assertIsNone(locked)
+        self.assertIn("not settled", locked_error)
+        (jobs / "progress.json").write_text(json.dumps({"state": "completed", "outcome": {"status": "completed"}}), encoding="utf-8")
+        argv, error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", background=True, from_request_id="coordinate-verified")
         self.assertIsNone(error)
+        self.assertNotIn("--goal", argv)
         self.assertIn("coordinate-verified", argv)
         self.assertIn("--pipe", argv)
         self.assertIn("--core-binary", argv)
         self.assertIn("--background", argv)
-        followed, follow_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Check the second file too", background=True)
+        followed, follow_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Check the second file too", background=True, from_request_id="coordinate-verified")
         self.assertIsNone(follow_error)
         self.assertEqual(followed[followed.index("--goal") + 1], "Check the second file too")
         self.assertNotIn("--write-instances", followed)
-        writing_follow, writing_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Add the line", True, background=True)
+        writing_follow, writing_error = workbench.coordination_continue_command(directory, Path("/repo"), "/tmp/core.sock", "/usr/bin/goalport-core", "Add the line", True, background=True, from_request_id="coordinate-verified")
         self.assertIsNone(writing_error)
         self.assertEqual(writing_follow[writing_follow.index("--write-instances") + 1], "codex")
         self.assertNotIn("pi", writing_follow)
@@ -542,6 +553,130 @@ class CommandRoutingTests(unittest.TestCase):
         self.assertNotIn("preview", body)
         html = workbench.inject_linux_flag("<head><title>GoalPort</title></head>")
         self.assertIn("__GOALPORT_LINUX_CORE__", html)
+
+
+class SavedTargetTests(unittest.TestCase):
+    def test_real_http_projection_and_continue_preserve_exact_selection(self):
+        class NeverCore:
+            MAX_FRAME_BYTES = 1024 * 1024
+            def call(self, *args, **kwargs):
+                raise AssertionError("Saved-target requests must not invoke Core")
+        with tempfile.TemporaryDirectory(prefix="gp-saved-http-") as temp:
+            root = Path(temp)
+            records = [{"requestId": "a", "goal": "Original A", "workspacePath": "/a", "savedAt": "01", "verdict": "verified"},
+                       {"requestId": "b", "goal": "Original B", "workspacePath": "/b", "savedAt": "02", "verdict": "verified"}]
+            file = root / "coordination-records.json"
+            file.write_text(json.dumps(records), encoding="utf-8")
+            before = file.read_bytes()
+            commands = []
+            def runner(argv):
+                commands.append(argv)
+                return 0, "The goal was admitted with request id new-child; its worker runs detached.", ""
+            handler = workbench.make_handler("/tmp/sock", root, NeverCore(), 2, root, runner, "/usr/bin/core")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            def post(kind, payload):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                connection.request("POST", "/goalport/ipc", json.dumps({"messageType": kind, "payload": payload}), {"Content-Type": "application/json"})
+                result = connection.getresponse()
+                body = json.loads(result.read())
+                connection.close()
+                return body
+            try:
+                detail = post("coordination_detail", {"requestId": "a"})
+                self.assertEqual(detail["payload"]["record"]["goal"], "Original A")
+                self.assertEqual(post("coordination_latest", {"requestId": "a"})["payload"]["record"], detail["payload"]["record"])
+                self.assertEqual(len(post("coordination_list", {})["payload"]["roots"]), 2)
+                self.assertIsNone(post("coordination_detail", {"requestId": "missing"})["payload"]["record"])
+                self.assertEqual(commands, [])
+                self.assertEqual(file.read_bytes(), before)
+                self.assertFalse(post("coordination_detail", {})["ok"])
+                self.assertFalse(post("coordination_latest", {"requestId": None})["ok"])
+                self.assertFalse(post("coordination_detail", "wrong shape")["ok"])
+                self.assertFalse(post("coordination_continue", {"background": True, "followUp": "must not latest-fallback"})["ok"])
+                self.assertEqual(commands, [])
+                admitted = post("coordination_continue", {"fromRequestId": "a", "followUp": "Current instruction", "background": True, "write": False, "workspaceRoot": "/untrusted", "rootRequestId": "b"})
+                self.assertTrue(admitted["ok"])
+                self.assertEqual(len(commands), 1)
+                self.assertEqual(commands[0][commands[0].index("--from") + 1], "a")
+                self.assertEqual(commands[0][commands[0].index("--workspace") + 1], "/a")
+                self.assertEqual(commands[0][commands[0].index("--goal") + 1], "Current instruction")
+                self.assertNotIn("--write-instances", commands[0])
+                self.assertEqual(file.read_bytes(), before)
+                records.append({**records[0], "requestId": "a2", "savedAt": "03", "continuation": {"parentRequestId": "a", "rootRequestId": "a", "originalGoal": "Original A", "followUp": "Current instruction"}})
+                file.write_text(json.dumps(records), encoding="utf-8")
+                self.assertFalse(post("coordination_continue", {"fromRequestId": "a", "background": True})["ok"])
+                self.assertEqual(len(commands), 1)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=3)
+
+    def test_matching_raw_relation_fixtures_and_no_rewrite(self):
+        fixtures = json.loads((Path(__file__).parent / "fixtures" / "saved-targets.json").read_text(encoding="utf-8"))
+        for fixture in fixtures:
+            with self.subTest(fixture["name"]):
+                before = json.dumps(fixture["records"])
+                targets = workbench.SavedTargets(fixture["records"])
+                actual = [[e["record"]["requestId"], e["relationStatus"], e["rootRequestId"], targets.head(e["rootRequestId"]) if e["rootRequestId"] else None] for e in targets.entries]
+                self.assertEqual(actual, fixture["expected"])
+                self.assertEqual(json.dumps(fixture["records"]), before)
+
+    def test_explicit_detail_selection_and_continue_argv_not_profile_latest(self):
+        with tempfile.TemporaryDirectory(prefix="gp-saved-target-") as temp:
+            root = Path(temp)
+            records = [{"requestId": "a", "goal": "Original A", "workspacePath": "/work/a", "savedAt": "01", "verdict": "checked"},
+                       {"requestId": "b", "goal": "Original B", "workspacePath": "/work/b", "savedAt": "02", "verdict": "checked"}]
+            file = root / "coordination-records.json"
+            file.write_text(json.dumps(records), encoding="utf-8")
+            before = file.read_bytes()
+            selected = workbench.latest_coordination_record(root, "a")
+            self.assertEqual(selected["record"]["goal"], "Original A")
+            self.assertEqual(selected["profileLatestId"], "b")
+            self.assertEqual(len(selected["roots"]), 2)
+            self.assertIsNone(workbench.latest_coordination_record(root, "missing")["record"])
+            argv, error = workbench.coordination_continue_command(root, Path("/repo"), "/tmp/core.sock", "/usr/bin/core", "Current 中文", False, True, "codex,pi", from_request_id="a")
+            self.assertIsNone(error)
+            self.assertEqual(argv[argv.index("--from") + 1], "a")
+            self.assertEqual(argv[argv.index("--workspace") + 1], "/work/a")
+            self.assertEqual(argv[argv.index("--goal") + 1], "Current 中文")
+            empty, error = workbench.coordination_continue_command(root, Path("/repo"), "/tmp/core.sock", "/usr/bin/core", "", False, True, from_request_id="a")
+            self.assertIsNone(error)
+            self.assertNotIn("--goal", empty)
+            self.assertIsNone(workbench.coordination_continue_command(root, Path("/repo"), background=True)[0])
+            self.assertEqual(file.read_bytes(), before)
+
+    def test_saved_a_and_current_b_unknown_held_stay_separate(self):
+        with tempfile.TemporaryDirectory(prefix="gp-saved-job-") as temp:
+            root = Path(temp)
+            file = root / "coordination-records.json"
+            file.write_text(json.dumps([{"requestId": "a", "goal": "A", "workspacePath": "/a", "verdict": "verified"}]), encoding="utf-8")
+            job = root / "coordination-jobs" / "jobs" / "job-b"
+            job.mkdir(parents=True)
+            (job.parent.parent / "active-admission.json").write_text(json.dumps({"jobId": "job-b"}), encoding="utf-8")
+            (job / "admission.json").write_text(json.dumps({"input": {"requestId": "b", "goal": "B", "workspacePath": "/b", "privateControlToken": "PRIVATE", "scopeGeneration": 99}}), encoding="utf-8")
+            for state in ("running", "revoked", "unconfirmed"):
+                (job / "progress.json").write_text(json.dumps({"state": state, "pendingCommand": {"commandId": "pending"}}), encoding="utf-8")
+                projected = workbench.latest_coordination_record(root, "a")
+                self.assertEqual(projected["record"]["goal"], "A")
+                self.assertEqual(projected["currentJob"]["goal"], "B")
+                self.assertEqual(projected["currentJob"]["requestId"], "b")
+                self.assertNotIn("PRIVATE", json.dumps(projected))
+                self.assertNotIn("scopeGeneration", json.dumps(projected))
+                self.assertIsNone(workbench.coordination_stop_command(root, Path("/repo"), "/tmp/sock", "/usr/bin/core", expected_job_id="not-job-b")[0])
+                stop, stop_error = workbench.coordination_stop_command(root, Path("/repo"), "/tmp/sock", "/usr/bin/core", expected_job_id="job-b")
+                self.assertIsNone(stop_error)
+                self.assertEqual(stop[-2:], ["--job", "job-b"])
+                self.assertIsNone(workbench.coordination_continue_command(root, Path("/repo"), "/tmp/sock", "/usr/bin/core", background=True, from_request_id="a")[0])
+            (job / "admission.json").unlink()
+            self.assertFalse(workbench.latest_coordination_record(root, "a")["currentJob"]["identityConfirmed"])
+            (job / "admission.json").write_text(json.dumps({"input": {"requestId": "b", "goal": "B", "workspacePath": "/b"}}), encoding="utf-8")
+            (job / "stuck-ack.json").write_text("{}", encoding="utf-8")
+            held = workbench.latest_coordination_record(root, "a")
+            self.assertEqual(held["currentJob"]["goal"], "B")
+            self.assertIsNone(held["line"])
+            self.assertIsNone(workbench.coordination_acknowledge_command(root, Path("/repo"), "/tmp/sock", "/usr/bin/core", expected_job_id="not-job-b")[0])
+            self.assertTrue(workbench.latest_coordination_record(root, "a")["leftoverHeld"])
+            self.assertEqual(workbench.latest_coordination_record(root, "a")["record"]["goal"], "A")
 
 
 @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "Linux Unix client")

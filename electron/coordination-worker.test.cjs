@@ -22,7 +22,7 @@ async function scenario(t, options = {}) {
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
   const roster = options.providers ?? providers;
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), backgroundConsent: true });
   if (options.storeDecorator) {
     options.store = options.storeDecorator(options.store ?? store, start);
   }
@@ -244,6 +244,19 @@ test("worker reconstruction passes all five historical feedback fields to backgr
   assert.deepEqual(r.backgroundEngineInputValue.executionFeedback, feedback);
   assert.deepEqual(Object.keys(r.backgroundEngineInputValue.executionFeedback), Object.keys(feedback));
   assert.equal(r.launches.some(command => feedback.previousCommandIds.includes(command.commandId)), false);
+});
+
+test("worker passes exact continuation descriptor to backgroundEngineInput and saves it in coordination record", async t => {
+  const continuation = {
+    parentRequestId: "parent-req-001",
+    rootRequestId: "root-req-001",
+    originalGoal: "Root original goal",
+    followUp: "Follow-up coordination text",
+  };
+  const r = await scenario(t, { continuation, captureExecutionFeedback: true });
+  assert.deepEqual(r.backgroundEngineInputValue.continuation, continuation);
+  assert.equal(r.records.length, 1);
+  assert.deepEqual(r.records[0].continuation, continuation);
 });
 
 // The packaged app has no GOALPORT_COORDINATE_SEND override. The worker must

@@ -14,7 +14,7 @@ import {
   type CoordinateTransport,
   type EnvironmentBlockedInfo,
 } from "./coordinateSession";
-import type { CoordinationRoundFact, RoundEvent } from "./savedPlan";
+import type { CoordinationRoundFact, RoundEvent, SavedTargetContinuation } from "./savedPlan";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -214,6 +214,8 @@ export async function requestCoordination(
     readonly writeAuthorization?: CoordinationWriteAuthorization;
     /** Completed execution feedback carried into a manual continuation send. */
     readonly executionFeedback?: ExecutionFeedback | null;
+    /** Optional continuation descriptor for continuing an existing saved target. */
+    readonly continuation?: SavedTargetContinuation;
     /**
      * Product adapter gate for the ONE corrective pass inside this Send:
      * confirm liveness and checkpoint first-round evidence, then return true.
@@ -267,6 +269,7 @@ export async function requestCoordination(
     allowedInstances: input.allowedInstances,
     writeAuthorization: input.writeAuthorization,
     executionFeedback: input.executionFeedback,
+    ...(input.continuation ? { continuation: input.continuation } : {}),
   };
   const planned = coordinateGoal(goalInput);
   if (planned.roles.length === 0) {
@@ -370,6 +373,7 @@ export async function requestCoordination(
           ? sent.authorizedWriteTurnsLeft
           : input.writeAuthorization!.remaining,
       },
+      ...(input.continuation ? { continuation: input.continuation } : {}),
     };
     const reads = sent.authorizedTurnsLeft;
     const writes = sent.authorizedWriteTurnsLeft;
@@ -465,6 +469,7 @@ export async function requestCoordination(
           : input.writeAuthorization!.remaining,
       },
       executionFeedback: feedback,
+      ...(input.continuation ? { continuation: input.continuation } : {}),
     };
     const reads = latest.authorizedTurnsLeft;
     const writes = latest.authorizedWriteTurnsLeft;

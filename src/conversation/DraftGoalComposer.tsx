@@ -83,6 +83,11 @@ interface DraftGoalComposerProps {
   onContinueCoordination?: () => void;
   onStopCoordination?: () => void;
   stopLabel?: string;
+  currentWorkTitle?: string | null;
+  currentWorkLine?: string | null;
+  savedResultLabel?: string | null;
+  savedResultOutcome?: string | null;
+  continueDisabledReason?: string | null;
   onLeaveGoal?: () => void;
   linuxCanStartCoordination?: boolean;
   linuxWrite?: boolean;
@@ -116,7 +121,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function GoalStatusHeading({
-  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false
+  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false, savedResultLabel, savedResultOutcome
 }: DraftGoalComposerProps) {
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
@@ -138,9 +143,10 @@ export function GoalStatusHeading({
   return (
       <div className="conversation-heading">
         <div className="conversation-heading-main">
-          <h2 title={activeGoalTitle || undefined} aria-label={activeGoalTitle || undefined}>{headingText}</h2>
-          <p>{inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "You can try again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
-          {activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
+          {savedResultLabel ? <p className="workspace-evidence-label">{savedResultLabel}</p> : null}
+          <h2 title={activeGoalTitle || undefined} aria-label={activeGoalTitle || undefined}>{savedResultLabel ? (activeGoalTitle ? shortGoalTitle(activeGoalTitle) : "Saved goal unavailable") : headingText}</h2>
+          <p>{savedResultLabel ? savedResultOutcome : inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "You can try again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
+          {!savedResultLabel && activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
             <p className="workspace-evidence-label">Previous saved result; the stop message above describes the current job.</p>
           ) : null}
           {activeGoalTitle && (goalChange || goalEvidence) ? (
@@ -163,7 +169,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -228,6 +234,11 @@ export function DraftGoalComposer({
 
   return (
     <section className={`draft-composer${isLinuxActiveTarget ? " draft-composer-active" : ""}`} aria-label={activeGoalTitle || "New goal"}>
+      {currentWorkLine ? <div className="current-work-strip" role="status" aria-label="Current work">
+        <div><strong title={currentWorkTitle || undefined}>{currentWorkTitle ? `Current work — ${shortGoalTitle(currentWorkTitle)}` : "Current work — not confirmed"}</strong><p>{currentWorkLine}</p></div>
+        {onStopCoordination ? <button className="button button-small button-outline" type="button" title={stopLabel} aria-label={stopLabel} disabled={busy || inputsLocked || inFlightLine} onClick={onStopCoordination}>{currentWorkTitle ? shortGoalTitle(stopLabel, 64) : stopLabel}</button> : null}
+        {onLeaveGoal ? <button className="button button-small button-outline" type="button" disabled={busy || inputsLocked || inFlightLine} onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
+      </div> : null}
       <form className="draft-composer-form" aria-label={activeGoalTitle ? "This goal" : "Start a goal"} onSubmit={handleFormSubmit}>
         {!isLinuxActiveTarget ? <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label> : null}
         <div className={`field-with-icon draft-workspace-row${isLinuxActiveTarget ? " compact-workspace-row" : ""}`} title={draft.workspace}>
@@ -282,6 +293,7 @@ export function DraftGoalComposer({
         />
 
         {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
+        {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
 
         {error ? (
           <div className="dialog-note" role="alert">
@@ -329,23 +341,24 @@ export function DraftGoalComposer({
         ) : null}
         {keepRunningHint ? <p className="draft-hint">{keepRunningHint}</p> : null}
         <div className="dialog-actions">
-          {onStopCoordination ? <button className="button button-small button-outline" type="button" disabled={coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop."} onClick={onStopCoordination}>{coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." ? coordinationResult : stopLabel}</button> : null}
-          {onLeaveGoal ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onLeaveGoal}>{coordinationResult === "Leaving this unreplayed." ? coordinationResult : "Leave it unreplayed"}</button> : null}
+          {onStopCoordination && !currentWorkLine ? <button className="button button-small button-outline" type="button" title={stopLabel} aria-label={stopLabel} disabled={coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop."} onClick={onStopCoordination}>{coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." ? coordinationResult : currentWorkTitle ? shortGoalTitle(stopLabel, 64) : stopLabel}</button> : null}
+          {onLeaveGoal && !currentWorkLine ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onLeaveGoal}>{coordinationResult === "Leaving this unreplayed." ? coordinationResult : "Leave it unreplayed"}</button> : null}
           {isLinuxActiveTarget ? (
             <>
               {draft.message.trim() ? (
                 <button className="button button-quiet" type="button" aria-label="Clear follow-up" onClick={onDiscard} disabled={busy || inputsLocked}>Clear follow-up</button>
               ) : null}
-              {!onStopCoordination ? <button
+              {<button
                 className="button button-primary"
                 type="button"
                 aria-label="Continue this goal"
-                disabled={continueDisabled || busy || inputsLocked || !connected}
+                disabled={continueDisabled || busy || inputsLocked || !connected || !onContinueCoordination}
+                title={continueDisabledReason || undefined}
                 onClick={onContinueCoordination}
               >
                 {continueButtonLabel}
                 <span aria-hidden="true">↗</span>
-              </button> : null}
+              </button>}
             </>
           ) : (
             <>

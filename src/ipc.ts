@@ -1,12 +1,17 @@
 import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
 import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
-import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
+import type { RoundEvent, SavedPlan, SavedTargetContinuation, SavedTargetRelationStatus } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
+
+export type { SavedTargetContinuation, SavedTargetRelationStatus };
 
 export type CoordinationRecord = Omit<SavedPlan, "roundEvents" | "authorizedTurnsLeft" | "authorizedWriteTurnsLeft" | "scopeExhausted"> & {
   /** Optional for records saved before completed recovery events existed. */
   readonly roundEvents?: readonly RoundEvent[];
+  readonly continuation?: SavedTargetContinuation;
+  readonly relationStatus?: SavedTargetRelationStatus;
+  readonly relationUnavailableReason?: string | null;
 };
 import {
   appendPreviewConversationMessage,

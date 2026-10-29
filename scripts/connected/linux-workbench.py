@@ -17,6 +17,10 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[2]
 FLAG = '<script>window.__GOALPORT_LINUX_CORE__={bridge:"/goalport/ipc"};</script>'
+_spec = importlib.util.spec_from_file_location("goalport_saved_targets", Path(__file__).with_name("saved_targets.py"))
+_saved_targets = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_saved_targets)
+SavedTargets = _saved_targets.SavedTargets
 
 
 def load_unix_client():
@@ -192,6 +196,9 @@ def current_job(data_dir: Path) -> dict | None:
 def live_fields(data_dir: Path | None) -> dict:
     job = current_job(data_dir) if data_dir is not None else None
     fields = {"line": job["line"] if job else None, "jobId": job["jobId"] if job else None}
+    held = leftover_left_job(data_dir) if job is None else None
+    if held:
+        job = {"jobId": held, "line": "This interrupted work still holds the slot. Leave it unreplayed before starting another goal."}
     if job and data_dir is not None:
         try:
             admission = json.loads((data_dir / "coordination-jobs" / "jobs" / job["jobId"] / "admission.json").read_text(encoding="utf-8"))
@@ -200,6 +207,26 @@ def live_fields(data_dir: Path | None) -> dict:
                 fields["currentGoal"] = {"goal": identity["goal"], "workspacePath": identity["workspacePath"]}
         except (OSError, json.JSONDecodeError, TypeError, AttributeError):
             pass  # Missing identity is unknown, never a fabricated saved result.
+    current = None
+    if job:
+        current = {"jobId": job["jobId"], "line": job["line"], "identityConfirmed": False}
+        try:
+            admission = json.loads((data_dir / "coordination-jobs" / "jobs" / job["jobId"] / "admission.json").read_text(encoding="utf-8"))
+            identity = admission.get("input", {})
+            if (_saved_targets.valid_id(identity.get("requestId")) and isinstance(identity.get("goal"), str)
+                    and isinstance(identity.get("workspacePath"), str)):
+                current.update({"requestId": identity["requestId"], "goal": identity["goal"], "workspacePath": identity["workspacePath"], "identityConfirmed": True})
+                descriptor = identity.get("continuation")
+                if "continuation" not in identity:
+                    current["rootRequestId"] = identity["requestId"]
+                elif _saved_targets.valid_descriptor(descriptor):
+                    targets = SavedTargets(read_saved_records(data_dir))
+                    parent = targets.selected(descriptor["parentRequestId"])
+                    if parent and parent["rootRequestId"] == descriptor["rootRequestId"] and identity["goal"] == descriptor["originalGoal"] and descriptor["originalGoal"] == str((targets.unique(descriptor["rootRequestId"]) or {}).get("goal", "")).strip() and _saved_targets.workspace_key(parent["record"].get("workspacePath")) == _saved_targets.workspace_key(identity["workspacePath"]):
+                        current["rootRequestId"] = descriptor["rootRequestId"]
+        except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+            pass
+    fields["currentJob"] = current
     return fields
 
 
@@ -418,8 +445,56 @@ def retained_continuation_result(data_dir: Path, last: dict, records: list) -> d
     return last
 
 
-def latest_coordination_record(data_dir: Path | None) -> dict:
-    """Read the newest saved coordinated-goal record. No tokens, no plan body."""
+def read_saved_records(data_dir: Path | None) -> list:
+    if data_dir is None:
+        return []
+    try:
+        records = json.loads((data_dir / "coordination-records.json").read_text(encoding="utf-8"))
+        return records if isinstance(records, list) else []
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def saved_status_label(data_dir: Path, record: dict) -> str:
+    """Plain saved-result status, not provider prose or a live permission claim."""
+    _admission, job = find_matching_admission(data_dir, record.get("requestId"), record.get("workspacePath"))
+    if job is not None:
+        try:
+            progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+            if progress.get("state") == "stopped":
+                return "Stopped; existing changes remain"
+            if progress.get("state") == "unconfirmed":
+                return "Not confirmed"
+        except (OSError, ValueError, AttributeError):
+            pass
+    verdict = record.get("verdict")
+    return {"verified": "Changes verified", "checked": "Plan checked", "revise": "Needs revision", "stopped": "Stopped; existing changes remain", "failed": "Failed; see check details", "unconfirmed": "Not confirmed"}.get(verdict, "Saved result") if isinstance(verdict, str) else "Saved result"
+
+
+def project_saved_record(data_dir: Path, entry: dict, records: list, targets: SavedTargets) -> dict:
+    last = entry["record"]
+    admission, _job = find_matching_admission(data_dir, last.get("requestId"), last.get("workspacePath"))
+    retained = retained_continuation_result(data_dir, last, records)
+    projected = {key: last.get(key) for key in ("requestId", "goal", "workspacePath", "savedAt", "verdict", "stopReason", "planningHarness", "reviewHarness", "messageDispatched")}
+    projected.update({key: entry[key] for key in ("rootRequestId", "relationStatus", "relationUnavailableReason")})
+    if "continuation" in entry:
+        projected["continuation"] = entry["continuation"]
+    root_id = entry["rootRequestId"]
+    projected.update({
+        "rootLatestId": targets.head(root_id) if root_id else None,
+        "retainedFromRequestId": retained.get("requestId") if retained is not last else None,
+        "outcome": short_outcome(last), "statusLabel": saved_status_label(data_dir, last), "detail": check_detail(retained, short_outcome(retained)),
+        "change": folded_text(retained, "executionText", short_outcome(retained)),
+        "executionEvidence": retained.get("executionEvidence"),
+        "auditInputEvidenceCoverage": retained.get("auditInputEvidenceCoverage"),
+        "auditInputEvidenceText": retained.get("auditInputEvidenceText"),
+        "rememberedIntent": project_remembered_intent(admission, last.get("workspacePath")),
+    })
+    return projected
+
+
+def latest_coordination_record(data_dir: Path | None, request_id: object = None) -> dict:
+    """Shared list/detail projection. An explicit ID never falls back to latest."""
     if data_dir is None:
         return {"ok": True, "record": None, "reason": "no coordination profile configured"}
     path = data_dir / "coordination-records.json"
@@ -428,39 +503,28 @@ def latest_coordination_record(data_dir: Path | None) -> dict:
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, "reason": "coordinated result could not be read"}
-    last = newest_saved_record(records) if isinstance(records, list) else None
-    if last is None:
-        return {"ok": True, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir), "reason": "no coordinated result saved"}
-    current_admission, _job = find_matching_admission(data_dir, last.get("requestId"), last.get("workspacePath"))
-    remembered_intent = project_remembered_intent(current_admission, last.get("workspacePath"))
-    retained = retained_continuation_result(data_dir, last, records)
-    return {
-        "ok": True,
-        "record": {
-            "requestId": last.get("requestId"),
-            "retainedFromRequestId": retained.get("requestId") if retained is not last else None,
-            "verdict": last.get("verdict"),
-            "stopReason": last.get("stopReason"),
-            "planningHarness": last.get("planningHarness"),
-            "reviewHarness": last.get("reviewHarness"),
-            "messageDispatched": last.get("messageDispatched"),
-            "goal": last.get("goal"),
-            "workspacePath": last.get("workspacePath"),
-            "outcome": short_outcome(last),
-            "detail": check_detail(retained, short_outcome(retained)),
-            "change": folded_text(retained, "executionText", short_outcome(retained)),
-            "executionEvidence": retained.get("executionEvidence"),
-            "auditInputEvidenceCoverage": retained.get("auditInputEvidenceCoverage"),
-            "auditInputEvidenceText": retained.get("auditInputEvidenceText"),
-            "rememberedIntent": remembered_intent,
-        },
-        "reason": None,
-        "leftRequestIds": left_request_ids(data_dir),
-        "unconfirmedGoal": disk_unconfirmed(data_dir, last.get("requestId") if isinstance(last.get("requestId"), str) else None) or disk_unconfirmed(data_dir),
-        "leftoverHeld": leftover_left_job(data_dir) is not None,
-        **live_fields(data_dir),
-    }
+        return {"ok": False, "record": None, "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir), "reason": "coordinated result could not be read"}
+    targets = SavedTargets(records)
+    summaries = []
+    seen = set()
+    for entry in targets.entries:
+        item = entry["record"]
+        root_id = entry["rootRequestId"]
+        key = root_id or item.get("requestId")
+        if not isinstance(key, str) or key in seen:
+            continue
+        seen.add(key)
+        root = targets.unique(root_id) if root_id else item
+        head_id = targets.head(root_id) if root_id else None
+        head = targets.unique(head_id) if head_id else item
+        summaries.append({"rootRequestId": root_id, "requestId": head_id or root_id or item.get("requestId"), "title": root.get("goal"), "workspacePath": root.get("workspacePath"), "outcome": short_outcome(head), "statusLabel": saved_status_label(data_dir, head), "relationStatus": entry["relationStatus"], "reason": entry["relationUnavailableReason"] or ("The latest result cannot be identified." if root_id and not head_id else None)})
+    last = targets.unique(request_id) if request_id is not None else newest_saved_record(records)
+    selected = targets.selected(last.get("requestId")) if isinstance(last, dict) else None
+    common = {"roots": summaries, "profileLatestId": (newest_saved_record(records) or {}).get("requestId"), "leftRequestIds": left_request_ids(data_dir), "unconfirmedGoal": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None, **live_fields(data_dir)}
+    if selected is None:
+        return {"ok": True, "record": None, **common, "reason": "That saved goal is no longer available or cannot be identified." if request_id is not None else "No coordinated result saved."}
+    history = [{"requestId": e["record"].get("requestId"), "savedAt": e["record"].get("savedAt"), "outcome": short_outcome(e["record"])} for e in targets.entries if selected["rootRequestId"] and e["rootRequestId"] == selected["rootRequestId"]]
+    return {"ok": True, "record": project_saved_record(data_dir, selected, records, targets), "history": history, "reason": None, **common}
 
 
 def subscription_harnesses(stdout: str) -> list[str]:
@@ -510,11 +574,13 @@ def leftover_left_job(data_dir: Path | None) -> str | None:
     return job_id
 
 
-def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_acknowledge_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else leftover_left_job(data_dir)
     if not isinstance(job_id, str) or not job_id:
         return None, "No coordinated goal to leave."
+    if expected_job_id is not None and expected_job_id != job_id:
+        return None, "Current work changed. Read its status before leaving it."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The goal id is invalid, so it was not left."
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "it was not left.", database)
@@ -560,10 +626,12 @@ def checked_instances(instances: object) -> tuple[str | None, str | None]:
     return ",".join(names), None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None, from_request_id: object = None) -> tuple[list[str] | None, str | None]:
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
-    found = latest_coordination_record(data_dir)
+    if not _saved_targets.valid_id(from_request_id):
+        return None, "Choose an available saved result before continuing."
+    found = latest_coordination_record(data_dir, from_request_id)
     record = found.get("record") if isinstance(found, dict) else None
     request_id = record.get("requestId") if isinstance(record, dict) else None
     if data_dir is None or not isinstance(request_id, str) or not request_id:
@@ -573,9 +641,17 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, database=database)
     if error:
         return None, error
-    saved_goal = record.get("goal") if isinstance(record.get("goal"), str) and record.get("goal") else "Continue the saved goal"
-    goal = follow_up.strip() if isinstance(follow_up, str) and follow_up.strip() else saved_goal
-    argv = [*prefix, "continue", "--from", request_id, "--goal", goal, "--background"]
+    if not record.get("rootRequestId"):
+        return None, record.get("relationUnavailableReason") or "The saved goal relationship is unavailable."
+    if record.get("rootLatestId") != request_id:
+        return None, "Open the latest result and choose Continue again."
+    if current_job(data_dir) is not None or disk_unconfirmed(data_dir) or leftover_left_job(data_dir):
+        return None, "Current work has not settled, so nothing was admitted."
+    if follow_up is not None and not isinstance(follow_up, str):
+        return None, "The follow-up must be text, so nothing was admitted."
+    argv = [*prefix, "continue", "--from", request_id, "--background"]
+    if isinstance(follow_up, str) and follow_up.strip():
+        argv.extend(["--goal", follow_up.strip()])
     workspace = record.get("workspacePath")
     if isinstance(workspace, str) and workspace:
         argv.extend(["--workspace", workspace])
@@ -623,11 +699,13 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     return argv, None
 
 
-def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None) -> tuple[list[str] | None, str | None]:
+def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else None
     if not isinstance(job_id, str) or not job_id:
         return None, "No running coordinated goal to stop."
+    if expected_job_id is not None and expected_job_id != job_id:
+        return None, "Current work changed. Read its status before stopping it."
     if not all(character.isalnum() or character in "._-" for character in job_id):
         return None, "The running goal id is invalid, so nothing was stopped."
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.", database)
@@ -708,7 +786,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_acknowledge":
-                argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary, database)
+                argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -731,10 +809,14 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 failure = err.strip() if isinstance(err, str) else ""
                 self._send(200, json.dumps({"ok": code == 0, "error": None if code == 0 else (failure or "Background Send consent could not be saved."), "payload": {"stdout": out, "stderr": err}}).encode(), "application/json")
                 return
-            if message_type == "coordination_latest":
+            if message_type in {"coordination_latest", "coordination_list", "coordination_detail"}:
+                payload = request.get("payload")
+                if not isinstance(payload, dict) or ((message_type == "coordination_detail" or "requestId" in payload) and not _saved_targets.valid_id(payload.get("requestId"))):
+                    self._send(200, json.dumps({"ok": False, "error": "Choose an exact saved result before opening it.", "payload": {"record": None}}).encode(), "application/json")
+                    return
                 self._send(200, json.dumps({
                     "ok": True,
-                    "payload": latest_coordination_record(coordination_data),
+                    "payload": latest_coordination_record(coordination_data, payload.get("requestId")),
                 }).encode(), "application/json")
                 return
             if message_type == "coordination_start":
@@ -765,7 +847,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_stop":
-                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database)
+                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -777,7 +859,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             if message_type == "coordination_continue":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database)
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return

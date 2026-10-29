@@ -11,6 +11,7 @@ afterEach(() => {
   delete window.__GOALPORT_LINUX_CORE__;
   try { sessionStorage.clear(); } catch { /* ignore */ }
   vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/");
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -179,7 +180,7 @@ describe("Linux Core bridge", () => {
         return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null, harnesses: missingHarness ? ["codex"] : ["codex", "pi"] } });
       }
       if (body.messageType === "coordination_latest") {
-        return jsonResponse({ ok: true, payload: { record: { requestId: "coordinate-verified", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line.", change: "Codex added pong under before.", rememberedIntent: { background: true, write: false } }, reason: null } });
+        return jsonResponse({ ok: true, payload: { roots: [{ requestId: "coordinate-verified", rootRequestId: "coordinate-verified", title: "Name the two files", workspacePath: "/home/you/project", outcome: "Verified" }], record: { requestId: "coordinate-verified", rootRequestId: "coordinate-verified", rootLatestId: "coordinate-verified", relationStatus: "legacy-root", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line.", change: "Codex added pong under before.", rememberedIntent: { background: true, write: false } }, reason: null } });
       }
       if (body.messageType === "goal_overview") {
         return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
@@ -197,7 +198,7 @@ describe("Linux Core bridge", () => {
     expect(screen.queryByText("Choose a Runtime")).toBeNull();
     expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
-    expect(await screen.findByText("verified. The two files are named and nothing was edited.")).toBeTruthy();
+    expect(await screen.findByText("The two files are named and nothing was edited.")).toBeTruthy();
     expect(screen.getByText("What was checked")).toBeTruthy();
     expect(screen.getByText("Executor report")).toBeTruthy();
     await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
@@ -215,8 +216,8 @@ describe("Linux Core bridge", () => {
     expect(document.title).toBe("Name the two files");
     expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
-    fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
-    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some((call) => String(call[1]?.body).includes("coordination_continue"))).toBe(true));
+    // This navigation/discovery fixture admits no work. Unknown-admission behavior is tested separately below.
+    expect(vi.mocked(fetch).mock.calls.some(call => String(call[1]?.body).includes('"messageType":"coordination_continue"'))).toBe(false);
     missingHarness = true;
     fireEvent.click(screen.getByRole("button", { name: "New goal" }));
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
@@ -236,7 +237,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
     expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
     fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
-    expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Continue this goal" }).closest(".dialog-actions")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".timeline-scroll")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".draft-composer")).toBeNull();
@@ -276,7 +277,7 @@ describe("Linux Core bridge", () => {
       const body = JSON.parse(String(init.body));
       if (body.messageType === "coordination_latest") return jsonResponse({ ok: true, payload: {
         record: null, line: "Codex is making changes…", jobId: "first-live",
-        currentGoal: { goal: "Append pong", workspacePath: "/work" }, reason: "no coordinated result saved",
+        currentGoal: { goal: "Append pong", workspacePath: "/work" }, currentJob: { requestId: "first-request", rootRequestId: "first-request", jobId: "first-live", goal: "Append pong", workspacePath: "/work", identityConfirmed: true, line: "Codex is making changes…" }, reason: "no coordinated result saved",
       } });
       if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
       if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
@@ -285,7 +286,7 @@ describe("Linux Core bridge", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Append pong" })).toBeTruthy();
     expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/work");
-    expect(screen.getByRole("button", { name: "Stop this goal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop Append pong" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
   });
 
@@ -296,7 +297,7 @@ describe("Linux Core bridge", () => {
       ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: "", campaigns: [], notices: [],
     };
     const record = {
-      requestId: "prior",
+      requestId: "prior", rootRequestId: "prior", rootLatestId: "prior", relationStatus: "legacy-root",
       goal: "Retain previous pong",
       workspacePath: "/work",
       verdict: "verified",
@@ -341,12 +342,13 @@ describe("Linux Core bridge", () => {
     expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
     expect(screen.getByText("CAPTURED_NEW_FILE_PONG_TOKEN")).toBeTruthy();
     expect(screen.getByText("EXACT_PRIOR_AUDIT_INPUT_TOKEN")).toBeTruthy();
-    expect(screen.getByText(/Previous saved result; the stop message above describes the current job/)).toBeTruthy();
+    expect(screen.getByText("Saved result")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Current work" }).textContent).toContain("not confirmed");
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/work");
     expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull();
     expect(screen.queryByLabelText("Allow Codex to change files in this workspace")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Continue this goal" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue this goal" })).toHaveProperty("disabled", true);
 
     first.unmount();
     projection = "terminal";
@@ -381,7 +383,7 @@ describe("Linux Core bridge", () => {
           ok: true,
           payload: {
             record: {
-              requestId: "req-r1",
+              requestId: "req-r1", rootRequestId: "req-r1", rootLatestId: "req-r1", relationStatus: "legacy-root",
               verdict: "verified",
               planningHarness: "Codex",
               reviewHarness: "Pi",
@@ -430,6 +432,7 @@ describe("Linux Core bridge", () => {
     await waitFor(() => expect(calls.filter((c) => c.messageType === "coordination_continue").length).toBe(continueCountBefore + 1));
     const firstContinue = calls.filter((c) => c.messageType === "coordination_continue")[0];
     expect(firstContinue.payload).toEqual({
+      fromRequestId: "req-r1",
       followUp: "",
       write: true,
       background: true,
@@ -453,7 +456,7 @@ describe("Linux Core bridge", () => {
           ok: true,
           payload: {
             record: {
-              requestId: "req-blocked",
+              requestId: "req-blocked", rootRequestId: "req-blocked", rootLatestId: "req-blocked", relationStatus: "legacy-root",
               verdict: "verified",
               planningHarness: "Codex",
               reviewHarness: "Pi",
@@ -501,7 +504,7 @@ describe("Linux Core bridge", () => {
     expect(calls.filter((c) => c.messageType === "coordination_start").length).toBe(0);
   });
 
-  it("R2/R3: polls preserve user uncheck, New goal resets false, explicit return restores baseline", async () => {
+  it("R2/R3: polls and resident navigation preserve dirty options; New goal starts false",  async () => {
     window.__GOALPORT_LINUX_CORE__ = true;
     const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
     let pollCount = 0;
@@ -515,8 +518,9 @@ describe("Linux Core bridge", () => {
         return jsonResponse({
           ok: true,
           payload: {
+            roots: [{ requestId: "req-lifecycle", rootRequestId: "req-lifecycle", title: "Lifecycle goal", workspacePath: "/home/you/work", outcome: "Verified" }],
             record: {
-              requestId: "req-lifecycle",
+              requestId: "req-lifecycle", rootRequestId: "req-lifecycle", rootLatestId: "req-lifecycle", relationStatus: "legacy-root",
               verdict: "verified",
               planningHarness: "Codex",
               reviewHarness: "Pi",
@@ -552,12 +556,12 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
     expect(screen.queryByText("Last used options restored")).toBeNull();
 
-    // 3. Explicit return to the saved target restores the baseline again
+    // 3. Resident return preserves the user's dirty choices, not the admission baseline
     fireEvent.click(screen.getByRole("button", { name: /Lifecycle goal/ }));
     expect(await screen.findByRole("heading", { name: "Lifecycle goal" })).toBeTruthy();
-    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
     expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
-    expect(screen.getByText("Last used options restored")).toBeTruthy();
+    expect(screen.queryByText("Last used options restored")).toBeNull();
   });
 
   it("keeps an unknown Continue draft without stale restore or Start controls", async () => {
@@ -572,7 +576,7 @@ describe("Linux Core bridge", () => {
       }
       if (body.messageType === "coordination_latest") {
         return jsonResponse({ ok: true, payload: { record: {
-          requestId: "saved-before-unknown",
+          requestId: "saved-before-unknown", rootRequestId: "saved-before-unknown", rootLatestId: "saved-before-unknown", relationStatus: "legacy-root",
           verdict: "verified",
           planningHarness: "Codex",
           reviewHarness: "Pi",
@@ -657,7 +661,7 @@ describe("Linux Core bridge", () => {
           ok: true,
           payload: {
             record: {
-              requestId: "req-r4",
+              requestId: "req-r4", rootRequestId: "req-r4", rootLatestId: "req-r4", relationStatus: "legacy-root",
               verdict: "verified",
               planningHarness: "Codex",
               reviewHarness: "Pi",

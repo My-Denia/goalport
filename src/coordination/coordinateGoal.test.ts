@@ -8,7 +8,22 @@ import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
 import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT } from "../types";
-import { evidenceCommand, formatEvidenceForAudit, coordinateGoal, replacementCommand, usableInstanceIds, MAX_AUDIT_PROMPT_BYTES, WINDOWS_CMD_MAX_CHARS, windowsCmdWorstCaseChars, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
+import {
+  evidenceCommand,
+  formatEvidenceForAudit,
+  coordinateGoal,
+  replacementCommand,
+  usableInstanceIds,
+  MAX_AUDIT_PROMPT_BYTES,
+  MAX_CONTINUATION_PROMPT_BYTES,
+  MAX_CONTINUATION_CHARS,
+  WINDOWS_CMD_MAX_CHARS,
+  windowsCmdWorstCaseChars,
+  type CoordinateGoalInput,
+  type ExecutionFeedback,
+  type SyntheticCatalogInstance,
+} from "./coordinateGoal";
+import type { SavedTargetContinuation } from "./continuation";
 
 const { launchSpec, turnSpec } = createRequire(import.meta.url)("../../electron/cli-coordinate.cjs") as {
   launchSpec(file: string, args: string[], env: NodeJS.ProcessEnv, platform: string): { file: string; args: string[]; verbatim: boolean };
@@ -818,6 +833,151 @@ describe("explicit write assembly and phase verdicts", () => {
     // Verify multibyte valid decode (no broken UTF-8 sequences)
     expect(() => new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(promptText, "utf8"))).not.toThrow();
   });
+
+  describe("Continuation descriptor and bounded prompt", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+
+    it("builds planning command with explicit Original goal and Current follow-up, keeping all 4 prior feedback labels and exact texts", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-123",
+        rootRequestId: "req-root-001",
+        originalGoal: "Root original goal with CJK 中文 and Emoji 🚀",
+        followUp: "Current follow-up with Japanese 日本語 and Emoji 🎯",
+      };
+
+      const feedback: ExecutionFeedback = {
+        previousPlan: "Exact previous plan text: 方案详情",
+        previousPlanReview: "Exact previous plan check: 审查结论\nVERDICT: carry-out",
+        previousExecutionReport: "Exact previous execution report: 执行修改",
+        previousExecutionAudit: "Exact previous execution audit: 独立审计\nVERDICT: revise",
+        previousCommandIds: ["cmd-prev-1", "cmd-prev-2"],
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-cont-1",
+        catalog,
+        continuation,
+        priorPlan: "Prior plan text",
+        priorReview: "Prior review text",
+        executionFeedback: feedback,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+
+      // Must start with explicit Original goal and Current follow-up sections
+      expect(planningText).toContain("Original goal:\nRoot original goal with CJK 中文 and Emoji 🚀");
+      expect(planningText).toContain("Current follow-up:\nCurrent follow-up with Japanese 日本語 and Emoji 🎯");
+      expect(planningText).toContain(workspacePath);
+      expect(planningText).toContain("Find the product contract in this workspace");
+
+      // All four prior feedback labels and exact texts must be present
+      expect(planningText).toContain("Previous plan:\nExact previous plan text: 方案详情");
+      expect(planningText).toContain("Previous independent plan check:\nExact previous plan check: 审查结论\nVERDICT: carry-out");
+      expect(planningText).toContain("Previous execution report:\nExact previous execution report: 执行修改");
+      expect(planningText).toContain("Previous independent execution audit:\nExact previous execution audit: 独立审计\nVERDICT: revise");
+      expect(planningText).toContain("cmd-prev-1\ncmd-prev-2");
+
+      // Check review command also carries full context
+      const reviewPromptText = state.commands[1]?.initialMessage.text ?? "";
+      expect(reviewPromptText).toContain("Original goal:\nRoot original goal with CJK 中文 and Emoji 🚀");
+      expect(reviewPromptText).toContain("Current follow-up:\nCurrent follow-up with Japanese 日本語 and Emoji 🎯");
+      expect(reviewPromptText).toContain("The planner's done-claim is not a pass.");
+    });
+
+    it("handles empty followUp by explicitly emitting (no additional instruction)", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-empty",
+        rootRequestId: "req-root-empty",
+        originalGoal: "Standalone original goal",
+        followUp: "",
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-empty-fu",
+        catalog,
+        continuation,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+      expect(planningText).toContain("Original goal:\nStandalone original goal");
+      expect(planningText).toContain("Current follow-up:\n(no additional instruction)");
+
+      const reviewPromptText = state.commands[1]?.initialMessage.text ?? "";
+      expect(reviewPromptText).toContain("Original goal:\nStandalone original goal");
+      expect(reviewPromptText).toContain("Current follow-up:\n(no additional instruction)");
+    });
+
+    it("refuses continuation when combined characters exceed 100,000 without returning role commands", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-toolong",
+        rootRequestId: "req-root-toolong",
+        originalGoal: "a".repeat(60_000),
+        followUp: "b".repeat(40_001),
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-overflow",
+        catalog,
+        continuation,
+      });
+
+      expect(state.roles).toHaveLength(0);
+      expect(state.commands).toHaveLength(0);
+      expect(state.stopReason).toContain("The combined character length of the original goal and follow-up exceeds 100,000 characters");
+      expect(state.stopReason).toContain("no turn was sent");
+    });
+
+    it("refuses continuation when assembled planning or review prompt exceeds 100,000 UTF-8 bytes without returning role commands", () => {
+      // Multibyte CJK characters: 3 bytes each in UTF-8
+      // 35,000 characters * 3 = 105,000 bytes > 100,000 bytes limit, while char count 35,000 <= 100,000
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-utf8",
+        rootRequestId: "req-root-utf8",
+        originalGoal: "字".repeat(34_000),
+        followUp: "词".repeat(1_000),
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-utf8-overflow",
+        catalog,
+        continuation,
+      });
+
+      expect(state.roles).toHaveLength(0);
+      expect(state.commands).toHaveLength(0);
+      expect(state.stopReason).toContain("assembled continuation prompt exceeded the 100,000-byte limit");
+      expect(state.stopReason).toContain("no turn was sent");
+    });
+
+    it("legacy absent descriptor prompt behavior remains completely unchanged", () => {
+      const state = coordinateGoal({
+        goal: "Legacy goal text without continuation",
+        workspacePath,
+        sendKey: "send-legacy",
+        catalog,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+      expect(planningText.startsWith("Legacy goal text without continuation\n")).toBe(true);
+      expect(planningText).not.toContain("Original goal:");
+      expect(planningText).not.toContain("Current follow-up:");
+    });
+  });
+
   it.each([
     ["VERDICT: verified", "unconfirmed", "verified"],
     ["VERDICT: carry-out", "checked", "unconfirmed"],

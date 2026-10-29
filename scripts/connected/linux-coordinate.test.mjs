@@ -373,6 +373,8 @@ test("continue carries the saved plan and review as execution feedback with a fr
     planText: "PLAN FROM THE SAVED RECORD",
     reviewText: "REVIEW FROM THE SAVED RECORD",
     result: "RESULT FROM THE SAVED RECORD",
+    executionText: "EXECUTION FROM THE SAVED RECORD",
+    auditText: "AUDIT FROM THE SAVED RECORD",
     verdict: "checked",
     stopReason: "The plan and its review were checked.",
     planningQuota: "unknown",
@@ -399,7 +401,8 @@ test("continue carries the saved plan and review as execution feedback with a fr
 
   const admission = storeOf(f).getActiveStatus();
   assert.equal(admission.jobId, jobId);
-  assert.equal(admission.admission.goal, "Revise the failing check");
+  assert.equal(admission.admission.goal, "First goal");
+  assert.deepEqual(admission.admission.continuation, { parentRequestId: "first-pass", rootRequestId: "first-pass", originalGoal: "First goal", followUp: "Revise the failing check" });
   assert.equal(admission.admission.workspacePath, f.workspace);
   assert.deepEqual(admission.admission.allowedInstances, ["codex", "claude"]);
   assert.notEqual(admission.requestId, "first-pass");
@@ -407,17 +410,84 @@ test("continue carries the saved plan and review as execution feedback with a fr
   assert.deepEqual(admission.admission.executionFeedback, {
     previousPlan: "PLAN FROM THE SAVED RECORD",
     previousPlanReview: "REVIEW FROM THE SAVED RECORD",
-    previousExecutionReport: null,
-    previousExecutionAudit: null,
+    previousExecutionReport: "EXECUTION FROM THE SAVED RECORD",
+    previousExecutionAudit: "AUDIT FROM THE SAVED RECORD",
     previousCommandIds: [],
   });
+  const engine = require(ENGINE_PATH);
+  const input = admission.admission;
+  const commands = [];
+  await engine.requestCoordination(engine.backgroundEngineInput({
+    requestId: admission.requestId, goal: input.goal, workspaceRoot: input.workspacePath,
+    readInstances: input.allowedInstances, readMaxTurns: input.maxTurns, backgroundConsent: true,
+    continuation: input.continuation, executionFeedback: input.executionFeedback,
+  }), { connected: true, sendAuthorized: true, stopReason: null,
+    providers: f.providers.map(p => ({ ...p, driver: p.instanceId === "claude" ? "claudeAgent" : "codex", enabled: true, installed: true, availability: "available", status: "ready" })) },
+  { launch: async command => { commands.push(command); return { text: commands.length === 1 ? "Bounded plan" : "VERDICT: stop", errorText: "", dispatched: true, turnsRemaining: 2 }; } });
+  assert.equal(commands.length, 2);
+  for (const text of ["Original goal:\nFirst goal", "Current follow-up:\nRevise the failing check", "PLAN FROM THE SAVED RECORD", "REVIEW FROM THE SAVED RECORD", "EXECUTION FROM THE SAVED RECORD", "AUDIT FROM THE SAVED RECORD"]) assert.ok(commands[0].initialMessage.text.includes(text), text);
   // The old request id is never spawned again.
   assert.equal(f.launches.length, 1);
 
   const missing = await invoke(f, ["continue", "--from", "no-such-record", "--goal", "Second goal", "--background"]);
   assert.equal(missing.code, 1);
-  assert.match(missing.stderr, /No saved coordinated-goal record has request id no-such-record/);
+  assert.match(missing.stderr, /missing or ambiguous/);
   assert.equal(f.launches.length, 1);
+});
+
+test("raw saved-target relations match the Python fixture contract without mutation", () => {
+  const { resolveSavedTargets } = require("./saved-targets.cjs");
+  const fixtures = JSON.parse(fs.readFileSync(new URL("./fixtures/saved-targets.json", import.meta.url), "utf8"));
+  for (const fixture of fixtures) {
+    const before = JSON.stringify(fixture.records);
+    const targets = resolveSavedTargets(fixture.records);
+    const actual = targets.entries.map(e => [e.record.requestId, e.relationStatus, e.rootRequestId, e.rootRequestId ? targets.head(e.rootRequestId) : null]);
+    assert.deepEqual(actual, fixture.expected, fixture.name);
+    assert.equal(JSON.stringify(fixture.records), before);
+  }
+});
+
+test("Continue refuses stale, ambiguous, invalid and other-folder selections before discovery or spawn", async t => {
+  const f = fixture(t, { discover: async () => { throw Error("must not discover"); } });
+  const record = { requestId: "root", goal: "Root 中文", workspacePath: f.workspace, verdict: "checked", stopReason: "checked", savedAt: "01", planText: "prior", reviewText: "review", result: null, planningHarness: null, reviewHarness: null, planningQuota: "unknown", reviewQuota: "unknown" };
+  fs.mkdirSync(f.dataDir, { recursive: true });
+  const file = path.join(f.dataDir, "coordination-records.json");
+  fs.writeFileSync(file, JSON.stringify([record, { ...record, requestId: "child", savedAt: "02", continuation: { parentRequestId: "root", rootRequestId: "root", originalGoal: record.goal, followUp: "Follow" } }]));
+  const stale = await invoke(f, ["continue", "--from", "root", "--background"]);
+  assert.match(stale.stderr, /newer result/);
+  const folder = await invoke(f, ["continue", "--from", "child", "--workspace", path.join(f.workspace, "other"), "--background"]);
+  assert.match(folder.stderr, /saved goal's folder/);
+  const tooLong = await invoke(f, ["continue", "--from", "child", "--goal", "x".repeat(100000), "--background"]);
+  assert.match(tooLong.stderr, /100,000/);
+  fs.writeFileSync(file, JSON.stringify([record, { requestId: "root" }]));
+  assert.equal((await invoke(f, ["result", "--request-id", "root"])).code, 1);
+  assert.equal((await invoke(f, ["result", "--request-id", ""])).code, 1);
+  assert.match((await invoke(f, ["continue", "--from", "root", "--background"])).stderr, /ambiguous/);
+  fs.writeFileSync(file, JSON.stringify([{ ...record, continuation: null }]));
+  assert.match((await invoke(f, ["continue", "--from", "root", "--background"])).stderr, /relationship/);
+  assert.equal(f.launches.length, 0);
+  assert.equal(f.snapshotCalls.length, 0);
+  assert.equal(fs.existsSync(jobsDirectory(f)), false);
+});
+
+test("empty Continue derives root goal and a final fresh-head check refuses a child appearing during discovery", async t => {
+  const f = fixture(t);
+  fs.mkdirSync(f.dataDir, { recursive: true });
+  const file = path.join(f.dataDir, "coordination-records.json");
+  const root = { requestId: "root", goal: "Original goal", workspacePath: f.workspace, verdict: "checked", stopReason: "checked", savedAt: "01", planText: "Plan", reviewText: "Review", result: null, planningHarness: null, reviewHarness: null, planningQuota: "unknown", reviewQuota: "unknown" };
+  fs.writeFileSync(file, JSON.stringify([root]));
+  await invoke(f, ["grant-access"]);
+  f.io.discover = async () => {
+    fs.writeFileSync(file, JSON.stringify([root, { ...root, requestId: "child", savedAt: "02", continuation: { parentRequestId: "root", rootRequestId: "root", originalGoal: root.goal, followUp: "" } }]));
+    return { ok: true, providers: f.providers };
+  };
+  assert.match((await invoke(f, ["continue", "--from", "root", "--background"])).stderr, /selected saved result changed/);
+  assert.equal(f.launches.length, 0);
+  f.io.discover = async () => ({ ok: true, providers: f.providers });
+  const admitted = await invoke(f, ["continue", "--from", "child", "--background"]);
+  assert.equal(admitted.code, 0, admitted.stderr);
+  assert.equal(storeOf(f).getActiveStatus().admission.goal, root.goal);
+  assert.deepEqual(storeOf(f).getActiveStatus().admission.continuation, { parentRequestId: "child", rootRequestId: "root", originalGoal: root.goal, followUp: "" });
 });
 
 test("a left job holding the admission slot blocks a new run until it is acknowledged", async (t) => {

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
 const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
@@ -330,6 +331,16 @@ function normalize(input) {
     // fatal to the rest of the saved record.
     planRevisionHistory = undefined;
   }
+  let continuation;
+  if (input.continuation !== undefined) {
+    if (isValidContinuationDescriptor(input.continuation)) {
+      continuation = normalizeContinuationDescriptor(input.continuation);
+    } else {
+      // Malformed existing optional metadata must not be discarded or cause
+      // record rejection; raw field preserved for future read-time relation validator.
+      continuation = input.continuation;
+    }
+  }
   return {
     requestId,
     workspacePath,
@@ -355,6 +366,7 @@ function normalize(input) {
     ...(roundEvents === undefined ? {} : { roundEvents }),
     ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
+    ...(continuation === undefined ? {} : { continuation }),
     savedAt: savedAtOf(input.savedAt),
   };
 }
@@ -375,6 +387,11 @@ function readRecords(directory) {
 }
 
 function saveRecord(directory, input, clock = () => new Date().toISOString()) {
+  if (input && input.continuation !== undefined) {
+    if (!isValidContinuationDescriptor(input.continuation)) {
+      throw new Error("The continuation descriptor is malformed.");
+    }
+  }
   const record = normalize(input);
   if (!record) {
     throw new Error("The plan could not be saved.");
@@ -390,4 +407,11 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
   return stamped;
 }
 
-module.exports = { readRecords, saveRecord };
+module.exports = {
+  normalizeRecord: normalize,
+  readRecords,
+  saveRecord,
+  isValidContinuationDescriptor,
+  normalizeContinuationDescriptor,
+  validatedContinuationOf,
+};

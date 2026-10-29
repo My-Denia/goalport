@@ -1561,4 +1561,104 @@ describe("one pre-write plan revision", () => {
     expect(transport.calls[6]?.initialMessage.text).toContain("Execution critique after the revised pass.");
     expect(transport.calls[6]?.initialMessage.text).toContain("Inspect the CURRENT workspace");
   });
+
+  describe("actual full continuation prompt bounds", () => {
+    const continuation = { parentRequestId: "parent", rootRequestId: "root", originalGoal: goal, followUp: "Inspect the result" };
+    it.each([false, true])("refuses a review after appending the actual planner output (scoped=%s)", async scoped => {
+      const catalog = catalogFromProviderSnapshots(providers);
+      const events: CoordinateSessionEvent[] = [];
+      const transport = recordingTransport([{ text: "文".repeat(34_000), errorText: "", dispatched: true, turnsRemaining: 3 }]);
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "full-bound", continuation },
+        { sendAuthorized: true, ...(scoped ? { allowedInstances: catalog.map(x => x.instanceId) } : {}), onEvent: e => events.push(e) }, transport);
+      expect(transport.calls).toHaveLength(1);
+      expect(state.commands).toHaveLength(1);
+      expect(state.planText).toBe("文".repeat(34_000));
+      expect(state.messageDispatched).toBe(true);
+      expect(state.stopReason).toMatch(/100,000-byte/);
+      expect(state.stopReason).not.toMatch(/no turn was sent/i);
+      expect(events.filter(e => e.kind === "started").map(e => e.role)).toEqual(scoped ? ["planning"] : []);
+      if (scoped) expect(state.authorizedTurnsLeft).toBe(3);
+    });
+    it("retains checked plan/review and counters when the evidence command itself is oversized", async () => {
+      const catalog = catalogFromProviderSnapshots(providersWithThird);
+      const events: CoordinateSessionEvent[] = [];
+      const plan = "x".repeat(55_000);
+      const review = `${"y".repeat(55_000)}\nVERDICT: carry-out`;
+      const transport = recordingTransport([
+        { text: plan, errorText: "", dispatched: true, turnsRemaining: 3, writeTurnsRemaining: 1 },
+        { text: review, errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 },
+      ]);
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "execution-bound", continuation,
+        writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 1 } },
+        { sendAuthorized: true, allowedInstances: catalog.map(x => x.instanceId), onEvent: e => events.push(e) }, transport);
+      expect(transport.calls).toHaveLength(2);
+      expect(state.planText).toBe(plan);
+      expect(state.reviewText).toBe(review);
+      expect(state.authorizedTurnsLeft).toBe(2);
+      expect(state.authorizedWriteTurnsLeft).toBe(1);
+      expect(state.messageDispatched).toBe(true);
+      expect(state.stopReason).toMatch(/execution was not sent/);
+      expect(events.filter(e => e.kind === "started").map(e => e.role)).toEqual(["planning", "review"]);
+    });
+    it("retains a failed dispatch when replacement construction refuses an oversized prompt", async () => {
+      const catalog = catalogFromProviderSnapshots(providersWithThird);
+      const changing = { ...continuation };
+      const launch = vi.fn(async () => {
+        changing.followUp = "文".repeat(34_000);
+        return { text: "partial planning fact", errorText: "usage limit reached", dispatched: true, turnsRemaining: 3 };
+      });
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "replacement-bound", continuation: changing },
+        { sendAuthorized: true, allowedInstances: catalog.map(x => x.instanceId) }, { launch });
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(state.messageDispatched).toBe(true);
+      expect(state.planText).toBe("partial planning fact");
+      expect(state.authorizedTurnsLeft).toBe(3);
+      expect(state.stopReason).toMatch(/100,000-byte/);
+    });
+  });
+
+  describe("Continuation descriptor in full session", () => {
+    const continuation = {
+      parentRequestId: "parent-req-001",
+      rootRequestId: "root-req-001",
+      originalGoal: "Root original goal for session",
+      followUp: "Follow-up coordination for session",
+    };
+
+    it("propagates continuation through initial planning and revision", async () => {
+      const results: CoordinateLaunchResult[] = [
+        { text: "Flawed plan.\n", errorText: "", dispatched: true, turnsRemaining: 5, writeTurnsRemaining: 2 },
+        { text: "Needs work.\nVERDICT: revise", errorText: "", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 2 },
+        { text: "Revised plan.", errorText: "", dispatched: true, turnsRemaining: 3, writeTurnsRemaining: 2 },
+        { text: "Accepted.\nVERDICT: carry-out", errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 2 },
+        { text: "Executed.", errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 },
+        { text: "Verified.\nVERDICT: verified", errorText: "", dispatched: true, turnsRemaining: 1, writeTurnsRemaining: 1 },
+      ];
+      const transport = recordingTransport(results);
+      const view = await requestCoordination(
+        {
+          goal: continuation.originalGoal,
+          workspacePath,
+          sendKey: "session-cont-send",
+          continuation,
+          allowedInstances: ["codex", "claude", "grok"],
+          writeAuthorization: { instances: ["codex", "claude", "grok"], workspaceRoot: workspacePath, remaining: 2 },
+          beforePlanRevision: async () => true,
+        },
+        { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+        transport,
+      );
+
+      expect(transport.calls).toHaveLength(6);
+      // Initial planning turn has Original goal and Current follow-up
+      expect(transport.calls[0]?.initialMessage.text).toContain("Original goal:\nRoot original goal for session");
+      expect(transport.calls[0]?.initialMessage.text).toContain("Current follow-up:\nFollow-up coordination for session");
+
+      // Revised planning turn also carries Original goal and Current follow-up
+      expect(transport.calls[2]?.initialMessage.text).toContain("Original goal:\nRoot original goal for session");
+      expect(transport.calls[2]?.initialMessage.text).toContain("Current follow-up:\nFollow-up coordination for session");
+
+      expect(view.verdict).toBe("verified");
+    });
+  });
 });

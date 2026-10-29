@@ -1,0 +1,33 @@
+[
+  {"name":"two roots and a child; same title never groups", "records":[
+    {"requestId":"a","goal":"Same goal","workspacePath":"/work/a","savedAt":"01"},
+    {"requestId":"b","goal":"Same goal","workspacePath":"/work/b","savedAt":"04"},
+    {"requestId":"a2","goal":"Same goal","workspacePath":"/work/a/./","savedAt":"02","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Same goal","followUp":"中文 follow-up"}},
+    {"requestId":"legacy","goal":"Same goal","workspacePath":"/work/a","savedAt":"03"}
+  ],"expected":[["a","legacy-root","a","a2"],["b","legacy-root","b","b"],["a2","valid","a","a2"],["legacy","legacy-root","legacy","legacy"]]},
+  {"name":"present null and extra are invalid not legacy", "records":[
+    {"requestId":"a","goal":"Goal","workspacePath":"/work"},
+    {"requestId":"null","goal":"Goal","workspacePath":"/work","continuation":null},
+    {"requestId":"extra","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Goal","followUp":"","extra":true}}
+  ],"expected":[["a","legacy-root","a","a"],["null","invalid",null,null],["extra","invalid",null,null]]},
+  {"name":"duplicate raw IDs even malformed second record", "records":[
+    {"requestId":"a","goal":"Goal","workspacePath":"/work"}, {"requestId":"a"},
+    {"requestId":"child","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Goal","followUp":""}}
+  ],"expected":[["a","ambiguous",null,null],["a","ambiguous",null,null],["child","invalid",null,null]]},
+  {"name":"cycle, missing, cross workspace and wrong root", "records":[
+    {"requestId":"a","goal":"Goal","workspacePath":"/work"},
+    {"requestId":"b","goal":"Goal","workspacePath":"/work"},
+    {"requestId":"b2","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"b","rootRequestId":"b","originalGoal":"Goal","followUp":""}},
+    {"requestId":"wrong","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"b2","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"cross","goal":"Goal","workspacePath":"/elsewhere","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"missing","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"gone","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"cycle1","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"cycle2","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"cycle2","goal":"Goal","workspacePath":"/work","continuation":{"parentRequestId":"cycle1","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"changed","goal":"Changed goal","workspacePath":"/work","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Goal","followUp":""}}
+  ],"expected":[["a","legacy-root","a","a"],["b","legacy-root","b",null],["b2","valid","b",null],["wrong","invalid",null,null],["cross","invalid",null,null],["missing","invalid",null,null],["cycle1","invalid",null,null],["cycle2","invalid",null,null],["changed","invalid",null,null]]},
+  {"name":"head tie refuses, never array-order guesses", "records":[
+    {"requestId":"a","goal":"Goal","workspacePath":"C:\\Work\\x","savedAt":"01"},
+    {"requestId":"a2","goal":"Goal","workspacePath":"c:/work/x/.","savedAt":"02","continuation":{"parentRequestId":"a","rootRequestId":"a","originalGoal":"Goal","followUp":""}},
+    {"requestId":"a3","goal":"Goal","workspacePath":"C:\\Work\\x","savedAt":"02","continuation":{"parentRequestId":"a2","rootRequestId":"a","originalGoal":"Goal","followUp":""}}
+  ],"expected":[["a","legacy-root","a",null],["a2","valid","a",null],["a3","valid","a",null]]}
+]

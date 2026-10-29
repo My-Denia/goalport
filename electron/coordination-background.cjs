@@ -50,7 +50,8 @@ function projection(status, live = false) {
     counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
-    workerPid: status.startupClaim?.pid ?? null };
+    workerPid: status.startupClaim?.pid ?? null,
+    ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}) };
 }
 function createBackgroundHost(options) {
   // The host admits and compares folders on ONE platform identity (the host's
@@ -172,6 +173,7 @@ function createBackgroundHost(options) {
           avoidInstances: input.avoidInstances,
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
+          ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
         };
         try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {

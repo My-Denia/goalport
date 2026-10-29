@@ -37,3 +37,7 @@ export type {
   BackgroundJobStartInput,
   BackgroundJobWriteScope,
 } from "./backgroundJob";
+export type {
+  SavedTargetContinuation,
+  SavedTargetRelationStatus,
+} from "./continuation";

@@ -599,11 +599,13 @@ test("legacy admissions preserve their exact canonical shape and remain readable
   const legacy = normalizeAdmissionInput(admission());
   assert.deepEqual(Object.keys(legacy), ["requestId", "goal", "workspacePath", "priorPlan", "priorReview", "avoidInstances", "allowedInstances", "maxTurns", "writeAuthorization", "backgroundConsent"]);
   assert.equal(Object.hasOwn(legacy, "executionFeedback"), false);
+  assert.equal(Object.hasOwn(legacy, "continuation"), false);
   const admitted = start(store);
   const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
   const status = reopened.getStatus(admitted.jobId);
   assert.deepEqual(status.admission, legacy);
   assert.equal(Object.hasOwn(status.admission, "executionFeedback"), false);
+  assert.equal(Object.hasOwn(status.admission, "continuation"), false);
   assert.equal(reopened.claimWorker(admitted.jobId).status.jobId, admitted.jobId);
   assert.equal(reopened.startAdmission(admission()).jobId, admitted.jobId);
 });
@@ -633,6 +635,71 @@ test("malformed feedback refuses admission using the existing invalid-admission 
     { ...executionFeedback, previousCommandIds: null },
   ];
   for (const value of invalid) assert.throws(() => store.startAdmission(admission({ executionFeedback: value })), { code: "invalid-admission" });
+});
+
+const continuation = {
+  parentRequestId: "parent-req-001",
+  rootRequestId: "root-req-001",
+  originalGoal: "Build a cross-platform coordination service.",
+  followUp: "Add Windows and Linux support.",
+};
+
+test("continuation descriptor is closed, durable, and round-trips through reopened status", (t) => {
+  const { profile, store } = fixture(t);
+  const admitted = start(store, { continuation });
+  const persisted = JSON.parse(fs.readFileSync(pathFor(profile, admitted.jobId, "admission.json"), "utf8"));
+  assert.deepEqual(persisted.input.continuation, continuation);
+  const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
+  assert.deepEqual(reopened.getStatus(admitted.jobId).admission.continuation, continuation);
+});
+
+test("continuation admission preserves exact canonical keys and separates new keys from legacy", (t) => {
+  const { profile, store } = fixture(t);
+  const normalized = normalizeAdmissionInput(admission({ continuation }));
+  assert.deepEqual(Object.keys(normalized), [
+    "requestId", "goal", "workspacePath", "priorPlan", "priorReview",
+    "avoidInstances", "allowedInstances", "maxTurns", "writeAuthorization",
+    "backgroundConsent", "continuation",
+  ]);
+  assert.deepEqual(Object.keys(normalized.continuation), [
+    "parentRequestId", "rootRequestId", "originalGoal", "followUp",
+  ]);
+  const admitted = start(store, { continuation });
+  const reopened = createCoordinationJobStore(profile, { bootstrapReady: true });
+  const status = reopened.getStatus(admitted.jobId);
+  assert.deepEqual(status.admission, normalized);
+  assert.equal(reopened.claimWorker(admitted.jobId).status.jobId, admitted.jobId);
+});
+
+test("continuation omission stays absent; null/extra fields refuse, equal duplicate is idempotent and changed descriptor conflicts", (t) => {
+  const { store } = fixture(t);
+  assert.throws(() => normalizeAdmissionInput(admission({ continuation: null })), { code: "invalid-admission" });
+  assert.throws(() => normalizeAdmissionInput(admission({ continuation: { ...continuation, ignored: true } })), { code: "invalid-admission" });
+  assert.deepEqual(normalizeAdmissionInput(admission()), normalizeAdmissionInput(admission({ continuation: undefined })));
+  const first = start(store, { continuation });
+  const duplicate = start(store, { continuation: { ...continuation } });
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.created, false);
+  assert.equal(duplicate.jobId, first.jobId);
+  const conflict = start(store, { continuation: { ...continuation, followUp: "different follow-up" } });
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.reason, "request-conflict");
+});
+
+test("malformed continuation descriptor refuses admission before launch with invalid-admission", (t) => {
+  const { store } = fixture(t);
+  const invalid = [
+    "not an object",
+    { ...continuation, parentRequestId: "" },
+    { ...continuation, rootRequestId: "invalid id with spaces" },
+    { ...continuation, originalGoal: "" },
+    { ...continuation, originalGoal: 123 },
+    { ...continuation, followUp: 456 },
+    { ...continuation, originalGoal: "a".repeat(50_001), followUp: "b".repeat(50_000) },
+  ];
+  for (const value of invalid) {
+    assert.throws(() => store.startAdmission(admission({ continuation: value })), { code: "invalid-admission" });
+  }
 });
 
 test("Linux endpoint overflow uses a deterministic same-directory hashed absolute path", { skip: process.platform !== "linux" }, () => {

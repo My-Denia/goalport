@@ -43,7 +43,13 @@ const { createCoreConnection } = require("../../electron/core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy, resolveUnixSocket } = require("../../electron/launch-config.cjs");
 const { harnessLaunchConfigured } = require("../../electron/harness-runtime.cjs");
 const { authorizeMembershipError } = require("../../electron/coordinate-service.cjs");
-const { readRecords } = require("../../electron/coordination-record.cjs");
+const { readRecords, normalizeRecord } = require("../../electron/coordination-record.cjs");
+const { resolveSavedTargets, workspaceKey } = require("./saved-targets.cjs");
+
+function savedTargets(directory) {
+  try { return resolveSavedTargets(JSON.parse(readFileSync(path.join(directory, "coordination-records.json"), "utf8"))); }
+  catch { return resolveSavedTargets([]); }
+}
 const { discoverCliProviders } = require("../../electron/cli-coordinate.cjs");
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -555,6 +561,13 @@ async function startAdmission(parsed, io, context, selection) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "Core could not confirm this profile, so nothing was admitted.");
   }
 
+  if (selection.continuation) {
+    const fresh = savedTargets(context.dataDir);
+    const selected = fresh.selected(selection.continuation.parentRequestId);
+    if (!selected?.rootRequestId || selected.rootRequestId !== selection.continuation.rootRequestId || fresh.head(selected.rootRequestId) !== selection.continuation.parentRequestId || fresh.unique(selected.rootRequestId)?.goal?.trim() !== goal || workspaceKey(selected.record.workspacePath) !== workspaceKey(selection.workspace)) {
+      return refuse(io, "The selected saved result changed. Open its latest result and choose Continue again; nothing was admitted.");
+    }
+  }
   const host = createHost({ ...context, ...prepared, snapshot: prepared.snapshot }, io);
   let projection;
   try {
@@ -567,6 +580,7 @@ async function startAdmission(parsed, io, context, selection) {
       backgroundConsent: true,
       ...(selectedWrite.write ? { write: selectedWrite.write } : {}),
       ...(selection.executionFeedback ? { executionFeedback: selection.executionFeedback } : {}),
+      ...(selection.continuation ? { continuation: selection.continuation } : {}),
     });
   } catch (error) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "GoalPort could not confirm this background start.");
@@ -627,12 +641,24 @@ function requestWasLeft(dataDir, requestId) {
 async function commandContinue(parsed, io, context) {
   const from = typeof parsed.values.from === "string" ? parsed.values.from.trim() : "";
   if (!from) return refuse(io, "continue needs --from with the request id of a saved record, so nothing was admitted.");
-  const record = readRecords(context.dataDir).find((item) => item.requestId === from);
-  if (!record) return refuse(io, `No saved coordinated-goal record has request id ${from} on this profile, so nothing was admitted.`);
+  const targets = savedTargets(context.dataDir);
+  const selected = targets.selected(from);
+  if (!selected) return refuse(io, "That saved result is missing or ambiguous, so nothing was admitted.");
+  if (!selected.rootRequestId) return refuse(io, `${selected.relationUnavailableReason} Nothing was admitted.`);
+  const head = targets.head(selected.rootRequestId);
+  if (!head) return refuse(io, "The latest result for this goal cannot be identified, so nothing was admitted.");
+  if (head !== from) return refuse(io, "A newer result is available. Open the latest result and choose Continue again; nothing was admitted.");
+  const record = normalizeRecord(selected.record);
+  if (!record) return refuse(io, "That saved result could not be read, so nothing was admitted.");
+  const root = targets.unique(selected.rootRequestId);
+  const followUp = typeof parsed.values.goal === "string" ? parsed.values.goal.trim() : "";
+  const originalGoal = root.goal.trim();
+  if (originalGoal.length + followUp.length > 100_000) return refuse(io, "The original goal and follow-up exceed 100,000 characters, so nothing was admitted.");
+  if (parsed.values.workspace !== undefined && workspaceKey(parsed.values.workspace) !== workspaceKey(record.workspacePath)) return refuse(io, "Continue must use the saved goal's folder, so nothing was admitted.");
   if (requestWasLeft(context.dataDir, from)) {
     return refuse(io, "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
   }
-  const workspace = typeof parsed.values.workspace === "string" ? parsed.values.workspace : record.workspacePath;
+  const workspace = record.workspacePath;
   // The saved texts travel as execution feedback. They are references, never
   // commands to relaunch: previousCommandIds stays empty, and the new admission
   // gets a fresh request id so the old job is never spawned a second time.
@@ -644,7 +670,8 @@ async function commandContinue(parsed, io, context) {
     previousCommandIds: [],
   };
   const code = await startAdmission(parsed, io, context, {
-    goal: parsed.values.goal,
+    goal: originalGoal,
+    continuation: { parentRequestId: from, rootRequestId: root.requestId, originalGoal, followUp },
     workspace,
     instancesText: parsed.values.instances,
     executionFeedback,
@@ -726,10 +753,13 @@ async function commandRelease(parsed, io, context) {
 function commandResult(parsed, io, context) {
   const records = readRecords(context.dataDir);
   const requestId = typeof parsed.values["request-id"] === "string" ? parsed.values["request-id"].trim() : "";
-  const record = requestId ? records.find((item) => item.requestId === requestId) : records[0];
+  if (parsed.values["request-id"] !== undefined && !/^[A-Za-z0-9._-]{1,256}$/.test(requestId)) return refuse(io, "Choose an exact saved result before opening it.");
+  const targets = savedTargets(context.dataDir);
+  const selected = requestId ? targets.selected(requestId) : targets.selected(records[0]?.requestId);
+  const record = selected ? normalizeRecord(selected.record) : null;
   if (!record) {
     return refuse(io, requestId
-      ? `No saved coordinated-goal record has request id ${requestId} on this profile.`
+      ? `The saved result ${requestId} is missing, ambiguous, or unreadable on this profile.`
       : "No coordinated-goal record was saved on this profile.");
   }
   write(io, `request: ${record.requestId}`);

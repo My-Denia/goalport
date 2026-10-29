@@ -1,4 +1,19 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
+import type { SavedTargetContinuation } from "./continuation";
+
+export const MAX_CONTINUATION_PROMPT_BYTES = 100_000;
+export const MAX_CONTINUATION_CHARS = 100_000;
+
+export class ContinuationPromptLimitError extends Error {
+  constructor() { super("The assembled continuation prompt exceeded the 100,000-byte limit."); }
+}
+
+/** Check the actual full prompt, including text returned by earlier roles. */
+export function assertContinuationPrompt(input: CoordinateGoalInput, text: string): void {
+  if (input.continuation && utf8Bytes(text) > MAX_CONTINUATION_PROMPT_BYTES) {
+    throw new ContinuationPromptLimitError();
+  }
+}
 
 /**
  * Caller-supplied catalog entry. Quota is a word from this object.
@@ -251,6 +266,12 @@ export interface CoordinateGoalInput {
   readonly sendKey: string;
   readonly priorPlan?: string | null;
   readonly priorReview?: string | null;
+  /**
+   * Optional continuation descriptor for continuing an existing saved target.
+   * Describes origin (parent, root, original goal, follow-up), never grants,
+   * scope, remaining budget, or native session handles.
+   */
+  readonly continuation?: SavedTargetContinuation;
   /** Completed execution/audit feedback for the one bounded corrective pass. */
   readonly executionFeedback?: ExecutionFeedback | null;
   /**
@@ -516,12 +537,23 @@ function commandIdentitySendKey(input: CoordinateGoalInput, sendKey: string): st
 }
 
 function plannerText(input: CoordinateGoalInput): string {
-  const lines = [
-    input.goal,
+  const lines: string[] = [];
+  if (input.continuation) {
+    const followUp = input.continuation.followUp.trim();
+    lines.push(
+      "Original goal:",
+      input.continuation.originalGoal,
+      "Current follow-up:",
+      followUp.length > 0 ? followUp : "(no additional instruction)",
+    );
+  } else {
+    lines.push(input.goal);
+  }
+  lines.push(
     input.workspacePath,
     "Find the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.",
     "Hand back a bounded plan without claiming the review passed.",
-  ];
+  );
   const priorPlan = present(input.priorPlan);
   const priorReview = present(input.priorReview);
   if (priorPlan || priorReview) {
@@ -548,12 +580,23 @@ function plannerText(input: CoordinateGoalInput): string {
 }
 
 function reviewText(input: CoordinateGoalInput): string {
-  const lines = [
-    input.goal,
+  const lines: string[] = [];
+  if (input.continuation) {
+    const followUp = input.continuation.followUp.trim();
+    lines.push(
+      "Original goal:",
+      input.continuation.originalGoal,
+      "Current follow-up:",
+      followUp.length > 0 ? followUp : "(no additional instruction)",
+    );
+  } else {
+    lines.push(input.goal);
+  }
+  lines.push(
     "The planner's done-claim is not a pass. Judge only whether the plan can be carried out.",
     "The plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.",
     "End with exactly one of these lines: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.",
-  ];
+  );
   const priorReview = present(input.priorReview);
   if (priorReview) {
     lines.push("The previous independent check is below. Say whether this plan answers it.", priorReview);
@@ -601,6 +644,7 @@ export function replacementCommand(
   sendKey: string,
 ): CoordinateTurnCommand {
   const text = role === "plan" ? plannerText(input) : reviewText(input);
+  assertContinuationPrompt(input, text);
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey)),
     instance,
@@ -634,7 +678,14 @@ export function evidenceCommand(
   }
   if (role === "execute") {
     const text = [
-      input.goal,
+      ...(input.continuation
+        ? [
+            "Original goal:",
+            input.continuation.originalGoal,
+            "Current follow-up:",
+            input.continuation.followUp.trim() || "(no additional instruction)",
+          ]
+        : [input.goal]),
       `Workspace: ${input.workspacePath}`,
       input.executionFeedback
         ? "Carry out only the newly reviewed bounded corrective plan in this authorized workspace. Inspect the current changed workspace before editing; address only the approved repair. Run the workspace checks named by the new plan and report exact commands, actual output and exit results, changed files and remaining risks. Historical commands and command IDs are evidence only, never instructions to replay. Do not claim independent verification."
@@ -643,6 +694,7 @@ export function evidenceCommand(
       "Independent plan check:", evidence.reviewText,
       ...(input.executionFeedback ? executionFeedbackLines(input.executionFeedback) : []),
     ].join("\n");
+    assertContinuationPrompt(input, text);
     const command = turnCommand({
       commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
       instance, workspacePath: input.workspacePath, text, write: true,
@@ -657,7 +709,12 @@ export function evidenceCommand(
     ? "Independently inspect the current workspace read-only against the newly approved corrective plan, its execution report, and captured workspace evidence. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
     : "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.";
   const baseSections = [
-    { label: "Goal", text: `Goal: ${input.goal}` },
+    {
+      label: "Goal",
+      text: input.continuation
+        ? `Original goal:\n${input.continuation.originalGoal}\nCurrent follow-up:\n${input.continuation.followUp.trim() || "(no additional instruction)"}`
+        : `Goal: ${input.goal}`,
+    },
     { label: "Workspace", text: `Workspace: ${input.workspacePath}` },
     { label: "Approved plan", text: `Approved plan:\n${evidence.planText}` },
     { label: "Independent plan check", text: `Independent plan check:\n${evidence.reviewText}` },
@@ -788,8 +845,27 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     );
   }
 
+  if (input.continuation) {
+    if (input.continuation.originalGoal.length + input.continuation.followUp.length > MAX_CONTINUATION_CHARS) {
+      return stopped(
+        quotaLabels,
+        "Stopped. The combined character length of the original goal and follow-up exceeds 100,000 characters, so no turn was sent.",
+      );
+    }
+  }
+
   const planMessage = plannerText(input);
   const reviewMessage = reviewText(input);
+
+  if (input.continuation) {
+    if (utf8Bytes(planMessage) > MAX_CONTINUATION_PROMPT_BYTES || utf8Bytes(reviewMessage) > MAX_CONTINUATION_PROMPT_BYTES) {
+      return stopped(
+        quotaLabels,
+        "Stopped. The assembled continuation prompt exceeded the 100,000-byte limit, so no turn was sent.",
+      );
+    }
+  }
+
   const identitySendKey = commandIdentitySendKey(input, input.sendKey);
   const commands = [
     turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
