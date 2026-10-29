@@ -266,9 +266,15 @@ Honesty rules the client keeps:
 
 New explicit Codex→Pi, background, four-read admissions with a recorded Pi
 capacity and no file-change authorization can keep the original worker and RAM
-scope after a saved **Plan checked** result. The current work row says **Ready**,
-not that a model is running. Closing/returning or reading status sends no model
-turn and never extends the fixed 15-minute idle window. The saved-result composer
+scope after a saved **Plan checked** result. Saved content appears first; the
+current work row says **Checking** until a matching host/worker status is received.
+Only that acknowledgement can show **Ready**, not a model running or remaining
+access recovered from disk. Closing/returning or reading status sends no model
+turn and never extends the worker's original 15-minute idle deadline. A previously
+received Ready observation survives a refresh only for the same job, request,
+root and selected view, with all passive base/slot observations unchanged and
+nonnegative. Pending work, revocation, a gone/unknown owner, changed slot, local
+action, status failure, navigation or that original expiry clears it immediately. The saved-result composer
 is the single Continue action: empty Enter sends nothing, explicit Continue may
 have no additional instruction. Other saved goals remain readable, not spendable.
 
@@ -289,10 +295,26 @@ worker budget, 12-second control timeout and 15-second CLI/HTTP operation budget
 Unknown delivery keeps the draft and original child ID. Reconcile that ID through
 status; do not invent a retry ID or replay a turn.
 
-Stop wakes the idle worker immediately. New goal uses an idle-only guarded revoke,
-then waits up to five seconds for the matching terminal job, no pending command
-and released slot before opening an empty safe draft. If active work wins that
-race, New goal does not stop it and keeps the current view. The stopped/expired
+Stop wakes the idle worker immediately. New goal uses the existing idle-only
+guarded revoke, then waits within one fixed five-second transaction for strict
+status of the captured job/request/root: terminal stopped/completed, matching
+outcome, inactive, no pending command or contradictory live state. It also reads
+a fresh passive global slot: only empty, with no unconfirmed/leftover-held
+negative observation, permits the local safe draft. A foreign occupied slot
+blocks; a stale pointer to this same job is still ending, not free. Unknown slot
+data is not empty. If active work wins the guarded revoke race, New goal does
+not stop it and keeps the current view.
+
+An invalidated status helper may need its original three-second budget to drain;
+a fresh read can need another three seconds. Both must fit in the same five-second
+UI attempt, never an extended deadline or a second simultaneous helper. Failure
+keeps the view and draft and explicitly offers another New goal click to check
+again. That explicit retry first confirms the captured identity, without revoking
+an already ended worker again. A prior revoke receipt alone is not settlement.
+New goal never sends a model turn or clears a hold. An explicit idle Stop keeps
+its captured job/request/root for the same later confirmation: its receipt and
+passive done label do not let the next New goal skip strict status and the fresh
+slot check. The stopped/expired
 unused allowance is separate from its checked result; no child report is invented.
 A later intentional Continue is labeled as a **new allowance**, not recovered
 remaining access. Inspecting another goal never ends the current allowance.
@@ -327,6 +349,32 @@ unavailable instead of falling back to another goal or a new Start. Core campaig
 addresses remain separate; explicitly opening a Core goal leaves the coordinated
 fragment.
 
+Passive `coordination_latest`, `coordination_list` and exact `coordination_detail`
+read only the local saved projection: record, roots/history, remembered labels,
+descriptive `currentBase`, `savedAllowanceView` and `globalSlot`. They do not run
+Node, Core, control, discovery or models. Saved labels cannot supply a live ACK,
+counters, acceptance confirmation or permission.
+
+Separate `coordination_status` requires an exact UUID-v4 **job** ID (not a saved
+request ID), with no latest/current fallback or caller-supplied profile/executable.
+It returns either `source: host-status` with a validated matching host job or
+`source: unavailable`, `job: null` and a fixed plain reason. Existing Node status
+and its 800 ms RAM acknowledgement remain unchanged. Only active current-mode
+work, a matching unresolved action or explicit New goal confirmation needs this
+read; settled history and blank New goal do not fan out status calls.
+
+The HTTP leader owns the childless status process and two short-lived binary pipe
+readers. It retains at most 4 MiB stdout and 16 KiB stderr, concurrently draining
+both; overflow fails the whole read. Execution cuts off at 2.5 seconds with the
+remaining 0.5 seconds reserved for direct-helper kill/reap/pipe/thread cleanup.
+Exactly one UTF-8 job-projection line is accepted. Same-job waiters share the
+original three-second deadline; a different job while busy is unavailable.
+Mutations invalidate pending display results before effects, then let that helper
+drain. There is no TTL/last-good status cache or replacement before confirmed
+cleanup. If OS cleanup is still unconfirmed, owned references remain on the entry
+until a later explicit read can confirm it; there is no autonomous reaper. These
+are bounded ordinary-child checks, not a hard real-time OS guarantee.
+
 The workbench keeps the saved result visible and presents a compact follow-up
 composer with one **Continue** action. A non-empty follow-up can be sent with
 Enter; an empty follow-up continues the existing goal only when Continue is
@@ -360,7 +408,22 @@ still apply when Continue is clicked. Unsent follow-up text and dirty choices
 survive A→B→A navigation in the resident page and are shared by earlier results
 within A. The URL preserves selection across reload; unsent text is not promised
 across a browser/process restart. Refused, lost or unconfirmed admission replies
-retain text and choices; HTTP success alone does not count as admission.
+retain text and choices; HTTP success alone does not count as admission. New
+Linux Start/new-allowance actions hold one caller request ID from the first
+explicit send and forward it unchanged through HTTP to the existing CLI
+`--request-id`; a live child retains its separate `liveRequestId`. An uncertain
+send locks its original text/ID rather than creating another send.
+
+A passive unique `submissionCandidate` is only an exact-job lookup key. Resolving
+an uncertain admission requires strict matching host status for the submitted ID,
+canonical absolute folder, goal/root and coherent active/live or terminal facts.
+Same text, a foreign ID, aliases, pending/unconfirmed status, ambiguous/missing
+candidates or timeouts keep the uncertainty. Live-child association requires the
+exact accepted child ID or matching closed child ACK, never its parent's ID or a
+disk observation. Old clients/reloaded pages without a recoverable submitted ID
+may view matching existing work read-only, but cannot prove that THIS lost Start
+was admitted by text alone. They keep the not-confirmed sentence and draft; no
+automatic resend, new ID, generic latest-status adoption or new intent store.
 
 Current work is separate from the selected saved result. While B is running,
 revoked-but-current, unknown or held, A remains readable and labeled Saved result;

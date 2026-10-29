@@ -157,6 +157,28 @@ function jobIdOf(out) {
   return match[1];
 }
 
+test("existing caller admission ID is preserved; exact terminal JSON status is one projection line without discovery or spawn", async t => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const admitted = await invoke(f, runArgs(f, { requestId: "caller-stable-results-first" }));
+  assert.equal(admitted.code, 0, admitted.stderr);
+  const id = jobIdOf(admitted), store = storeOf(f);
+  assert.equal(store.getStatus(id).requestId, "caller-stable-results-first");
+  const owner = store.claimWorker(id).ownerToken;
+  store.recordOutcome(id, { status: "stopped" }, owner); store.releaseAdmission(id, owner);
+  const launched = f.launches.length;
+  f.io.discover = async () => { throw Error("status must not discover"); };
+  f.io.spawn = () => { throw Error("status must not spawn"); };
+  const status = await invoke(f, ["status", "--job", id, "--json-status"]);
+  assert.equal(status.code, 0, status.stderr);
+  const lines = status.stdout.split(/\r?\n/).filter(Boolean);
+  assert.equal(lines.length, 1); assert.ok(lines[0].startsWith("job projection: "));
+  const projected = JSON.parse(lines[0].slice("job projection: ".length));
+  assert.equal(projected.jobId, id); assert.equal(projected.requestId, "caller-stable-results-first");
+  assert.equal(projected.active, false); assert.equal(projected.pendingCommand, null);
+  assert.equal(projected.outcome.status, "stopped"); assert.equal(f.launches.length, launched);
+});
+
 test("run refuses without --background and without durable consent, each with its own sentence", async (t) => {
   const f = fixture(t);
 

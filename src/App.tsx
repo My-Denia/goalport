@@ -1,5 +1,6 @@
 import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import { matchingAcknowledgedLiveReady, parseLiveRead, liveAcceptedRequest } from "./coordination/liveRead";
+import { acknowledgedCurrentJob, parseAllowanceStatus, matchesBase, readyBase, sameReadyBase, confirmedAssociation, confirmedIdleEnd, validJobId } from "./coordination/allowanceStatus";
 import {
   BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE,
   backgroundStartOutcome,
@@ -56,7 +57,7 @@ import { GoalDialog } from "./ui/GoalDialog";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { useCoreSnapshot } from "./lib/useCoreSnapshot";
 import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute, coordinatedRouteFromLocation, setCoordinatedRoute, type CoordinatedRoute } from "./lib/goalRoute";
-import { admittedIdentity, continuationUnavailable, type SavedTargetPayload, type SavedTargetResult, type SavedTargetSummary, type CoordinatedCurrentJob } from "./coordination/savedTargetView";
+import { admittedIdentity, continuationUnavailable, type SavedTargetPayload, type SavedTargetResult, type SavedTargetSummary, type CoordinatedCurrentJob, type HostCurrentJob, type SavedCurrentBase, type SavedAllowanceView } from "./coordination/savedTargetView";
 import { useConversationDrafts } from "./lib/useConversationDrafts";
 import {
   canExplicitlyRetry,
@@ -445,6 +446,7 @@ function App() {
   const [linuxBaseHarnesses, setLinuxSignedIn] = useState<string[]>([]);
   const linuxRouteAwareDiscovery = useRef(false);
   const [linuxPiSnapshot, setLinuxPiSnapshot] = useState<ProviderSnapshot | null>(null);
+  const linuxWorkspaceExpansion = useRef<{ input: string; workspace: string } | null>(null);
   const [linuxPiSelection, setLinuxPiSelection] = useState<PiCapacitySelection | undefined>();
   const [linuxDiscoverChecked, setLinuxDiscoverChecked] = useState(false);
   const [linuxConsentMissing, setLinuxConsentMissing] = useState(false);
@@ -489,7 +491,23 @@ function App() {
   const [savedRoots, setSavedRoots] = useState<SavedTargetSummary[]>([]);
   const [savedHistory, setSavedHistory] = useState<NonNullable<SavedTargetPayload["history"]>>([]);
   const [currentWork, setCurrentWork] = useState<CoordinatedCurrentJob | null>(null);
-  const [allowanceJob, setAllowanceJob] = useState<BackgroundStatus | null>(null);
+  const [hostCurrent, setHostCurrent] = useState<HostCurrentJob | null>(null);
+  const [savedAllowanceView, setSavedAllowanceView] = useState<SavedAllowanceView | null>(null);
+  const hostObservation = useRef<{ job: HostCurrentJob; base: SavedCurrentBase; view: string | null } | null>(null);
+  const admissionIntent = useRef<{ requestId: string; goal: string; workspace: string; root: string | null; key: string; text: string; view: CoordinatedRoute | null; unknown: boolean } | null>(null);
+  const pendingIdleClose = useRef<{ jobId: string; requestId: string; root: string; revokeRequested: boolean; revokeAcked: boolean } | null>(null);
+  function clearHostObservation() {
+    hostObservation.current = null;
+    setHostCurrent(null);
+    setCurrentWork(current => current?.liveRead ? { ...current, liveRead: null, line: "Checking the open allowance. Your saved result is kept." } : current);
+  }
+  useEffect(() => {
+    if (linuxActionBusy) { clearHostObservation(); return; }
+    const expiresAt = parseLiveRead(hostCurrent?.liveRead)?.expiresAt;
+    if (!expiresAt) return;
+    const timer = window.setTimeout(clearHostObservation, Math.max(0, Date.parse(expiresAt) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [hostCurrent, linuxActionBusy]);
   const liveIntent = useRef<{ jobId: string; from: string; requestId: string; followUp: string; text: string; key: string; root: string; unknown: boolean } | null>(null);
   const [desktopFollowUp, setDesktopFollowUp] = useState("");
   const desktopNewAllowanceIntent = useRef<{ input: BackgroundJobStartInput; from: string; text: string; unknown: boolean } | null>(null);
@@ -510,7 +528,7 @@ function App() {
     : [...new Set([...linuxBaseHarnesses, ...(piAvailable && linuxLegacyPi ? ["pi"] : [])])];
   const linuxPiProblem = linuxPiSelection && (!piAvailable || (!piOwnGoal && !samePiPair(linuxPiSelection, linuxPiSnapshot?.piCapacity?.offer))) ? "This goal\u0027s requested Pi route is unavailable; its choice is kept." : null;
   const linuxHarnessSentence = linuxHarnessProblem || linuxPiProblem || (linuxPiSelection && !linuxSignedIn.includes("codex") ? "Codex is needed to plan with this Pi capacity; nothing was sent." : null) || (linuxPiSnapshot && linuxSignedIn.length < 2 ? "Use Pi\u0027s configured capacity to add independent checking, or recheck the folder if unavailable." : null);
-  const matchingLiveReady = matchingAcknowledgedLiveReady(currentWork, savedTarget, linuxPiSelection) && !linuxWrite;
+  const matchingLiveReady = matchingAcknowledgedLiveReady(hostCurrent, savedTarget, linuxPiSelection) && !linuxWrite && !linuxActionBusy && !admissionUnsaid.current && !liveIntent.current?.unknown;
   const idleNewGoalReady = matchingLiveReady && !liveIntent.current?.unknown;
   const desktopLiveNewGoalBlocked = client.mode !== "linux-core" && backgroundJob?.followUpMode === "live-read-once" && backgroundJob.active
     && (!backgroundView || !parseLiveRead(backgroundJob.liveRead)?.ready || liveIntent.current?.unknown === true || linuxActionBusy);
@@ -529,6 +547,7 @@ function App() {
     // A deliberate view transition relinquishes auto-follow for the submitted
     // result; a later explicit parent route must stay pinned to that parent.
     localAdmission.current = null;
+    clearHostObservation();
     stashCoordinatedDraft();
     if (!fromLocation) setCoordinatedRoute(route, replace);
     coordinatedDraftKey.current = "";
@@ -1044,7 +1063,7 @@ function App() {
     if (client.mode === "linux-core" && !linuxShowingFreshDraft && (coordinatedRoute !== null || Boolean(linuxCoordinationGoal || linuxCoordinationRequest))) {
       return;
     }
-    if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && linuxActionBusy)) return;
+    if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && (linuxActionBusy || admissionUnsaid.current || admissionIntent.current?.unknown))) return;
     const retrying = canExplicitlyRetry(draftGoal.intent);
     if (draftBlocked && !retrying) return;
     const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();
@@ -1087,9 +1106,20 @@ function App() {
           setLinuxHoldLine(true);
           return;
         }
+        const expansion = linuxWorkspaceExpansion.current;
+        const admissionWorkspace = workspace.startsWith("~")
+          ? expansion?.input === workspace ? expansion.workspace : null
+          : workspace;
+        if (!admissionWorkspace) {
+          setDraftError({ sentence: "The home-folder path could not be resolved. Recheck the folder before sending." });
+          return;
+        }
         const submittedRoute = coordinatedRouteRef.current;
         const submittedKey = coordinatedDraftKey.current || "coordinated:new";
         const submittedText = draftGoal.message;
+        const submittedId = freshRequestId();
+        admissionIntent.current = { requestId: submittedId, goal: message, workspace: admissionWorkspace, root: null, key: submittedKey, text: submittedText, view: submittedRoute, unknown: true };
+        clearHostObservation();
         const statusEpoch = ++linuxStatusEpoch.current;
         linuxActionOpen.current = true;
         setLinuxActionBusy(true);
@@ -1103,19 +1133,22 @@ function App() {
         void fetch("/goalport/ipc", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ messageType: "coordination_start", payload: { goal: message, workspaceRoot: workspace, write: linuxWrite, background: backgroundConsent, ...(linuxPiSelection ? { piCapacity: linuxPiSelection } : {}), instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
+          body: JSON.stringify({ messageType: "coordination_start", payload: { requestId: submittedId, goal: message, workspaceRoot: admissionWorkspace, write: linuxWrite, background: backgroundConsent, ...(linuxPiSelection ? { piCapacity: linuxPiSelection } : {}), instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
         }).then(async (response) => response.json()).then((body) => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
           const failedSend = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
-          const admitted = coordinationStartAdmitted(body) && admittedIdentity(body) !== null;
-          admissionUnsaid.current = !failedSend && !admitted;
+          const returnedIdentity = admittedIdentity(body);
+          const admitted = coordinationStartAdmitted(body) && returnedIdentity?.requestId === submittedId;
+          const definitelyRefused = failedSend && !returnedIdentity && typeof body?.error === "string" && !/unconfirmed|timeout|not confirmed/i.test(body.error);
+          admissionUnsaid.current = !admitted && !definitelyRefused;
+          if (admissionIntent.current?.requestId === submittedId) admissionIntent.current.unknown = admissionUnsaid.current;
           rememberAdmissionUnsaid(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : null);
           if (admissionUnsaid.current) clearFailure();
           const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
-          setLinuxCoordinationLine(shown);
-          const failed = failedSend;
+          setLinuxCoordinationLine(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : shown);
+          const failed = failedSend && !admissionUnsaid.current;
           linuxHoldLineRef.current = failed && !admitted;
           if (failed && !admitted) rememberFailure(shown);
           setLinuxHoldLine(failed && !admitted);
@@ -1160,10 +1193,13 @@ function App() {
         }).catch(() => {
           if (statusEpoch !== linuxStatusEpoch.current) return;
           linuxActionSettled.current = statusEpoch;
-          setLinuxCoordinationLine("The coordinated goal could not be sent.");
-          linuxHoldLineRef.current = true;
-          rememberFailure("The coordinated goal could not be sent.");
-          setLinuxHoldLine(true);
+          admissionUnsaid.current = true;
+          rememberAdmissionUnsaid("The send returned without saying the goal was admitted.");
+          clearFailure();
+          setLinuxCoordinationLine("The send returned without saying the goal was admitted.");
+          linuxHoldLineRef.current = false;
+          setLinuxHoldLine(false);
+          setSelectionRefresh(value => value + 1);
           setSidebarUnconfirmed(false);
           setDraftError(null);
         }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
@@ -2066,32 +2102,67 @@ function App() {
     if (client.mode !== "linux-core" && desktopNewAllowanceIntent.current?.unknown) {
       setLiveMessage(BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE); return;
     }
-    if (client.mode === "linux-core" && linuxCoordinationLive && idleNewGoalReady && currentWork?.jobId && currentWork.requestId) {
-      const job = currentWork;
-      linuxActionOpen.current = true; setLinuxActionBusy(true);
+    if (client.mode === "linux-core" && (pendingIdleClose.current || (linuxCoordinationLive && idleNewGoalReady && currentWork?.jobId && currentWork.requestId && currentWork.rootRequestId))) {
+      if (admissionUnsaid.current || admissionIntent.current?.unknown || liveIntent.current?.unknown || linuxActionBusy) return;
+      const retry = pendingIdleClose.current !== null;
+      const capturedView = coordinatedRouteRef.current;
+      const job = pendingIdleClose.current ?? { jobId: currentWork!.jobId, requestId: currentWork!.requestId!, root: currentWork!.rootRequestId!, revokeRequested: false, revokeAcked: false };
+      pendingIdleClose.current = job;
+      linuxActionOpen.current = true; setLinuxActionBusy(true); clearHostObservation();
       const epoch = ++linuxStatusEpoch.current;
       const abort = new AbortController(), deadline = performance.now() + 5000;
-      const timeout = window.setTimeout(() => abort.abort(), 5000);
+      const ending = "The allowance end is not confirmed yet. Your view is kept. You can click New goal again to check.";
+      let timeout: number;
+      const timedOut = new Promise<never>((_, reject) => { timeout = window.setTimeout(() => { abort.abort(); reject(Error(ending)); }, 5000); });
+      const read = async (messageType: string, payload: object) => {
+        const response = await Promise.race([fetch("/goalport/ipc", { signal: abort.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageType, payload }) }), timedOut]);
+        const body = await Promise.race([response.json(), timedOut]);
+        if (!response.ok || body?.ok !== true) throw Error(messageType === "coordination_stop" ? coordinationReplyLine(body, ending) : ending);
+        return body;
+      };
+      const revoke = async () => {
+        job.revokeRequested = true;
+        await read("coordination_stop", { jobId: job.jobId, onlyIfReadyFromRequestId: job.requestId });
+        job.revokeAcked = true;
+      };
       setLiveMessage("Ending the open allowance…");
       try {
-        const response = await fetch("/goalport/ipc", { signal: abort.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageType: "coordination_stop", payload: { jobId: job.jobId, onlyIfReadyFromRequestId: job.requestId } }) });
-        const reply = await response.json();
-        if (!response.ok || reply?.ok !== true) throw Error(coordinationReplyLine(reply, "The allowance was not ended. The current view is kept."));
+        if (!retry) await revoke();
         while (performance.now() < deadline) {
-          const statusResponse = await fetch("/goalport/ipc", { signal: abort.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageType: "coordination_detail", payload: { requestId: job.requestId } }) });
-          const body = await statusResponse.json();
-          const status = body?.payload?.allowanceJob as BackgroundStatus | undefined;
-          if (epoch !== linuxStatusEpoch.current) return;
-          if (performance.now() < deadline && statusResponse.ok && body.ok === true && status?.jobId === job.jobId && status.requestId === job.requestId
-            && !status.active && !status.pendingCommand && status.outcome?.status === status.state && ["stopped", "completed"].includes(status.state)) {
-            setCurrentWork(null); setLinuxCoordinationLive(false); setAllowanceJob(status); setLiveMessage(null);
-            openCoordinated({ kind: "new" }); return;
+          const body = await read("coordination_status", { jobId: job.jobId });
+          if (epoch !== linuxStatusEpoch.current || coordinatedRouteRef.current !== capturedView) return;
+          const reply = parseAllowanceStatus(body.payload, job.jobId);
+          if (reply?.source === "host-status") {
+            const status = reply.job;
+            if (confirmedIdleEnd(status, job)) {
+              const baseReply = await read("coordination_latest", {});
+              if (epoch !== linuxStatusEpoch.current || coordinatedRouteRef.current !== capturedView) return;
+              if (performance.now() >= deadline) throw Error(ending);
+              const base = baseReply.payload as SavedTargetPayload | undefined, slot = base?.globalSlot;
+              if (slot?.kind === "occupied" && slot.jobId !== job.jobId) throw Error("Another goal owns the work slot. Your current view is kept.");
+              if (!slot || slot.kind === "unknown" || base?.unconfirmedGoal !== false || base?.leftoverHeld !== false)
+                throw Error("The work slot could not be confirmed. Your view is kept.");
+              if (slot.kind === "empty") {
+                pendingIdleClose.current = null;
+                setCurrentWork(null); setLinuxCoordinationLive(false); setLiveMessage(null);
+                openCoordinated({ kind: "new" }); return;
+              }
+              setLiveMessage("The previous allowance is still ending. Your view is kept.");
+            } else if (retry && !job.revokeAcked && capturedView?.kind === "result" && capturedView.requestId === job.requestId && savedTarget?.rootRequestId === job.root
+              && status.jobId === job.jobId && status.requestId === job.requestId
+              && status.active && status.live && !status.revoked && status.pendingCommand === null
+              && parseLiveRead(status.liveRead)?.rootRequestId === job.root && parseLiveRead(status.liveRead)?.ready
+              && Date.parse(status.liveRead!.expiresAt!) > Date.now()) {
+              await revoke();
+            } else if (!status.active || status.state === "unconfirmed" || status.pendingCommand) {
+              throw Error(ending);
+            }
           }
-          await new Promise(resolve => window.setTimeout(resolve, 100));
+          await Promise.race([new Promise(resolve => window.setTimeout(resolve, Math.min(100, Math.max(0, deadline - performance.now())))), timedOut]);
         }
-        throw Error("The allowance end is not confirmed yet. Your current view is kept.");
-      } catch (error) { setLiveMessage(error instanceof Error ? error.message : "The allowance end is not confirmed. Your current view is kept."); }
-      finally { window.clearTimeout(timeout); if (epoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; linuxActionSettled.current = epoch; setLinuxActionBusy(false); setSelectionRefresh(value => value + 1); } }
+        throw Error(ending);
+      } catch (error) { setLiveMessage(error instanceof Error ? error.message : ending); }
+      finally { window.clearTimeout(timeout!); if (epoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; linuxActionSettled.current = epoch; setLinuxActionBusy(false); setSelectionRefresh(value => value + 1); } }
       return;
     }
     if (client.mode !== "linux-core" && backgroundJob?.followUpMode === "live-read-once" && backgroundJob.active) {
@@ -2564,15 +2635,17 @@ function App() {
     let cancelled = false;
     let inFlight = false;
     const refresh = () => {
-      if (inFlight || linuxActionOpen.current) return;
+      if (cancelled || inFlight || linuxActionOpen.current) return;
       inFlight = true;
       const settledAtStart = linuxActionSettled.current;
       const epochAtStart = linuxStatusEpoch.current;
       const route = coordinatedRouteRef.current;
+      let confirmHost: (() => Promise<void>) | null = null;
+      const stillCurrent = () => !cancelled && !linuxActionOpen.current && settledAtStart === linuxActionSettled.current && epochAtStart === linuxStatusEpoch.current && coordinatedRouteRef.current === route;
       const requestId = route?.kind === "result" ? route.requestId : route?.kind === "unavailable" ? "__unavailable__" : undefined;
       void fetch("/goalport/ipc", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messageType: "coordination_latest", payload: requestId ? { requestId } : {} }),
+        body: JSON.stringify({ messageType: "coordination_latest", payload: { ...(requestId ? { requestId } : {}), ...(admissionIntent.current?.unknown ? { lookupRequestId: admissionIntent.current.requestId } : {}) } }),
       }).then(async response => response.ok ? response.json() : null).then(async body => {
         if (cancelled || linuxActionOpen.current || settledAtStart !== linuxActionSettled.current || epochAtStart !== linuxStatusEpoch.current || coordinatedRouteRef.current !== route) return;
         const payload = body?.payload as SavedTargetPayload | undefined;
@@ -2584,32 +2657,79 @@ function App() {
         }
         const jobLeft = typeof payload.jobId === "string" && leftJobIds.current.has(payload.jobId);
         const live = !jobLeft && Boolean(payload.line && payload.jobId);
-        const job = jobLeft ? null : payload.currentJob ?? (live ? { jobId: payload.jobId!, line: payload.line!, identityConfirmed: false } : null);
-        if (job?.liveRead) job.liveRead = parseLiveRead(job.liveRead);
-        setCurrentWork(job);
-        setAllowanceJob(payload.allowanceJob ?? null);
-        const intent = liveIntent.current;
-        const ack = parseLiveRead(job?.liveRead);
-        const ended = payload.allowanceJob;
-        if (intent && ended?.jobId === intent.jobId && ended.requestId === intent.from && !ended.active && !ended.pendingCommand && ended.outcome?.status === ended.state) {
-          if (ended.acceptedRequestId === intent.requestId) {
-            intent.unknown = false;
-            coordinatedText.current[intent.key] = ""; coordinatedDrafts.update(intent.key, "");
-            if (coordinatedDraftKey.current === intent.key) setDraftGoal(current => current?.message === intent.text ? { ...current, message: "" } : current);
-            localAdmission.current = { requestId: intent.requestId, rootId: intent.root, viewId: intent.from };
-          } else if (ended.outcome.allowanceEnd === "idle-stopped" || ended.outcome.allowanceEnd === "expired") intent.unknown = false;
-        }
-        if (intent && job?.jobId === intent.jobId && job.requestId === intent.from && ack?.rootRequestId === intent.root) {
-          if (ack.childRequestId === intent.requestId) {
-            intent.unknown = false;
-            coordinatedText.current[intent.key] = ""; coordinatedDrafts.update(intent.key, "");
-            if (coordinatedDraftKey.current === intent.key) setDraftGoal(current => current?.message === intent.text ? { ...current, message: "" } : current);
-            localAdmission.current = { requestId: intent.requestId, rootId: intent.root, viewId: intent.from };
-          } else if (ack.ready && ack.childRequestId === null) intent.unknown = false;
-        }
-        if (job?.followUpMode === "live-read-once" && ack?.childRequestId && !localAdmission.current && route?.kind === "result" && route.requestId === job.requestId) {
-          localAdmission.current = { requestId: ack.childRequestId, rootId: ack.rootRequestId, viewId: job.requestId! };
-        }
+        const base = jobLeft ? null : payload.currentBase ?? null;
+        const job: CoordinatedCurrentJob | null = base ? { jobId: base.jobId, requestId: base.admittedRequestId ?? undefined,
+          rootRequestId: base.rootRequestId ?? undefined, goal: base.goal ?? undefined, workspacePath: base.workspacePath ?? undefined,
+          followUpMode: base.followUpMode ?? undefined, identityConfirmed: base.identityConfirmed, line: payload.line || "Current work is not confirmed." }
+          : live ? { jobId: payload.jobId!, line: payload.line!, identityConfirmed: false } : null;
+        const observed = hostObservation.current;
+        const view = route?.kind === "result" ? route.requestId : null;
+        const retain = observed && base && observed.view === view && sameReadyBase(observed.base, base)
+          && !admissionUnsaid.current && !liveIntent.current?.unknown && parseLiveRead(observed.job.liveRead)?.expiresAt
+          && Date.now() < Date.parse(observed.job.liveRead!.expiresAt!);
+        if (!retain) { hostObservation.current = null; setHostCurrent(null); }
+        setCurrentWork(retain ? observed.job : job);
+        setSavedAllowanceView(payload.savedAllowanceView ?? null);
+        const held = admissionIntent.current;
+        const proposed = held?.unknown ? payload.submissionCandidate : null;
+        const candidate = held && proposed?.kind === "submission-candidate" && proposed.identityConfirmed && held.workspace.startsWith("/")
+          && proposed.admittedRequestId === held.requestId && proposed.goal === held.goal && proposed.workspacePath === held.workspace
+          && (held.root === null || held.root === proposed.rootRequestId) ? proposed : null;
+        const childIntent = liveIntent.current;
+        const lookupJob = candidate?.jobId ?? (childIntent?.unknown ? childIntent.jobId : base?.jobId);
+        const cleanActiveBase = base && base.identityConfirmed && base.active === true && base.pending === "none"
+          && base.revoked === false && base.workerGone === false && !base.unconfirmed && base.allowanceEnd === null && base.observedAcceptedChildId === null && base.phase !== "unknown"
+          && !base.profileUnconfirmed && !base.leftoverHeld && base.globalSlot.kind === "occupied"
+          && base.globalSlot.jobId === base.jobId && base.globalSlot.admittedRequestId === base.admittedRequestId
+          && !["unknown", "unconfirmed", "revoked", "completed", "failed", "stopped"].includes(base.state);
+        const wantsStatus = !!(candidate || childIntent?.unknown || (route?.kind !== "new" && base?.followUpMode === "live-read-once" && cleanActiveBase));
+        if (wantsStatus && validJobId(lookupJob)) confirmHost = async () => {
+          if (!stillCurrent()) return;
+          try {
+            const response = await fetch("/goalport/ipc", { method: "POST", headers: { "content-type": "application/json" },
+              body: JSON.stringify({ messageType: "coordination_status", payload: { jobId: lookupJob } }) });
+            const body = response.ok ? await response.json() : null;
+            if (!stillCurrent()) return;
+            const reply = body?.ok === true ? parseAllowanceStatus(body.payload, lookupJob) : null;
+            if (reply?.source !== "host-status") {
+              clearHostObservation();
+              if (base?.followUpMode === "live-read-once") setCurrentWork(job ? { ...job, line: "The open allowance is not confirmed. Your result is kept." } : null);
+              return;
+            }
+            const status = reply.job, acknowledged = acknowledgedCurrentJob(reply);
+            if (base && matchesBase(status, base) && acknowledged) {
+              // Only host state changes here; never roots, selected record, options or focus.
+              const canShowReady = readyBase(base) && status.active && !status.pendingCommand && !status.revoked;
+              const display = canShowReady ? acknowledged : { ...acknowledged, liveRead: null };
+              setCurrentWork(status.active ? display : null);
+              setHostCurrent(canShowReady ? acknowledged : null);
+              hostObservation.current = canShowReady ? { job: acknowledged, base, view } : null;
+            }
+            if (held?.unknown && admissionIntent.current === held && candidate && confirmedAssociation(status, candidate, held)) {
+              held.unknown = false; admissionUnsaid.current = false; rememberAdmissionUnsaid(null);
+              linuxHoldLineRef.current = false; setLinuxHoldLine(false); clearFailure();
+              coordinatedText.current[held.key] = ""; coordinatedDrafts.update(held.key, "");
+              if (coordinatedDraftKey.current === held.key) setDraftGoal(current => current?.message === held.text ? { ...current, message: "" } : current);
+              localAdmission.current = { requestId: held.requestId, rootId: candidate.rootRequestId, viewId: view };
+              setLinuxCoordinationLine(status.active ? "The goal was admitted." : "The admitted goal has finished. Its result is kept.");
+              if (coordinatedRouteRef.current === held.view && (!held.view || held.view.kind === "new")) {
+                openCoordinated({ kind: "result", requestId: held.requestId }, true);
+              } else setSelectionRefresh(value => value + 1);
+            }
+            const intent = liveIntent.current, ack = parseLiveRead(status.liveRead);
+            if (intent?.unknown && status.jobId === intent.jobId && status.requestId === intent.from
+              && acknowledged?.rootRequestId === intent.root
+              && (status.acceptedRequestId === intent.requestId || (ack?.childRequestId === intent.requestId && ack.fromRequestId === intent.from))) {
+              intent.unknown = false;
+              coordinatedText.current[intent.key] = ""; coordinatedDrafts.update(intent.key, "");
+              if (coordinatedDraftKey.current === intent.key) setDraftGoal(current => current?.message === intent.text ? { ...current, message: "" } : current);
+              localAdmission.current = { requestId: intent.requestId, rootId: intent.root, viewId: intent.from };
+              setLiveMessage(null);
+            }
+          } catch {
+            if (stillCurrent()) clearHostObservation();
+          }
+        };
         setLinuxLeftoverHeld(payload.leftoverHeld === true);
         if (job) seenJobId.current = job.jobId;
         const unconfirmed = payload.unconfirmedGoal === true || /not confirmed|unconfirmed|worker is gone/i.test(job?.line ?? "");
@@ -2618,17 +2738,16 @@ function App() {
         if (live) {
           leftUnconfirmedSlot.current = false;
           try { sessionStorage.removeItem("goalport.linux.leftSlot"); } catch { /* storage may be unavailable */ }
-          admissionUnsaid.current = false;
-          rememberAdmissionUnsaid(null);
-          grantAllowed.current = false;
-          linuxHoldLineRef.current = false;
-          setLinuxHoldLine(false);
-          clearFailure();
-          heldJobId.current = null;
-          setLinuxCoordinationLine(payload.line ?? null);
+          // A passive observation cannot settle an uncertain Start.
+          if (!admissionUnsaid.current) {
+            grantAllowed.current = false;
+            linuxHoldLineRef.current = false; setLinuxHoldLine(false);
+            clearFailure(); heldJobId.current = null;
+            setLinuxCoordinationLine(payload.line ?? null);
+          }
         }
         if (payload.ok === false) { setSavedReadError("Saved results could not be read. Continue is unavailable."); return; }
-        if (!route && !campaignIdFromLocation()) {
+        if (!route && !campaignIdFromLocation() && !admissionUnsaid.current) {
           const initialId = job?.requestId ?? payload.record?.requestId;
           if (initialId) { openCoordinated({ kind: "result", requestId: initialId }, true); return; }
         }
@@ -2702,8 +2821,8 @@ function App() {
             : exact.verdict === "stopped" ? "Stopped. No further turn was sent. Existing workspace edits remain."
             : exact.outcome || exact.verdict);
         }
-      }).catch(() => {
-        if (!cancelled) setSavedReadError("Saved results could not be read. Continue is unavailable.");
+      }).then(async () => { await confirmHost?.(); }).catch(() => {
+        if (stillCurrent()) { clearHostObservation(); setSavedReadError("Saved results could not be read. Continue is unavailable."); }
       }).finally(() => { inFlight = false; });
     };
     refresh();
@@ -2711,7 +2830,7 @@ function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [client.mode, linuxCoordinationLive, linuxActionBusy, selectionRefresh]);
 
-  const currentWorkReason = (linuxActionBusy ? linuxCoordinationLine : currentWork?.line) || (linuxLeftoverHeld ? "Current work still holds the slot." : sidebarUnconfirmed ? "Current work is not confirmed, so another goal cannot start yet." : linuxHoldLine || admissionUnsaid.current ? linuxCoordinationLine : null);
+  const currentWorkReason = (admissionUnsaid.current ? savedAdmissionUnsaid() : linuxActionBusy ? linuxCoordinationLine : currentWork?.line) || (linuxLeftoverHeld ? "Current work still holds the slot." : sidebarUnconfirmed ? "Current work is not confirmed, so another goal cannot start yet." : linuxHoldLine || admissionUnsaid.current ? linuxCoordinationLine : null);
   const isSavedView = client.mode === "linux-core" && coordinatedRoute !== null && coordinatedRoute.kind !== "new";
 
   const leftoverSlotLine = client.mode === "linux-core" && linuxLeftoverHeld && !linuxCoordinationLive && !linuxActionBusy
@@ -2743,12 +2862,13 @@ function App() {
       if (inFlight) return;
       inFlight = true;
       const request = ++generation;
+      const workspaceInput = draftGoalRef.current?.workspace?.trim() ?? "";
       void fetch("/goalport/ipc", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messageType: "coordination_discover", payload: { workspaceRoot: draftGoalRef.current?.workspace || undefined } }),
+        body: JSON.stringify({ messageType: "coordination_discover", payload: { workspaceRoot: workspaceInput || undefined } }),
       }).then(async (response) => response.json().catch(() => null)).then((body) => {
-        if (cancelled || request !== generation) return;
+        if (cancelled || request !== generation || (draftGoalRef.current?.workspace?.trim() ?? "") !== workspaceInput) return;
         const unchecked = "The signed-in harnesses could not be checked, so nothing will be sent.";
         if (!body || typeof body !== "object" || (body as { ok?: unknown }).ok === false) {
           const error = (body as { error?: unknown } | null)?.error;
@@ -2757,7 +2877,9 @@ function App() {
           setLinuxDiscoverChecked(true);
           return;
         }
-        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown; pi?: ProviderSnapshot } }).payload;
+        const payload = (body as { payload?: { sentence?: unknown; consentMissing?: unknown; harnesses?: unknown; workspaceRoot?: unknown; pi?: ProviderSnapshot } }).payload;
+        linuxWorkspaceExpansion.current = typeof payload?.workspaceRoot === "string" && payload.workspaceRoot.startsWith("/")
+          ? { input: workspaceInput, workspace: payload.workspaceRoot } : null;
         if (payload?.pi !== undefined) linuxRouteAwareDiscovery.current = true;
         setLinuxPiSnapshot(payload?.pi ?? null);
         const sentence = payload?.sentence;
@@ -2959,8 +3081,8 @@ function App() {
         onToggleDetails={() => { if (client.mode === "linux-core") return; setDetailsOpen((value) => !value); }}
         detailsDisabled={client.mode === "linux-core"}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
-        onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || (linuxCoordinationLive && !idleNewGoalReady))) return; backgroundAttached.current = true; void handleNewGoal(); }}
-        newGoalDisabled={desktopLiveNewGoalBlocked || (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || (linuxCoordinationLive && !idleNewGoalReady) || sidebarUnconfirmed || workerGone || linuxLeftoverHeld || linuxHoldLine || admissionUnsaid.current))}
+        onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || (linuxCoordinationLive && !idleNewGoalReady && !pendingIdleClose.current))) return; backgroundAttached.current = true; void handleNewGoal(); }}
+        newGoalDisabled={desktopLiveNewGoalBlocked || (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || admissionUnsaid.current || liveIntent.current?.unknown === true || (!pendingIdleClose.current && ((linuxCoordinationLive && !idleNewGoalReady) || sidebarUnconfirmed || workerGone || linuxLeftoverHeld || linuxHoldLine))))}
         newGoalDisabledReason={client.mode === "linux-core" ? currentWorkReason || (linuxActionBusy || linuxGranting ? "Wait for this to finish." : null) : desktopLiveNewGoalBlocked ? "Open the current Ready result to end its unused allowance. Active or unconfirmed work cannot be replaced." : null}
         onOpenAbout={() => setAboutOpen(true)}
         onReconnect={handleReconnect}
@@ -2976,7 +3098,7 @@ function App() {
           projectOverride={client.mode === "linux-core" ? "This page" : undefined}
           failedOpenId={client.mode === "linux-core" ? snapshot.notices.find((notice) => notice.startsWith("Goal open failed:"))?.slice("Goal open failed:".length).trim().split(":")[0]?.trim() : undefined}
           goalListUnreadable={client.mode === "linux-core" && snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:"))}
-          newGoalEnabled={!desktopLiveNewGoalBlocked && !(client.mode === "linux-core" && (linuxActionBusy || linuxGranting || (linuxCoordinationLive && !idleNewGoalReady) || sidebarUnconfirmed || workerGone))}
+          newGoalEnabled={!desktopLiveNewGoalBlocked && !(client.mode === "linux-core" && (linuxActionBusy || linuxGranting || admissionUnsaid.current || liveIntent.current?.unknown === true || (!pendingIdleClose.current && ((linuxCoordinationLive && !idleNewGoalReady) || sidebarUnconfirmed || workerGone))))}
           plansUnreadable={plansUnreadable}
           plansSentenceVisible={!draftActive}
           collapsed={navCollapsed}
@@ -2999,7 +3121,7 @@ function App() {
             setSelectedPlanId(requestId);
           }}
           navigationLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting)}
-          navigationLockedReason={client.mode === "linux-core" && (sidebarUnconfirmed || workerGone) ? "Another goal cannot start yet." : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? "Wait for this to finish." : client.mode === "linux-core" && linuxCoordinationLive ? "This goal is still running." : null}
+          navigationLockedReason={client.mode === "linux-core" && (sidebarUnconfirmed || workerGone) ? "Another goal cannot start yet." : client.mode === "linux-core" && (linuxActionBusy || linuxGranting) ? "Wait for this to finish." : client.mode === "linux-core" && linuxCoordinationLive ? currentWork?.followUpMode === "live-read-once" ? "Current work is being checked." : "This goal is still running." : null}
           onSelectCampaign={(campaignId) => {
             if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
             backgroundAttached.current = true; setBackgroundView(false);
@@ -3213,7 +3335,7 @@ function App() {
                     discoveredHarnesses={linuxSignedIn}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" && !currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: enabled, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined}
-                    inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || liveIntent.current?.unknown === true)}
+                    inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || liveIntent.current?.unknown === true || admissionUnsaid.current)}
                     coordinationResult={backgroundConsent && linuxDiscoverChecked && !snapshot.notices.some((notice) => notice.startsWith("Goal list read failed:") || notice.startsWith("Goal open failed:")) && !(linuxActionBusy || linuxGranting || sidebarUnconfirmed || leftUnreplayed || linuxLeftoverHeld || linuxHoldLine || workerGone || linuxHarnessSentence || linuxConsentMissing) && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? activeNotice.sentence : client.mode === "linux-core" && (linuxActionBusy || linuxGranting || linuxHoldLine || linuxCoordinationLine === "Background Send is allowed." || lineSaysAdmissionUnsaid(linuxCoordinationLine) || !linuxShowingFreshDraft) ? (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : sidebarUnconfirmed && !linuxActionBusy && !linuxGranting && !linuxHoldLine && !leftUnreplayed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : "This goal's exit is not confirmed.") : leftUnreplayed && !linuxActionBusy && !linuxGranting ? "The interrupted job stays unreplayed; the same request id cannot be admitted again." : linuxCoordinationLine) : null}
                     failureHeadline={isSavedView ? null : client.mode === "linux-core" && linuxHoldLine && !leftUnreplayed ? linuxCoordinationLine : client.mode === "linux-core" && !linuxShowingFreshDraft && !sidebarUnconfirmed && !leftUnreplayed && sidebarFailed.current ? failedLine.current : null}
                     goalDetail={client.mode === "linux-core" && !linuxShowingFreshDraft ? linuxCoordinationDetail : null}
@@ -3240,8 +3362,7 @@ function App() {
                           setLinuxCoordinationLive(false);
                           setLinuxLeftoverHeld(false);
                           linuxHoldLineRef.current = false;
-                          admissionUnsaid.current = false;
-                          rememberAdmissionUnsaid(null);
+                          // Leaving a different observed job does not settle an unknown Start.
                           leftUnconfirmedSlot.current = true;
                           try { sessionStorage.setItem("goalport.linux.leftSlot", "1"); } catch { /* a private window can refuse storage */ }
                           clearFailure();
@@ -3274,6 +3395,10 @@ function App() {
                       if (linuxActionBusy) return;
                       const wasGone = workerGone;
                       const wasUnconfirmed = linuxCoordinationLine === "This goal's exit is not confirmed, so another goal cannot start yet.";
+                      // Stop receipt/passive done are not settlement for a later New goal.
+                      const idleEnd = matchingLiveReady && currentWork?.requestId && currentWork.rootRequestId
+                        ? { jobId: currentWork.jobId, requestId: currentWork.requestId, root: currentWork.rootRequestId, revokeRequested: true, revokeAcked: false } : null;
+                      if (idleEnd) pendingIdleClose.current = idleEnd;
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
@@ -3289,6 +3414,7 @@ function App() {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         const stopFailed = !body || (body as { ok?: unknown }).ok === false;
+                        if (idleEnd && !stopFailed) idleEnd.revokeAcked = true;
                         const text = coordinationReplyLine(body, stopFailed ? "Stop could not be sent." : "Stop was sent.");
                         const gone = "The worker is gone. Its exit is not confirmed, so another goal cannot start yet.";
                         const textMentionsUnconfirmed = /unconfirmed|not confirmed/i.test(text || "");
@@ -3299,8 +3425,7 @@ function App() {
                         setLinuxCoordinationLine(stopLine);
                         setCurrentWork(current => current ? { ...current, line: stopLine } : current);
                         if (!stopFailed && !textMentionsUnconfirmed && !(wasUnconfirmed && !textMentionsUnconfirmed) && !(wasGone && !textMentionsUnconfirmed)) {
-                          admissionUnsaid.current = false;
-                          rememberAdmissionUnsaid(null);
+                          // A stop receipt is not a causal admission confirmation.
                           clearFailure();
                           setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
                           linuxHoldLineRef.current = false;
@@ -3369,6 +3494,10 @@ function App() {
                       const submittedKey = coordinatedDraftKey.current;
                       const submittedRoot = savedTarget?.rootRequestId;
                       const submittedView = linuxCoordinationRequest;
+                      const submittedId = freshRequestId();
+                      admissionIntent.current = { requestId: submittedId, goal: savedTarget!.goal, workspace: savedTarget!.workspacePath,
+                        root: submittedRoot ?? null, key: submittedKey, text: submittedText, view: coordinatedRouteRef.current, unknown: true };
+                      clearHostObservation();
                       const statusEpoch = ++linuxStatusEpoch.current;
                       linuxActionOpen.current = true;
                       setLinuxActionBusy(true);
@@ -3381,18 +3510,21 @@ function App() {
                       void fetch("/goalport/ipc", {
                         method: "POST",
                         headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ messageType: "coordination_continue", payload: { fromRequestId: linuxCoordinationRequest, followUp: submittedText, write: linuxWrite, background: backgroundConsent, instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
+                        body: JSON.stringify({ messageType: "coordination_continue", payload: { requestId: submittedId, fromRequestId: linuxCoordinationRequest, followUp: submittedText, write: linuxWrite, background: backgroundConsent, instances: linuxSignedIn.length >= 2 ? linuxSignedIn.join(",") : undefined } }),
                       }).then(async (response) => response.json()).then((body) => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
                         const continueFailed = !body || (body as { ok?: unknown }).ok === false || (typeof (body as { error?: unknown }).error === "string" && (body as { error: string }).error.trim().length > 0);
-                        const admitted = coordinationStartAdmitted(body) && admittedIdentity(body) !== null;
-                        admissionUnsaid.current = !continueFailed && !admitted;
+                        const returnedIdentity = admittedIdentity(body);
+                        const admitted = coordinationStartAdmitted(body) && returnedIdentity?.requestId === submittedId;
+                        const definitelyRefused = continueFailed && !returnedIdentity && typeof body?.error === "string" && !/unconfirmed|timeout|not confirmed/i.test(body.error);
+                        admissionUnsaid.current = !admitted && !definitelyRefused;
+                        if (admissionIntent.current?.requestId === submittedId) admissionIntent.current.unknown = admissionUnsaid.current;
                         rememberAdmissionUnsaid(admissionUnsaid.current ? "Continue returned without saying the goal was admitted." : null);
                         if (admissionUnsaid.current) clearFailure();
                         const text = coordinationReplyLine(body, continueFailed ? "Continue could not be sent." : admitted ? "The goal was admitted." : "Continue returned without saying the goal was admitted.");
                         const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
-                        setLinuxCoordinationLine(shown || "Continue was sent.");
+                        setLinuxCoordinationLine(admissionUnsaid.current ? "Continue returned without saying the goal was admitted." : shown || "Continue was sent.");
                         const failed = continueFailed;
                         if ((failed && !admitted) || /unconfirmed/i.test(text || "")) {
                           linuxHoldLineRef.current = true;
@@ -3432,15 +3564,17 @@ function App() {
                       }).catch(() => {
                         if (statusEpoch !== linuxStatusEpoch.current) return;
                         linuxActionSettled.current = statusEpoch;
-                        linuxHoldLineRef.current = true;
-                        rememberFailure("Continue could not be sent.");
-                        heldJobId.current = seenJobId.current;
-                        setLinuxHoldLine(true);
-                        setLinuxCoordinationLine("Continue could not be sent.");
+                        admissionUnsaid.current = true;
+                        rememberAdmissionUnsaid("Continue returned without saying the goal was admitted.");
+                        clearFailure();
+                        linuxHoldLineRef.current = false;
+                        setLinuxHoldLine(false);
+                        setLinuxCoordinationLine("Continue returned without saying the goal was admitted.");
+                        setSelectionRefresh(value => value + 1);
                       }).finally(() => { if (statusEpoch === linuxStatusEpoch.current) { linuxActionOpen.current = false; setLinuxActionBusy(false); } });
                     } : undefined}
-                    continueLabel={matchingLiveReady ? "Continue" : allowanceJob?.followUpMode === "live-read-once" && !allowanceJob.active ? "Continue · new allowance" : undefined}
-                    liveAllowanceHint={liveMessage || (matchingLiveReady ? "Uses the open allowance for one follow-up. No work starts until you continue." : allowanceJob?.outcome?.allowanceEnd === "expired" ? "The unused allowance expired. Continuing starts a new allowance." : allowanceJob?.outcome?.allowanceEnd === "idle-stopped" ? "The unused allowance was stopped. The checked result is kept. Continuing starts a new allowance." : null)}
+                    continueLabel={matchingLiveReady ? "Continue" : savedAllowanceView && ["completed", "stopped", "failed"].includes(savedAllowanceView.state) ? "Continue · new allowance" : undefined}
+                    liveAllowanceHint={liveMessage || (matchingLiveReady ? "Uses the open allowance for one follow-up. No work starts until you continue." : savedAllowanceView?.allowanceEnd === "expired" ? "The unused allowance expired. Continuing starts a new allowance." : savedAllowanceView?.allowanceEnd === "idle-stopped" ? "The unused allowance was stopped. The checked result is kept. Continuing starts a new allowance." : null)}
                     workspacePlaceholder={client.mode === "linux-core" ? "/home/you/project" : undefined}
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" && !linuxCoordinationLive && !linuxActionBusy ? (linuxPiSnapshot ? linuxHarnessProblem : linuxHarnessSentence) : null}
@@ -3495,7 +3629,7 @@ function App() {
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
                       if (client.mode === "linux-core") {
-                        if (draftGoal?.workspace !== value.workspace) { setLinuxPiSelection(undefined); setLinuxPiSnapshot(null); setLinuxDiscoverChecked(false); }
+                        if (draftGoal?.workspace !== value.workspace) { linuxWorkspaceExpansion.current = null; setLinuxPiSelection(undefined); setLinuxPiSnapshot(null); setLinuxDiscoverChecked(false); }
                         coordinatedText.current[coordinatedDraftKey.current] = value.message;
                         coordinatedDrafts.update(coordinatedDraftKey.current, value.message);
                       }
