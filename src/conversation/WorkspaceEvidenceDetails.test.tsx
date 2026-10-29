@@ -23,14 +23,14 @@ describe("WorkspaceEvidenceDetails", () => {
     const coverage = { totalEvidenceBytes: 10000, includedEvidenceBytes: 10000, cropped: false, promptBytes: 13000, promptBudgetBytes: 32768 };
     const { rerender } = render(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={coverage} auditInputEvidenceText="unchanged subset" />);
     expect(screen.queryByText(/Selected prompt transport/)).toBeNull();
-    expect(screen.queryByText(/had only part of the workspace material/)).toBeNull();
+    expect(screen.queryByText(/Only part of the workspace material was supplied/)).toBeNull();
     rerender(<WorkspaceEvidenceDetails evidence={evidence} auditInputEvidenceCoverage={{ ...coverage, promptDelivery: "stdin" }} auditInputEvidenceText="unchanged subset" />);
     expect(screen.getByText(/13000 UTF-8 bytes within its 32768-byte budget/)).toBeTruthy();
     expect(screen.getByText(/Selected prompt transport: stdin/)).toBeTruthy();
     expect(screen.getByText(/Pi trims edge whitespace/)).toBeTruthy();
-    expect(screen.queryByText(/had only part of the workspace material/)).toBeNull();
+    expect(screen.queryByText(/Only part of the workspace material was supplied/)).toBeNull();
     rerender(<WorkspaceEvidenceDetails evidence={{ ...evidence, untrackedFiles: [{ path: "binary.bin", binary: true, size: 80 }] }} auditInputEvidenceCoverage={{ ...coverage, promptDelivery: "stdin" }} />);
-    expect(screen.getByText(/had only part of the workspace material; omitted content was not checked/)).toBeTruthy();
+    expect(screen.getByText(/Only part of the workspace material was supplied; omitted content was not delivered in this prompt/)).toBeTruthy();
   });
 
   it("renders captured workspace diff, untracked files, and crop coverage when evidence is present", () => {

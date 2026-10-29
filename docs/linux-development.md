@@ -187,7 +187,7 @@ Honesty rules the client keeps:
   remain 64 KiB per tracked diff, 32 retained untracked paths and 8 KiB per text
   file; excess paths are counted rather than emitted without bound. What the
   model outputs is an "Executor report" (not an independently captured diff).
-- Audit input: on Linux, a final read-only Pi audit uses piped stdin, with a
+- Audit input: on Linux, a background-worker final read-only Pi audit uses piped stdin, with a
   32768-byte COMPLETE UTF-8 prompt budget and 16384-byte evidence reservation.
   That includes goal, plan, review, reports, prior feedback/metadata and evidence.
   Material that fits is preserved in full; overflow uses labeled crop notices.

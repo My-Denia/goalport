@@ -99,7 +99,7 @@ export function WorkspaceEvidenceDetails({
             {auditInputEvidenceCoverage || auditInputEvidenceText ? (
               <details className="workspace-audit-input">
                 <summary>What the independent audit received</summary>
-                {incompleteMaterial ? <p>The independent check had only part of the workspace material; omitted content was not checked.</p> : null}
+                {incompleteMaterial ? <p>Only part of the workspace material was supplied; omitted content was not delivered in this prompt.</p> : null}
                 {auditInputEvidenceCoverage ? (
                   <p className="workspace-evidence-crop-note">
                     Audit delivery contains {auditInputEvidenceCoverage.includedEvidenceBytes} of {auditInputEvidenceCoverage.totalEvidenceBytes} original captured-material bytes; crop notices are additional.
