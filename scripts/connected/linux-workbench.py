@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import json
 import os
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -21,6 +22,9 @@ _spec = importlib.util.spec_from_file_location("goalport_saved_targets", Path(__
 _saved_targets = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_saved_targets)
 SavedTargets = _saved_targets.SavedTargets
+_status_spec = importlib.util.spec_from_file_location("goalport_workbench_status", Path(__file__).with_name("workbench_status.py"))
+_status = importlib.util.module_from_spec(_status_spec)
+_status_spec.loader.exec_module(_status)
 
 
 def load_unix_client():
@@ -151,8 +155,8 @@ def current_job(data_dir: Path) -> dict | None:
         return None
     try:
         active = json.loads(active_path.read_text(encoding="utf-8"))
-        job_id = active.get("jobId")
-        if not isinstance(job_id, str) or not job_id:
+        job_id = active.get("jobId") if isinstance(active, dict) else None
+        if not _saved_targets.valid_id(job_id):
             return None
         if (data_dir / "coordination-jobs" / "jobs" / job_id / "stuck-ack.json").is_file():
             return None
@@ -174,7 +178,7 @@ def current_job(data_dir: Path) -> dict | None:
         return None
     if not isinstance(progress, dict):
         return None
-    settled = progress.get("state") in {"completed", "failed", "stopped"} and progress.get("outcome") and not progress.get("pendingCommand")
+    settled = isinstance(progress.get("state"), str) and progress.get("state") in {"completed", "failed", "stopped"} and progress.get("outcome") and not progress.get("pendingCommand")
     if settled:
         return None
     claim_path = data_dir / "coordination-jobs" / "jobs" / job_id / "startup-claim.json"
@@ -216,6 +220,8 @@ def live_fields(data_dir: Path | None) -> dict:
             if (_saved_targets.valid_id(identity.get("requestId")) and isinstance(identity.get("goal"), str)
                     and isinstance(identity.get("workspacePath"), str)):
                 current.update({"requestId": identity["requestId"], "goal": identity["goal"], "workspacePath": identity["workspacePath"], "identityConfirmed": True})
+                if admission.get("followUpMode") == "live-read-once":
+                    current["followUpMode"] = "live-read-once"
                 descriptor = identity.get("continuation")
                 if "continuation" not in identity:
                     current["rootRequestId"] = identity["requestId"]
@@ -343,6 +349,47 @@ def newest_saved_record(records: list) -> dict | None:
     return None
 
 
+def owned_live_context(admission: dict, progress: dict, records: list) -> dict | None:
+    """Optional context is local, never a reason to repair base state."""
+    a = admission.get("input", {})
+    c = progress.get("liveFollowUp")
+    fields = {"requestId", "fromRequestId", "rootRequestId", "originalGoal", "followUp", "workspacePath", "piCapacity", "backgroundConsent", "write", "initialPlan", "initialReview", "acceptedAt", "phase"}
+    descriptor = a.get("continuation") or {}
+    if (admission.get("followUpMode") != "live-read-once" or not isinstance(c, dict) or set(c) != fields
+            or a.get("allowedInstances") != ["codex", "pi"] or a.get("maxTurns") != 4
+            or a.get("backgroundConsent") is not True or a.get("writeAuthorization") is not None
+            or not _saved_targets.valid_id(c.get("requestId")) or c["requestId"] == a.get("requestId")
+            or c.get("fromRequestId") != a.get("requestId") or c.get("rootRequestId") != descriptor.get("rootRequestId", a.get("requestId"))
+            or c.get("originalGoal") != descriptor.get("originalGoal", a.get("goal")) or c.get("workspacePath") != a.get("workspacePath")
+            or c.get("piCapacity") != a.get("piCapacity") or not isinstance(c.get("piCapacity"), dict) or set(c["piCapacity"]) != {"provider", "model", "useExistingCapacity"}
+            or c["piCapacity"].get("useExistingCapacity") is not True or any(not isinstance(c["piCapacity"].get(k), str) or not c["piCapacity"][k].strip() for k in ("provider", "model"))
+            or c.get("backgroundConsent") is not True or c.get("write") is not False
+            or not isinstance(c.get("followUp"), str) or c["followUp"] != c["followUp"].strip()
+            or not isinstance(c.get("originalGoal"), str) or len(c["originalGoal"]) + len(c["followUp"]) > 100000
+            or any(not isinstance(c.get(k), str) or not c[k].strip() for k in ("initialPlan", "initialReview", "acceptedAt"))
+            or c.get("phase") not in {"accepted", "running", "completed", "unconfirmed"}):
+        return None
+    from datetime import datetime
+    try:
+        datetime.fromisoformat(c["acceptedAt"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    initial = [r for r in records if isinstance(r, dict) and r.get("requestId") == a.get("requestId")]
+    child = [r for r in records if isinstance(r, dict) and r.get("requestId") == c["requestId"]]
+    if (len(initial) != 1 or len(child) > 1 or initial[0].get("verdict") != "checked"
+            or initial[0].get("planText") != c["initialPlan"] or initial[0].get("reviewText") != c["initialReview"]
+            or initial[0].get("workspacePath") != a.get("workspacePath") or initial[0].get("piCapacity") != a.get("piCapacity")):
+        return None
+    targets = SavedTargets(records)
+    if (targets.selected(a.get("requestId")) or {}).get("rootRequestId") != c["rootRequestId"] or (child and (targets.selected(c["requestId"]) or {}).get("rootRequestId") != c["rootRequestId"]):
+        return None
+    if child and (child[0].get("workspacePath") != a.get("workspacePath") or child[0].get("goal") != c["originalGoal"]
+                  or child[0].get("piCapacity") != a.get("piCapacity") or child[0].get("continuation") != {
+                      "parentRequestId": a["requestId"], "rootRequestId": c["rootRequestId"], "originalGoal": c["originalGoal"], "followUp": c["followUp"]}):
+        return None
+    return c
+
+
 def find_matching_admission(data_dir: Path | None, request_id: object, workspace_path: object) -> tuple[dict | None, Path | None]:
     """Find the single immutable admission matching requestId and workspacePath."""
     if data_dir is None or not isinstance(request_id, str) or not request_id or not isinstance(workspace_path, str) or not workspace_path:
@@ -367,6 +414,16 @@ def find_matching_admission(data_dir: Path | None, request_id: object, workspace
                     and candidate.get("requestId") == request_id
                     and candidate.get("workspacePath") == workspace_path):
                 matches.append((candidate, job))
+            elif isinstance(candidate, dict) and candidate.get("workspacePath") == workspace_path:
+                try:
+                    progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+                    child = owned_live_context(admission, progress, read_saved_records(data_dir))
+                    if child and child["requestId"] == request_id and sum(r.get("requestId") == request_id for r in read_saved_records(data_dir) if isinstance(r, dict)) == 1:
+                        contextual = {**candidate, "requestId": child["requestId"], "goal": child["originalGoal"], "priorPlan": child["initialPlan"], "priorReview": child["initialReview"], "continuation": {"parentRequestId": candidate["requestId"], "rootRequestId": child["rootRequestId"], "originalGoal": child["originalGoal"], "followUp": child["followUp"]}}
+                        contextual.pop("executionFeedback", None)
+                        matches.append((contextual, job))
+                except (OSError, ValueError, AttributeError, TypeError):
+                    pass
     except (OSError, AttributeError):
         return None, None
     if len(matches) != 1:
@@ -463,6 +520,29 @@ def saved_status_label(data_dir: Path, record: dict) -> str:
     if job is not None:
         try:
             progress = json.loads((job / "progress.json").read_text(encoding="utf-8"))
+            admission = json.loads((job / "admission.json").read_text(encoding="utf-8"))
+            a = admission.get("input", {})
+            outcome = progress.get("outcome") or {}
+            marker = outcome.get("allowanceEnd")
+            report = outcome.get("report") if isinstance(outcome.get("report"), dict) else {}
+            relation = SavedTargets(read_saved_records(data_dir)).selected(record.get("requestId"))
+            pair = a.get("piCapacity")
+            pair_valid = isinstance(pair, dict) and set(pair) == {"provider", "model", "useExistingCapacity"} and pair.get("useExistingCapacity") is True and all(isinstance(pair.get(k), str) and pair[k] == pair[k].strip() and pair[k] for k in ("provider", "model"))
+            slot = data_dir / "coordination-jobs" / "active-admission.json"
+            active_for_record = json.loads(slot.read_text(encoding="utf-8")).get("jobId") == job.name if slot.exists() else False
+            idle_state = (marker == "idle-stopped" and progress.get("state") == "stopped") or (marker == "expired" and progress.get("state") == "completed")
+            if (admission.get("followUpMode") == "live-read-once" and a.get("requestId") == record.get("requestId")
+                    and a.get("allowedInstances") == ["codex", "pi"] and a.get("maxTurns") == 4 and a.get("backgroundConsent") is True and a.get("writeAuthorization") is None
+                    and pair_valid and pair == record.get("piCapacity") and record.get("verdict") == "checked" and a.get("goal") == record.get("goal")
+                    and relation and relation.get("rootRequestId") == (a.get("continuation") or {}).get("rootRequestId", a.get("requestId"))
+                    and report.get("verdict") == "checked" and all(isinstance(report.get(k), str) and report[k].strip() == record.get(k) for k in ("planText", "reviewText"))
+                    and idle_state and outcome.get("status") == progress.get("state") and progress.get("pendingCommand") is None
+                    and "liveFollowUp" not in progress and isinstance(progress.get("completedCommands"), list)
+                    and type(progress.get("revoked")) is bool and not active_for_record
+                    and progress.get("schema") == "goalport.coordination-job-progress.v1" and progress.get("jobId") == job.name
+                    and admission.get("schema") == "goalport.coordination-job-admission.v1" and admission.get("jobId") == job.name
+                    and (marker != "idle-stopped" or progress.get("revoked") is True)):
+                return "Plan checked"
             if progress.get("state") == "stopped":
                 return "Stopped; existing changes remain"
             if progress.get("state") == "unconfirmed":
@@ -529,6 +609,154 @@ def latest_coordination_record(data_dir: Path | None, request_id: object = None)
         return {"ok": True, "record": None, **common, "reason": "That saved goal is no longer available or cannot be identified." if request_id is not None else "No coordinated result saved."}
     history = [{"requestId": e["record"].get("requestId"), "savedAt": e["record"].get("savedAt"), "outcome": short_outcome(e["record"])} for e in targets.entries if selected["rootRequestId"] and e["rootRequestId"] == selected["rootRequestId"]]
     return {"ok": True, "record": project_saved_record(data_dir, selected, records, targets), "history": history, "reason": None, **common}
+
+
+def read_local_object(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def global_slot(data_dir):
+    if data_dir is None:
+        return {"kind": "unknown"}
+    path = data_dir / "coordination-jobs" / "active-admission.json"
+    try:
+        slot = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"kind": "empty"}
+    except (OSError, ValueError):
+        return {"kind": "unknown"}
+    if (not isinstance(slot, dict) or slot.get("schema") != "goalport.coordination-job-active.v1"
+            or not _status.valid_job_id(slot.get("jobId")) or not _saved_targets.valid_id(slot.get("requestId"))):
+        return {"kind": "unknown"}
+    admission = read_local_object(data_dir / "coordination-jobs" / "jobs" / slot["jobId"] / "admission.json")
+    if (not admission or admission.get("schema") != "goalport.coordination-job-admission.v1"
+            or admission.get("jobId") != slot["jobId"] or not isinstance(admission.get("input"), dict)
+            or admission["input"].get("requestId") != slot["requestId"]):
+        return {"kind": "unknown"}
+    return {"kind": "occupied", "jobId": slot["jobId"], "admittedRequestId": slot["requestId"]}
+
+
+def saved_current_base(data_dir, job_id, slot=None):
+    """Descriptive file observations only; never a BackgroundStatus or ACK."""
+    if data_dir is None or not _status.valid_job_id(job_id):
+        return None
+    slot = global_slot(data_dir) if slot is None else slot
+    job = data_dir / "coordination-jobs" / "jobs" / job_id
+    admission = read_local_object(job / "admission.json") or {}
+    progress = read_local_object(job / "progress.json") or {}
+    a = admission.get("input") if isinstance(admission.get("input"), dict) else {}
+    identity = (admission.get("schema") == "goalport.coordination-job-admission.v1" and admission.get("jobId") == job_id
+                and _saved_targets.valid_id(a.get("requestId")) and isinstance(a.get("goal"), str)
+                and isinstance(a.get("workspacePath"), str) and a["workspacePath"].startswith("/"))
+    root = None
+    if identity:
+        if "continuation" not in a:
+            root = a["requestId"]
+        elif _saved_targets.valid_descriptor(a["continuation"]):
+            d = a["continuation"]
+            targets = SavedTargets(read_saved_records(data_dir))
+            parent = targets.selected(d["parentRequestId"])
+            if (parent and parent["rootRequestId"] == d["rootRequestId"] and a["goal"] == d["originalGoal"]
+                    and d["originalGoal"] == str((targets.unique(d["rootRequestId"]) or {}).get("goal", "")).strip()
+                    and _saved_targets.workspace_key(parent["record"].get("workspacePath")) == _saved_targets.workspace_key(a["workspacePath"])):
+                root = d["rootRequestId"]
+    valid_progress = progress.get("schema") == "goalport.coordination-job-progress.v1" and progress.get("jobId") == job_id
+    state = progress.get("state") if valid_progress and isinstance(progress.get("state"), str) and progress.get("state") in _status.STATES else "unknown"
+    phase = progress.get("phase") if valid_progress and "phase" in progress and (progress.get("phase") is None or isinstance(progress.get("phase"), str)) else "unknown"
+    pending = ("none" if progress["pendingCommand"] is None else "present" if isinstance(progress["pendingCommand"], dict) else "unknown") if valid_progress and "pendingCommand" in progress else "unknown"
+    try:
+        (job / "revocation.json").stat()
+        revoked = True
+    except FileNotFoundError:
+        revoked = progress.get("revoked") if valid_progress and type(progress.get("revoked")) is bool else "unknown"
+    except OSError:
+        revoked = "unknown"
+    claim = read_local_object(job / "startup-claim.json")
+    pid = claim.get("pid") if claim else None
+    gone = not worker_alive(pid) if type(pid) is int and pid > 0 else "unknown"
+    outcome = progress.get("outcome") if valid_progress and isinstance(progress.get("outcome"), dict) else {}
+    end = outcome.get("allowanceEnd")
+    end = end if end in ("idle-stopped", "expired", None) and valid_progress else "unknown"
+    try:
+        child = owned_live_context(admission, progress, read_saved_records(data_dir)) if identity and valid_progress else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        child = None
+    return {"kind": "saved-current-base", "jobId": job_id, "admittedRequestId": a.get("requestId") if identity else None,
+            "rootRequestId": root, "goal": a.get("goal") if identity else None, "workspacePath": a.get("workspacePath") if identity else None,
+            "identityConfirmed": bool(identity and root), "followUpMode": "live-read-once" if admission.get("followUpMode") == "live-read-once" else None,
+            "state": state, "phase": phase, "pending": pending, "revoked": revoked, "workerGone": gone,
+            "unconfirmed": state in ("unknown", "unconfirmed") or outcome.get("status") == "unconfirmed" or ("liveFollowUp" in progress and child is None),
+            "allowanceEnd": end, "observedAcceptedChildId": child["requestId"] if child else None,
+            "active": slot["kind"] == "occupied" and slot["jobId"] == job_id if slot["kind"] != "unknown" else "unknown",
+            "globalSlot": slot, "profileUnconfirmed": disk_unconfirmed(data_dir), "leftoverHeld": leftover_left_job(data_dir) is not None}
+
+
+def status_base(data_dir, job_id):
+    base = saved_current_base(data_dir, job_id)
+    if (not base or not base["identityConfirmed"] or base["state"] == "unknown" or base["phase"] == "unknown"
+            or base["pending"] == "unknown" or base["revoked"] == "unknown" or base["active"] == "unknown"
+            or base["allowanceEnd"] == "unknown" or base["globalSlot"]["kind"] == "unknown" or base["workerGone"] == "unknown"
+            or (base["active"] is True and base["unconfirmed"])):
+        return None
+    return base
+
+
+def submission_candidate(data_dir, request_id):
+    if data_dir is None or not _saved_targets.valid_id(request_id):
+        return None
+    jobs = data_dir / "coordination-jobs" / "jobs"
+    try:
+        matches = []
+        for job in jobs.iterdir():
+            if not _status.valid_job_id(job.name):
+                continue
+            a = read_local_object(job / "admission.json")
+            if a and isinstance(a.get("input"), dict) and a["input"].get("requestId") == request_id:
+                base = saved_current_base(data_dir, job.name)
+                if not base or not base["identityConfirmed"]:
+                    return None
+                matches.append({"kind": "submission-candidate", "jobId": job.name, "admittedRequestId": request_id,
+                                "rootRequestId": base["rootRequestId"], "goal": base["goal"], "workspacePath": base["workspacePath"],
+                                "identityConfirmed": True, "active": base["active"]})
+        return matches[0] if len(matches) == 1 else None
+    except OSError:
+        return None
+
+
+def passive_saved_payload(data_dir, request_id=None, lookup_request_id=None):
+    try:
+        payload = latest_coordination_record(data_dir, request_id)
+    except (OSError, ValueError, TypeError, AttributeError):
+        # Preserve uncertainty, not empty/free, if existing local parsing fails.
+        return {"ok": False, "record": None, "currentBase": None, "savedAllowanceView": None,
+                "globalSlot": {"kind": "unknown"}, "unconfirmedGoal": True, "leftoverHeld": True,
+                "reason": "Saved results could not be read."}
+    current = payload.pop("currentJob", None)
+    slot = global_slot(data_dir)
+    base_id = current.get("jobId") if current else slot.get("jobId")
+    base = saved_current_base(data_dir, base_id, slot)
+    payload["unconfirmedGoal"] = payload.get("unconfirmedGoal") is True or slot["kind"] == "unknown" or bool(base and base["unconfirmed"])
+    if base and payload.get("jobId") is None and base["active"] is True:
+        payload["jobId"] = base["jobId"]
+        payload["line"] = "The previous allowance is still ending. Your view is kept." if base["state"] in ("stopped", "completed", "failed") else "Current work is not confirmed."
+    view = None
+    record = payload.get("record")
+    if isinstance(record, dict):
+        _, path = find_matching_admission(data_dir, record.get("requestId"), record.get("workspacePath"))
+        saved = saved_current_base(data_dir, path.name, slot) if path else None
+        if saved and saved["identityConfirmed"] and saved["followUpMode"] == "live-read-once":
+            view = {"kind": "saved-allowance", "jobId": saved["jobId"], "initialRequestId": saved["admittedRequestId"],
+                    "rootRequestId": saved["rootRequestId"], "state": saved["state"], "phase": saved["phase"],
+                    "allowanceEnd": saved["allowanceEnd"] if saved["allowanceEnd"] in ("idle-stopped", "expired") else None}
+    if (base and base["followUpMode"] == "live-read-once") or (current and current.get("followUpMode") == "live-read-once"):
+        payload["line"] = "Checking the open allowance. Your saved result is kept."
+    payload.update(currentBase=base, savedAllowanceView=view, globalSlot=slot,
+                   submissionCandidate=submission_candidate(data_dir, lookup_request_id))
+    return payload
 
 
 def pi_capacity_snapshot(stdout: str) -> dict | None:
@@ -644,11 +872,12 @@ def checked_instances(instances: object) -> tuple[str | None, str | None]:
     return ",".join(names), None
 
 
-def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None, from_request_id: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, follow_up: object = None, write: object = False, background: object = False, instances: object = None, database: str | None = None, from_request_id: object = None, live_request_id: object = None, request_id: object = None) -> tuple[list[str] | None, str | None]:
     if background is not True:
         return None, KEEP_RUNNING_SENTENCE
     if not _saved_targets.valid_id(from_request_id):
         return None, "Choose an available saved result before continuing."
+    admission_request_id = request_id
     found = latest_coordination_record(data_dir, from_request_id)
     record = found.get("record") if isinstance(found, dict) else None
     request_id = record.get("requestId") if isinstance(record, dict) else None
@@ -661,13 +890,35 @@ def coordination_continue_command(data_dir: Path | None, repo_root: Path, endpoi
         return None, error
     if not record.get("rootRequestId"):
         return None, record.get("relationUnavailableReason") or "The saved goal relationship is unavailable."
-    if record.get("rootLatestId") != request_id:
+    if record.get("rootLatestId") != request_id and live_request_id is None:
         return None, "Open the latest result and choose Continue again."
+    active = live_fields(data_dir).get("currentJob")
+    if (isinstance(active, dict) and active.get("followUpMode") == "live-read-once") or live_request_id is not None:
+        accepted_match = False
+        candidate, owner_job = find_matching_admission(data_dir, request_id, record.get("workspacePath"))
+        if owner_job is not None:
+            try:
+                a = json.loads((owner_job / "admission.json").read_text(encoding="utf-8"))
+                p = json.loads((owner_job / "progress.json").read_text(encoding="utf-8"))
+                child = owned_live_context(a, p, read_saved_records(data_dir))
+                accepted_match = bool(child and child["fromRequestId"] == request_id and child["requestId"] == live_request_id and child["followUp"] == (follow_up or "").strip())
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        if ((not accepted_match and record.get("rootLatestId") != request_id)
+                or (not accepted_match and (not isinstance(active, dict) or active.get("requestId") != request_id or active.get("followUpMode") != "live-read-once"))
+                or not _saved_targets.valid_id(live_request_id) or live_request_id == request_id or write is not False
+                or (instances is not None and instances != "codex,pi") or (follow_up is not None and not isinstance(follow_up, str))):
+            return None, "The live follow-up does not match the original allowance; nothing was sent."
+        return [*prefix, "continue", "--from", request_id, "--background", "--live-request-id", live_request_id, "--goal", (follow_up or "").strip()], None
     if current_job(data_dir) is not None or disk_unconfirmed(data_dir) or leftover_left_job(data_dir):
         return None, "Current work has not settled, so nothing was admitted."
     if follow_up is not None and not isinstance(follow_up, str):
         return None, "The follow-up must be text, so nothing was admitted."
+    if admission_request_id is not None and not _saved_targets.valid_id(admission_request_id):
+        return None, "The submitted request id is invalid, so nothing was admitted."
     argv = [*prefix, "continue", "--from", request_id, "--background"]
+    if admission_request_id is not None:
+        argv.extend(["--request-id", admission_request_id])
     if isinstance(follow_up, str) and follow_up.strip():
         argv.extend(["--goal", follow_up.strip()])
     workspace = record.get("workspacePath")
@@ -691,7 +942,7 @@ def expand_workspace(workspace: str) -> str:
     return workspace
 
 
-def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None, database: str | None = None, pi_capacity: object = PI_CAPACITY_ABSENT) -> tuple[list[str] | None, str | None]:
+def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: object, workspace: object, write: object = False, endpoint: str | None = None, core_binary: str | None = None, background: object = False, instances: object = None, database: str | None = None, pi_capacity: object = PI_CAPACITY_ABSENT, request_id: object = None) -> tuple[list[str] | None, str | None]:
     if data_dir is None:
         return None, "No coordination profile is configured, so nothing was admitted."
     if not isinstance(goal, str) or not goal.strip():
@@ -706,7 +957,11 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, database=database)
     if error:
         return None, error
+    if request_id is not None and not _saved_targets.valid_id(request_id):
+        return None, "The submitted request id is invalid, so nothing was admitted."
     argv = [*prefix, "run", "--goal", goal.strip(), "--workspace", workspace, "--background"]
+    if request_id is not None:
+        argv.extend(["--request-id", request_id])
     if pi_capacity is not PI_CAPACITY_ABSENT:
         argv.extend(["--pi-capacity", json.dumps(pi_capacity, ensure_ascii=False, separators=(",", ":"))])
     if write is True:
@@ -719,7 +974,7 @@ def coordination_start_command(data_dir: Path | None, repo_root: Path, goal: obj
     return argv, None
 
 
-def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None) -> tuple[list[str] | None, str | None]:
+def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: str | None = None, core_binary: str | None = None, database: str | None = None, expected_job_id: object = None, only_if_ready_from: object = None) -> tuple[list[str] | None, str | None]:
     job = current_job(data_dir) if data_dir is not None else None
     job_id = job.get("jobId") if isinstance(job, dict) else None
     if not isinstance(job_id, str) or not job_id:
@@ -731,10 +986,83 @@ def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: 
     prefix, error = coordination_cli_prefix(data_dir, repo_root, endpoint, core_binary, "nothing was stopped.", database)
     if error:
         return None, error
-    return [*prefix, "stop", "--job", job_id], None
+    if only_if_ready_from is not None and not _saved_targets.valid_id(only_if_ready_from):
+        return None, "The initial result is unavailable; nothing was stopped."
+    return [*prefix, "stop", "--job", job_id, *(["--only-if-ready-from", only_if_ready_from] if only_if_ready_from is not None else [])], None
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None):
+NATIVE_WORKSPACE_COMMANDS = {"start_conversation", "conversation_send", "send_message", "select_runtime", "select_attempt", "resume_native_session", "handoff", "reassign", "continue_in_isolated_workspace"}
+NATIVE_GLOBAL_COMMANDS = {"create_campaign", "create_campaign_with_task", "queue_override", "request_owner_action"}
+NATIVE_FOLDER_SENTENCE = "Codex conversations need an absolute folder path, for example /path/to/project."
+
+
+def native_workspace(value, *, canonical=False):
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise ValueError(NATIVE_FOLDER_SENTENCE)
+    root = Path(value).resolve(strict=True)
+    if not root.is_dir() or (canonical and str(root) != value):
+        raise ValueError("The conversation folder could not be confirmed. Nothing was sent.")
+    return str(root)
+
+
+def native_ingress_workspace(request, endpoint, unix_client, timeout):
+    """Closed product table. Returns canonical W root, or None for conservative G."""
+    kind = request["messageType"]
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("The native request has no valid target. Nothing was sent.")
+    wrapper = request.get("nativeTarget")
+    if "nativeTarget" in request and (not isinstance(wrapper, dict) or set(wrapper) != {"campaignId"}
+                                or not isinstance(wrapper["campaignId"], str) or not wrapper["campaignId"]):
+        raise ValueError("Choose the exact conversation before continuing. Nothing was sent.")
+    if wrapper is not None and "campaignId" in payload and payload["campaignId"] != wrapper["campaignId"]:
+        raise ValueError("The conversation target changed. Nothing was sent.")
+    if kind in NATIVE_GLOBAL_COMMANDS:
+        return None
+    if kind == "start_conversation":
+        return native_workspace(payload.get("workspaceRoot"))
+    if kind == "continue_in_isolated_workspace":
+        return native_workspace(payload.get("targetWorkspace"))
+    campaign = payload.get("campaignId") if kind in {"conversation_send", "send_message", "select_runtime", "select_attempt"} else wrapper.get("campaignId") if wrapper else None
+    if not isinstance(campaign, str) or not campaign:
+        raise ValueError("Choose the exact conversation before continuing. Nothing was sent.")
+    lookup = str(uuid.uuid4())
+    reply = unix_client.call(endpoint, "goal_detail", {"campaignId": campaign}, timeout=timeout, request_id=lookup)
+    envelope = reply.get("payload") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or reply.get("protocolVersion") != "goalport.ipc.v2"
+            or reply.get("requestId") != lookup or reply.get("ok") is not True
+            or not isinstance(envelope, dict) or envelope.get("requestId") != lookup or envelope.get("accepted") is not True):
+        raise ValueError("The conversation target could not be confirmed. Nothing was sent.")
+    snapshot = envelope.get("snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("activeCampaignId") != campaign:
+        raise ValueError("The conversation target changed. Nothing was sent.")
+    project, task, attempt = snapshot.get("project"), snapshot.get("activeTask"), snapshot.get("attempt")
+    if not isinstance(project, dict) or not isinstance(task, dict) or not isinstance(task.get("id"), str) or not task["id"]:
+        raise ValueError("The conversation folder or task could not be confirmed. Nothing was sent.")
+    if "taskId" in payload and payload["taskId"] != task["id"]:
+        raise ValueError("The conversation task changed. Nothing was sent.")
+    attempt_key = "oldAttemptId" if kind in {"handoff", "reassign"} else "attemptId"
+    required = kind not in {"select_runtime", "select_attempt"}
+    if required or attempt_key in payload:
+        explicit = payload.get(attempt_key)
+        if not isinstance(explicit, str) or not explicit or not isinstance(attempt, dict) or attempt.get("id") != explicit:
+            raise ValueError("Only the current conversation attempt can continue here. Nothing was sent.")
+    return native_workspace(project.get("workspaceRoot"), canonical=True)
+
+
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None, status_capture=None, native_capture=None):
+    def status_argv(job_id):
+        if coordination_data is None:
+            return None
+        prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, database=database)
+        return [*prefix, "status", "--job", job_id, "--json-status"] if not error else None
+
+    status_reads = _status.InFlightStatus(status_argv, coordination_child_env, ROOT,
+        lambda job_id: status_base(coordination_data, job_id), **({"capture": status_capture} if status_capture else {}))
+
+    native_reads = _status.NativePreflight(coordination_child_env, ROOT,
+        **({"capture": native_capture} if native_capture else {}))
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -794,6 +1122,15 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(400, disconnected_body("Core request must be an object"), "application/json")
                 return
             message_type = request.get("messageType") or request.get("message_type")
+            if message_type in {"coordination_start", "coordination_continue", "coordination_stop", "coordination_grant", "coordination_acknowledge"}:
+                status_reads.invalidate()  # Before effects, including implicit acknowledge.
+            if message_type == "coordination_status":
+                payload = request.get("payload")
+                if not isinstance(payload, dict) or set(payload) != {"jobId"} or not _status.valid_job_id(payload.get("jobId")):
+                    self._send(200, json.dumps({"ok": False, "error": "Choose an exact allowance job before checking it."}).encode(), "application/json")
+                    return
+                self._send(200, json.dumps({"ok": True, "payload": status_reads.read(payload["jobId"])}).encode(), "application/json")
+                return
             if message_type == "coordination_discover":
                 prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "the signed-in harnesses could not be checked.", database)
                 if error:
@@ -804,12 +1141,13 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
                 workspace = payload.get("workspaceRoot")
+                expanded_workspace = expand_workspace(workspace.strip()) if isinstance(workspace, str) and workspace.strip() else None
                 args = [*prefix, "discover"]
-                if isinstance(workspace, str) and workspace.strip():
-                    args.extend(["--workspace", expand_workspace(workspace.strip())])
+                if expanded_workspace is not None:
+                    args.extend(["--workspace", expanded_workspace])
                 code, out, err = continue_runner(args)
                 pi = pi_capacity_snapshot(out)
-                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": None if pi else subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "pi": pi, "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
+                self._send(200, json.dumps({"ok": code == 0, "payload": {"sentence": None if pi else subscription_harness_sentence(out), "harnesses": subscription_harnesses(out), "workspaceRoot": expanded_workspace, "pi": pi, "consentMissing": consent_missing(out), "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_acknowledge":
                 argv, error = coordination_acknowledge_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
@@ -840,15 +1178,21 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 if not isinstance(payload, dict) or ((message_type == "coordination_detail" or "requestId" in payload) and not _saved_targets.valid_id(payload.get("requestId"))):
                     self._send(200, json.dumps({"ok": False, "error": "Choose an exact saved result before opening it.", "payload": {"record": None}}).encode(), "application/json")
                     return
+                if "lookupRequestId" in payload and not _saved_targets.valid_id(payload["lookupRequestId"]):
+                    self._send(200, json.dumps({"ok": False, "error": "The submitted request id is invalid."}).encode(), "application/json")
+                    return
                 self._send(200, json.dumps({
                     "ok": True,
-                    "payload": latest_coordination_record(coordination_data, payload.get("requestId")),
+                    "payload": passive_saved_payload(coordination_data, payload.get("requestId"), payload.get("lookupRequestId")),
                 }).encode(), "application/json")
                 return
             if message_type == "coordination_start":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                if "requestId" in payload and not _saved_targets.valid_id(payload["requestId"]):
+                    self._send(200, json.dumps({"ok": False, "error": "The submitted request id is invalid, so nothing was admitted."}).encode(), "application/json")
+                    return
                 argv, error = coordination_start_command(
-                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"), database, payload.get("piCapacity", PI_CAPACITY_ABSENT),
+                    coordination_data, ROOT, payload.get("goal"), payload.get("workspaceRoot"), payload.get("write") is True, endpoint, core_binary, payload.get("background") is True, payload.get("instances"), database, payload.get("piCapacity", PI_CAPACITY_ABSENT), payload.get("requestId"),
                 )
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
@@ -873,7 +1217,11 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(200, json.dumps({"ok": code == 0, "payload": {"exitCode": code, "stdout": out, "stderr": err}}).encode(), "application/json")
                 return
             if message_type == "coordination_stop":
-                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"))
+                stop_payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                if "onlyIfReadyFromRequestId" in stop_payload and not _saved_targets.valid_id(stop_payload["onlyIfReadyFromRequestId"]):
+                    self._send(200, json.dumps({"ok": False, "error": "The guarded idle result is invalid; nothing was stopped."}).encode(), "application/json")
+                    return
+                argv, error = coordination_stop_command(coordination_data, ROOT, endpoint, core_binary, database, (request.get("payload") or {}).get("jobId"), (request.get("payload") or {}).get("onlyIfReadyFromRequestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -885,10 +1233,17 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             if message_type == "coordination_continue":
                 payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                if "requestId" in payload and not _saved_targets.valid_id(payload["requestId"]):
+                    self._send(200, json.dumps({"ok": False, "error": "The submitted request id is invalid, so nothing was admitted."}).encode(), "application/json")
+                    return
                 if "piCapacity" in payload:
                     self._send(200, json.dumps({"ok": False, "error": "Continue retains the saved goal's Pi route; it cannot be edited here."}).encode(), "application/json")
                     return
-                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write") is True, payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"))
+                live = "liveRequestId" in payload
+                if live and (not _saved_targets.valid_id(payload.get("liveRequestId")) or set(payload) - {"liveRequestId", "fromRequestId", "followUp", "write", "background", "instances"}):
+                    self._send(200, json.dumps({"ok": False, "error": "The live follow-up cannot change its original allowance."}).encode(), "application/json")
+                    return
+                argv, error = coordination_continue_command(coordination_data, ROOT, endpoint, core_binary, payload.get("followUp"), payload.get("write", False) if live else payload.get("write") is True, payload.get("background", False) if live else payload.get("background") is True, payload.get("instances"), database, payload.get("fromRequestId"), payload.get("liveRequestId"), payload.get("requestId"))
                 if error:
                     self._send(200, json.dumps({"ok": False, "error": error}).encode(), "application/json")
                     return
@@ -919,7 +1274,20 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
             request_id = request.get("requestId") or request.get("request_id")
+            preflighting = message_type in NATIVE_WORKSPACE_COMMANDS | NATIVE_GLOBAL_COMMANDS
             try:
+                if preflighting:
+                    if coordination_data is None:
+                        raise ValueError("Workspace reservations are unavailable. Nothing was sent.")
+                    workspace = native_ingress_workspace({**request, "messageType": message_type}, endpoint, unix_client, timeout)
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, database=database)
+                    if error:
+                        raise ValueError(error)
+                    argv = [*prefix, "native-preflight", *( ["--workspace", workspace] if workspace is not None else ["--global"] )]
+                    if not native_reads.read(argv, workspace):
+                        raise ValueError("Competing work or workspace reservations could not be checked. Nothing was sent.")
+                preflighting = False
+                # nativeTarget is a workbench lookup key only; never forwarded to Core.
                 response = unix_client.call(
                     endpoint, message_type, payload, timeout=timeout, request_id=request_id
                 )
@@ -927,7 +1295,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(502, disconnected_body(str(error)), "application/json")
                 return
             except (OSError, ValueError) as error:
-                self._send(502, disconnected_body(str(error)), "application/json")
+                self._send(200 if preflighting else 502, disconnected_body(str(error)), "application/json")
                 return
             self._send(200, json.dumps(response).encode(), "application/json")
 
@@ -968,7 +1336,7 @@ def main(argv=None) -> int:
 
     def continue_runner(argv: list[str]) -> tuple[int, str, str]:
         import subprocess
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=coordination_child_env())
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=15 if "--live-request-id" in argv else 60, env=coordination_child_env())
         return completed.returncode, completed.stdout, completed.stderr
 
     handler = make_handler(endpoint, dist, unix_client, args.timeout, coordination_data, continue_runner, core_binary, database)

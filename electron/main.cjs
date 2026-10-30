@@ -1273,7 +1273,8 @@ app.whenReady().then(() => {
     }
     return backgroundHost.heldWorkspaces(candidate);
   });
-  handleTrusted("goalport:background-revoke", (_, jobId) => backgroundHost.revoke(jobId));
+  handleTrusted("goalport:background-revoke", (_, jobId, payload) => backgroundHost.revoke(jobId, payload));
+  handleTrusted("goalport:background-continue", (_, jobId, payload) => backgroundHost.continueLive(jobId, payload));
   handleTrusted("goalport:background-acknowledge", (_, jobId) => backgroundHost.acknowledge(jobId));
   handleTrusted("goalport:background-release-terminal", (_, jobId) => backgroundHost.releaseConfirmedTerminal(jobId));
   handleTrusted("goalport:start-core", async () => { await ensureCore(); return { connected: true, pipeName: coreServePipe(process.platform, configuredPipeName) }; });

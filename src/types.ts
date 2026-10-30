@@ -109,11 +109,16 @@ export interface ProductConversation {
   runtime: ProductRuntimeSelection;
   turn: ProductTurn;
   /** Native session lifetime is independent of the current turn and send permission. */
-  session?: { state: "starting" | "attached" | "unavailable" | "detached" | "closed" | "none"; nativeIdKnown: boolean };
+  session?: { state: "starting" | "attached" | "unavailable" | "detached" | "closed" | "none"; nativeIdKnown: boolean; transport?: NativeSessionTransport };
   /** Product title: manual rename, independent generated title, or local fallback. */
   title: string;
   /** Excerpt of an actually committed completed turn; never inferred success. */
   resultSummary?: string;
+}
+
+export type NativeSessionTransport = "app-server" | "exec" | "unknown";
+export function normalizeNativeSessionTransport(value: unknown): NativeSessionTransport {
+  return value === "app-server" || value === "exec" ? value : "unknown";
 }
 
 const PRODUCT_RUNTIME_STATES: readonly ProductRuntimeSelectionState[] = ["none", "starting", "selected", "unavailable"];
@@ -185,7 +190,7 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
       actions: Array.isArray(turnRaw.actions) ? turnRaw.actions.map((action) => asText(action, "")).filter(Boolean) : undefined
     },
     session: sessionRaw && ["starting", "attached", "unavailable", "detached", "closed", "none"].includes(String(sessionRaw.state))
-      ? { state: sessionRaw.state as "starting" | "attached" | "unavailable" | "detached" | "closed" | "none", nativeIdKnown: sessionRaw.nativeIdKnown === true || sessionRaw.native_id_known === true }
+      ? { state: sessionRaw.state as "starting" | "attached" | "unavailable" | "detached" | "closed" | "none", nativeIdKnown: sessionRaw.nativeIdKnown === true || sessionRaw.native_id_known === true, transport: normalizeNativeSessionTransport(sessionRaw.transport) }
       : undefined,
     title: asText(raw.title, ""),
     resultSummary: optionalText(raw.resultSummary ?? raw.result_summary)
@@ -286,6 +291,7 @@ export interface TimelineItem {
 }
 
 export interface RuntimeProfile {
+  nativeSessionTransport?: NativeSessionTransport;
   /** Core-owned Runtime identity. Unknown ids stay unknown instead of becoming Codex. */
   id: string;
   name: string;
@@ -1256,6 +1262,7 @@ function normalizeRuntime(value: unknown): RuntimeProfile | null {
     support: support === "supported" || support === "partial" || support === "unsupported" ? support : "unknown",
     mode: asText(raw.mode, "Unassigned"),
     subtitle: asText(raw.subtitle, "Capability-gated path"),
+    nativeSessionTransport: normalizeNativeSessionTransport(raw.nativeSessionTransport ?? raw.native_session_transport),
     reasons: Array.isArray(raw.reasons) ? raw.reasons.map((reason) => asText(reason, "")).filter(Boolean) : ["No routing reason was provided by Core"],
     capabilities: {
       events: normalizeEvidenceState(capabilities.events) ?? "needs-review",

@@ -30,6 +30,53 @@ const SUBSCRIPTION_PROVIDERS = [
   { instanceId: "claude", displayName: "Claude", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "opus", isDefault: true }] },
 ];
 
+test("native-preflight is an exact read-only W/G operation, not discovery/Core/status", async t => {
+  const f = fixture(t, { discover: async () => { throw Error("no discovery"); }, snapshot: async () => { throw Error("no Core"); }, spawn: () => { throw Error("no process"); } });
+  const missing = await invoke(f, ["native-preflight", "--global"], { withCore: false });
+  assert.equal(missing.code, 1); assert.equal(fs.existsSync(f.dataDir), false);
+  fs.mkdirSync(f.dataDir);
+  for (const flags of [["--workspace", path.join(f.workspace, ".")], ["--global"]]) {
+    const read = await invoke(f, ["native-preflight", ...flags], { withCore: false });
+    assert.equal(read.code, 0, read.stderr);
+    const lines = read.stdout.trim().split("\n");
+    assert.equal(lines.length, 1);
+    const facts = JSON.parse(lines[0].slice("native preflight: ".length));
+    assert.equal(facts.outstanding, false); assert.equal(facts.inventory.complete, true); assert.equal(facts.inventory.globalBlock, false);
+    if (flags[0] === "--workspace") { assert.equal(facts.workspace, fs.realpathSync(f.workspace)); assert.equal(facts.inventory.candidate, facts.workspace); assert.equal(facts.inventory.candidateBlocked, false); }
+    else { assert.equal(facts.mode, "global"); assert.deepEqual(facts.inventory.holds, []); assert.equal(Object.hasOwn(facts, "workspace"), false); }
+  }
+  assert.deepEqual(fs.readdirSync(f.dataDir), [], "a preflight never creates a profile/store/grant");
+  assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
+test("native-preflight rejects missing/mutually exclusive/foreign flags, nonabsolute roots and incomplete inventory", async t => {
+  const f = fixture(t);
+  fs.mkdirSync(f.dataDir);
+  for (const flags of [[], ["--global", "--workspace", f.workspace], ["--workspace", "relative"], ["--workspace", "~"], ["--workspace", ""], ["--workspace", path.join(f.root, "missing")], ["--global", "--goal", "not allowed"], ["--global", "--background"]]) {
+    assert.equal((await invoke(f, ["native-preflight", ...flags])).code, 1, JSON.stringify(flags));
+  }
+  const jobs = path.join(f.dataDir, "coordination-jobs", "jobs"); fs.mkdirSync(jobs, { recursive: true });
+  fs.writeFileSync(path.join(jobs, "malformed-inventory"), "fixture");
+  for (const flags of [["--workspace", f.workspace], ["--global"]]) assert.equal((await invoke(f, ["native-preflight", ...flags])).code, 1);
+  assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
+test("native-preflight refuses active and acknowledged-left same-folder holds without reviving work", async t => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const launched = await invoke(f, runArgs(f, { requestId: "native-competing" }));
+  assert.equal(launched.code, 0, launched.stderr);
+  const id = jobIdOf(launched);
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", f.workspace])).code, 1);
+  const left = await invoke(f, ["acknowledge", "--job", id]);
+  assert.equal(left.code, 0, left.stderr);
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", f.workspace])).code, 1);
+  assert.equal((await invoke(f, ["native-preflight", "--global"])).code, 1);
+  const other = fs.mkdtempSync(path.join(f.root, "other-"));
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", other])).code, 0);
+  assert.equal(f.launches.length, 1);
+});
+
 let sequence = 0;
 
 function writeFixtureFile(root, name, text) {
@@ -104,6 +151,30 @@ async function invoke(f, argv, options = {}) {
   return { code, ...drain(f) };
 }
 
+test("live CLI uses caller child ID through real fake-control frames, no fresh admission/discovery/spawn on refusal, idempotent after lost reply", { skip: process.platform !== "linux" }, async t => {
+  const f = fixture(t, { discover: async () => { throw Error("live Continue must not perform host discovery"); } });
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const store = createCoordinationJobStore(f.dataDir, { bootstrapReady: true });
+  const start = store.startAdmission({ requestId: "initial", goal: "Original", workspacePath: f.workspace, allowedInstances: ["codex", "pi"], maxTurns: 4, backgroundConsent: true, piCapacity: pair }, { followUpMode: "live-read-once" });
+  const owner = store.claimWorker(start.jobId).ownerToken;
+  saveRecord(f.dataDir, { requestId: "initial", goal: "Original", workspacePath: f.workspace, verdict: "checked", stopReason: "Checked", planningHarness: "Codex", reviewHarness: "Pi", planningQuota: null, reviewQuota: null, planText: "Full plan", reviewText: "Full check", result: "Checked", piCapacity: pair });
+  let accepted = null, operations = 0;
+  const endpoint = jobControlEndpoint(controlEndpointFor(f.pipe, { platform: "linux", env: f.env }), start.jobId);
+  const server = await store.startControlServer({ jobId: start.jobId, endpoint,
+    getLiveReadStatus: () => ({ mode: "live-read-once", ready: !accepted, initialRequestId: "initial", fromRequestId: "initial", rootRequestId: "initial", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: accepted?.requestId ?? null, expiresAt: "2026-01-01T00:15:00Z", reason: accepted ? "busy" : null }),
+    beforeGuardedRevoke: () => { if (accepted) throw Error("active fixture"); },
+    onContinue: payload => { operations++; accepted = { ...payload, rootRequestId: "initial", originalGoal: "Original", workspacePath: f.workspace, piCapacity: pair, backgroundConsent: true, write: false, initialPlan: "Full plan", initialReview: "Full check", acceptedAt: "2026-01-01T00:00:00Z", phase: "accepted" }; store.recordLiveFollowUpAccepted(start.jobId, accepted, owner); },
+  }); t.after(() => server.close());
+  const missing = await invoke(f, ["continue", "--from", "initial", "--background"]); assert.equal(missing.code, 1); assert.match(missing.stderr, /caller request id/);
+  const long = await invoke(f, ["continue", "--from", "initial", "--background", "--live-request-id", "child", "--goal", "😀".repeat(3000)]); assert.equal(long.code, 1); assert.match(long.stderr, /too long/); assert.equal(operations, 0);
+  const args = ["continue", "--from", "initial", "--background", "--live-request-id", "child", "--goal", "  exact follow-up  "];
+  const first = await invoke(f, args); assert.equal(first.code, 0, first.stderr); assert.match(first.stdout, /live accepted request: child/); assert.equal(accepted.requestId, "child"); assert.equal(accepted.followUp, "exact follow-up");
+  const again = await invoke(f, args); assert.equal(again.code, 0, again.stderr); assert.equal(operations, 1);
+  const conflict = await invoke(f, [...args.slice(0, -1), "different"]); assert.equal(conflict.code, 1); assert.match(conflict.stderr, /different follow-up/);
+  const guarded = await invoke(f, ["stop", "--job", start.jobId, "--only-if-ready-from", "initial"]); assert.equal(guarded.code, 1); assert.equal(store.getStatus(start.jobId).revoked, false);
+  assert.equal(fs.readdirSync(path.join(f.dataDir, "coordination-jobs", "jobs")).length, 1); assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
 function runArgs(f, overrides = {}) {
   const args = [
     "run",
@@ -132,6 +203,28 @@ function jobIdOf(out) {
   assert.ok(match, `expected a job line in:\n${out.stdout}${out.stderr}`);
   return match[1];
 }
+
+test("existing caller admission ID is preserved; exact terminal JSON status is one projection line without discovery or spawn", async t => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const admitted = await invoke(f, runArgs(f, { requestId: "caller-stable-results-first" }));
+  assert.equal(admitted.code, 0, admitted.stderr);
+  const id = jobIdOf(admitted), store = storeOf(f);
+  assert.equal(store.getStatus(id).requestId, "caller-stable-results-first");
+  const owner = store.claimWorker(id).ownerToken;
+  store.recordOutcome(id, { status: "stopped" }, owner); store.releaseAdmission(id, owner);
+  const launched = f.launches.length;
+  f.io.discover = async () => { throw Error("status must not discover"); };
+  f.io.spawn = () => { throw Error("status must not spawn"); };
+  const status = await invoke(f, ["status", "--job", id, "--json-status"]);
+  assert.equal(status.code, 0, status.stderr);
+  const lines = status.stdout.split(/\r?\n/).filter(Boolean);
+  assert.equal(lines.length, 1); assert.ok(lines[0].startsWith("job projection: "));
+  const projected = JSON.parse(lines[0].slice("job projection: ".length));
+  assert.equal(projected.jobId, id); assert.equal(projected.requestId, "caller-stable-results-first");
+  assert.equal(projected.active, false); assert.equal(projected.pendingCommand, null);
+  assert.equal(projected.outcome.status, "stopped"); assert.equal(f.launches.length, launched);
+});
 
 test("run refuses without --background and without durable consent, each with its own sentence", async (t) => {
   const f = fixture(t);
