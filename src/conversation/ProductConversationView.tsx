@@ -37,7 +37,7 @@ function AssistantMessage({ item }: { item: ProductConversationItem }) {
       <div className="tl-avatar" aria-hidden="true">◎</div>
       <div className="tl-event-body">
         <div className="tl-meta">
-          <span className="tl-actor">{item.actor?.trim() || "Runtime"}</span>
+          <span className="tl-actor">{item.actor?.trim() || "Agent"}</span>
           <Timestamp value={item.timestamp} />
         </div>
         <div className="tl-agent-body">{renderMarkdownBody(item.body, item.id)}</div>
@@ -190,9 +190,7 @@ export function ProductConversationView({ product, loadingEarlier = false, onLoa
   const nodes = useMemo(() => renderItems(visibleItems, onChooseRuntime, onDiagnose), [visibleItems, onChooseRuntime, onDiagnose]);
   return (
     <div className="timeline-inner" data-product-conversation="true">
-      {product.runtime.provider === "codex" ? <p className="draft-hint" role="status">{product.session?.transport === "app-server"
-        ? "Codex app-server · native conversation context"
-        : product.session?.transport === "exec" ? "One-shot Codex; native session continuation is unavailable" : "Transport not confirmed"}</p> : null}
+      {product.runtime.provider === "codex" && product.session?.transport === "exec" ? <p className="draft-hint" role="status">Codex can't continue this conversation after this turn.</p> : null}
       {product.pageInfo?.hasOlder && onLoadEarlier ? (
         <button className="button button-quiet history-load-earlier" type="button" onClick={onLoadEarlier} disabled={loadingEarlier}>
           {loadingEarlier ? "Loading earlier…" : "Load earlier"}

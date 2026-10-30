@@ -48,9 +48,9 @@ it("a running workspace check stays beside its goal and never takes over the des
   window.goalportCore = { ...window.goalportCore, snapshot: async () => snapshot, startCore: async () => snapshot, backgroundStatus: async () => job, nativeCheck } as never;
   window.history.replaceState(null, "", "/goals/campaign-desktop");
   render(<App />);
-  await screen.findByRole("region", { name: "Workspace check" });
+  await screen.findByRole("region", { name: "Pi review" });
   expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
-  expect(screen.getByRole("button", { name: "Stop check" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop review" })).toBeTruthy();
   // A long command log must not squeeze the conversation and this button out of view.
   expect(screen.getByText("Workspace results").closest("details")?.open).toBe(false);
 });

@@ -37,6 +37,10 @@ function pidGone(pid) {
   try { process.kill(pid, 0); return false; }
   catch (error) { return error?.code === "ESRCH"; }
 }
+// Pi has no write path in a workspace check, so an unconfirmed one protects nothing.
+function leftReadOnlyCheck(facts) {
+  return !!facts?.acknowledgedStuckAt && !!facts.admission?.nativeCheckTarget && facts.admission.writeAuthorization === null;
+}
 function durableTerminal(facts) {
   return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
 }
@@ -89,7 +93,7 @@ function createBackgroundHost(options) {
     const caller = workspaceIdentity(workspaceRoot, platform);
     for (const id of jobIds()) {
       const facts = s.getStatus(id);
-      if (confirmedTerminal(facts)) continue;
+      if (confirmedTerminal(facts) || leftReadOnlyCheck(facts)) continue;
       if (!facts.acknowledgedStuckAt) return true;
       const held = workspaceIdentity(facts.admission?.workspacePath, platform);
       if (caller === null || held === null || held === caller) return true;
@@ -111,7 +115,7 @@ function createBackgroundHost(options) {
         if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) { complete = false; continue; }
         try {
           const facts = s.getStatus(entry.name);
-          if (confirmedTerminal(facts)) continue;
+          if (confirmedTerminal(facts) || leftReadOnlyCheck(facts)) continue;
           if (!facts.acknowledgedStuckAt) { globalBlock = true; continue; }
           const workspacePath = facts.admission?.workspacePath;
           if (!workspaceIdentity(workspacePath, platform)) { complete = false; continue; }
@@ -342,4 +346,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };
+module.exports = { createBackgroundHost, leftReadOnlyCheck, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };

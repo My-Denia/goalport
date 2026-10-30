@@ -108,7 +108,7 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
     focusKey
   });
 
-  const placeholder = "Ask the selected Runtime to continue…";
+  const placeholder = `Ask ${runtime?.name ?? "the agent"} to continue…`;
 
   const hint = closingSession
     ? "Closing the Runtime session…"
