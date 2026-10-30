@@ -613,14 +613,23 @@ fn describe_turn(
             "diagnose"
         } else if session.state == "closed"
             && context.attempt.state == AttemptState::Closed
-            && context.attempt.provider.eq_ignore_ascii_case("claude")
+            && (context.attempt.provider.eq_ignore_ascii_case("claude")
+                || context.attempt.provider.eq_ignore_ascii_case("codex"))
             && session.native_id_known
             && settled
             && no_unsettled_effect
             && store
                 .attempts_for_task(&context.attempt.task_id)
                 .map_err(|error| error.to_string())?
-                .last()
+                .iter()
+                .rev()
+                // A Codex resume that failed leaves an unstarted successor; the
+                // closed session is still the one the user can continue.
+                .find(|attempt| {
+                    !(attempt.provider.eq_ignore_ascii_case("codex")
+                        && matches!(attempt.state, AttemptState::Queued)
+                        && attempt.provider_session.is_none())
+                })
                 .is_some_and(|latest| latest.id == context.attempt.id)
         {
             turn.reason_code = Some("session-closed".into());

@@ -1571,13 +1571,12 @@ impl Store {
                 "closed-session successor must name a distinct source Attempt".into(),
             ));
         }
-        if !successor
-            .successor_attempt
-            .provider
-            .eq_ignore_ascii_case("claude")
+        let successor_provider = &successor.successor_attempt.provider;
+        if !successor_provider.eq_ignore_ascii_case("claude")
+            && !successor_provider.eq_ignore_ascii_case("codex")
         {
             return Err(StoreError::InvalidState(
-                "closed-session successor is only defined for Claude".into(),
+                "closed-session successor is only defined for Claude and Codex".into(),
             ));
         }
         let payload_json = serde_json::to_string(&serde_json::json!({
@@ -1601,11 +1600,10 @@ impl Store {
                 "the closed-session successor must belong to the source task".into(),
             ));
         }
-        if !source_provider.eq_ignore_ascii_case("claude")
-            || !successor
-                .successor_attempt
-                .provider
-                .eq_ignore_ascii_case(&source_provider)
+        if !successor
+            .successor_attempt
+            .provider
+            .eq_ignore_ascii_case(&source_provider)
         {
             return Err(StoreError::InvalidState(
                 "the closed-session successor provider must equal the Claude source".into(),

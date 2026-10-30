@@ -5734,6 +5734,116 @@ impl UiController {
     /// Explicitly closed Claude sessions continue on a new Attempt. The closed
     /// row stays CLOSED. This does not resume a FAILED attempt and does not
     /// send the old prompt.
+    /// Continue a closed Codex conversation in a successor Attempt on the same
+    /// thread. Codex confirms the thread in `thread/resume`, so unlike Claude the
+    /// successor becomes active here, or stays unstarted and can be retried.
+    fn resume_closed_codex_session(&mut self, source: &Attempt) -> Result<(), String> {
+        let session_id = source
+            .provider_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "no persisted native session to resume".to_string())?
+            .to_owned();
+        let workspace = PathBuf::from(self.workspace_for_attempt(&source.id)?);
+        self.ensure_workspace_ingress_allowed(
+            workspace.to_string_lossy().as_ref(),
+            "native session resume",
+        )?;
+        let task = self
+            .store
+            .get_task(&source.task_id)
+            .map_err(store_message)?;
+        let successor_hash = sha256_hex(format!("{}:closed-codex-successor", source.id).as_bytes());
+        let successor_attempt = Attempt::new(
+            format!("attempt-{successor_hash}"),
+            &task.id,
+            &source.provider,
+            format!("{}-cap-v1", source.provider),
+        );
+        let successor_id = successor_attempt.id.clone();
+        match self.store.insert_closed_claude_successor(&ClosedClaudeSuccessor {
+            source_attempt_id: source.id.clone(),
+            successor_attempt,
+        }) {
+            Ok(()) => {}
+            Err(StoreError::IdempotencyConflict(_)) => {
+                let existing = self
+                    .store
+                    .get_attempt(&successor_id)
+                    .map_err(store_message)?;
+                if existing.task_id != task.id
+                    || existing.state != AttemptState::Queued
+                    || existing.provider_session.is_some()
+                {
+                    return Err(store_message(StoreError::IdempotencyConflict(successor_id)));
+                }
+            }
+            Err(error) => return Err(store_message(error)),
+        }
+        if self
+            .runtime_manager
+            .registered_binding(&successor_id)
+            .is_none()
+        {
+            self.runtime_manager
+                .select_runtime(
+                    &successor_id,
+                    &source.provider,
+                    None,
+                    runtime_version(&source.provider),
+                    &workspace,
+                )
+                .map_err(|error| format!("Native session resume failed: {error}"))?;
+        }
+        let context = SessionRequest {
+            campaign_id: Some(task.campaign_id.clone()),
+            task_id: task.id.clone(),
+            attempt_id: successor_id.clone(),
+            workspace_root: workspace,
+            resume_session: Some(session_id.clone()),
+        };
+        let session = self
+            .runtime_manager
+            .resume_session_with_context(&successor_id, &context)
+            .map_err(|error| format!("Native session resume failed: {error}"))?;
+        if session.handle.session_id != session_id {
+            return Err("Native session resume returned a different thread id".into());
+        }
+        self.store
+            .set_attempt_provider_session(&successor_id, &session_id)
+            .map_err(store_message)?;
+        self.persist_event(
+            &successor_id,
+            "attempt.active",
+            json!({ "resumedFrom": source.id }),
+            Some(AttemptState::Active),
+        )?;
+        self.persist_event(
+            &successor_id,
+            "runtime.session.resumed",
+            json!({
+                "resumed": true,
+                "sessionHash": sha256_hex(session_id.as_bytes()),
+                "nativeSubmissionCount": 1
+            }),
+            None,
+        )?;
+        let identity = self
+            .runtime_manager
+            .registration_identity(&successor_id)
+            .unwrap_or_default();
+        self.persist_registration_established(
+            &successor_id,
+            &identity,
+            "resume_native_session",
+            &source.provider,
+        )?;
+        self.selected_attempt_id = Some(successor_id);
+        self.selected_campaign_id = Some(task.campaign_id);
+        Ok(())
+    }
+
     fn resume_closed_claude_session(
         &mut self,
         request: &UiCommandRequest,
@@ -6037,6 +6147,9 @@ impl UiController {
         if attempt.state == AttemptState::Closed && attempt.provider.eq_ignore_ascii_case("claude")
         {
             return self.resume_closed_claude_session(request, &attempt);
+        }
+        if attempt.state == AttemptState::Closed && attempt.provider.eq_ignore_ascii_case("codex") {
+            return self.resume_closed_codex_session(&attempt);
         }
         if attempt.state.is_terminal() {
             return Err(format!(

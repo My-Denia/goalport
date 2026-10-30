@@ -15,7 +15,7 @@ const PROVIDER_COPY: Record<ProviderFailureCode, string> = {
   "delivery-unknown": "The last message may have been delivered. Check its status before sending again.",
   "resume-spawn-failed": "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again.",
   "resume-verification-failed": "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again.",
-  "provider-exited": "The Runtime process ended. Close this session before starting new work; its history remains here."
+  "provider-exited": "Send a message to pick up where you left off."
 };
 
 type TurnCopyCode = Extract<TurnStateReasonCode, "permission-pending" | "recovery-required" | "turn-starting" | "stop-pending" | "authorization-revoked">;

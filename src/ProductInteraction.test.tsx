@@ -198,7 +198,7 @@ describe('conversation-first product boundary', () => {
     verified.productConversation!.items = [{ id: 'reply-1', kind: 'assistant-message', body: 'after-resume' }];
     const command = mount(closed, async () => pending);
     const composer = await screen.findByRole('form', { name: 'Message composer' });
-    expect(composer.textContent).toContain('Earlier messages stay put.');
+    expect(composer.textContent).toContain('pick up where you left off');
     fireEvent.click(screen.getByRole('button', { name: 'Open details panel' }));
     expect(within(screen.getByRole('complementary', { name: 'Session details' })).getByRole('button', { name: 'Resume session' })).toBeTruthy();
     fireEvent.click(within(composer).getByRole('button', { name: 'Resume session' }));
@@ -238,12 +238,30 @@ describe('conversation-first product boundary', () => {
     const command = mount(closed, async () => pending);
     fireEvent.click(within(await screen.findByRole('form', { name: 'Message composer' })).getByRole('button', { name: 'Resume session' }));
     expect(await screen.findByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeTruthy();
-    expect(screen.queryByText('Runtime session resumed. You can continue this goal.')).toBeNull();
     expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'resume_native_session', payload: { attemptId: 'attempt-reused' } }));
     window.goalportCore!.snapshot = async () => verified;
     await waitFor(() => {
       expect(screen.queryByText('Session is starting again. Send a message to continue. Earlier messages will not be sent again.')).toBeNull();
     }, { timeout: 2500 });
+  });
+
+  it('sending into an ended session just carries on, with no extra step', async () => {
+    const detached = base();
+    detached.productConversation!.runtime.state = 'unavailable';
+    detached.productConversation!.session = { state: 'detached', nativeIdKnown: true };
+    detached.productConversation!.turn = { state: 'failed', canSend: false, canStop: false, reasonCode: 'session-detached', actions: ['resume-session'] };
+    const command = mount(detached, async () => {
+      const resumed = structuredClone(detached);
+      resumed.productConversation!.session = { state: 'attached', nativeIdKnown: true };
+      resumed.productConversation!.turn = { state: 'idle', canSend: true, canStop: false };
+      return resumed;
+    });
+    const form = await screen.findByRole('form', { name: 'Message composer' });
+    fireEvent.change(within(form).getByRole('textbox'), { target: { value: 'Carry on' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(command.mock.calls.map(call => call[0].messageType)).toEqual(expect.arrayContaining(['resume_native_session', 'conversation_send'])));
+    const kinds = command.mock.calls.map(call => call[0].messageType);
+    expect(kinds.indexOf('resume_native_session')).toBeLessThan(kinds.indexOf('conversation_send'));
   });
 
   it('resumes only through the explicit Core action and confirms attached state', async () => {
@@ -259,7 +277,7 @@ describe('conversation-first product boundary', () => {
     });
     const composer = await screen.findByRole('form', { name: 'Message composer' });
     fireEvent.click(within(composer).getByRole('button', { name: 'Resume session' }));
-    expect(await screen.findByText('Runtime session resumed. You can continue this goal.')).toBeTruthy();
+    await waitFor(() => expect(within(composer).queryByRole('button', { name: 'Resume session' })).toBeNull());
     fireEvent.click(screen.getByRole('button', { name: 'Open details panel' }));
     expect(within(screen.getByRole('complementary', { name: 'Session details' })).queryByRole('button', { name: 'Resume session' })).toBeNull();
     expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'resume_native_session', payload: { attemptId: detached.attempt.id } }));
