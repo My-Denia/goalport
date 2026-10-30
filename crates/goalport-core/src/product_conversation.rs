@@ -24,7 +24,7 @@ use crate::{
     domain::{Attempt, AttemptState, DecisionState},
     history::HistoryPageInfo,
     provider_failure::ProviderFailure,
-    runtime_manager::RuntimeManager,
+    runtime_manager::{CodexTransportKind, RuntimeManager},
     store::{ConversationPreference, EventRecord, StopResponsibility, Store},
 };
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,17 @@ pub struct ProductSession {
     /// `attached` | `detached` | `unavailable` | `none`.
     pub state: String,
     pub native_id_known: bool,
+    #[serde(default)]
+    pub transport: ProductSessionTransport,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductSessionTransport {
+    AppServer,
+    Exec,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +169,11 @@ pub fn product_conversation(
         }
         .into(),
         native_id_known: context.attempt.provider_session.is_some(),
+        transport: match runtime_manager.codex_transport(&context.attempt.id) {
+            Some(CodexTransportKind::AppServer) => ProductSessionTransport::AppServer,
+            Some(CodexTransportKind::Exec) => ProductSessionTransport::Exec,
+            None => ProductSessionTransport::Unknown,
+        },
     };
     let mut turn = project_turn(store, runtime_manager, context, &runtime)?;
     describe_turn(store, runtime_manager, context, &runtime, &session, &mut turn)?;

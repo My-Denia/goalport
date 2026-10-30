@@ -58,7 +58,7 @@ function fixture(t, behavior = behaviorConfig(), wrapperOptions = {}) {
   };
   // The stub acceptance surface is intentionally hermetic. No inherited
   // checkout/profile state is allowed to steer discovery to another backend.
-  for (const key of ["GOALPORT_HARNESS_CHECKOUT", "GOALPORT_HARNESS_SERVER_CWD", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]) delete env[key];
+  for (const key of ["GOALPORT_HARNESS_CHECKOUT", "GOALPORT_HARNESS_SERVER_CWD", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR"]) delete env[key];
   t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const harness = {
     root,
@@ -161,6 +161,9 @@ async function discoverProviders(harness) {
     env: harness.env,
     timeoutMs: 5000,
     execFile(file, args) {
+      // This fixture owns only Codex/Claude processes. Answer the new Linux
+      // Pi metadata/legacy locator probes locally; never spawn a host CLI.
+      if (file === "pi" || file === "which" || file === "where") return { code: 127, stdout: "", stderr: "" };
       assert.ok(IDENTITIES.has(file), `only a pinned stub identity may be probed: ${file}`);
       const child = spawnStubProcess(harness, file, args, harness.worktree);
       if (child.error) throw child.error;
@@ -173,6 +176,16 @@ async function discoverProviders(harness) {
       return { stdout: child.stdout ?? "", stderr: child.stderr ?? "", code: child.status };
     },
   });
+}
+
+function assertDiscoveryIds(snapshot, ids) {
+  const routeAware = process.platform === "linux";
+  assert.deepEqual(snapshot.providers.map(provider => provider.instanceId), [...ids, ...(routeAware ? ["pi"] : [])]);
+  if (routeAware) {
+    const pi = snapshot.providers.find(provider => provider.instanceId === "pi");
+    assert.equal(pi.availability, "unavailable");
+    assert.deepEqual(pi.piCapacity.catalog, []);
+  }
 }
 
 async function providerErrorClassifier() {
@@ -216,7 +229,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
   }));
 
   const firstDiscovery = await discoverProviders(harness);
-  assert.deepEqual(firstDiscovery.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
+  assertDiscoveryIds(firstDiscovery, ["codex", "claude"]);
   assert.equal(firstDiscovery.providers[0].auth.type, "chatgpt");
   assert.equal(firstDiscovery.providers[1].auth.type, "subscription");
 
@@ -226,7 +239,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
 
   // Probes run between turn queue entries but cannot consume a queued turn.
   const secondDiscovery = await discoverProviders(harness);
-  assert.deepEqual(secondDiscovery.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
+  assertDiscoveryIds(secondDiscovery, ["codex", "claude"]);
   const secondTurn = await runTurn(harness, "codex");
   assert.equal(secondTurn.ok, false);
   assert.equal(secondTurn.stopCode, "not-finished");
@@ -237,7 +250,7 @@ test("real discovery probes, unavailable-provider response, turn queues, and pro
     turns: { codex: ["codex-no-text"], claude: [] },
   }));
   const unavailable = await discoverProviders(harness);
-  assert.deepEqual(unavailable.providers.map((provider) => provider.instanceId), ["codex"]);
+  assertDiscoveryIds(unavailable, ["codex"]);
   const thirdTurn = await runTurn(harness, "codex");
   assert.equal(thirdTurn.ok, false);
   assert.equal(thirdTurn.stopCode, "no-text");
@@ -267,7 +280,7 @@ test("all failure and success classes flow through actual spawned wrappers and p
   }));
   const classifyProviderError = await providerErrorClassifier();
   const discovered = await discoverProviders(harness);
-  assert.deepEqual(discovered.providers.map((provider) => provider.instanceId), ["codex", "claude"]);
+  assertDiscoveryIds(discovered, ["codex", "claude"]);
 
   const codexSuccess = await runTurn(harness, "codex");
   assert.equal(codexSuccess.ok, true);

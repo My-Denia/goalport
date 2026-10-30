@@ -5,6 +5,9 @@ const { spawn } = require("node:child_process");
 const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity, jobControlEndpoint } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
+const { discoverCliProviders } = require("./cli-coordinate.cjs");
+const { piAdmissionContext } = require("./pi-capacity-admission.cjs");
+const liveRead = require("./live-read-once.cjs");
 
 const HOST_REFUSAL_CODES = new Set([
   "background-unavailable",
@@ -46,11 +49,17 @@ function projection(status, live = false) {
   }
   return { jobId: status.jobId, requestId: status.requestId, goal: status.admission.goal, active: status.active,
     state: !confirmedTerminal && !live ? "unconfirmed" : status.state, live,
+    ...(status.followUpMode === liveRead.MODE ? { followUpMode: liveRead.MODE } : {}),
+    phase: status.phase ?? null,
+    ...(status.acceptedRequestId ? { acceptedRequestId: status.acceptedRequestId } : {}),
+    ...(live && liveRead.liveStatus(status.liveRead) ? { liveRead: liveRead.liveStatus(status.liveRead) } : {}),
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
     counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
-    workerPid: status.startupClaim?.pid ?? null };
+    workerPid: status.startupClaim?.pid ?? null,
+    ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}),
+    ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}) };
 }
 function createBackgroundHost(options) {
   // The host admits and compares folders on ONE platform identity (the host's
@@ -130,6 +139,8 @@ function createBackgroundHost(options) {
     }
     if (!facts) return null;
     lastJobId = facts.jobId;
+    const owned = Object.hasOwn(facts, "liveFollowUp") ? s.readOwnedLiveFollowUpContext(facts.jobId) : null;
+    if (owned) facts = { ...facts, acceptedRequestId: owned.requestId };
     if (!facts.active || durableTerminal(facts)) return projection(facts);
     try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
@@ -172,6 +183,8 @@ function createBackgroundHost(options) {
           avoidInstances: input.avoidInstances,
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
+          ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
+          ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: input.piCapacity } : {}),
         };
         try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {
@@ -191,8 +204,15 @@ function createBackgroundHost(options) {
         throw preflightRefusal(error);
       }
 
+      if ((platform === "linux" || admissionInput.piCapacity) && admissionInput.allowedInstances.includes("pi")) {
+        try {
+          const discovered = await (options.discover ?? discoverCliProviders)({ cwd: admissionInput.workspacePath, routeAwarePi: true, env: options.env });
+          const context = piAdmissionContext(admissionInput, profileDirectory, discovered, platform);
+          if (context.piCapacity) admissionInput.piCapacity = context.piCapacity;
+        } catch (error) { throw codedRefusal("background-invalid-admission", error.message, error); }
+      }
       let admitted;
-      try { admitted = s.startAdmission(admissionInput); }
+      try { admitted = s.startAdmission(admissionInput, liveRead.eligible(admissionInput) ? { followUpMode: liveRead.MODE } : {}); }
       catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
       if (!admitted.ok) {
         const message = admitted.reason === "workspace-held"
@@ -241,29 +261,58 @@ function createBackgroundHost(options) {
     catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
     return status(jobId);
   }
-  async function revoke(jobId) {
+  async function continueLive(jobId, payload) {
+    const s = store(), facts = s.getStatus(jobId);
+    const accepted = s.readOwnedLiveFollowUpContext(jobId);
+    if (accepted) {
+      if (payload?.requestId !== accepted.requestId || payload?.fromRequestId !== accepted.fromRequestId || typeof payload?.followUp !== "string" || payload.followUp.trim() !== accepted.followUp) throw codedRefusal("live-conflict", "This allowance already accepted a different follow-up.");
+      return { ...await status(jobId), acceptedRequestId: accepted.requestId };
+    }
+    if (!facts.active || facts.followUpMode !== liveRead.MODE) throw codedRefusal("live-unavailable", "This goal has no open live allowance.");
+    const ack = await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "continue", { payload, timeoutMs: 12000 });
+    const latest = s.getStatus(jobId), owned = s.readOwnedLiveFollowUpContext(jobId);
+    return projection({ ...withControlAck(latest, ack), ...(owned ? { acceptedRequestId: owned.requestId } : {}) }, !durableTerminal(latest));
+  }
+  async function revoke(jobId, payload) {
+    const guarded = payload !== undefined;
+    if (guarded) liveRead.controlPayload("revoke", payload);
     const s = store();
     const facts = s.getStatus(jobId);
+    if (guarded && (!facts.active || payload.onlyIfReadyFromRequestId !== facts.requestId)) throw codedRefusal("live-unavailable", "The matching idle allowance is unavailable; nothing was stopped.");
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "revoke")), true); }
-    catch {
+    try { return projection(withControlAck(facts, await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "revoke", { ...(guarded ? { payload } : {}) })), true); }
+    catch (error) {
+      if (guarded) throw error; // Guarded New goal NEVER pre-marks or falls back.
       // Durable revoke denies future admission if the same owner is still
       // alive. Missing control is NOT proof that tools stopped.
       s.revoke(jobId);
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, acknowledge, releaseConfirmedTerminal, outstanding, heldWorkspaces };
+  return { start, status, continueLive, revoke, acknowledge, releaseConfirmedTerminal, outstanding, heldWorkspaces };
 }
 function withControlAck(facts, ack) {
+  if (facts.followUpMode === liveRead.MODE && durableTerminal(facts)) return facts;
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {
     throw Object.assign(new Error("The job control acknowledgement does not match this admission."), { code: "control-identity-mismatch" });
+  }
+  if (facts.followUpMode === liveRead.MODE && (!['admitted','running','revoked','completed','failed','stopped','unconfirmed'].includes(ack.state)
+    || !['active','revoked','claimed'].every(key => typeof ack[key] === 'boolean')
+    || !(ack.pendingCommandId === null || liveRead.id(ack.pendingCommandId))
+    || !['readTurnsRemaining','writeTurnsRemaining','workerPid'].every(key => ack[key] === null || (Number.isInteger(ack[key]) && ack[key] >= 0)))) {
+    throw codedRefusal("control-identity-mismatch", "The live status acknowledgement is malformed.");
+  }
+  const live = liveRead.liveStatus(ack.liveRead);
+  if (ack.liveRead !== undefined && (!live || facts.followUpMode !== liveRead.MODE || live.initialRequestId !== facts.requestId
+    || live.rootRequestId !== (facts.admission.continuation?.rootRequestId ?? facts.requestId))) {
+    throw codedRefusal("control-identity-mismatch", "The live acknowledgement does not match this goal.");
   }
   const counters = facts.counters ? { ...facts.counters } : null;
   if (counters && ack.readTurnsRemaining != null) counters.readTurnsRemaining = ack.readTurnsRemaining;
   if (counters && ack.writeTurnsRemaining != null) counters.writeTurnsRemaining = ack.writeTurnsRemaining;
   return {
     ...facts,
+    ...(live ? { liveRead: live } : {}),
     state: ack.state,
     active: ack.active === true,
     revoked: ack.revoked === true,

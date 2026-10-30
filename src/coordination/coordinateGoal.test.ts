@@ -8,7 +8,22 @@ import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CampaignNav } from "../nav/CampaignNav";
 import { DEMO_SNAPSHOT, EMPTY_SNAPSHOT } from "../types";
-import { evidenceCommand, formatEvidenceForAudit, coordinateGoal, replacementCommand, usableInstanceIds, MAX_AUDIT_PROMPT_BYTES, WINDOWS_CMD_MAX_CHARS, windowsCmdWorstCaseChars, type CoordinateGoalInput, type ExecutionFeedback, type SyntheticCatalogInstance } from "./coordinateGoal";
+import {
+  evidenceCommand,
+  formatEvidenceForAudit,
+  coordinateGoal,
+  replacementCommand,
+  usableInstanceIds,
+  MAX_AUDIT_PROMPT_BYTES,
+  MAX_CONTINUATION_PROMPT_BYTES,
+  MAX_CONTINUATION_CHARS,
+  WINDOWS_CMD_MAX_CHARS,
+  windowsCmdWorstCaseChars,
+  type CoordinateGoalInput,
+  type ExecutionFeedback,
+  type SyntheticCatalogInstance,
+} from "./coordinateGoal";
+import type { SavedTargetContinuation } from "./continuation";
 
 const { launchSpec, turnSpec } = createRequire(import.meta.url)("../../electron/cli-coordinate.cjs") as {
   launchSpec(file: string, args: string[], env: NodeJS.ProcessEnv, platform: string): { file: string; args: string[]; verbatim: boolean };
@@ -24,6 +39,57 @@ const goal = "Explain the failure and leave a bounded plan.";
 function instance(overrides: SyntheticCatalogInstance): SyntheticCatalogInstance {
   return overrides;
 }
+
+describe("admitted Pi requested capacity", () => {
+  const selection = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+  const codex: SyntheticCatalogInstance = { instanceId: "codex", name: "Codex", billing: "subscription", models: ["default"] };
+  const pi: SyntheticCatalogInstance = { instanceId: "pi", name: "Pi", billing: "unknown", piCredentialKind: "apiKey-only", models: ["new-global-default"], piCapacity: { offer: { ...selection, model: "beta" }, catalog: [{ provider: "Fixture", model: "alpha" }, { provider: "Fixture", model: "beta" }] } };
+  const input = { catalog: [codex, pi], goal: "Inspect fixture", workspacePath: "/fixture/workspace", sendKey: "own-route", allowedInstances: ["codex", "pi"], piCapacity: selection };
+  it("keeps Pi out of unnamed/default pools, requires intent, and derives every role/replacement from admitted selection", () => {
+    expect(usableInstanceIds(input.catalog)).toEqual(["codex"]);
+    expect(coordinateGoal({ ...input, piCapacity: undefined }).commands).toEqual([]);
+    const commands = coordinateGoal(input).commands;
+    expect(commands[1].modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+    expect(replacementCommand("plan", pi, input, "replace").modelSelection).toEqual(commands[1].modelSelection);
+    expect(replacementCommand("review", pi, input, "replace").modelSelection).toEqual(commands[1].modelSelection);
+    const evidence = { planText: "Bounded plan", reviewText: "VERDICT: carry-out", executionText: "Report" };
+    const audit = evidenceCommand("audit", pi, { ...input, auditPromptTransport: "linux-pi-stdin", writeAuthorization: { instances: ["codex"], workspaceRoot: input.workspacePath, remaining: 1 } }, evidence);
+    expect(audit.modelSelection).toEqual(commands[1].modelSelection);
+    expect(audit.promptDelivery).toBe("stdin");
+    expect(coordinateGoal({ ...input, writeAuthorization: { instances: ["pi"], workspaceRoot: input.workspacePath, remaining: 1 } }).commands).toEqual([]);
+  });
+  it("honors the selected Codex/Pi roles even with another subscription and reversed catalog order", () => {
+    const claude: SyntheticCatalogInstance = { instanceId: "claude", name: "Claude", billing: "subscription", models: ["opus"] };
+    const selected = { ...input, catalog: [claude, pi, codex], allowedInstances: ["claude", "pi", "codex"] };
+    const commands = coordinateGoal(selected).commands;
+    expect(commands.map(command => command.modelSelection.instanceId)).toEqual(["codex", "pi"]);
+    expect(commands[1].modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+    expect(coordinateGoal({ ...selected, catalog: [claude, pi] }).commands).toEqual([]);
+    expect(coordinateGoal({ ...selected, allowedInstances: ["claude", "pi"] }).commands).toEqual([]);
+    expect(coordinateGoal({ ...selected, piCapacity: undefined, allowedInstances: ["claude", "codex"] }).commands.map(command => command.modelSelection.instanceId)).toEqual(["claude", "codex"]);
+  });
+  it.each(["revision", "corrective"])("retains admitted pair in %s rebuilds after injected global defaults change", async mode => {
+    const { requestCoordination } = await import("./requestCoordination");
+    const piSnapshot = { instanceId: "pi", auth: { status: "invalid_state", type: "apiKey" }, models: [{ slug: "default", isDefault: true }], piCapacity: { ...pi.piCapacity!, offer: selection } };
+    let reviews = 0, audits = 0;
+    const commands: CoordinateTurnCommand[] = [];
+    const result = await requestCoordination({ ...input, writeAuthorization: { instances: ["codex"], workspaceRoot: input.workspacePath, remaining: 2 }, beforePlanRevision: async () => true, beforeRepair: async () => true }, { connected: true, sendAuthorized: true, stopReason: null, providers: [{ instanceId: "codex", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "default", isDefault: true }] }, piSnapshot] }, { launch: async command => {
+      commands.push(command);
+      if (command.modelSelection.instanceId === "pi") {
+        expect(command.modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+        piSnapshot.piCapacity.offer = { ...selection, model: "beta" };
+      }
+      const role = command.commandId.split("-")[1];
+      const text = role === "review" ? `VERDICT: ${mode === "revision" && ++reviews === 1 ? "revise" : "carry-out"}` : role === "audit" ? `VERDICT: ${mode === "corrective" && ++audits === 1 ? "revise" : "verified"}` : "Bounded fixture report";
+      return { launched: true, dispatched: true, text, errorText: "", turnsRemaining: 12, writeTurnsRemaining: 2, ...(command.modelSelection.instanceId === "pi" ? { requestedPiCapacity: { provider: "Fixture", model: "alpha" } } : {}) };
+    } }, () => true);
+    expect(commands.length).toBeGreaterThan(4);
+    expect(result.verdict).toBe("verified");
+    expect(result.requestedPiCapacity).toEqual({ provider: "Fixture", model: "alpha" });
+    const history = mode === "revision" ? result.planRevisionHistory : result.feedbackHistory;
+    expect(history?.[0].requestedPiCapacity).toEqual(result.requestedPiCapacity);
+  });
+});
 
 describe("Synthetic path", () => {
   it("names two different harnesses, a fixture review, and the stop reason that the review is in", () => {
@@ -639,6 +705,61 @@ describe("explicit write assembly and phase verdicts", () => {
     expect(repairAudit.initialMessage.text).toContain(sameEvidence.executionText);
     expect(evidenceCommand("execute", catalog[0]!, repairInput, sameEvidence)).toEqual(repairWriter);
   });
+  it("Linux Pi delivers full formatted multi-file material >4KiB within 32KiB; legacy remains cropped", () => {
+    const pi = { ...catalog[1]!, instanceId: "pi", name: "Pi" };
+    const afterDiff = ["diff --git a/src/one.ts b/src/one.ts", ...Array.from({ length: 110 }, (_, n) => `+export const rule${n} = '中文😀: preserve actual file content';`), "diff --git a/src/two.ts b/src/two.ts", "+export const finalBeyondOldEnvelope = 'tail-marker';"].join("\n");
+    const executionEvidence = { status: "available" as const, complete: true, changed: true, beforeDiff: "baseline-marker", afterDiff,
+      untrackedFiles: [{ path: "checks.txt", size: 21, content: "untracked-tail-marker" }] };
+    const material = { planText: "approved-plan-marker", reviewText: "check-marker VERDICT: carry-out", executionText: "actual-report-marker", executionFacts: "facts-marker", executionEvidence };
+    const host = { ...input, auditPromptTransport: "linux-pi-stdin" as const };
+    const audit = evidenceCommand("audit", pi, host, material);
+    const full = formatEvidenceForAudit(executionEvidence, Number.MAX_SAFE_INTEGER);
+    expect(full.coverage.totalEvidenceBytes).toBeGreaterThan(4096);
+    expect(audit.auditInputEvidenceText).toBe(full.text);
+    expect(audit.auditInputEvidenceCoverage).toMatchObject({ totalEvidenceBytes: full.coverage.totalEvidenceBytes, includedEvidenceBytes: full.coverage.totalEvidenceBytes, cropped: false, promptBudgetBytes: 32768, promptDelivery: "stdin", croppedSections: [] });
+    const bytes = new TextEncoder().encode(audit.initialMessage.text).length;
+    expect(bytes).toBeGreaterThan(8192);
+    expect(bytes).toBeLessThan(24576);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(bytes);
+    expect(audit.auditInputEvidenceCoverage).not.toHaveProperty("windowsCmdWorstCaseChars");
+    expect(windowsCmdWorstCaseChars(audit.initialMessage.text)).toBeGreaterThan(WINDOWS_CMD_MAX_CHARS);
+    expect(audit.promptDelivery).toBe("stdin");
+    for (const marker of [afterDiff, "baseline-marker", "untracked-tail-marker", "approved-plan-marker", "actual-report-marker", "facts-marker"]) expect(audit.initialMessage.text).toContain(marker);
+    const legacy = evidenceCommand("audit", pi, input, material);
+    expect(legacy).not.toHaveProperty("promptDelivery");
+    expect(legacy.auditInputEvidenceCoverage).not.toHaveProperty("promptDelivery");
+    expect(legacy.auditInputEvidenceCoverage!.promptBudgetBytes).toBe(4096);
+    expect(legacy.auditInputEvidenceCoverage!.cropped).toBe(true);
+    expect(legacy.initialMessage.text).toContain("cropped for transport");
+    // Capacity must not leak from this selection into a different instance,
+    // then must become available again when Pi is selected anew.
+    const other = evidenceCommand("audit", catalog[1]!, host, material);
+    expect(other.auditInputEvidenceCoverage!.promptBudgetBytes).toBe(4096);
+    expect(other).not.toHaveProperty("promptDelivery");
+    expect(evidenceCommand("audit", pi, host, material)).toEqual(audit);
+  });
+  it("32KiB overflow has finite labeled crop and leaves execute/plan/review uncapped at 4KiB", () => {
+    const pi = { ...catalog[1]!, instanceId: "pi", name: "Pi" };
+    const host = { ...input, auditPromptTransport: "linux-pi-stdin" as const, goal: "goal-material ".repeat(3000) };
+    const material = { planText: "plan-material ".repeat(3000), reviewText: "review-material ".repeat(3000), executionText: "report-material ".repeat(3000), executionEvidence: { status: "incomplete" as const, complete: false, changed: true, beforeDiff: "前😀".repeat(12000), afterDiff: "後😀".repeat(12000), untrackedFiles: [{ path: "binary", binary: true, size: 50 }] } };
+    const audit = evidenceCommand("audit", pi, host, material);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBeLessThanOrEqual(32768);
+    expect(audit.auditInputEvidenceCoverage!.promptBytes).toBe(new TextEncoder().encode(audit.initialMessage.text).length);
+    expect(audit.auditInputEvidenceCoverage!.cropped).toBe(true);
+    expect(audit.auditInputEvidenceCoverage!.croppedSections!.length).toBeGreaterThan(0);
+    expect(audit.initialMessage.text).toContain("cropped for transport");
+    expect(audit.auditInputEvidenceText).toContain("Workspace AFTER tracked diff cropped");
+    expect(audit.auditInputEvidenceCoverage).not.toHaveProperty("windowsCmdWorstCaseChars");
+    expect(new TextDecoder("utf8", { fatal: true }).decode(new TextEncoder().encode(audit.initialMessage.text))).toBe(audit.initialMessage.text);
+    const execute = evidenceCommand("execute", catalog[0]!, host, material);
+    expect(execute.initialMessage.text).toContain(material.planText);
+    expect(execute.initialMessage.text.length).toBeGreaterThan(4096);
+    expect(execute).not.toHaveProperty("promptDelivery");
+    for (const planned of coordinateGoal(host).commands) {
+      expect(planned.initialMessage.text.length).toBeGreaterThan(4096);
+      expect(planned).not.toHaveProperty("promptDelivery");
+    }
+  });
   it("delivers captured BEFORE/AFTER diffs and untracked text as the exact retained audit subset", () => {
     const executionEvidence = {
       status: "available" as const,
@@ -818,6 +939,151 @@ describe("explicit write assembly and phase verdicts", () => {
     // Verify multibyte valid decode (no broken UTF-8 sequences)
     expect(() => new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(promptText, "utf8"))).not.toThrow();
   });
+
+  describe("Continuation descriptor and bounded prompt", () => {
+    const catalog = [
+      instance({ instanceId: "pi-local", name: "Pi", defaultModel: "pi-default", quota: "available" }),
+      instance({ instanceId: "cursor-local", name: "Cursor", models: ["cursor-first"], quota: "available" }),
+    ];
+
+    it("builds planning command with explicit Original goal and Current follow-up, keeping all 4 prior feedback labels and exact texts", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-123",
+        rootRequestId: "req-root-001",
+        originalGoal: "Root original goal with CJK 中文 and Emoji 🚀",
+        followUp: "Current follow-up with Japanese 日本語 and Emoji 🎯",
+      };
+
+      const feedback: ExecutionFeedback = {
+        previousPlan: "Exact previous plan text: 方案详情",
+        previousPlanReview: "Exact previous plan check: 审查结论\nVERDICT: carry-out",
+        previousExecutionReport: "Exact previous execution report: 执行修改",
+        previousExecutionAudit: "Exact previous execution audit: 独立审计\nVERDICT: revise",
+        previousCommandIds: ["cmd-prev-1", "cmd-prev-2"],
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-cont-1",
+        catalog,
+        continuation,
+        priorPlan: "Prior plan text",
+        priorReview: "Prior review text",
+        executionFeedback: feedback,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+
+      // Must start with explicit Original goal and Current follow-up sections
+      expect(planningText).toContain("Original goal:\nRoot original goal with CJK 中文 and Emoji 🚀");
+      expect(planningText).toContain("Current follow-up:\nCurrent follow-up with Japanese 日本語 and Emoji 🎯");
+      expect(planningText).toContain(workspacePath);
+      expect(planningText).toContain("Find the product contract in this workspace");
+
+      // All four prior feedback labels and exact texts must be present
+      expect(planningText).toContain("Previous plan:\nExact previous plan text: 方案详情");
+      expect(planningText).toContain("Previous independent plan check:\nExact previous plan check: 审查结论\nVERDICT: carry-out");
+      expect(planningText).toContain("Previous execution report:\nExact previous execution report: 执行修改");
+      expect(planningText).toContain("Previous independent execution audit:\nExact previous execution audit: 独立审计\nVERDICT: revise");
+      expect(planningText).toContain("cmd-prev-1\ncmd-prev-2");
+
+      // Check review command also carries full context
+      const reviewPromptText = state.commands[1]?.initialMessage.text ?? "";
+      expect(reviewPromptText).toContain("Original goal:\nRoot original goal with CJK 中文 and Emoji 🚀");
+      expect(reviewPromptText).toContain("Current follow-up:\nCurrent follow-up with Japanese 日本語 and Emoji 🎯");
+      expect(reviewPromptText).toContain("The planner's done-claim is not a pass.");
+    });
+
+    it("handles empty followUp by explicitly emitting (no additional instruction)", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-empty",
+        rootRequestId: "req-root-empty",
+        originalGoal: "Standalone original goal",
+        followUp: "",
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-empty-fu",
+        catalog,
+        continuation,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+      expect(planningText).toContain("Original goal:\nStandalone original goal");
+      expect(planningText).toContain("Current follow-up:\n(no additional instruction)");
+
+      const reviewPromptText = state.commands[1]?.initialMessage.text ?? "";
+      expect(reviewPromptText).toContain("Original goal:\nStandalone original goal");
+      expect(reviewPromptText).toContain("Current follow-up:\n(no additional instruction)");
+    });
+
+    it("refuses continuation when combined characters exceed 100,000 without returning role commands", () => {
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-toolong",
+        rootRequestId: "req-root-toolong",
+        originalGoal: "a".repeat(60_000),
+        followUp: "b".repeat(40_001),
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-overflow",
+        catalog,
+        continuation,
+      });
+
+      expect(state.roles).toHaveLength(0);
+      expect(state.commands).toHaveLength(0);
+      expect(state.stopReason).toContain("The combined character length of the original goal and follow-up exceeds 100,000 characters");
+      expect(state.stopReason).toContain("no turn was sent");
+    });
+
+    it("refuses continuation when assembled planning or review prompt exceeds 100,000 UTF-8 bytes without returning role commands", () => {
+      // Multibyte CJK characters: 3 bytes each in UTF-8
+      // 35,000 characters * 3 = 105,000 bytes > 100,000 bytes limit, while char count 35,000 <= 100,000
+      const continuation: SavedTargetContinuation = {
+        parentRequestId: "req-parent-utf8",
+        rootRequestId: "req-root-utf8",
+        originalGoal: "字".repeat(34_000),
+        followUp: "词".repeat(1_000),
+      };
+
+      const state = coordinateGoal({
+        goal: continuation.originalGoal,
+        workspacePath,
+        sendKey: "send-utf8-overflow",
+        catalog,
+        continuation,
+      });
+
+      expect(state.roles).toHaveLength(0);
+      expect(state.commands).toHaveLength(0);
+      expect(state.stopReason).toContain("assembled continuation prompt exceeded the 100,000-byte limit");
+      expect(state.stopReason).toContain("no turn was sent");
+    });
+
+    it("legacy absent descriptor prompt behavior remains completely unchanged", () => {
+      const state = coordinateGoal({
+        goal: "Legacy goal text without continuation",
+        workspacePath,
+        sendKey: "send-legacy",
+        catalog,
+      });
+
+      expect(state.commands).toHaveLength(2);
+      const planningText = state.commands[0]?.initialMessage.text ?? "";
+      expect(planningText.startsWith("Legacy goal text without continuation\n")).toBe(true);
+      expect(planningText).not.toContain("Original goal:");
+      expect(planningText).not.toContain("Current follow-up:");
+    });
+  });
+
   it.each([
     ["VERDICT: verified", "unconfirmed", "verified"],
     ["VERDICT: carry-out", "checked", "unconfirmed"],

@@ -1,3 +1,4 @@
+import type { PiCapacitySelection, PiPair } from "../../electron/pi-capacity.mjs";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import {
   coordinateGoal,
@@ -14,11 +15,12 @@ import {
   type CoordinateTransport,
   type EnvironmentBlockedInfo,
 } from "./coordinateSession";
-import type { CoordinationRoundFact, RoundEvent } from "./savedPlan";
+import type { CoordinationRoundFact, RoundEvent, SavedTargetContinuation } from "./savedPlan";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
 export interface CoordinationView {
+  readonly requestedPiCapacity?: PiPair;
   planningHarness: string | null;
   reviewHarness: string | null;
   planText: string | null;
@@ -164,6 +166,7 @@ function roundFactFrom(sent: CoordinateSessionState): CoordinationRoundFact {
     executionEvidence: sent.executionEvidence ?? null,
     auditInputEvidenceCoverage: sent.auditInputEvidenceCoverage ?? null,
     auditInputEvidenceText: sent.auditInputEvidenceText ?? null,
+    ...(sent.requestedPiCapacity ? { requestedPiCapacity: sent.requestedPiCapacity } : {}),
     result: sent.result,
     verdict: sent.verdict,
     stopReason: sent.stopReason,
@@ -195,6 +198,7 @@ function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: bo
       auditInputEvidenceText: sent.auditInputEvidenceText ?? null,
       authorizedWriteTurnsLeft: sent.authorizedWriteTurnsLeft,
     } : {}),
+    ...(sent.requestedPiCapacity ? { requestedPiCapacity: sent.requestedPiCapacity } : {}),
     authorizedTurnsLeft: sent.authorizedTurnsLeft,
     scopeExhausted: sent.scopeExhausted,
   });
@@ -205,15 +209,21 @@ export async function requestCoordination(
     readonly workspacePath: string;
     readonly goal: string;
     readonly sendKey: string;
+    /** Host-only in-memory transport capability; absent keeps legacy argv. */
+    readonly auditPromptTransport?: "linux-pi-stdin";
     readonly priorPlan?: string | null;
     readonly priorReview?: string | null;
     readonly avoidInstances?: readonly string[];
     /** Scoped round membership: present means recovery is authorized. */
     readonly allowedInstances?: readonly string[];
+    readonly piCapacity?: PiCapacitySelection;
+    readonly legacyPiContinuation?: boolean;
     /** Explicit M6 scope.write snapshot after separate user consent. */
     readonly writeAuthorization?: CoordinationWriteAuthorization;
     /** Completed execution feedback carried into a manual continuation send. */
     readonly executionFeedback?: ExecutionFeedback | null;
+    /** Optional continuation descriptor for continuing an existing saved target. */
+    readonly continuation?: SavedTargetContinuation;
     /**
      * Product adapter gate for the ONE corrective pass inside this Send:
      * confirm liveness and checkpoint first-round evidence, then return true.
@@ -258,6 +268,7 @@ export async function requestCoordination(
   const catalog = catalogFromProviderSnapshots(discovery.providers);
   const goalInput = {
     catalog,
+    auditPromptTransport: input.auditPromptTransport,
     goal: input.goal,
     workspacePath: input.workspacePath,
     sendKey: input.sendKey,
@@ -267,6 +278,9 @@ export async function requestCoordination(
     allowedInstances: input.allowedInstances,
     writeAuthorization: input.writeAuthorization,
     executionFeedback: input.executionFeedback,
+    ...(input.continuation ? { continuation: input.continuation } : {}),
+    ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}),
+    legacyPiContinuation: input.legacyPiContinuation,
   };
   const planned = coordinateGoal(goalInput);
   if (planned.roles.length === 0) {
@@ -353,6 +367,7 @@ export async function requestCoordination(
     ])];
     const revisionInput: CoordinateGoalInput = {
       catalog,
+      auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,
       workspacePath: input.workspacePath,
       // A fresh identity namespace keeps every revised command id distinct
@@ -370,6 +385,9 @@ export async function requestCoordination(
           ? sent.authorizedWriteTurnsLeft
           : input.writeAuthorization!.remaining,
       },
+      ...(input.continuation ? { continuation: input.continuation } : {}),
+      ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}),
+      legacyPiContinuation: input.legacyPiContinuation,
     };
     const reads = sent.authorizedTurnsLeft;
     const writes = sent.authorizedWriteTurnsLeft;
@@ -451,6 +469,7 @@ export async function requestCoordination(
     };
     const correctiveInput: CoordinateGoalInput = {
       catalog,
+      auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,
       workspacePath: input.workspacePath,
       // After a plan revision the repair keeps the revised chain's active
@@ -465,6 +484,9 @@ export async function requestCoordination(
           : input.writeAuthorization!.remaining,
       },
       executionFeedback: feedback,
+      ...(input.continuation ? { continuation: input.continuation } : {}),
+      ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}),
+      legacyPiContinuation: input.legacyPiContinuation,
     };
     const reads = latest.authorizedTurnsLeft;
     const writes = latest.authorizedWriteTurnsLeft;

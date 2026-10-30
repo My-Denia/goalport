@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { CoreSnapshot, GoalCard } from "../types";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
+import { shortGoalTitle } from "../conversation/shortGoalTitle";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
   collapsed: boolean;
   plans?: readonly { requestId: string; title: string; active: boolean; verdict: CoordinationVerdict | null; savedAt?: string | null }[];
   onSelectPlan?: (requestId: string) => void;
+  savedTargets?: readonly { requestId: string; title: string; workspacePath: string; outcome: string | null; statusLabel?: string; active: boolean; reason?: string | null }[];
+  onSelectSavedTarget?: (requestId: string) => void;
+  savedTargetOwnsView?: boolean;
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
@@ -44,15 +48,15 @@ function runningJobDetail(label: string): string {
   return label;
 }
 
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false, plansSentenceVisible = true }: CampaignNavProps) {
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, savedTargets = [], onSelectSavedTarget, savedTargetOwnsView = false, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false, plansSentenceVisible = true }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const overview = snapshot.goalOverview;
-  const backgroundOwnsView = runningJob?.viewing === true;
+  const backgroundOwnsView = savedTargetOwnsView || runningJob?.viewing === true;
   const campaignListUnavailable = !overview && snapshot.bounds?.projectionUnavailable === true
     && snapshot.campaigns.length === 0;
-  const goalCount = overview ? overview.goals.length : snapshot.campaigns.length;
+  const goalCount = savedTargets.length + (overview ? overview.goals.length : snapshot.campaigns.length);
 
   useEffect(() => {
     if (renamingId) renameInputRef.current?.focus();
@@ -103,6 +107,15 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
       {!collapsed && navigationLockedReason ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
 
       <div className="campaign-list">
+        {savedTargets.map(item => (
+          <button key={item.requestId} type="button" className={`campaign-item coordinated-target-item${item.active ? " campaign-active" : ""}`}
+            title={`${item.title} — ${item.workspacePath}`} aria-label={`${item.title}, ${item.workspacePath}`}
+            onClick={() => onSelectSavedTarget?.(item.requestId)}>
+            <span className="campaign-state" aria-hidden="true" />
+            <span className="campaign-item-copy"><strong title={item.title}>{shortGoalTitle(item.title)}</strong><small title={item.workspacePath}>{item.workspacePath.split(/[\\/]/).filter(Boolean).at(-1) || item.workspacePath}</small><small title={item.reason || item.statusLabel || "Saved result"}>{item.reason || item.statusLabel || "Saved result"}</small></span>
+            {item.active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
+          </button>
+        ))}
         {runningJob ? (
           <button
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}

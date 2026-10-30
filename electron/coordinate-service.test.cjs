@@ -271,6 +271,45 @@ test("a refused launch and a dispatched failure report their dispatched state", 
   assert.equal(unknown.dispatched, null);
 });
 
+test("Linux stdin no-child refunds, but a real post-child setup error keeps charge/claim and actual facts", { skip: process.platform !== "linux" }, async () => {
+  const { defaultSpawn } = require("./cli-coordinate.cjs");
+  for (const nochild of [true, false]) {
+    const directory = scopeTempDir();
+    let child, closed;
+    try {
+      coordinationScope.revoke();
+      const granted = coordinationScope.authorize(["pi"], 2);
+      const input = { ...command, commandId: `coordinate-audit-stdin-${nochild}`, modelSelection: { instanceId: "pi", model: "default" }, promptDelivery: "stdin", initialMessage: { text: "中文😀 exact input\n" } };
+      const runtime = { stateDir: directory, discover: async () => ({}), prepare: async () => held,
+        run: command => runCliTurn(command, { stateDir: directory, spawnTurn: spec => defaultSpawn({ ...spec, cwd: directory,
+          file: nochild ? path.join(directory, "does-not-exist") : process.execPath,
+          args: nochild ? [] : ["-e", "setInterval(()=>{},1000)"],
+          register(proc) {
+            child = proc;
+            closed = new Promise(resolve => proc.once("close", resolve));
+            if (!nochild) throw Error("real child registration failed after pid");
+          },
+        }) }),
+      };
+      const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, input, "stdin-service", { scope: coordinationScope, scopeGeneration: granted.generation });
+      assert.equal(result.dispatched, nochild ? false : null);
+      assert.equal(result.turnsRemaining, nochild ? 2 : 1);
+      assert.equal(fs.existsSync(path.join(directory, `claim-${input.commandId}`)), !nochild);
+      assert.deepEqual(result.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes: Buffer.byteLength(input.initialMessage.text), inputEnded: false });
+      if (!nochild) {
+        const again = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, input, "stdin-service", { scope: coordinationScope, scopeGeneration: granted.generation });
+        assert.equal(again.dispatched, null);
+        assert.equal(again.turnsRemaining, 1);
+        assert.equal(child.exitCode, null);
+      }
+    } finally {
+      if (child?.pid && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await closed;
+      scopeCleanup(directory);
+    }
+  }
+});
+
 test("a runtime that throws mid-turn reports an unknown dispatch state", async () => {
   const result = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, {
     async discover() {

@@ -1,4 +1,5 @@
 import type { SyntheticCatalogInstance, SyntheticQuota } from "./coordinateGoal";
+import { piCredentialKind, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
 
 export interface ProviderSnapshotModel {
   readonly slug?: unknown;
@@ -15,7 +16,7 @@ export interface ProviderSnapshot {
   readonly installed?: unknown;
   readonly availability?: unknown;
   readonly status?: unknown;
-  readonly auth?: { readonly status?: unknown; readonly type?: unknown; readonly label?: unknown };
+  readonly auth?: { readonly status?: unknown; readonly type?: unknown; readonly label?: unknown; readonly credentialKind?: unknown };
   readonly models?: readonly ProviderSnapshotModel[];
   readonly usageLimits?: {
     readonly unavailable?: unknown;
@@ -23,6 +24,7 @@ export interface ProviderSnapshot {
   };
   /** Persisted harness-health evidence merged into the snapshot by discovery. */
   readonly environmentHealth?: unknown;
+  readonly piCapacity?: PiCapacityMetadata;
 }
 
 function modelSpecificWindow(id: unknown): boolean {
@@ -64,6 +66,7 @@ function confirmedSubscription(type: unknown): boolean {
 }
 
 function billing(snapshot: ProviderSnapshot): SyntheticCatalogInstance["billing"] {
+  if (snapshot.instanceId === "pi" && snapshot.piCapacity) return "unknown";
   if (snapshot.auth?.type === "apiKey") return "paid-api";
   if (typeof snapshot.auth?.label === "string" && snapshot.auth.label.toLowerCase().includes("api key")) {
     return "paid-api";
@@ -101,10 +104,13 @@ export function catalogFromProviderSnapshots(
       overageWindowIds,
       enabled: snapshot.enabled !== false,
       installed: snapshot.installed !== false,
-      authenticated: snapshot.auth?.status === "authenticated",
+      authenticated: snapshot.instanceId === "pi" && snapshot.piCapacity
+        ? (snapshot.auth?.status === "unauthenticated" ? false : snapshot.auth?.status === "authenticated" ? true : undefined)
+        : snapshot.auth?.status === "authenticated",
       launchable: snapshot.availability !== "unavailable" && snapshot.status !== "disabled" && snapshot.status !== "error",
       quota: quotaFromSnapshot(snapshot),
       billing: billing(snapshot),
+      ...(snapshot.piCapacity ? { piCapacity: snapshot.piCapacity, piCredentialKind: piCredentialKind(snapshot.auth) } : {}),
       ...(environmentAvoided === undefined ? {} : { environmentAvoided }),
     } satisfies SyntheticCatalogInstance];
   });

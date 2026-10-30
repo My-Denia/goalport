@@ -1,6 +1,10 @@
+import type { PiCapacitySelection, PiPair } from "../../electron/pi-capacity.mjs";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "./coordinateGoal";
 import type { CoordinationView } from "./requestCoordination";
 import type { CoordinationVerdict } from "./verdict";
+import type { SavedTargetContinuation, SavedTargetRelationStatus } from "./continuation";
+
+export type { SavedTargetContinuation, SavedTargetRelationStatus };
 
 /**
  * One completed fact about a recovery round: a harness failure or a takeover
@@ -26,6 +30,7 @@ export interface RoundEvent {
  * retained fact never becomes permission for another turn.
  */
 export interface CoordinationRoundFact {
+  readonly requestedPiCapacity?: PiPair;
   readonly planningHarness: string | null;
   readonly reviewHarness: string | null;
   readonly planText: string | null;
@@ -49,11 +54,18 @@ export interface CoordinationRoundFact {
 
 export type SavedPlan = CoordinationView & {
   requestId: string;
+  piCapacity?: PiCapacitySelection;
   goal: string;
   workspacePath: string;
   savedAt?: string | null;
   /** Optional: records saved before recovery existed stay valid without it. */
   roundEvents?: readonly RoundEvent[];
+  /** Optional continuation descriptor for continuing a saved target. */
+  continuation?: SavedTargetContinuation;
+  /** Optional read-time relation status projection. */
+  relationStatus?: SavedTargetRelationStatus;
+  /** Optional relation unavailable reason when invalid or ambiguous. */
+  relationUnavailableReason?: string | null;
   // feedbackHistory and planRevisionHistory are inherited from
   // CoordinationView: only completed earlier passes are retained (at most one
   // entry each), and top-level result fields are always the latest pass.

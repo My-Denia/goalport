@@ -1,7 +1,9 @@
 "use strict";
 
 const fs = require("node:fs");
+const { normalizePiCapacity, normalizeRequestedPiCapacity } = require("./pi-capacity.mjs");
 const path = require("node:path");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
 const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
@@ -144,13 +146,15 @@ function auditCoverageOf(value) {
     cropped: value.cropped === true,
     promptBytes: typeof value.promptBytes === "number" ? value.promptBytes : 0,
     ...(typeof value.promptBudgetBytes === "number" ? { promptBudgetBytes: value.promptBudgetBytes } : {}),
+    ...(value.promptDelivery === "stdin" || value.promptDelivery === "argv" ? { promptDelivery: value.promptDelivery } : {}),
     ...(typeof value.windowsCmdWorstCaseChars === "number" ? { windowsCmdWorstCaseChars: value.windowsCmdWorstCaseChars } : {}),
     ...(Array.isArray(value.croppedSections) ? { croppedSections: value.croppedSections.filter((item) => typeof item === "string") } : {}),
   };
 }
 
 // Exact transport material is not trimmed: leading/trailing whitespace and
-// every crop marker are part of what the auditor actually received.
+// every crop marker are part of the host-delivered subset. Pi's piped-stdin
+// reader trims edge whitespace before constructing its model message.
 function auditInputTextOf(value) {
   if (value === null) return null;
   return typeof value === "string" ? value : undefined;
@@ -227,6 +231,7 @@ function coordinationRoundFactOf(value) {
   }
   return {
     ...fact,
+    ...(normalizeRequestedPiCapacity(value.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(value.requestedPiCapacity) } : {}),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
     ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),
@@ -330,6 +335,16 @@ function normalize(input) {
     // fatal to the rest of the saved record.
     planRevisionHistory = undefined;
   }
+  let continuation;
+  if (input.continuation !== undefined) {
+    if (isValidContinuationDescriptor(input.continuation)) {
+      continuation = normalizeContinuationDescriptor(input.continuation);
+    } else {
+      // Malformed existing optional metadata must not be discarded or cause
+      // record rejection; raw field preserved for future read-time relation validator.
+      continuation = input.continuation;
+    }
+  }
   return {
     requestId,
     workspacePath,
@@ -355,6 +370,9 @@ function normalize(input) {
     ...(roundEvents === undefined ? {} : { roundEvents }),
     ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
+    ...(continuation === undefined ? {} : { continuation }),
+    ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: normalizePiCapacity(input.piCapacity) ?? input.piCapacity } : {}),
+    ...(normalizeRequestedPiCapacity(input.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(input.requestedPiCapacity) } : {}),
     savedAt: savedAtOf(input.savedAt),
   };
 }
@@ -375,6 +393,12 @@ function readRecords(directory) {
 }
 
 function saveRecord(directory, input, clock = () => new Date().toISOString()) {
+  if (input && input.continuation !== undefined) {
+    if (!isValidContinuationDescriptor(input.continuation)) {
+      throw new Error("The continuation descriptor is malformed.");
+    }
+  }
+  if (input && Object.hasOwn(input, "piCapacity") && !normalizePiCapacity(input.piCapacity)) throw new Error("The requested Pi capacity is malformed.");
   const record = normalize(input);
   if (!record) {
     throw new Error("The plan could not be saved.");
@@ -390,4 +414,11 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
   return stamped;
 }
 
-module.exports = { readRecords, saveRecord };
+module.exports = {
+  normalizeRecord: normalize,
+  readRecords,
+  saveRecord,
+  isValidContinuationDescriptor,
+  normalizeContinuationDescriptor,
+  validatedContinuationOf,
+};

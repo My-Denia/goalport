@@ -101,7 +101,7 @@ describe("review debt frontend contracts", () => {
 
     expect(await screen.findByRole("heading", { name: /start a goal/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
-    expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-reserved");
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-reserved"));
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests.map((request) => request.messageType)).toEqual(["start_conversation", "start_conversation"]);

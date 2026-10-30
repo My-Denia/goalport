@@ -9,8 +9,9 @@ const { createCoreConnection } = require("./core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy } = require("./launch-config.cjs");
 const { createHarnessRuntime } = require("./harness-runtime.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
-const { authorizeCoordination, discoverCoordination, launchOne } = require("./coordinate-service.cjs");
+const { authorizeCoordination, authorizeMembershipError, discoverCoordination, launchOne } = require("./coordinate-service.cjs");
 const { saveRecord } = require("./coordination-record.cjs");
+const liveRead = require("./live-read-once.cjs");
 
 const { coreRefusal, guardCoreCoverage } = require("./coordination-core-guard.cjs");
 function workerCore(config) {
@@ -29,7 +30,7 @@ async function runWorker(config, deps = {}) {
   const store = deps.store ?? createCoordinationJobStore(config.directory, { bootstrapReady: true });
   const scope = deps.scope ?? require("./coordination-scope.cjs");
   const engine = deps.engine ?? require(config.enginePath);
-  const runtime = deps.runtime ?? createHarnessRuntime({ stateDir: config.stateDir });
+  let runtime;
   const core = deps.core ?? workerCore(config);
   const env = deps.env ?? process.env;
   const claim = store.claimWorker(config.jobId);
@@ -50,13 +51,115 @@ async function runWorker(config, deps = {}) {
   const consentStore = deps.consentStore ?? createBackgroundSendConsentStore(config.directory);
   const consentReader = deps.consentReader ?? (() => consentStore.read());
   const admitted = claim.status.admission;
-  const input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
+  runtime = deps.runtime ?? createHarnessRuntime({ stateDir: config.stateDir, cliProbe: { cwd: admitted.workspacePath, routeAwarePi: process.platform === "linux" || !!admitted.piCapacity }, ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}) });
+  let input = { requestId: admitted.requestId, goal: admitted.goal, workspaceRoot: admitted.workspacePath,
     readInstances: admitted.allowedInstances, readMaxTurns: admitted.maxTurns,
     ...(admitted.writeAuthorization ? { write: admitted.writeAuthorization } : {}), priorPlan: admitted.priorPlan,
     priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
-    ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true };
+    ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true,
+    ...(admitted.continuation ? { continuation: admitted.continuation } : {}),
+    ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}) };
   const owner = claim.ownerToken;
-  let control, storageFailed = false, liveResult = null;
+  let control, storageFailed = false, heldUnconfirmed = false, liveResult = null;
+  const nowMs = deps.nowMs ?? (() => performance.now());
+  const wallNowMs = deps.wallNowMs ?? Date.now;
+  const schedule = deps.schedule ?? ((fn, ms) => setTimeout(fn, ms));
+  const cancelScheduled = deps.cancelScheduled ?? clearTimeout;
+  const mode = claim.status.followUpMode === liveRead.MODE && liveRead.eligible(admitted);
+  let authorization, stage = "initial", initialResult = null, accepted = null, acceptedPrepared = null, idleDeadline = null, expiresAt = null, idleTimer = null;
+  let wake;
+  const waiter = new Promise(resolve => { wake = resolve; });
+  const clearIdle = () => { if (idleTimer !== null) cancelScheduled(idleTimer); idleTimer = null; };
+  const signal = (kind, data) => { clearIdle(); wake({ kind, data }); };
+  const localFacts = () => {
+    const facts = store.getStatus(config.jobId);
+    store.assertWorkerOwner(config.jobId, owner);
+    if (!facts.active || !facts.startupClaim || facts.acknowledgedStuckAt) throw Error("The original worker no longer owns this allowance.");
+    return facts;
+  };
+  function getLiveReadStatus(base) {
+    if (!mode) return null;
+    let current = null, facts = base, reason = null;
+    try { facts = localFacts(); current = scope.current(); } catch { reason = "unconfirmed"; }
+    const same = current && authorization && current.generation === authorization.generation;
+    if (!reason) reason = storageFailed ? "unconfirmed" : facts.revoked ? "revoked" : !same ? "no-live-scope"
+      : idleDeadline !== null && nowMs() >= idleDeadline && !accepted ? "expired"
+      : facts.pendingCommand || stage !== "ready" || accepted ? "busy"
+      : !initialResult || current.write || (!accepted && Object.hasOwn(facts, "liveFollowUp")) ? "context-unavailable" : current.remaining < 2 ? "not-enough-reads" : null;
+    return { mode: liveRead.MODE, ready: reason === null, initialRequestId: admitted.requestId, fromRequestId: admitted.requestId,
+      rootRequestId: admitted.continuation?.rootRequestId ?? admitted.requestId, remainingReads: same ? current.remaining : null,
+      readonly: !!same && !current.write, pending: !!facts?.pendingCommand, revoked: facts?.revoked === true,
+      childRequestId: accepted?.requestId ?? null, expiresAt, reason };
+  }
+  function beforeGuardedRevoke(payload) {
+    if (payload.onlyIfReadyFromRequestId !== admitted.requestId || !getLiveReadStatus(localFacts())?.ready) throw Error("The allowance is no longer idle; the current work was not stopped.");
+  }
+  function onRevoke({ storageError }) {
+    if (storageError) storageFailed = true;
+    if (stage === "ready" || stage === "validating") {
+      stage = storageError ? "unconfirmed" : "ending";
+      signal(storageError ? "storage-error" : "revoke");
+    }
+  }
+  async function onContinue(payload) {
+    payload = liveRead.controlPayload("continue", payload);
+    if (!mode || payload.fromRequestId !== admitted.requestId) throw Error("This is not the open initial result.");
+    if (accepted) {
+      if (payload.requestId === accepted.requestId && payload.followUp === accepted.followUp) return;
+      throw Error("This allowance already accepted a different follow-up.");
+    }
+    if (!getLiveReadStatus(localFacts())?.ready) throw Error("The live allowance is not ready.");
+    stage = "validating";
+    const operationDeadline = nowMs() + 10000;
+    let timeout;
+    const checks = (async () => {
+      await gate();
+      const fresh = await (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir, cwd: admitted.workspacePath, routeAwarePi: true });
+      const context = require("./pi-capacity-admission.cjs").piAdmissionContext({ ...admitted, continuation: undefined }, config.directory, fresh);
+      const membership = authorizeMembershipError(fresh, admitted.allowedInstances, context);
+      if (membership) throw Error(membership);
+      const discovery = await discoverCoordination(env, { ...runtime, discover: async () => fresh }, admitted.requestId, consentReader);
+      if (!discovery.connected || !discovery.sendAuthorized) throw Error(discovery.stopReason || "Background Send is not enabled.");
+      const originalGoal = admitted.continuation?.originalGoal ?? admitted.goal;
+      const child = { ...input, requestId: payload.requestId, goal: originalGoal, priorPlan: initialResult.planText, priorReview: initialResult.reviewText,
+        continuation: { parentRequestId: admitted.requestId, rootRequestId: admitted.continuation?.rootRequestId ?? admitted.requestId, originalGoal, followUp: payload.followUp } };
+      delete child.executionFeedback;
+      // No saved result ID may be claimed as a new child, even outside this job.
+      const records = require("./coordination-record.cjs").readRecords(config.directory);
+      if (records.some(r => r.requestId === payload.requestId)
+        || require("./pi-capacity-admission.cjs").ownAdmissionForRequest(config.directory, payload.requestId)) throw Error("That follow-up identity already exists.");
+      if (typeof engine.preflightBackgroundContinuation !== "function") throw Error("Live continuation assembly is unavailable.");
+      engine.preflightBackgroundContinuation(child, discovery.providers);
+      return { child, discovery, context };
+    })();
+    try {
+      const prepared = await Promise.race([checks, new Promise((_, reject) => { timeout = schedule(() => reject(Error("The live checks timed out; nothing was accepted.")), 10000); })]);
+      // Checks can finish after Stop/expiry/operation timeout. Never let their
+      // completion resurrect readiness or write accepted input.
+      const facts = localFacts(), current = scope.current();
+      if (stage !== "validating" || storageFailed || facts.revoked || facts.pendingCommand || accepted || nowMs() >= operationDeadline
+        || idleDeadline === null || nowMs() >= idleDeadline || !current || current.generation !== authorization.generation || current.write || current.remaining < 2) throw Error("The allowance changed or expired; nothing was accepted.");
+      const c = prepared.child.continuation;
+      const context = { requestId: payload.requestId, fromRequestId: admitted.requestId, rootRequestId: c.rootRequestId, originalGoal: c.originalGoal,
+        followUp: payload.followUp, workspacePath: admitted.workspacePath, piCapacity: admitted.piCapacity, backgroundConsent: true, write: false,
+        initialPlan: initialResult.planText, initialReview: initialResult.reviewText, acceptedAt: new Date(wallNowMs()).toISOString(), phase: "accepted" };
+      try { store.recordLiveFollowUpAccepted(config.jobId, context, owner); }
+      catch (error) {
+        if (["live-unavailable", "live-conflict", "invalid-live-context"].includes(error?.code)) {
+          if (localFacts().revoked) { stage = "ending"; signal("revoke"); }
+          throw error;
+        }
+        storageFailed = true; stage = "unconfirmed"; signal("storage-error"); throw error;
+      }
+      accepted = context;
+      acceptedPrepared = prepared;
+      stage = "accepted";
+      signal("continue-accepted", prepared);
+    } catch (error) {
+      if (stage === "validating") stage = "ready"; // deadline never extended
+      throw error;
+    } finally { if (timeout !== undefined) cancelScheduled(timeout); }
+  }
   const counters = () => { const s = scope.current(); return { readTurnsRemaining: s?.remaining ?? null, writeTurnsRemaining: s?.write?.remaining ?? null }; };
   const persist = patch => { try { store.updateProgress(config.jobId, patch, owner); } catch (error) { storageFailed = true; throw error; } };
   async function gate() {
@@ -68,15 +171,24 @@ async function runWorker(config, deps = {}) {
   }
   try {
     await gate();
-    const authorization = await authorizeCoordination({ instances: input.readInstances, maxTurns: input.readMaxTurns, ...(input.write ? { write: input.write } : {}) }, scope, () => (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir }));
+    const freshDiscovery = await (deps.discover ?? discoverCliProviders)({ stateDir: runtime.stateDir, cwd: admitted.workspacePath, routeAwarePi: process.platform === "linux" || !!admitted.piCapacity });
+    const piContext = (process.platform === "linux" || admitted.piCapacity) && admitted.allowedInstances.includes("pi")
+      ? require("./pi-capacity-admission.cjs").piAdmissionContext(admitted, config.directory, freshDiscovery)
+      : undefined;
+    authorization = await authorizeCoordination({ instances: input.readInstances, maxTurns: input.readMaxTurns, ...(input.write ? { write: input.write } : {}) }, scope, () => freshDiscovery, piContext);
     if (!authorization.ok) throw new Error(authorization.errorText);
-    const discovery = await discoverCoordination(env, runtime, input.requestId, consentReader);
+    const discovery = await discoverCoordination(env, { ...runtime, discover: async () => freshDiscovery }, input.requestId, consentReader);
     if (!discovery.connected || !discovery.sendAuthorized) throw new Error(discovery.stopReason || "Background Send is not enabled.");
     persist({ phase: "running", counters: counters(), display: { activity: "Organizing this goal…", failures: [] } });
-    control = await store.startControlServer({ jobId: config.jobId, endpoint: config.controlEndpoint });
+    control = await store.startControlServer({ jobId: config.jobId, endpoint: config.controlEndpoint,
+      getLiveReadStatus, onContinue, beforeGuardedRevoke, onRevoke });
     const failures = [];
-    liveResult = await engine.requestCoordination({
+    const runRound = async (roundDiscovery, roundPiContext) => engine.requestCoordination({
       ...engine.backgroundEngineInput(input),
+      ...(roundPiContext?.legacyPiContinuation ? { legacyPiContinuation: true } : {}),
+      // Host capability, not persisted admission/renderer authority. The CLI
+      // independently checks the actual platform and final audit command.
+      ...(process.platform === "linux" ? { auditPromptTransport: "linux-pi-stdin" } : {}),
       beforePlanRevision: async checkpoint => {
         await gate();
         const s = scope.current();
@@ -100,7 +212,7 @@ async function runWorker(config, deps = {}) {
           persist({ display: { ...prior, failures: [...failures], activity: event.kind === "started" ? `${event.harness || event.instanceId} is ${event.role === "planning" ? "planning" : event.role === "review" ? "checking" : event.role === "execution" ? "making changes" : "verifying"}…` : event.sentence } });
         } catch { storageFailed = true; }
       },
-    }, discovery, { launch: async command => {
+    }, roundDiscovery, { launch: async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
       try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
         if (error?.code === "access-revoked" || error?.code === "stuck-acknowledged") {
@@ -124,7 +236,7 @@ async function runWorker(config, deps = {}) {
         // never-started settlement applies; no runtime call happens.
         persist({ counters: counters() });
         return runtime.run(admittedCommand, generation);
-      } }, command, input.requestId, { scope, scopeGeneration: authorization.generation }, consentReader);
+      } }, command, admitted.requestId, { scope, scopeGeneration: authorization.generation }, consentReader);
       // Live evidence remains in memory even when the completion write fails.
       liveResult = result;
       try {
@@ -133,6 +245,52 @@ async function runWorker(config, deps = {}) {
       } catch { storageFailed = true; }
       return result;
     } }, () => true);
+    liveResult = await runRound(discovery, piContext);
+    const saveResult = () => (deps.saveRecord ?? saveRecord)(config.directory, {
+      ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal,
+      savedAt: new Date(wallNowMs()).toISOString(), ...(input.continuation ? { continuation: input.continuation } : {}),
+      ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}) });
+    let initialSaved = false, initialSaveFailed = false, allowanceEnd;
+    if (mode && !storageFailed && liveResult.verdict === "checked" && liveResult.planText && liveResult.reviewText) {
+      const facts = localFacts(), current = scope.current();
+      if (!facts.pendingCommand && !facts.revoked && current && current.generation === authorization.generation && !current.write && current.remaining >= 2) {
+        try {
+          const saved = saveResult();
+          initialSaved = true;
+          if (saved?.requestId === admitted.requestId && saved.verdict === "checked" && saved.planText && saved.reviewText) initialResult = saved;
+          else initialSaveFailed = true;
+        } catch { initialSaveFailed = true; }
+        if (initialSaved && initialResult) {
+          idleDeadline = nowMs() + 900000;
+          expiresAt = new Date(wallNowMs() + 900000).toISOString();
+          persist({ phase: "awaiting-followup", counters: counters(), display: { activity: "Ready for one follow-up. No model is running.", failures } });
+          stage = "ready";
+          idleTimer = schedule(() => {
+            if (!["ready", "validating"].includes(stage) || accepted || storageFailed || nowMs() < idleDeadline) return;
+            try {
+              const facts = localFacts(), current = scope.current();
+              if (facts.pendingCommand || !current || current.generation !== authorization.generation) {
+                heldUnconfirmed = true; stage = "unconfirmed"; signal("storage-error"); return;
+              }
+              stage = "ending"; signal(facts.revoked ? "revoke" : "idle-expired");
+            } catch { storageFailed = true; stage = "unconfirmed"; signal("storage-error"); }
+          }, 900000);
+          if (localFacts().revoked) onRevoke({ storageError: false });
+          const event = await waiter;
+          if (event.kind === "storage-error") throw Error("The allowance end could not be confirmed; its admission remains held.");
+          if (acceptedPrepared) {
+            input = acceptedPrepared.child;
+            stage = "running";
+            store.updateLiveFollowUpPhase(config.jobId, "running", owner);
+            persist({ phase: "followup-running", display: { activity: "Organizing the follow-up…", failures } });
+            liveResult = await runRound(acceptedPrepared.discovery, acceptedPrepared.context);
+          } else {
+            allowanceEnd = event.kind === "idle-expired" ? "expired" : "idle-stopped";
+          }
+        }
+      }
+    }
+    stage = "ending";
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
     const pending = store.getStatus(config.jobId).pendingCommand;
     const currentStatus = store.getStatus(config.jobId);
@@ -150,23 +308,19 @@ async function runWorker(config, deps = {}) {
     // forever and no later goal can start. The outcome carries an honest
     // note instead; the success path keeps the audited record-before-
     // outcome order unchanged.
-    let recordSaveFailed = false;
-    try {
-      (deps.saveRecord ?? saveRecord)(config.directory, { ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal, savedAt: new Date().toISOString() });
-    } catch {
-      recordSaveFailed = true;
-    }
+    let recordSaveFailed = initialSaveFailed;
+    try { if ((!initialSaved && !initialSaveFailed) || accepted) saveResult(); } catch { recordSaveFailed = true; }
+    if (accepted) store.updateLiveFollowUpPhase(config.jobId, status === "unconfirmed" ? "unconfirmed" : "completed", owner);
     store.recordOutcome(config.jobId, {
       status,
       report: liveResult,
+      ...(allowanceEnd ? { allowanceEnd } : {}),
       ...(recordSaveFailed ? { error: "The saved plan record could not be written; the retained result below is this job's own record." } : {}),
     }, owner);
-    scope.revoke();
     if (status !== "unconfirmed") store.releaseAdmission(config.jobId, owner);
     return { status, report: liveResult, ...(recordSaveFailed ? { recordSaveFailed: true } : {}) };
   } catch (error) {
-    scope.revoke();
-    if (!storageFailed) {
+    if (!storageFailed && !heldUnconfirmed) {
       try {
         const s = store.getStatus(config.jobId);
         const status = s.pendingCommand ? "unconfirmed" : "failed";
@@ -174,8 +328,10 @@ async function runWorker(config, deps = {}) {
         if (status !== "unconfirmed") store.releaseAdmission(config.jobId, owner);
       } catch { storageFailed = true; }
     }
-    return { status: "unconfirmed", error: error.message, partialResult: liveResult, storageFailed };
+    return { status: "unconfirmed", error: error.message, partialResult: liveResult, storageFailed, ...(heldUnconfirmed ? { unconfirmedHeld: true } : {}) };
   } finally {
+    stage = "closed";
+    clearIdle();
     scope.revoke();
     await control?.close();
     runtime.close();

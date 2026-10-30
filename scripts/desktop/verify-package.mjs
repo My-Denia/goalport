@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argsFor, artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, STAGED_APP_MODULES } from "./package.mjs";
 
 // Offline staging regression (no packaging run, no Windows): walk the local
-// require graph of the staged entry points and refuse any relative .cjs
+// require graph of the staged entry points and refuse any relative .cjs/.mjs
 // dependency that the explicit staging list does not carry. A name missing
 // here produces a packaged app that cannot start, so the check must be red
 // the moment a module is added without its staging entry.
@@ -20,9 +20,9 @@ export function stagedDependenciesCoverGraph(staged = STAGED_APP_MODULES, roots 
       return;
     }
     const source = readFileSync(resolve(electronDir, name), "utf8");
-    for (const match of source.matchAll(/require\("\.\/([^"]+)"\)/g)) {
-      const target = match[1];
-      if (!target.endsWith(".cjs") || seen.has(target)) continue;
+    for (const match of source.matchAll(/require\s*\(\s*(["\'])(\.{1,2}\/[^"\']+)\1\s*\)/g)) {
+      const target = relative(electronDir, resolve(electronDir, dirname(name), match[2])).replaceAll("\\", "/");
+      if (!/\.(?:cjs|mjs)$/.test(target) || seen.has(target)) continue;
       if (!stagedSet.has(target)) missing.push(`${name} -> ${target}`);
       visit(target);
     }

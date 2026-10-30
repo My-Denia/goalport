@@ -27,7 +27,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import fs, { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
@@ -38,12 +38,20 @@ import { parseArgs } from "node:util";
 const require = createRequire(import.meta.url);
 const { createBackgroundHost } = require("../../electron/coordination-background.cjs");
 const { createBackgroundSendConsentStore } = require("../../electron/background-send-consent.cjs");
-const { controlEndpointFor } = require("../../electron/coordination-job.cjs");
+const { controlEndpointFor, createCoordinationJobStore } = require("../../electron/coordination-job.cjs");
 const { createCoreConnection } = require("../../electron/core-client.cjs");
 const { assertPipePeer, assertCoreIdentity, pipePeerBusy, resolveUnixSocket } = require("../../electron/launch-config.cjs");
 const { harnessLaunchConfigured } = require("../../electron/harness-runtime.cjs");
 const { authorizeMembershipError } = require("../../electron/coordinate-service.cjs");
-const { readRecords } = require("../../electron/coordination-record.cjs");
+const { normalizePiCapacity } = require("../../electron/pi-capacity.mjs");
+const { piAdmissionContext, ownAdmissionForRequest } = require("../../electron/pi-capacity-admission.cjs");
+const { readRecords, normalizeRecord } = require("../../electron/coordination-record.cjs");
+const { resolveSavedTargets, workspaceKey } = require("./saved-targets.cjs");
+
+function savedTargets(directory) {
+  try { return resolveSavedTargets(JSON.parse(readFileSync(path.join(directory, "coordination-records.json"), "utf8"))); }
+  catch { return resolveSavedTargets([]); }
+}
 const { discoverCliProviders } = require("../../electron/cli-coordinate.cjs");
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -68,13 +76,14 @@ const USAGE = [
   "",
   "Commands:",
   "  discover                 Installed/authenticated harnesses, auth type and health.",
+  "  native-preflight         Read-only --workspace ABS or --global competing-work check.",
   "  grant-access             Save the durable Background Send consent.",
   "  revoke-access            Remove the durable Background Send consent.",
   "  run                      Admit one coordinated goal. Writes only with both write flags.",
   "  status [--job ID]        Print the live projection exactly as stored.",
   "  stop [--job ID]          Durably revoke access and print the real state.",
   "  result [--request-id ID] Print the saved verdict, plan and review.",
-  "  continue --from ID       Admit a new goal carrying the saved plan/review.",
+  "  continue --from ID       Continue the selected result (Ready reuses its live allowance)." ,
   "  acknowledge [--job ID]   Leave an interrupted job without replaying it.",
   "  release [--job ID]       Free the profile slot after a confirmed terminal job.",
   "",
@@ -86,8 +95,11 @@ const USAGE = [
   "  --write-instances a,b    Opt-in write harnesses. Never inferred. Requires --write-turns.",
   "  --write-turns N          Write turn cap, 1..8. Requires --write-instances.",
   "  --background             Explicit keep-working-after-closing consent (required for run/continue).",
+  "  --pi-capacity JSON        Exact configured {provider,model,useExistingCapacity:true}; required for fresh Pi goals.",
   "  --request-id ID          Caller-stable request id for a retry of the same admission.",
   "  --from ID                Saved request id that continue revises.",
+  "  --live-request-id ID     Stable caller child ID, required for a Ready live allowance.",
+  "  --only-if-ready-from ID  Stop only the matching idle allowance (New goal)." ,
   "  --job ID                 Job id (defaults to the active/newest job).",
   "  --core-binary PATH       Absolute goalport-core executable (run/continue).",
   "  --database PATH          Absolute Core database (default <data-dir>/core.sqlite).",
@@ -96,20 +108,25 @@ const USAGE = [
   "  --help                   This help.",
   "",
   "Consent: --background is never defaulted and is not write consent. The durable",
-  "consent store is the only grant. Unknown and apiKey logins are never authorized.",
+  "consent store is the only grant. Pi's explicit configured choice does not confirm billing.",
   "A job whose exit could not be confirmed stays unconfirmed and is never replayed.",
 ].join("\n");
 
 const OPTIONS = {
   goal: { type: "string" },
   workspace: { type: "string" },
+  global: { type: "boolean" },
   instances: { type: "string" },
   turns: { type: "string" },
   "write-instances": { type: "string" },
   "write-turns": { type: "string" },
   background: { type: "boolean" },
+  "pi-capacity": { type: "string" },
   job: { type: "string" },
   "request-id": { type: "string" },
+  "live-request-id": { type: "string" },
+  "only-if-ready-from": { type: "string" },
+  "json-status": { type: "boolean" },
   from: { type: "string" },
   "data-dir": { type: "string" },
   pipe: { type: "string" },
@@ -259,6 +276,7 @@ function createHost(options, io) {
     ordinaryScope: () => null,
     endpoint: () => options.controlEndpoint,
     workerPath: options.workerPath,
+    discover: options.discover,
     snapshot: options.snapshot,
     config: () => ({
       connectPath: options.connectPath,
@@ -299,7 +317,7 @@ function discoveryProblemText(discovered) {
 async function readDiscovery(io, context) {
   let discovered;
   try {
-    discovered = await context.discover({ stateDir: path.join(context.dataDir, "harness-state") });
+    discovered = await context.discover({ stateDir: path.join(context.dataDir, "harness-state"), cwd: context.workspace || process.cwd(), provisional: !context.workspace, routeAwarePi: true });
   } catch (error) {
     return { ok: false, message: discoveryProblemText({ errorText: error?.message }) };
   }
@@ -317,7 +335,7 @@ function instanceList(text, providers) {
   return [...new Set(providers
     .filter((provider) => {
       const type = provider?.auth?.type;
-      return (type === "chatgpt" || type === "subscription") && typeof provider.instanceId === "string";
+      return !(provider.instanceId === "pi" && provider.piCapacity) && (type === "chatgpt" || type === "subscription") && typeof provider.instanceId === "string";
     })
     .map((provider) => provider.instanceId))];
 }
@@ -459,7 +477,7 @@ async function commandDiscover(parsed, io, context) {
   if (context.strippedKeys.length > 0) {
     write(io, `note: ignored ${context.strippedKeys.join(", ")}; the durable consent store is the only grant.`);
   }
-  const discovered = await readDiscovery(io, context);
+  const discovered = await readDiscovery(io, { ...context, workspace: parsed.values.workspace });
   if (!discovered.ok) return refuse(io, discovered.message);
   if (!discovered.providers.length) {
     write(io, "No signed-in subscription harness was found on this machine.");
@@ -469,6 +487,7 @@ async function commandDiscover(parsed, io, context) {
     const status = typeof provider?.auth?.status === "string" ? provider.auth.status : "unknown";
     const type = typeof provider?.auth?.type === "string" ? provider.auth.type : "unknown";
     write(io, `provider ${provider.instanceId}: ${status} (${type})`);
+    if (provider.instanceId === "pi" && provider.piCapacity) write(io, `pi capacity: ${JSON.stringify(provider)}`);
     if (Array.isArray(provider.models) && provider.models.length > 0) {
       const models = provider.models.map((model) => model?.slug ?? model?.name).filter((model) => typeof model === "string" && model);
       if (models.length > 0) write(io, `  models: ${models.join(", ")}`);
@@ -529,7 +548,7 @@ async function startAdmission(parsed, io, context, selection) {
   const selectedWrite = writeSelection(parsed, selection.workspace);
   if (!selectedWrite.ok) return refuse(io, selectedWrite.message);
 
-  const discovered = await readDiscovery(io, context);
+  const discovered = await readDiscovery(io, { ...context, workspace: selection.workspace });
   if (!discovered.ok) return refuse(io, discovered.message);
   const instances = instanceList(selection.instancesText, discovered.providers);
   if (instances.length === 0) return refuse(io, "No signed-in subscription harness was found on this machine, so nothing was admitted.");
@@ -542,7 +561,17 @@ async function startAdmission(parsed, io, context, selection) {
   if (selectedWrite.write?.instances.includes("pi")) {
     return refuse(io, "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox.");
   }
-  const membership = authorizeMembershipError(discoveredMembership, instances)
+  let piContext;
+  let requestedPi = selection.piCapacity;
+  if (parsed.values["pi-capacity"] !== undefined) {
+    try { requestedPi = JSON.parse(parsed.values["pi-capacity"]); } catch { return refuse(io, "The requested Pi capacity is malformed."); }
+    if (!normalizePiCapacity(requestedPi)) return refuse(io, "The requested Pi capacity is malformed.");
+  }
+  if (instances.includes("pi")) {
+    try { piContext = piAdmissionContext({ allowedInstances: instances, workspacePath: selection.workspace, ...(selection.continuation ? { continuation: selection.continuation } : {}), ...(requestedPi !== undefined ? { piCapacity: requestedPi } : {}) }, context.dataDir, discoveredMembership); }
+    catch (error) { return refuse(io, error.message); }
+  } else if (requestedPi !== undefined) return refuse(io, "Pi capacity needs Pi selected for this goal.");
+  const membership = authorizeMembershipError(discoveredMembership, instances, piContext)
     || (selectedWrite.write ? authorizeMembershipError(discoveredMembership, selectedWrite.write.instances) : null);
   if (membership) return refuse(io, membership);
   if (instances.length < 2) {
@@ -555,6 +584,13 @@ async function startAdmission(parsed, io, context, selection) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "Core could not confirm this profile, so nothing was admitted.");
   }
 
+  if (selection.continuation) {
+    const fresh = savedTargets(context.dataDir);
+    const selected = fresh.selected(selection.continuation.parentRequestId);
+    if (!selected?.rootRequestId || selected.rootRequestId !== selection.continuation.rootRequestId || fresh.head(selected.rootRequestId) !== selection.continuation.parentRequestId || fresh.unique(selected.rootRequestId)?.goal?.trim() !== goal || workspaceKey(selected.record.workspacePath) !== workspaceKey(selection.workspace)) {
+      return refuse(io, "The selected saved result changed. Open its latest result and choose Continue again; nothing was admitted.");
+    }
+  }
   const host = createHost({ ...context, ...prepared, snapshot: prepared.snapshot }, io);
   let projection;
   try {
@@ -567,6 +603,8 @@ async function startAdmission(parsed, io, context, selection) {
       backgroundConsent: true,
       ...(selectedWrite.write ? { write: selectedWrite.write } : {}),
       ...(selection.executionFeedback ? { executionFeedback: selection.executionFeedback } : {}),
+      ...(selection.continuation ? { continuation: selection.continuation } : {}),
+      ...(piContext?.piCapacity ? { piCapacity: piContext.piCapacity } : {}),
     });
   } catch (error) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "GoalPort could not confirm this background start.");
@@ -627,12 +665,60 @@ function requestWasLeft(dataDir, requestId) {
 async function commandContinue(parsed, io, context) {
   const from = typeof parsed.values.from === "string" ? parsed.values.from.trim() : "";
   if (!from) return refuse(io, "continue needs --from with the request id of a saved record, so nothing was admitted.");
-  const record = readRecords(context.dataDir).find((item) => item.requestId === from);
-  if (!record) return refuse(io, `No saved coordinated-goal record has request id ${from} on this profile, so nothing was admitted.`);
+  // Live branches terminate here on EVERY refusal/unknown. They never reach
+  // the fresh-admission path (and never generate a child UUID).
+  const liveId = parsed.values["live-request-id"];
+  const liveStore = createCoordinationJobStore(context.dataDir, { bootstrapReady: true });
+  const active = liveStore.getActiveStatus();
+  if (active?.followUpMode === "live-read-once" || liveId !== undefined) {
+    const resolved = readHost(context, io);
+    if (!resolved.ok) return refuse(io, resolved.message);
+    if (typeof liveId !== "string" || !/^[A-Za-z0-9._-]{1,256}$/.test(liveId) || liveId === from) return refuse(io, "Live Continue needs its original caller request id; nothing was sent.");
+    if (parsed.values.background !== true || parsed.values["write-instances"] !== undefined || parsed.values["write-turns"] !== undefined || parsed.values["pi-capacity"] !== undefined || parsed.values.turns !== undefined || parsed.values["request-id"] !== undefined) return refuse(io, "Live Continue cannot change the original allowance.");
+    const followUp = typeof parsed.values.goal === "string" ? parsed.values.goal.trim() : "";
+    const own = ownAdmissionForRequest(context.dataDir, from);
+    if (!own || (parsed.values.workspace !== undefined && workspaceKey(parsed.values.workspace) !== workspaceKey(own.workspacePath)) || (parsed.values.instances !== undefined && parsed.values.instances !== own.allowedInstances.join(","))) return refuse(io, "Continue must keep the original folder and harnesses.");
+    const jobsRoot = path.join(context.dataDir, "coordination-jobs", "jobs");
+    const acceptedOwners = fs.existsSync(jobsRoot) ? fs.readdirSync(jobsRoot).filter(id => /^[0-9a-f-]{36}$/i.test(id)).flatMap(id => {
+      const status = liveStore.getStatus(id);
+      if (status.requestId !== from) return [];
+      const child = liveStore.readOwnedLiveFollowUpContext(id);
+      return child ? [{ jobId: id, child }] : [];
+    }) : [];
+    if (acceptedOwners.length) {
+      if (acceptedOwners.length !== 1 || acceptedOwners[0].child.requestId !== liveId || acceptedOwners[0].child.followUp !== followUp) return refuse(io, "The allowance already accepted a different follow-up.");
+      const projection = await resolved.host.continueLive(acceptedOwners[0].jobId, { requestId: liveId, fromRequestId: from, followUp });
+      writeProjection(io, projection); write(io, `live accepted request: ${liveId}`); return 0;
+    }
+    if (!active || active.requestId !== from || active.followUpMode !== "live-read-once") return refuse(io, "The original live worker is unavailable; nothing was sent.");
+    const targets = savedTargets(context.dataDir), selected = targets.selected(from);
+    if (!selected?.rootRequestId || targets.head(selected.rootRequestId) !== from) return refuse(io, "Open the latest initial result; nothing was sent.");
+    try {
+      const projection = await resolved.host.continueLive(active.jobId, { requestId: liveId, fromRequestId: from, followUp });
+      if ((projection?.acceptedRequestId ?? projection?.liveRead?.childRequestId) !== liveId) return refuse(io, "The follow-up acceptance is not confirmed. Keep this request id and check status.");
+      writeProjection(io, projection);
+      write(io, `live accepted request: ${liveId}`);
+      return 0;
+    } catch (error) { return refuse(io, error?.message || "The follow-up acceptance is not confirmed; do not resend with a new id."); }
+  }
+  const targets = savedTargets(context.dataDir);
+  const selected = targets.selected(from);
+  if (!selected) return refuse(io, "That saved result is missing or ambiguous, so nothing was admitted.");
+  if (!selected.rootRequestId) return refuse(io, `${selected.relationUnavailableReason} Nothing was admitted.`);
+  const head = targets.head(selected.rootRequestId);
+  if (!head) return refuse(io, "The latest result for this goal cannot be identified, so nothing was admitted.");
+  if (head !== from) return refuse(io, "A newer result is available. Open the latest result and choose Continue again; nothing was admitted.");
+  const record = normalizeRecord(selected.record);
+  if (!record) return refuse(io, "That saved result could not be read, so nothing was admitted.");
+  const root = targets.unique(selected.rootRequestId);
+  const followUp = typeof parsed.values.goal === "string" ? parsed.values.goal.trim() : "";
+  const originalGoal = root.goal.trim();
+  if (originalGoal.length + followUp.length > 100_000) return refuse(io, "The original goal and follow-up exceed 100,000 characters, so nothing was admitted.");
+  if (parsed.values.workspace !== undefined && workspaceKey(parsed.values.workspace) !== workspaceKey(record.workspacePath)) return refuse(io, "Continue must use the saved goal's folder, so nothing was admitted.");
   if (requestWasLeft(context.dataDir, from)) {
     return refuse(io, "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
   }
-  const workspace = typeof parsed.values.workspace === "string" ? parsed.values.workspace : record.workspacePath;
+  const workspace = record.workspacePath;
   // The saved texts travel as execution feedback. They are references, never
   // commands to relaunch: previousCommandIds stays empty, and the new admission
   // gets a fresh request id so the old job is never spawned a second time.
@@ -643,11 +729,15 @@ async function commandContinue(parsed, io, context) {
     previousExecutionAudit: record.auditText ?? null,
     previousCommandIds: [],
   };
+  let own;
+  try { own = ownAdmissionForRequest(context.dataDir, from); } catch { /* The strict host still refuses malformed prior admissions. */ }
   const code = await startAdmission(parsed, io, context, {
-    goal: parsed.values.goal,
+    goal: originalGoal,
+    continuation: { parentRequestId: from, rootRequestId: root.requestId, originalGoal, followUp },
     workspace,
-    instancesText: parsed.values.instances,
+    instancesText: parsed.values.instances ?? (own?.allowedInstances?.includes("pi") ? own.allowedInstances.join(",") : undefined),
     executionFeedback,
+    ...(Object.hasOwn(record, "piCapacity") ? { piCapacity: record.piCapacity } : {}),
   });
   // Only a real admission earns the note: a refused start replays nothing.
   if (code === 0 && record.verdict === "unconfirmed") {
@@ -662,7 +752,8 @@ async function commandStatus(parsed, io, context) {
   const projection = await currentJob(resolved.host, parsed.values.job, io);
   if (projection === undefined) return 1;
   if (projection === null) return refuse(io, NO_JOB_SENTENCE);
-  writeProjection(io, projection);
+  if (parsed.values["json-status"]) write(io, `job projection: ${JSON.stringify(projection)}`);
+  else writeProjection(io, projection);
   return 0;
 }
 
@@ -674,7 +765,7 @@ async function commandStop(parsed, io, context) {
   if (current === null) return refuse(io, NO_JOB_SENTENCE);
   let projection;
   try {
-    projection = await resolved.host.revoke(current.jobId);
+    projection = await resolved.host.revoke(current.jobId, parsed.values["only-if-ready-from"] === undefined ? undefined : { onlyIfReadyFromRequestId: parsed.values["only-if-ready-from"] });
   } catch (error) {
     return refuse(io, typeof error?.message === "string" && error.message ? error.message : "The stop could not be recorded.");
   }
@@ -726,10 +817,13 @@ async function commandRelease(parsed, io, context) {
 function commandResult(parsed, io, context) {
   const records = readRecords(context.dataDir);
   const requestId = typeof parsed.values["request-id"] === "string" ? parsed.values["request-id"].trim() : "";
-  const record = requestId ? records.find((item) => item.requestId === requestId) : records[0];
+  if (parsed.values["request-id"] !== undefined && !/^[A-Za-z0-9._-]{1,256}$/.test(requestId)) return refuse(io, "Choose an exact saved result before opening it.");
+  const targets = savedTargets(context.dataDir);
+  const selected = requestId ? targets.selected(requestId) : targets.selected(records[0]?.requestId);
+  const record = selected ? normalizeRecord(selected.record) : null;
   if (!record) {
     return refuse(io, requestId
-      ? `No saved coordinated-goal record has request id ${requestId} on this profile.`
+      ? `The saved result ${requestId} is missing, ambiguous, or unreadable on this profile.`
       : "No coordinated-goal record was saved on this profile.");
   }
   write(io, `request: ${record.requestId}`);
@@ -760,7 +854,46 @@ function commandResult(parsed, io, context) {
   return 0;
 }
 
+async function commandNativePreflight(parsed, io, context) {
+  const flags = parsed.values;
+  const hasWorkspace = Object.hasOwn(flags, "workspace");
+  const global = flags.global === true;
+  const allowed = new Set(["workspace", "global", "data-dir", "pipe", "core-binary", "database"]);
+  if (hasWorkspace === global || Object.keys(flags).some(key => !allowed.has(key))) {
+    return refuse(io, "native-preflight requires exactly one of --workspace ABS or --global.");
+  }
+  let candidate;
+  try {
+    if (!fs.statSync(context.dataDir).isDirectory()) throw new Error("profile unavailable");
+    // Confirm absence from readable directories, not existsSync(EACCES) == false.
+    const profileEntries = fs.readdirSync(context.dataDir);
+    if (profileEntries.includes("coordination-jobs")) {
+      const storeRoot = path.join(context.dataDir, "coordination-jobs");
+      const storeEntries = fs.readdirSync(storeRoot);
+      if (storeEntries.includes("jobs")) fs.readdirSync(path.join(storeRoot, "jobs"));
+    }
+    if (hasWorkspace) {
+      if (typeof flags.workspace !== "string" || !path.isAbsolute(flags.workspace)) throw new Error("absolute folder required");
+      candidate = fs.realpathSync(flags.workspace);
+      if (!path.isAbsolute(candidate) || !fs.statSync(candidate).isDirectory()) throw new Error("folder unavailable");
+    }
+    const read = readHost(context, io);
+    if (!read.ok) return refuse(io, read.message);
+    const outstanding = read.host.outstanding(candidate);
+    const inventory = read.host.heldWorkspaces(candidate);
+    const clear = outstanding === false && inventory?.complete === true && inventory.globalBlock === false
+      && Array.isArray(inventory.holds) && (global ? inventory.holds.length === 0
+        : inventory.candidate === candidate && inventory.candidateBlocked === false);
+    if (!clear) return refuse(io, "Competing work or workspace reservations could not be cleared. Nothing was sent.");
+    write(io, `native preflight: ${JSON.stringify({ mode: global ? "global" : "workspace", ...(global ? {} : { workspace: candidate }), outstanding, inventory })}`);
+    return 0;
+  } catch {
+    return refuse(io, "Competing work or workspace reservations could not be checked. Nothing was sent.");
+  }
+}
+
 const HANDLERS = {
+  "native-preflight": commandNativePreflight,
   discover: commandDiscover,
   "grant-access": commandGrant,
   "revoke-access": commandRevoke,

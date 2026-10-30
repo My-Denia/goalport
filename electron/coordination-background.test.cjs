@@ -89,6 +89,30 @@ test('Start forwards complete execution feedback into immutable durable admissio
   assert.deepEqual(admission.executionFeedback, executionFeedback);
 });
 
+test('Start forwards valid continuation descriptor into immutable durable admission', async t => {
+  const r = setup(t);
+  const continuation = {
+    parentRequestId: 'parent-req-001',
+    rootRequestId: 'root-req-001',
+    originalGoal: 'Root goal text',
+    followUp: 'Follow-up instruction',
+  };
+  const first = await r.host.start({ ...r.input, continuation });
+  const admission = createCoordinationJobStore(r.directory, { bootstrapReady: true }).getStatus(first.jobId).admission;
+  assert.deepEqual(admission.continuation, continuation);
+  const status = await r.host.status(first.jobId);
+  assert.deepEqual(status.continuation, continuation);
+});
+
+test('Start with malformed continuation descriptor refuses before admission with background-invalid-admission', async t => {
+  const r = setup(t);
+  await assert.rejects(
+    () => r.host.start({ ...r.input, continuation: { parentRequestId: 'bad' } }),
+    error => error.code === 'background-invalid-admission'
+  );
+  assert.equal(r.launches.length, 0);
+});
+
 test('a long accepted goal does not hide the live stop control', { skip: process.platform !== 'linux' }, async t => {
   const r = setup(t);
   const goal = 'g'.repeat(9000);
