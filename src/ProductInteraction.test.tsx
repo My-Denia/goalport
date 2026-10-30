@@ -52,7 +52,7 @@ describe('conversation-first product boundary', () => {
     mount(base());
     await screen.findByRole('textbox', { name: 'Message composer' });
     expect(screen.queryByRole('button', { name: /stop/i })).toBeNull();
-    expect(screen.getByText('Ready')).toBeTruthy();
+    expect(screen.queryByText('Ready')).toBeNull();
   });
 
   it('shows native startup with its cancellation action without hiding the conversation', async () => {
