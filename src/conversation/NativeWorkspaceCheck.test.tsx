@@ -74,6 +74,12 @@ it('on the desktop it talks only to the preload bridge and accepts a Windows fol
  finally{delete window.goalportCore;}
 });
 
+it('renders a markdown table from Pi as a table, keeping inline code and inert text',()=>{
+ const text='Intro\n\n| Claim | Shown |\n|---|---|\n| `git diff` passed | Not shown |\n| <b>x</b> | Yes |\n\nAfter';
+ render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);
+ expect(screen.getByRole('columnheader',{name:'Claim'})).toBeTruthy();expect(screen.getAllByRole('row')).toHaveLength(3);expect(screen.getByRole('cell',{name:'Not shown'})).toBeTruthy();expect(screen.getByText('git diff').tagName).toBe('CODE');expect(screen.getByText('<b>x</b>').tagName).toBe('TD');expect(screen.getByText('After').tagName).toBe('P');
+});
+
 it('renders a returned Pi response as readable safe markdown, not a raw command log',()=>{
  const text='### Specific findings\n\n- A **concrete** doc issue with `Stop check`.\n\n<script>not executable</script>';
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);
