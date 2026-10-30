@@ -3643,10 +3643,10 @@ describe("one in-window repair", () => {
       typeMessage("Draft for path validation");
       const folderInput = screen.getByRole("textbox", { name: "Project folder" });
 
-      // 1. Empty candidate
+      // 1. Empty candidate: a blank box is not called a mistake, and Send stays off.
       fireEvent.change(folderInput, { target: { value: "" } });
       await waitFor(() => {
-        expect(screen.getByText(/needs an absolute folder path/)).toBeTruthy();
+        expect(screen.queryByText(/needs an absolute folder path/)).toBeNull();
         expect(screen.queryByText(/still reserved while the interrupted goal's exit is unconfirmed/)).toBeNull();
         expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
       });

@@ -1084,6 +1084,8 @@ function App() {
   };
   const draftHeld = workspaceHeldByBackground(candidateWorkspace);
   const draftHeldSentence = heldWorkspaces.length > 0 ? HELD_FOLDER_SENTENCE : UNIDENTIFIABLE_FOLDER_SENTENCE;
+  // An empty folder box is a blank form, not a mistake to point out.
+  const draftHeldNote = draftHeld && (heldWorkspaces.length > 0 || candidateWorkspace.trim() !== "");
   useEffect(() => {
     if (!draftHeld) setDraftError(current => (current?.sentence === HELD_FOLDER_SENTENCE || current?.sentence === UNIDENTIFIABLE_FOLDER_SENTENCE) ? null : current);
   }, [draftHeld]);
@@ -2434,6 +2436,7 @@ function App() {
       const next = client.conversationSend
         ? await client.conversationSend(message, target.campaignId, target.attemptId, intent.requestId)
         : await client.sendMessage(message, target.campaignId, target.attemptId, target.taskId);
+      anchor.scrollToBottom(false);
       const messageType = client.conversationSend ? "conversation_send" : "send_message";
       const outcome = next.commandOutcome;
       const matches = !client.conversationSend || !outcome || (outcome.requestId === intent.requestId && outcome.messageType === messageType);
@@ -3466,7 +3469,7 @@ function App() {
                 connected={snapshot.connection === "connected"} busy={draftBusy}
                 blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || sidebarUnconfirmed || workerGone || linuxLeftoverHeld || admissionUnsaid.current || admissionIntent.current?.unknown === true || liveIntent.current?.unknown === true || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                 waitingOn={null} retryLabel={draftRetryLabel}
-                error={draftError ?? (draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : currentWorkReason ? { sentence: currentWorkReason } : null)}
+                error={draftError ?? (draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : currentWorkReason ? { sentence: currentWorkReason } : null)}
                 canBrowse={false} coordinationAvailable={false}
                 workspacePlaceholder="/path/to/project"
                 workspaceHint="Codex conversations need an absolute folder path, for example /path/to/project."
@@ -3493,7 +3496,7 @@ function App() {
                         : "Checking which agents can work on this goal… Send unlocks once your agent access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
+                    error={draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
