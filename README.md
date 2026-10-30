@@ -9,9 +9,9 @@ GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start 
 ![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20desktop%20%7C%20Linux%20source-lightgrey)
 
-![GoalPort Linux workbench with goal input before agent permissions](docs/assets/screenshots/linux-first-goal.png)
+![GoalPort Linux New goal with Codex conversation explicitly selected](docs/assets/screenshots/linux-native-entry.png)
 
-<sub>Current Linux workbench from source, before allowing agent work. The Windows release package is separate; permission and Runtime screenshots below show its desktop path.</sub>
+<sub>Current Linux workbench from source, with Codex conversation explicitly selected before sending. Coordinated work remains the default. The Windows release package is separate; permission and Runtime screenshots below show its desktop path.</sub>
 
 ## Why GoalPort
 

@@ -40,6 +40,57 @@ function instance(overrides: SyntheticCatalogInstance): SyntheticCatalogInstance
   return overrides;
 }
 
+describe("admitted Pi requested capacity", () => {
+  const selection = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+  const codex: SyntheticCatalogInstance = { instanceId: "codex", name: "Codex", billing: "subscription", models: ["default"] };
+  const pi: SyntheticCatalogInstance = { instanceId: "pi", name: "Pi", billing: "unknown", piCredentialKind: "apiKey-only", models: ["new-global-default"], piCapacity: { offer: { ...selection, model: "beta" }, catalog: [{ provider: "Fixture", model: "alpha" }, { provider: "Fixture", model: "beta" }] } };
+  const input = { catalog: [codex, pi], goal: "Inspect fixture", workspacePath: "/fixture/workspace", sendKey: "own-route", allowedInstances: ["codex", "pi"], piCapacity: selection };
+  it("keeps Pi out of unnamed/default pools, requires intent, and derives every role/replacement from admitted selection", () => {
+    expect(usableInstanceIds(input.catalog)).toEqual(["codex"]);
+    expect(coordinateGoal({ ...input, piCapacity: undefined }).commands).toEqual([]);
+    const commands = coordinateGoal(input).commands;
+    expect(commands[1].modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+    expect(replacementCommand("plan", pi, input, "replace").modelSelection).toEqual(commands[1].modelSelection);
+    expect(replacementCommand("review", pi, input, "replace").modelSelection).toEqual(commands[1].modelSelection);
+    const evidence = { planText: "Bounded plan", reviewText: "VERDICT: carry-out", executionText: "Report" };
+    const audit = evidenceCommand("audit", pi, { ...input, auditPromptTransport: "linux-pi-stdin", writeAuthorization: { instances: ["codex"], workspaceRoot: input.workspacePath, remaining: 1 } }, evidence);
+    expect(audit.modelSelection).toEqual(commands[1].modelSelection);
+    expect(audit.promptDelivery).toBe("stdin");
+    expect(coordinateGoal({ ...input, writeAuthorization: { instances: ["pi"], workspaceRoot: input.workspacePath, remaining: 1 } }).commands).toEqual([]);
+  });
+  it("honors the selected Codex/Pi roles even with another subscription and reversed catalog order", () => {
+    const claude: SyntheticCatalogInstance = { instanceId: "claude", name: "Claude", billing: "subscription", models: ["opus"] };
+    const selected = { ...input, catalog: [claude, pi, codex], allowedInstances: ["claude", "pi", "codex"] };
+    const commands = coordinateGoal(selected).commands;
+    expect(commands.map(command => command.modelSelection.instanceId)).toEqual(["codex", "pi"]);
+    expect(commands[1].modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+    expect(coordinateGoal({ ...selected, catalog: [claude, pi] }).commands).toEqual([]);
+    expect(coordinateGoal({ ...selected, allowedInstances: ["claude", "pi"] }).commands).toEqual([]);
+    expect(coordinateGoal({ ...selected, piCapacity: undefined, allowedInstances: ["claude", "codex"] }).commands.map(command => command.modelSelection.instanceId)).toEqual(["claude", "codex"]);
+  });
+  it.each(["revision", "corrective"])("retains admitted pair in %s rebuilds after injected global defaults change", async mode => {
+    const { requestCoordination } = await import("./requestCoordination");
+    const piSnapshot = { instanceId: "pi", auth: { status: "invalid_state", type: "apiKey" }, models: [{ slug: "default", isDefault: true }], piCapacity: { ...pi.piCapacity!, offer: selection } };
+    let reviews = 0, audits = 0;
+    const commands: CoordinateTurnCommand[] = [];
+    const result = await requestCoordination({ ...input, writeAuthorization: { instances: ["codex"], workspaceRoot: input.workspacePath, remaining: 2 }, beforePlanRevision: async () => true, beforeRepair: async () => true }, { connected: true, sendAuthorized: true, stopReason: null, providers: [{ instanceId: "codex", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "default", isDefault: true }] }, piSnapshot] }, { launch: async command => {
+      commands.push(command);
+      if (command.modelSelection.instanceId === "pi") {
+        expect(command.modelSelection).toEqual({ instanceId: "pi", provider: "Fixture", model: "alpha" });
+        piSnapshot.piCapacity.offer = { ...selection, model: "beta" };
+      }
+      const role = command.commandId.split("-")[1];
+      const text = role === "review" ? `VERDICT: ${mode === "revision" && ++reviews === 1 ? "revise" : "carry-out"}` : role === "audit" ? `VERDICT: ${mode === "corrective" && ++audits === 1 ? "revise" : "verified"}` : "Bounded fixture report";
+      return { launched: true, dispatched: true, text, errorText: "", turnsRemaining: 12, writeTurnsRemaining: 2, ...(command.modelSelection.instanceId === "pi" ? { requestedPiCapacity: { provider: "Fixture", model: "alpha" } } : {}) };
+    } }, () => true);
+    expect(commands.length).toBeGreaterThan(4);
+    expect(result.verdict).toBe("verified");
+    expect(result.requestedPiCapacity).toEqual({ provider: "Fixture", model: "alpha" });
+    const history = mode === "revision" ? result.planRevisionHistory : result.feedbackHistory;
+    expect(history?.[0].requestedPiCapacity).toEqual(result.requestedPiCapacity);
+  });
+});
+
 describe("Synthetic path", () => {
   it("names two different harnesses, a fixture review, and the stop reason that the review is in", () => {
     const state = coordinateGoal({

@@ -1,3 +1,4 @@
+import { normalizePiCapacity, type PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import type { CoordinationWriteAuthorization, ExecutionFeedback } from "./coordinateGoal";
 import type { BackgroundStatus } from "./backgroundStatus";
 import {
@@ -57,6 +58,7 @@ export interface BackgroundJobWriteScope {
  * background consent.
  */
 export interface BackgroundJobStartInput {
+  readonly piCapacity?: PiCapacitySelection;
   /**
    * Caller-stable id. Job identity and the engine send key derive from it —
    * never from history length — so a reattached UI and the running worker
@@ -183,6 +185,7 @@ export function backgroundStartRefusal(start: BackgroundJobStartInput): string |
       seen.add(value);
     }
   }
+  if (Object.hasOwn(start, "piCapacity") && (!normalizePiCapacity(start.piCapacity) || !start.readInstances.includes("pi"))) return "The requested Pi capacity is malformed, so nothing was admitted.";
   if (start.continuation !== undefined) {
     if (!isValidContinuationDescriptor(start.continuation)) {
       return "The background continuation descriptor is malformed, so nothing was admitted.";
@@ -207,6 +210,7 @@ export function backgroundJobKey(requestId: string): string {
  * liveness callbacks on top; nothing here carries renderer or draft identity.
  */
 export interface BackgroundEngineInput {
+  readonly piCapacity?: PiCapacitySelection;
   readonly workspacePath: string;
   readonly goal: string;
   readonly sendKey: string;
@@ -232,6 +236,7 @@ export interface BackgroundEngineInput {
  */
 export function backgroundEngineInput(start: BackgroundJobStartInput): BackgroundEngineInput {
   return {
+    ...(start.piCapacity ? { piCapacity: { ...start.piCapacity } } : {}),
     workspacePath: start.workspaceRoot,
     goal: start.goal,
     sendKey: backgroundJobKey(start.requestId),

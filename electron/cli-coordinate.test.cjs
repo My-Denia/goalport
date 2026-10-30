@@ -3,11 +3,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { discoverCliProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, piWindowsLaunch, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
+const { discoverCliProviders: discoverProviders, runCliTurn, codexReply, codexEnvironmentBlocked, codexToolSuccess, claudeReply, replyFrom, turnSpec, piWindowsLaunch, launchSpec, killProcessTree, defaultExec, writeGrant } = require("./cli-coordinate.cjs");
 const { roleOfCommandId, guardCoordinateWriteCommand } = require("./coordinate-guard.cjs");
 const { readHealth, markBlocked } = require("./harness-health.cjs");
 const { defaultSpawn, spawnStdinTurn } = require("./cli-coordinate.cjs");
 const { EventEmitter, once } = require("node:events");
+
+// Existing discovery cases are the retained legacy host contract. New Linux
+// route-aware discovery is exercised separately in pi-capacity.test.cjs.
+const discoverCliProviders = io => discoverProviders({ routeAwarePi: false, ...io });
 
 function command(instanceId, model, commandId = `coordinate-plan-${instanceId}`) {
   return {
@@ -439,6 +443,7 @@ test("a pi install with an enumerable model table is discovered with its built-i
 test("pi oauth providers are classified as a subscription and an api key is not", async () => {
   const { discoverCliProviders } = require("./cli-coordinate.cjs");
   const discovered = await discoverCliProviders({
+    routeAwarePi: false,
     home: "/home/person",
     readFile(file) {
       if (String(file).replace(/\\/g, "/").endsWith(".pi/agent/auth.json")) {

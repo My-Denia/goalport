@@ -1,3 +1,4 @@
+import type { PiCapacitySelection, PiPair } from "../../electron/pi-capacity.mjs";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "./coordinateGoal";
 import type { CoordinationView } from "./requestCoordination";
 import type { CoordinationVerdict } from "./verdict";
@@ -29,6 +30,7 @@ export interface RoundEvent {
  * retained fact never becomes permission for another turn.
  */
 export interface CoordinationRoundFact {
+  readonly requestedPiCapacity?: PiPair;
   readonly planningHarness: string | null;
   readonly reviewHarness: string | null;
   readonly planText: string | null;
@@ -52,6 +54,7 @@ export interface CoordinationRoundFact {
 
 export type SavedPlan = CoordinationView & {
   requestId: string;
+  piCapacity?: PiCapacitySelection;
   goal: string;
   workspacePath: string;
   savedAt?: string | null;

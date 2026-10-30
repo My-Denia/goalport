@@ -10,6 +10,14 @@
  * code stay external because the worker runs in Node.
  */
 export { requestCoordination } from "./requestCoordination";
+import { coordinateGoal } from "./coordinateGoal";
+import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
+import { backgroundEngineInput, type BackgroundJobStartInput } from "./backgroundJob";
+/** Pure assembly of the SAME engine input; does not launch or authorize. */
+export function preflightBackgroundContinuation(input: BackgroundJobStartInput, providers: readonly ProviderSnapshot[]): void {
+  const assembled = coordinateGoal({ ...backgroundEngineInput(input), catalog: catalogFromProviderSnapshots(providers) });
+  if (assembled.commands.length !== 2) throw new Error(assembled.stopReason);
+}
 export type {
   CoordinationDiscovery,
   CoordinationView,
