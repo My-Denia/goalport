@@ -437,6 +437,15 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .task-state-complete { background: var(--green-soft); color: var(--green); }
 .task-state-waiting { background: var(--panel-soft); color: var(--ink-muted); }
 
+/* Native chat stays primary even when a turn captured long command output. */
+.native-turn-results {
+  width: calc(100% - 44px); max-width: 640px; margin: 0 auto 8px;
+  flex: 0 0 auto; min-height: 0; max-height: min(35dvh, 320px); overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.native-turn-results > summary { padding: 8px 12px; color: var(--ink-soft); font-size: 12.5px; cursor: pointer; }
+.native-turn-results > .turn-results { width: auto; max-width: none; margin: 0; border: 0; }
+
 /* ---------- Turn results ---------- */
 
 .turn-results {

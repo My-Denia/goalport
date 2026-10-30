@@ -104,6 +104,10 @@ that goal even when another coordinated job is current. Session details and the
 timeline show actual registered app-server / one-shot exec / unconfirmed
 transport. Stored or synthetic session IDs alone do not prove continuity.
 
+Native chat stays primary: saved file/command details are retained under the
+collapsed **Workspace results** disclosure. Opening it uses a bounded scroll
+area rather than pushing the conversation and input out of the viewport.
+
 Closing the page does not close the Core session. On return, an attached session
 can accept an explicit new message. A detached, known nonterminal session can use
 the existing **Resume session** action only when Core offers it; that attaches

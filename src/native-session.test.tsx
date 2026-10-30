@@ -16,9 +16,9 @@ const packet = (active = false): CoreSnapshot => ({ ...DEMO_SNAPSHOT, preview: f
   runtimes: DEMO_SNAPSHOT.runtimes.map(item => ({ ...item, nativeSessionTransport: item.id === "codex" ? "app-server" : "unknown" })),
   productConversation: { ...DEMO_SNAPSHOT.productConversation!, title:"Native goal", items:[], runtime:{ state:"selected", provider:"codex", name:"Codex" }, session:{ state:"attached", nativeIdKnown:true, transport:"app-server" }, turn:{ state:"completed", canSend:true, canStop:false, actions:["close-session"] } }
 });
-function server(options: { unknownStart?: boolean; delayedStart?: Promise<Response> } = {}) {
+function server(options: { unknownStart?: boolean; delayedStart?: Promise<Response>; active?: boolean; results?: CoreSnapshot["turnResults"] } = {}) {
   const calls: Array<{messageType:string; payload:Record<string,unknown>; requestId:string; nativeTarget?:unknown}> = [];
-  let current = packet();
+  let current = { ...packet(options.active), ...(options.results ? { turnResults: options.results } : {}) };
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(String(init.body)); calls.push(body);
     if (body.messageType === "coordination_latest") return reply({ ok:true, payload:{ record:null, roots:[], profileUnconfirmed:false, leftoverHeld:false, line:null, currentBase:null, globalSlot:{kind:"empty"} } });
@@ -39,6 +39,19 @@ async function chooseNative() {
   fireEvent.keyDown(native, {key:"Enter"});
   await waitFor(() => expect(window.location.hash).toBe("#codex/new"));
 }
+
+it("keeps native chat primary by folding saved workspace results without discarding them", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/goals/campaign-native");
+  server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}]});
+  render(<App />);
+  const summary = await screen.findByText("Workspace results");
+  const disclosure = summary.closest("details")!;
+  expect(disclosure.open).toBe(false);
+  expect(disclosure.querySelector('[aria-label="Results"]')).not.toBeNull();
+  expect(screen.getByRole("textbox", {name:"Message composer"})).toBeTruthy();
+  fireEvent.click(summary); expect(disclosure.open).toBe(true);
+  expect(screen.getByText("Saved native turn reply")).toBeTruthy();
+});
 
 it("normalizes missing/null/unrecognized configured and actual transport to unknown, never guesses from a native id", () => {
   for (const value of [undefined, null, "unrecognized", false, 1, "exec", "app-server"]) {
