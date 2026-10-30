@@ -480,10 +480,49 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
         .collect()
 }
 
+/// What the user would have typed: agents wrap commands in their shell.
+fn inside_shell(command: &str) -> &str {
+    let (program, rest) = match command.strip_prefix('"') {
+        Some(quoted) => match quoted.split_once('"') {
+            Some(parts) => parts,
+            None => return command,
+        },
+        None => match command.split_once(char::is_whitespace) {
+            Some(parts) => parts,
+            None => return command,
+        },
+    };
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    if !matches!(name, "pwsh" | "powershell" | "cmd" | "bash" | "sh" | "zsh") {
+        return command;
+    }
+    let mut rest = rest.trim_start();
+    while let Some(flag) = rest.split_whitespace().next().filter(|word| word.starts_with('-') || word.starts_with('/')) {
+        rest = rest[flag.len()..].trim_start();
+        let lower = flag.to_ascii_lowercase();
+        if matches!(lower.as_str(), "-command" | "-c" | "-lc" | "/c") {
+            let inner = rest.trim_matches(['"', '\'']).trim();
+            return if inner.is_empty() { command } else { inner };
+        }
+    }
+    command
+}
+
+/// The list under Files changed has the full path; a step only needs the name.
+fn short_path(path: &str) -> &str {
+    let absolute = path.starts_with('/') || path.as_bytes().get(1) == Some(&b':');
+    if absolute {
+        path.rsplit(['/', '\\']).next().unwrap_or(path)
+    } else {
+        path
+    }
+}
+
 /// One step in the words a person would use. Providers name these after their
 /// own protocol (`commandExecution`, `Bash`), which means nothing on screen.
 fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> String {
-    const COMMAND_LIMIT: usize = 120;
+    const COMMAND_LIMIT: usize = 80;
     let exit_code = payload.and_then(|value| value.get("exitCode")).and_then(Value::as_i64);
     let failed = status.contains("fail") || status.contains("error") || exit_code.is_some_and(|code| code != 0);
     if let Some(command) = payload
@@ -492,6 +531,7 @@ fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> Strin
         .map(str::trim)
         .filter(|command| !command.is_empty())
     {
+        let command = inside_shell(command);
         let first_line = command.lines().next().unwrap_or(command);
         let mut shown: String = first_line.chars().take(COMMAND_LIMIT).collect();
         if shown.len() < command.len() {
@@ -511,11 +551,11 @@ fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> Strin
     } else if lower.contains("filechange") || lower.contains("edit") || lower.contains("write") {
         match paths.as_slice() {
             [] => "Changed files".to_owned(),
-            [path] => format!("Changed {path}"),
-            [path, rest @ ..] => format!("Changed {path} and {} more", rest.len()),
+            [path] => format!("Changed {}", short_path(path)),
+            [path, rest @ ..] => format!("Changed {} and {} more", short_path(path), rest.len()),
         }
     } else if lower == "read" {
-        paths.first().map_or_else(|| "Read a file".to_owned(), |path| format!("Read {path}"))
+        paths.first().map_or_else(|| "Read a file".to_owned(), |path| format!("Read {}", short_path(path)))
     } else if lower == "grep" || lower == "glob" || lower == "ls" {
         "Searched the workspace".to_owned()
     } else if lower.contains("web") {
@@ -1167,6 +1207,16 @@ mod activity_sentence_tests {
         assert_eq!(activity_sentence("Edit", "completed", Some(&json!({"path": "a.md"}))), "Changed a.md");
         assert_eq!(activity_sentence("Read", "completed", Some(&json!({"path": "a.md"}))), "Read a.md");
         assert_eq!(activity_sentence("tool_result", "completed", None), "Used a tool");
+    }
+
+    #[test]
+    fn shell_wrappers_and_machine_paths_stay_out_of_steps() {
+        let wrapped = r#""C:\\Users\\me\\pwsh.exe" -Command "git status --short""#;
+        assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": wrapped}))), "Ran git status --short");
+        assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "/bin/bash -lc 'npm test'"}))), "Ran npm test");
+        assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "git status"}))), "Ran git status");
+        assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["C:\\Users\\me\\repo\\GUIDE.md"]}))), "Changed GUIDE.md");
+        assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["docs/guide.md"]}))), "Changed docs/guide.md");
     }
 
     #[test]

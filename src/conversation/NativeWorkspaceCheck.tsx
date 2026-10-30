@@ -89,6 +89,8 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
   async function stop(){if(!job)return;setError(null);try{await ipc('coordination_stop',{jobId:job.jobId});onJob({...job,revoked:true});}catch(e){setError(e instanceof Error?e.message:'Stop check is not confirmed.');}}
   async function leave(){if(!job)return;setError(null);try{const reply=await ipc('coordination_acknowledge',{jobId:job.jobId});onJob(reply?.job?.jobId===job.jobId?reply.job:{...job,acknowledgedStuckAt:new Date().toISOString()});}catch(e){setError(e instanceof Error?e.message:'Leaving the check is not confirmed.');}}
   const owns=job?.nativeCheckTarget?.campaignId===campaign;
+  // A finished review of an earlier turn belongs with the saved ones, not under the newest reply.
+  const earlier=owns&&!job?.active&&Boolean(target)&&job?.nativeCheckTarget?.turnRequestId!==target?.turnRequestId&&saved.some(s=>s.requestId===job?.requestId);
   const holding=Boolean(job?.active&&!job.acknowledgedStuckAt);
   // The first start waits on the host for a minute or more; only a reply lost after that is an earlier request.
   const starting=Boolean(pending)&&busy&&!unknown;
@@ -107,9 +109,9 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
       {starting?<p role="status">Sending to Pi. This can take a minute.</p>:null}
       <div className="dialog-actions"><button type="button" className="button button-outline" disabled={busy||unknown} onClick={()=>changeOpen(false)}>Cancel</button><button type="button" className="button button-primary" disabled={busy||(!pending&&!material)} onClick={()=>{void start();}}>{starting?'Sending…':unknown?'Check on it':'Send to Pi'}</button></div>
     </GoalLayer>
-    {owns && job?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}} onAskCodex={onAskCodex}/>:null}
+    {owns && job && !earlier?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}} onAskCodex={onAskCodex}/>:null}
     {(owns&&holding)||(!eligible&&!pending)?null:<button type="button" className="button button-small button-outline" disabled={busy||(!pending&&(!target||!eligible||holding))} onClick={()=>{setOpen(true);if(!pending){request.current='native-check-'+crypto.randomUUID();void prepare();}}}>{starting?'Sending to Pi…':pending?'Check on your earlier request':'Ask Pi to review'}</button>}
     {!open && error?<CheckMessage text={error} pending={Boolean(pending)}/>:null}
-    {saved.filter(s=>s.requestId!==job?.requestId).map(s=><details key={s.requestId}><summary>Pi's review · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · earlier turn':''}</summary><PiReview text={s.auditText ?? ''} id={s.requestId}/><details><summary>What Pi was sent</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}
+    {saved.filter(s=>earlier||s.requestId!==job?.requestId).map(s=><details key={s.requestId}><summary>Pi's review · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · earlier turn':''}</summary><PiReview text={s.auditText ?? ''} id={s.requestId}/><details><summary>What Pi was sent</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}
   </section>;
 }

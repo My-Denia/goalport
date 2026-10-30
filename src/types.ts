@@ -135,7 +135,8 @@ export function normalizeProductConversationItem(value: unknown): ProductConvers
   const kind = typeof raw.kind === "string" ? raw.kind : "";
   if (!PRODUCT_ITEM_KINDS.includes(kind as ProductConversationItemKind)) return null;
   const body = typeof raw.body === "string" ? raw.body : "";
-  if (!body.trim()) return null;
+  // A streamed reply can contain a delta that is only a space or a newline.
+  if (!body.trim() && kind !== "assistant-message") return null;
   return {
     id,
     kind: kind as ProductConversationItemKind,

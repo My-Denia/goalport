@@ -3,6 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TurnResults } from "./panels/TurnResults";
 import { SinceLastVisit } from "./conversation/SinceLastVisit";
+import { coalesceVisibleFragments } from "./conversation/ProductConversationView";
 import type { TurnResult } from "./types";
 
 const result: TurnResult = {
@@ -44,6 +45,24 @@ describe("Turn results", () => {
     render(<TurnResults results={[{ ...result, baselineRecorded: false, before: [], during: [], unattributed: [] }]} />);
     expect(screen.getByText("Changes for this turn couldn't be compared.")).toBeTruthy();
     expect(screen.queryByText("user.txt")).toBeNull();
+  });
+});
+
+describe("A streamed reply", () => {
+  const piece = (id: string, body: string) => ({ id, kind: "assistant-message", body, logicalItemId: "reply" }) as never;
+
+  it("shows once when the finished message differs from the stream only by spacing", () => {
+    const [reply, ...rest] = coalesceVisibleFragments([piece("a", "to GUIDE.md:"), piece("b", "31 words."), piece("c", "to GUIDE.md: 31 words.")]);
+    expect(rest).toEqual([]);
+    expect(reply.body).toBe("to GUIDE.md: 31 words.");
+  });
+
+  it("keeps a space that arrived on its own", () => {
+    expect(coalesceVisibleFragments([piece("a", "to:"), piece("b", " "), piece("c", "31")])[0].body).toBe("to: 31");
+  });
+
+  it("never leaves an empty message behind", () => {
+    expect(coalesceVisibleFragments([piece("a", " ")])).toEqual([]);
   });
 });
 

@@ -164,7 +164,8 @@ export function coalesceVisibleFragments(items: ProductConversationItem[]): Prod
       && fragmentCoverageIsContinuous) {
       // A completed provider item repeats the whole message after its deltas.
       // That fragment replaces the streamed text; a later delta still appends.
-      const replacesStream = previous.body.length > 0 && item.body.startsWith(previous.body);
+      // Stored replies may have lost whitespace deltas, so spacing doesn't count.
+      const replacesStream = previous.body.trim().length > 0 && withoutSpacing(item.body).startsWith(withoutSpacing(previous.body));
       visible[visible.length - 1] = {
         ...previous,
         body: replacesStream ? item.body : previous.body + item.body,
@@ -175,7 +176,11 @@ export function coalesceVisibleFragments(items: ProductConversationItem[]): Prod
       visible.push({ ...item });
     }
   }
-  return visible;
+  return visible.filter((item) => item.body.trim().length > 0);
+}
+
+function withoutSpacing(text: string): string {
+  return text.replace(/\s+/g, "");
 }
 
 interface ProductConversationViewProps {
