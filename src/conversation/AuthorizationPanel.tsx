@@ -231,7 +231,7 @@ export function AuthorizationPanel({
       </div>
       {scope && !changeMode ? (
         <p className="authorization-scope-line">
-          {scope.remaining} of {scope.maxTurns} authorized model turns left.{" "}
+          {scope.remaining} of {scope.maxTurns} turns left.{" "}
           <button
             type="button"
             className="button button-small button-outline"

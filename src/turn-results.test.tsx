@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { TurnResults } from "./panels/TurnResults";
+import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import type { TurnResult } from "./types";
 
 const result: TurnResult = {
@@ -43,5 +44,19 @@ describe("Turn results", () => {
     render(<TurnResults results={[{ ...result, baselineRecorded: false, before: [], during: [], unattributed: [] }]} />);
     expect(screen.getByText("Changes for this turn couldn't be compared.")).toBeTruthy();
     expect(screen.queryByText("user.txt")).toBeNull();
+  });
+});
+
+describe("Coming back to a goal", () => {
+  afterEach(() => { try { localStorage.removeItem("goalport.lastSeenAnswers"); } catch { /* no storage */ } });
+  const seen = (count: number) => { try { localStorage.setItem("goalport.lastSeenAnswers", JSON.stringify({ goal: count })); return true; } catch { return false; } };
+  const product = (messages: number, canStop = false) => ({ items: Array.from({ length: messages }, (_, index) => ({ id: String(index), kind: "user-message", body: "x" })), runtime: { name: "Codex" }, turn: { canStop } }) as never;
+  it("says what happened since the last visit, once, and stays quiet otherwise", () => {
+    if (!seen(1)) return;
+    render(<SinceLastVisit campaignId="goal" product={product(2)} results={[{ ...result, during: [{ path: "a.md" }] } as never]} />);
+    expect(screen.getByText("Codex finished while you were away · 1 file changed.")).toBeTruthy();
+    cleanup();
+    render(<SinceLastVisit campaignId="goal" product={product(2)} results={[]} />);
+    expect(screen.queryByText(/while you were away/)).toBeNull();
   });
 });

@@ -275,7 +275,7 @@ export function CoordinationStatus({
           above is the revised pass.
         </p>
       ) : null}
-      {verdict === "checked" && !executionHarness && !executionText && !executionEvidence ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
+      {verdict === "checked" && !executionHarness && !executionText && !executionEvidence ? <p>The plan passed its check. Nothing changed, because no agent was allowed to edit files.</p> : null}
       {hasExecutionActivity ? (
         <article className="coordination-result" aria-label="Workspace changes result">
           <h3>Changes{executionHarness ? ` — ${executionHarness}` : ""}</h3>
@@ -316,7 +316,7 @@ export function CoordinationStatus({
         : null}
       {onRevise ? (
         <div className="coordination-revise">
-          <p>This needs a revision. Revise keeps this plan and opens the goal so you can send an update. Nothing is sent until you press Send.</p>
+          <p>This plan needs changes. Revise keeps it and lets you send an update.</p>
           <button type="button" onClick={onRevise}>Revise</button>
         </div>
       ) : null}
@@ -333,7 +333,7 @@ export function CoordinationStatus({
         </article>
       ) : null}
       {plain ? null : (
-      <dl>
+      <details className="coordination-facts"><summary>Plan, check and details</summary><dl>
         <dt>Goal</dt>
         <dd>{fact(goal ?? null)}</dd>
         {saved && savedAt ? (
@@ -342,11 +342,11 @@ export function CoordinationStatus({
             <dd><time dateTime={savedAt}>{saved}</time></dd>
           </>
         ) : null}
-        <dt>Planning harness</dt>
+        <dt>Planned by</dt>
         <dd>{fact(planningHarness)}</dd>
         <dt>Planning quota</dt>
         <dd>{fact(planningQuota)}</dd>
-        <dt>Review harness</dt>
+        <dt>Checked by</dt>
         <dd>{fact(reviewHarness)}</dd>
         <dt>Review quota</dt>
         <dd>{fact(reviewQuota)}</dd>
@@ -354,7 +354,7 @@ export function CoordinationStatus({
         <dd>{fact(planText)}</dd>
         <dt>Check</dt>
         <dd>{fact(reviewText)}</dd>
-      </dl>
+      </dl></details>
       )}
       {scopeExhausted ? (
         <div className="coordination-budget" role="status">
@@ -372,12 +372,12 @@ export function CoordinationStatus({
           ) : null}
         </div>
       ) : budget ? (
-        <p className="coordination-budget">{budget.remaining} of {budget.maxTurns} authorized model turns left.</p>
+        <p className="coordination-budget">{budget.remaining} of {budget.maxTurns} turns left.</p>
       ) : null}
       {writeBudget ? <p className="coordination-budget">{writeBudget.remaining ?? "Unknown"} of {writeBudget.maxTurns} write turns left.</p> : null}
       {onChangeAccess || onStopAllowing ? (
         <div className="coordination-access">
-          <span className="coordination-access-label">Harness access</span>
+          <span className="coordination-access-label">Agent access</span>
           {onChangeAccess ? (
             <button
               type="button"
@@ -446,7 +446,7 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
       ))}
       {activity ? <p className="coordination-progress-activity">{activity}</p> : null}
       {remaining !== null && maxTurns !== null ? (
-        <p>{remaining} of {maxTurns} authorized model turns left.</p>
+        <p>{remaining} of {maxTurns} turns left.</p>
       ) : null}
       {maxWriteTurns != null ? <p>{writeRemaining ?? "Unknown"} of {maxWriteTurns} write turns left.</p> : null}
       {onStopAllowing ? (

@@ -2072,7 +2072,7 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
     // Even a programmatic submit cannot reach the legacy unscoped launch.
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
-    expect(await screen.findByText(/Harness access is still loading, so nothing was sent/)).toBeTruthy();
+    expect(await screen.findByText(/Agent access is still loading, so nothing was sent/)).toBeTruthy();
     resolveDiscovery({ connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null });
     await screen.findByText(/Nothing runs until you press Send\./);
     await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
@@ -2116,7 +2116,7 @@ describe("harness access panel and scoped rounds", () => {
     });
     render(<App />);
     await openDraftWithPanel();
-    expect(await screen.findByText("2 of 4 authorized model turns left.")).toBeTruthy();
+    expect(await screen.findByText("2 of 4 turns left.")).toBeTruthy();
     expect(screen.getByText(/Codex and Claude will plan and check this goal./)).toBeTruthy();
     // The paid-api row is displayed (its unselectable reason) but never gets
     // a checkbox, and the summary never claims GoalPort may use it.
@@ -2306,10 +2306,10 @@ describe("harness access panel and scoped rounds", () => {
     releaseFirst();
     // The in-flight line followed the first launch's return, while the check
     // turn is still waiting behind its own gate.
-    await waitFor(() => expect(screen.getByText("3 of 4 authorized model turns left.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("3 of 4 turns left.")).toBeTruthy());
     releaseSecond();
     // …and the terminal line shows the last launch's count.
-    await waitFor(() => expect(screen.getByText("2 of 4 authorized model turns left.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("2 of 4 turns left.")).toBeTruthy());
     expect(await screen.findByText("Can be carried out", { selector: "dd" })).toBeTruthy();
   });
 
@@ -2459,7 +2459,7 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.queryByRole("button", { name: "Allow more turns" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Change" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop allowing" })).toBeNull();
-    expect(screen.queryByText(/authorized model turns left/)).toBeNull();
+    expect(screen.queryByText(/turns left/)).toBeNull();
   });
 
   it("keeps Send again without working alongside the panel", async () => {
@@ -2516,7 +2516,7 @@ describe("harness access panel and scoped rounds", () => {
     await screen.findByText("Can be carried out", { selector: "dd" });
     expect(bridge.authorizations).toEqual([{ instances: ["codex", "claude"], maxTurns: 4, workspaceRoot: "/tmp/goalport-preview-workspace" }]);
     expect(bridge.launchCount()).toBe(2);
-    expect(screen.getByText(/No harness is allowed to change files/)).toBeTruthy();
+    expect(screen.getByText(/no agent was allowed to edit files/)).toBeTruthy();
   });
 
   it("requires a workspace and explains unavailable write members without selecting them", async () => {
@@ -2738,7 +2738,7 @@ describe("one in-window repair", () => {
     expect(retained.hasAttribute("open")).toBe(true);
     expect(screen.getByText(FIRST_EXECUTION)).toBeTruthy();
     expect(screen.getByText(/Read-only critique: the unchanged checks still fail\./)).toBeTruthy();
-    expect(screen.getByText("0 of 6 authorized model turns left.")).toBeTruthy();
+    expect(screen.getByText("0 of 6 turns left.")).toBeTruthy();
     expect(screen.getByText("0 of 2 write turns left.")).toBeTruthy();
   });
 
@@ -3046,7 +3046,7 @@ describe("one in-window repair", () => {
       expect(retained.hasAttribute("open")).toBe(true);
       expect(screen.getByText(PLAN_TEXT)).toBeTruthy();
       expect(screen.getByText(/Read-only plan critique: the plan ignores/)).toBeTruthy();
-      expect(screen.getByText("0 of 5 authorized model turns left.")).toBeTruthy();
+      expect(screen.getByText("0 of 5 turns left.")).toBeTruthy();
       expect(screen.getByText("0 of 1 write turns left.")).toBeTruthy();
     });
 
@@ -3113,7 +3113,7 @@ describe("one in-window repair", () => {
       expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
       expect(screen.getByText(/not enough access left for one more checked plan revision/)).toBeTruthy();
       expect(screen.getByText(/GoalPort did not add turns/)).toBeTruthy();
-      expect(screen.getByText("2 of 4 authorized model turns left.")).toBeTruthy();
+      expect(screen.getByText("2 of 4 turns left.")).toBeTruthy();
       expect(screen.queryByText("Before plan revision")).toBeNull();
       expect(bridge.authorizations).toHaveLength(1);
     });
