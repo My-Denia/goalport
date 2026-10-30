@@ -592,6 +592,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .composer-actions .runtime-picker-button { min-height: 28px; padding: 2px 8px; border-color: transparent; background: transparent; }
 .composer-actions .runtime-picker-button:hover { border-color: var(--line); }
 .composer-actions .runtime-picker-copy small { display: none; }
+.composer-actions .runtime-picker { flex: none; }
+.composer-actions .composer-hint { flex: 1; min-width: 0; text-align: left; }
 .composer-actions .provider-avatar { width: 20px; height: 20px; font-size: 11px; }
 .review-verdict { display: inline-block; margin: 0 0 6px; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 700; }
 .review-verdict-good { background: rgba(92, 200, 140, 0.14); color: #7fd8a4; }
