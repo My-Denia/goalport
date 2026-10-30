@@ -1102,7 +1102,7 @@ function App() {
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
     : nativeCheckJob?.active && !nativeCheckJob.live && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? "This check is no longer running. Leave it above to send again."
+    ? "This check is no longer running. Leave it above to work in other folders; this folder stays reserved."
     : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
     ? nativeCheckJob.revoked ? "The check is stopping. Send when it has finished." : "Pi is checking this workspace. Send when it finishes, or stop the check above."
     : client.mode === "electron" && nativeCheckJob?.active
