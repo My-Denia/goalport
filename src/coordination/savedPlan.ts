@@ -53,6 +53,9 @@ export interface CoordinationRoundFact {
 }
 
 export type SavedPlan = CoordinationView & {
+  recordKind?: 'native-workspace-check';
+  nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
+  nativeCheckMaterial?: import('./nativeWorkspaceCheck').NativeCheckMaterial;
   requestId: string;
   piCapacity?: PiCapacitySelection;
   goal: string;

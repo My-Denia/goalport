@@ -492,6 +492,16 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
         : job.revoked ? "Access stopped. The current turn may finish; no further turn will start. This does not undo edits or confirm tools stopped."
         : job.live ? "This goal is running on its own. You can close GoalPort and return to this same job."
         : "This background job finished. Its result is retained below.";
+  if (job.recordKind === 'native-workspace-check') return <section className="background-job" aria-label="Workspace check" data-job-id={job.jobId}>
+    <h3>{settled && job.state === 'completed' ? 'Independent workspace check returned' : 'Independent workspace check'}</h3>
+    <p role="status">{job.state === 'unconfirmed' ? 'The check outcome is unconfirmed. Nothing will be replayed.' : job.revoked && !settled ? 'Check access stopped. The current Pi turn may finish; no further turn will start.' : settled ? 'This response covers the shared snapshot only, not later edits or native authorship.' : 'Pi is checking the shared workspace snapshot. You can return to this goal later.'}</p>
+    {job.workspacePath ? <p title={job.workspacePath}>{job.workspacePath}</p> : null}
+    {job.active && !job.revoked ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop check</button> : null}
+    {job.progress?.activity && !settled ? <p>{job.progress.activity}</p> : null}
+    {report?.auditText ? <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{report.auditText}</pre> : null}
+    {job.outcome?.error ? <p role="status">{job.outcome.error}</p> : null}
+    {job.nativeCheckMaterial ? <details><summary>Shared snapshot · {job.nativeCheckMaterial.coverage.limited ? 'Limited' : 'Selected tracked changes'} · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
+  </section>;
   return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>
     <h2>{job.goal}</h2><p role="status">{sentence}</p>
     {/* Stop allowing stays reachable while the admission is active and not

@@ -5,6 +5,9 @@ import type { LiveReadStatus } from "./liveRead";
 
 /** Public workbench projection only. No admission/scope/control material. */
 export interface SavedTargetResult {
+  recordKind?: 'native-workspace-check';
+  nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
+  nativeCheckMaterial?: import('./nativeWorkspaceCheck').NativeCheckMaterial;
   requestId: string;
   rootRequestId: string | null;
   rootLatestId: string | null;
@@ -34,6 +37,7 @@ export interface SavedTargetSummary {
   reason?: string | null;
 }
 export interface CoordinatedCurrentJob {
+  nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
   jobId: string;
   requestId?: string;
   rootRequestId?: string;
@@ -61,6 +65,7 @@ export interface SavedAllowanceView {
 }
 export type GlobalSlot = { kind: "empty" } | { kind: "occupied"; jobId: string; admittedRequestId: string } | { kind: "unknown" };
 export interface SavedCurrentBase {
+  nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
   kind: "saved-current-base";
   jobId: string;
   admittedRequestId: string | null;
@@ -117,6 +122,7 @@ export interface SavedTargetPayload {
 
 export function continuationUnavailable(record: SavedTargetResult | null): string | null {
   if (!record) return "That saved goal is no longer available or cannot be identified.";
+  if (record.recordKind === 'native-workspace-check') return 'Workspace checks do not continue a coordinated goal.';
   if (Object.hasOwn(record, "piCapacity") && (!normalizePiCapacity(record.piCapacity) || !normalizePiCapacity(record.rememberedIntent?.piCapacity) || !samePiPair(record.piCapacity, record.rememberedIntent?.piCapacity))) return "This saved Pi route is unavailable. Its result is still shown.";
   if (!record.rootRequestId) return record.relationUnavailableReason || "The saved goal relationship is unavailable.";
   if (!record.rootLatestId) return "The latest result cannot be identified.";

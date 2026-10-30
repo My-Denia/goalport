@@ -13,6 +13,9 @@ export interface BackgroundHeldWorkspaces {
 
 /** Permission-free IPC projection. Controls require a fresh acknowledged connection. */
 export interface BackgroundStatus {
+  readonly recordKind?: 'native-workspace-check';
+  readonly nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
+  readonly nativeCheckMaterial?: import('./nativeWorkspaceCheck').NativeCheckMaterial;
   readonly piCapacity?: PiCapacitySelection;
   jobId: string;
   requestId: string;

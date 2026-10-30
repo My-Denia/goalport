@@ -1,3 +1,4 @@
+import { parseNativeCheckTarget, parseNativeCheckMaterial } from './nativeWorkspaceCheck';
 import type { BackgroundStatus } from "./backgroundStatus";
 import { parseLiveRead } from "./liveRead";
 import type { HostCurrentJob, SavedCurrentBase, SubmissionCandidate } from "./savedTargetView";
@@ -27,6 +28,9 @@ function isBackgroundStatus(v: unknown): v is BackgroundStatus {
   if (!Array.isArray(v.completedCommands) || !v.completedCommands.every(c => object(c) && typeof c.commandId === "string" && object(c.facts))) return false;
   if (!(v.progress === null || (object(v.progress) && (v.progress.activity === undefined || typeof v.progress.activity === "string")))) return false;
   if (!(v.outcome === null || (object(v.outcome) && typeof v.outcome.status === "string" && (v.outcome.allowanceEnd === undefined || ["idle-stopped", "expired"].includes(String(v.outcome.allowanceEnd)))))) return false;
+  if (Object.hasOwn(v,'nativeCheckTarget') || Object.hasOwn(v,'nativeCheckMaterial') || v.recordKind === 'native-workspace-check') {
+    if(v.recordKind !== 'native-workspace-check' || !parseNativeCheckTarget(v.nativeCheckTarget) || !parseNativeCheckMaterial(v.nativeCheckMaterial) || v.readMaxTurns !== 2 || v.writeMaxTurns !== null || v.followUpMode !== undefined) return false;
+  }
   if (v.liveRead !== undefined) {
     const live = parseLiveRead(v.liveRead);
     if (!live || v.followUpMode !== "live-read-once" || !v.live || live.initialRequestId !== v.requestId
@@ -42,6 +46,7 @@ export function parseAllowanceStatus(value: unknown, jobId: string): AllowanceSt
   return { source: "host-status", job: value.job, jobId };
 }
 export function statusRoot(job: BackgroundStatus): string | null {
+  if (job.recordKind === 'native-workspace-check') return null;
   const live = parseLiveRead(job.liveRead);
   if (live) return live.rootRequestId;
   const continuation = (job as BackgroundStatus & { continuation?: unknown }).continuation;
@@ -58,7 +63,8 @@ export function acknowledgedCurrentJob(reply: Extract<AllowanceStatusReply, { so
     : job.state === "unconfirmed" ? "The open allowance is not confirmed. Your result is kept."
     : job.progress?.activity || (job.active ? "Checking the open allowance. Your saved result is kept." : "The allowance has ended. Your result is kept.");
   return { source: "host-status", jobId: job.jobId, requestId: job.requestId, rootRequestId: statusRoot(job) ?? undefined, goal: job.goal,
-    workspacePath: job.workspacePath, followUpMode: job.followUpMode, liveRead: live, identityConfirmed: statusRoot(job) !== null, line };
+    workspacePath: job.workspacePath, followUpMode: job.followUpMode, liveRead: live,
+    ...(job.nativeCheckTarget ? {nativeCheckTarget:job.nativeCheckTarget} : {}), identityConfirmed: statusRoot(job) !== null || !!job.nativeCheckTarget, line };
 }
 export function readyBase(base: SavedCurrentBase | null | undefined): base is SavedCurrentBase {
   return !!(base?.kind === "saved-current-base" && base.identityConfirmed && base.followUpMode === "live-read-once"

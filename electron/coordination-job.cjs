@@ -264,6 +264,8 @@ function normalizeAdmissionInput(input, platform = process.platform) {
     writeAuthorization,
     backgroundConsent: true,
   };
+  const purpose = require('./native-workspace-check.cjs').purposeOf(input);
+  Object.assign(normalized, purpose);
   const executionFeedback = normalizeExecutionFeedback(input.executionFeedback);
   if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
   const continuation = normalizeContinuation(input.continuation);

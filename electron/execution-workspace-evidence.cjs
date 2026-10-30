@@ -207,6 +207,12 @@ async function readRepoRoot(git, workspacePath) {
   return path.resolve(workspacePath, result.stdout.trim());
 }
 
+function trackedArgs(workspacePath, options, kind) {
+  const selected = options.trackedPaths;
+  if (selected !== undefined && (!Array.isArray(selected) || selected.length > 80 || selected.some(p => typeof p !== "string" || !p || p.includes("\0") || path.isAbsolute(p) || p.split("/").some(x => x === ".." || x === ".")) || selected.some(p => Buffer.byteLength(p) > 1024) || Buffer.byteLength(selected.join("\0")) > 16384)) throw new Error("Invalid explicit tracked paths.");
+  const prefix = selected === undefined ? ["-C", workspacePath] : ["--literal-pathspecs", "-C", workspacePath];
+  return [...prefix, ...(kind === "diff" ? ["diff", "--no-ext-diff", "--no-textconv", ...(selected === undefined ? [] : ["--no-renames"]), "HEAD"] : ["status", "--porcelain=v1", "-z", "-uall"]), "--", ...(selected ?? ["."])];
+}
 async function captureWorkspaceBaseline(workspacePath, options = {}) {
   const git = options.gitExec ?? defaultGitExec;
   const maxDiffBytes = options.maxDiffBytes ?? DEFAULT_MAX_DIFF_BYTES;
@@ -230,19 +236,15 @@ async function captureWorkspaceBaseline(workspacePath, options = {}) {
   if (!repoRoot) {
     return unavailableBaseline("The Git repository root could not be read before execution.", capturedAt, { headCommit });
   }
-  const diffResult = await git(
-    ["-C", workspacePath, "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "."],
-    workspacePath,
-  );
+  const diffArgs = trackedArgs(workspacePath, options, "diff");
+  const diffResult = options.trackedPaths?.length === 0 ? { code: 0, stdout: "", stderr: "" } : await git(diffArgs, workspacePath);
   if (diffResult.code !== 0) {
     return unavailableBaseline(`Git diff failed before execution: ${diffResult.stderr.trim() || "unknown error"}`, capturedAt, { headCommit });
   }
   const { text: beforeDiff, truncated: diffTruncated } = truncateUtf8(diffResult.stdout, maxDiffBytes);
 
-  const statusResult = await git(
-    ["-C", workspacePath, "status", "--porcelain=v1", "-z", "-uall", "--", "."],
-    workspacePath,
-  );
+  const statusArgs = trackedArgs(workspacePath, options, "status");
+  const statusResult = options.trackedPaths?.length === 0 ? { code: 0, stdout: "", stderr: "" } : await git(statusArgs, workspacePath);
   if (statusResult.code !== 0) {
     return {
       gitAvailable: true,
@@ -268,6 +270,7 @@ async function captureWorkspaceBaseline(workspacePath, options = {}) {
     changed: null,
     headCommit,
     beforeDiff,
+    ...(options.trackedPaths !== undefined ? { selectedStatus: statusResult.stdout } : {}),
     untrackedFiles: collected.snapshots,
     untrackedFilesOmitted: collected.omitted,
     truncated: diffTruncated || collected.truncated,
@@ -324,19 +327,15 @@ async function captureWorkspaceEvidence(workspacePath, baseline, options = {}) {
   const repoRoot = await readRepoRoot(git, workspacePath);
   if (!repoRoot) return incompleteResult("The Git repository root could not be read after execution; changes cannot be confirmed.");
 
-  const diffResult = await git(
-    ["-C", workspacePath, "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "."],
-    workspacePath,
-  );
+  const diffArgs = trackedArgs(workspacePath, options, "diff");
+  const diffResult = options.trackedPaths?.length === 0 ? { code: 0, stdout: "", stderr: "" } : await git(diffArgs, workspacePath);
   if (diffResult.code !== 0) {
     return incompleteResult(`Git diff failed after execution: ${diffResult.stderr.trim() || "unknown error"}; changes cannot be confirmed.`);
   }
   const { text: afterDiff, truncated: diffTruncated } = truncateUtf8(diffResult.stdout, maxDiffBytes);
 
-  const statusResult = await git(
-    ["-C", workspacePath, "status", "--porcelain=v1", "-z", "-uall", "--", "."],
-    workspacePath,
-  );
+  const statusArgs = trackedArgs(workspacePath, options, "status");
+  const statusResult = options.trackedPaths?.length === 0 ? { code: 0, stdout: "", stderr: "" } : await git(statusArgs, workspacePath);
   const statusFailed = statusResult.code !== 0;
   const untrackedList = statusFailed ? [] : parsePorcelainUntracked(statusResult.stdout);
   const collected = statusFailed
@@ -371,6 +370,7 @@ async function captureWorkspaceEvidence(workspacePath, baseline, options = {}) {
     changed,
     beforeDiff: baseline.beforeDiff,
     afterDiff,
+    ...(options.trackedPaths !== undefined ? { selectedStatus: statusResult.code === 0 ? statusResult.stdout : null } : {}),
     beforeUntrackedFiles,
     untrackedFiles: collected.snapshots,
     beforeUntrackedFilesOmitted: baseline.untrackedFilesOmitted ?? 0,

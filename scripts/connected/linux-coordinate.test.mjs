@@ -77,6 +77,46 @@ test("native-preflight refuses active and acknowledged-left same-folder holds wi
   assert.equal(f.launches.length, 1);
 });
 
+test('native check prepare derives exact newest target; lost final reply resolves own job before buffer/Core/discovery', async t => {
+  const f=fixture(t);const target={campaignId:'campaign-check',attemptId:'attempt-check',turnRequestId:'turn-check'};
+  const pair={provider:'Fixture',model:'alpha',useExistingCapacity:true};
+  const snapshot={bounds:{projectionUnavailable:false,truncated:false},activeCampaignId:target.campaignId,attempt:{id:target.attemptId,taskId:'task-check',provider:'codex',state:'waiting'},activeTask:{id:'task-check',title:'Synthetic goal'},project:{workspaceRoot:f.workspace},decisions:[],productConversation:{runtime:{provider:'codex'},turn:{state:'completed',canStop:false}},turnResults:[{requestId:target.turnRequestId,replyState:'completed',replyText:'reported',commands:[]}]};
+  f.io.nativeCore={exchangeVerified:async q=>({ok:true,requestId:q.requestId,payload:{requestId:q.requestId,accepted:true,...(q.messageType==='goal_overview'?{overview:{truncated:false,goals:[{campaignId:target.campaignId,attention:'completed'}],pending:[]}}:{snapshot})}})};
+  f.io.snapshot=async()=>snapshot;
+  f.io.discover=async()=>({ok:true,providers:[]});
+  const flags=['--request-id','native-request','--campaign-id',target.campaignId,'--attempt-id',target.attemptId,'--turn-request-id',target.turnRequestId];
+  const offered=await invoke(f,['native-check-prepare',...flags]);assert.equal(offered.code,0,offered.stderr);assert.equal(JSON.parse(offered.stdout).workspacePath,require('../../electron/coordination-job.cjs').workspaceIdentity(f.workspace));assert.equal(f.launches.length,0);
+  snapshot.turnResults.push({requestId:'newest-failed',replyState:'failed',commands:[]});
+  const stale=await invoke(f,['native-check-prepare',...flags]);assert.equal(stale.code,1);assert.match(stale.stderr,/Preview again/);snapshot.turnResults.pop();
+  const engine=require(ENGINE_PATH);const context={reply:'reported',replyTruncated:false,commands:[],commandsOmitted:0,commandsTruncated:false,filesTruncated:false,comparisonUnavailable:false,olderTurnsOmitted:0};
+  const m=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:{head:'a'.repeat(40),paths:[],selectedDiff:'diff fixture',selectedStatus:'',nativeReportedContext:context},nativeReportedContext:context,capturedAt:'2026-01-01T00:00:00Z'});
+  const store=createCoordinationJobStore(f.dataDir,{bootstrapReady:true});const admitted=store.startAdmission({requestId:'native-request',goal:'fixture',workspacePath:f.workspace,allowedInstances:['pi'],maxTurns:2,writeAuthorization:null,backgroundConsent:true,piCapacity:pair,nativeCheckTarget:target,nativeCheckMaterial:m});
+  f.io.snapshot=async()=>{throw Error('must not read Core');};f.io.discover=async()=>{throw Error('must not discover');};
+  const repeated=await invoke(f,['native-check-start',...flags,'--pi-capacity',JSON.stringify(pair),'--background']);assert.equal(repeated.code,0,repeated.stderr);assert.equal(JSON.parse(repeated.stdout).job.jobId,admitted.jobId);assert.equal(f.launches.length,0);
+  const conflict=await invoke(f,['native-check-start',...flags,'--pi-capacity',JSON.stringify({...pair,model:'other'}),'--background']);assert.equal(conflict.code,1);assert.match(conflict.stderr,/different target or Pi capacity/);
+});
+
+test('new native CLI prepare/start transports exact server material into the existing immutable host admission once',async t=>{
+ const f=fixture(t);const target={campaignId:'campaign-slice',attemptId:'attempt-slice',turnRequestId:'turn-slice'},pair={provider:'Fixture',model:'alpha',useExistingCapacity:true};const engine=require(ENGINE_PATH);
+ const context={reply:'reported',replyTruncated:false,commands:[],commandsOmitted:0,commandsTruncated:false,filesTruncated:false,comparisonUnavailable:false,olderTurnsOmitted:0};
+ const material=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:{head:'a'.repeat(40),paths:[],selectedDiff:'diff captured synthetic',selectedStatus:'',nativeReportedContext:context},nativeReportedContext:context,capturedAt:new Date().toISOString()});
+ const snapshot={bounds:{projectionUnavailable:false,truncated:false},activeCampaignId:target.campaignId,attempt:{id:target.attemptId,taskId:'task',state:'waiting',provider:'codex'},activeTask:{id:'task',title:'Native fixture'},project:{workspaceRoot:f.workspace},decisions:[],productConversation:{runtime:{provider:'codex'},turn:{state:'completed',canStop:false}},turnResults:[{requestId:target.turnRequestId,replyState:'completed',replyText:'reported',commands:[]}]};
+ f.io.nativeCore={exchangeVerified:async q=>({ok:true,requestId:q.requestId,payload:{requestId:q.requestId,accepted:true,...(q.messageType==='goal_overview'?{overview:{truncated:false,goals:[],pending:[]}}:{snapshot})}})};
+ f.io.snapshot=async()=>snapshot;f.io.engine=engine;
+ const roster=[{instanceId:'pi',displayName:'Pi',auth:{status:'unknown',type:'apiKey'},piCapacity:{offer:pair,catalog:[pair],workspacePath:f.workspace}}];f.io.discover=async()=>({ok:true,providers:roster});
+ let captures=0,rechecks=0;f.io.collectNativeMaterial=async()=>{captures++;return {nativeCheckMaterial:material,uiExclusions:[]};};f.io.recheckNativeMaterial=async(_r,m)=>{require('../../electron/native-workspace-check.cjs').assertRebuilt(m,engine);rechecks++;assert.equal(m.exactPrompt,material.exactPrompt);};
+ await invoke(f,['grant-access']);const flags=['--request-id','slice-request','--campaign-id',target.campaignId,'--attempt-id',target.attemptId,'--turn-request-id',target.turnRequestId,'--pi-capacity',JSON.stringify(pair)];
+ const preview=await invoke(f,['native-check-prepare',...flags]);assert.equal(preview.code,0,preview.stderr);assert.equal(f.launches.length,0);const packet=JSON.parse(preview.stdout);
+ const filename=path.join(f.root,'server-packet.json');
+ const expired=engine.prepareNativeWorkspaceCheckMaterial({...material,capturedAt:'2000-01-01T00:00:00Z'});fs.writeFileSync(filename,JSON.stringify({...packet,nativeCheckMaterial:expired}),{mode:0o600});
+ const expiredStart=await invoke(f,['native-check-start',...flags,'--background','--material-file',filename]);assert.equal(expiredStart.code,1);assert.deepEqual(JSON.parse(expiredStart.stdout),{nativeCheckRefused:true,previewAgain:true});assert.match(expiredStart.stderr,/Preview again/);assert.equal(f.launches.length,0);
+ fs.writeFileSync(filename,JSON.stringify({...packet,nativeCheckMaterial:{...material,exactPrompt:material.exactPrompt+' tampered'}}));const tamperedStart=await invoke(f,['native-check-start',...flags,'--background','--material-file',filename]);assert.equal(tamperedStart.code,1);assert.deepEqual(JSON.parse(tamperedStart.stdout),{nativeCheckRefused:true,previewAgain:true});assert.match(tamperedStart.stderr,/exact preview/);assert.equal(f.launches.length,0);
+ fs.writeFileSync(filename,JSON.stringify(packet));
+ const started=await invoke(f,['native-check-start',...flags,'--background','--material-file',filename]);assert.equal(started.code,0,started.stderr);const job=JSON.parse(started.stdout).job;
+ const facts=createCoordinationJobStore(f.dataDir,{bootstrapReady:true}).getStatus(job.jobId);assert.deepEqual(facts.admission.nativeCheckTarget,target);assert.equal(facts.admission.nativeCheckMaterial.exactPrompt,material.exactPrompt);assert.deepEqual(facts.admission.allowedInstances,['pi']);assert.equal(facts.admission.maxTurns,2);assert.equal(facts.admission.writeAuthorization,null);assert.equal(f.launches.length,1);assert.equal(captures,1);assert.equal(rechecks,1);
+ fs.unlinkSync(filename);const repeated=await invoke(f,['native-check-start',...flags,'--background']);assert.equal(repeated.code,0,repeated.stderr);assert.equal(JSON.parse(repeated.stdout).job.jobId,job.jobId);assert.equal(f.launches.length,1);assert.equal(captures,1);assert.equal(rechecks,1);
+});
+
 let sequence = 0;
 
 function writeFixtureFile(root, name, text) {

@@ -25,6 +25,9 @@ SavedTargets = _saved_targets.SavedTargets
 _status_spec = importlib.util.spec_from_file_location("goalport_workbench_status", Path(__file__).with_name("workbench_status.py"))
 _status = importlib.util.module_from_spec(_status_spec)
 _status_spec.loader.exec_module(_status)
+_preview_spec = importlib.util.spec_from_file_location("goalport_native_check_preview", Path(__file__).with_name("native_check_preview.py"))
+_preview = importlib.util.module_from_spec(_preview_spec)
+_preview_spec.loader.exec_module(_preview)
 
 
 def load_unix_client():
@@ -330,7 +333,7 @@ def newest_saved_record(records: list) -> dict | None:
     dated_at = ""
     undated = None
     for item in records:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("recordKind") == "native-workspace-check":
             continue
         stamp = item.get("savedAt")
         if isinstance(stamp, str) and stamp:
@@ -344,7 +347,7 @@ def newest_saved_record(records: list) -> dict | None:
         return dated
     if undated is not None:
         for item in reversed(records):
-            if isinstance(item, dict):
+            if isinstance(item, dict) and item.get("recordKind") != "native-workspace-check":
                 return item
     return None
 
@@ -574,7 +577,38 @@ def project_saved_record(data_dir: Path, entry: dict, records: list, targets: Sa
         **({"piCapacity": last["piCapacity"]} if "piCapacity" in last else {}),
         **({"requestedPiCapacity": last["requestedPiCapacity"]} if "requestedPiCapacity" in last else {}),
     })
+    if last.get("recordKind") == "native-workspace-check":
+        projected.update(native_check_record(data_dir, last))
     return projected
+
+
+def native_check_record(data_dir, record):
+    admission, job = find_matching_admission(data_dir, record.get("requestId"), record.get("workspacePath"))
+    target, material = record.get("nativeCheckTarget"), record.get("nativeCheckMaterial")
+    envelope = read_local_object(job / 'admission.json') if job else None
+    canonical_keys = {'requestId', 'goal', 'workspacePath', 'priorPlan', 'priorReview', 'avoidInstances', 'allowedInstances', 'maxTurns', 'writeAuthorization', 'backgroundConsent', 'piCapacity', 'nativeCheckTarget', 'nativeCheckMaterial'}
+    unique_record = sum(isinstance(r, dict) and r.get('requestId') == record.get('requestId') for r in read_saved_records(data_dir)) == 1
+    valid_envelope = (isinstance(envelope, dict) and set(envelope) == {'schema', 'jobId', 'createdAt', 'input'}
+                      and envelope.get('schema') == 'goalport.coordination-job-admission.v1' and isinstance(envelope.get('createdAt'), str)
+                      and envelope.get('jobId') == job.name and isinstance(admission, dict) and set(admission) == canonical_keys
+                      and admission.get('goal') == record.get('goal') and unique_record
+                      and admission.get('priorPlan') is None and admission.get('priorReview') is None and admission.get('avoidInstances') == [])
+    if valid_envelope:
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(envelope['createdAt'].replace('Z', '+00:00'))
+        except ValueError:
+            valid_envelope = False
+    valid = (isinstance(target, dict) and set(target) == {"campaignId", "attemptId", "turnRequestId"}
+             and all(_saved_targets.valid_id(v) for v in target.values()) and _preview.valid_material(material) and valid_envelope
+             and admission.get("nativeCheckTarget") == target and admission.get("nativeCheckMaterial") == material
+             and admission.get("piCapacity") == record.get("piCapacity") and admission.get("allowedInstances") == ["pi"]
+             and admission.get("maxTurns") == 2 and admission.get("writeAuthorization") is None
+             and admission.get("backgroundConsent") is True and not any(k in admission for k in ("continuation", "executionFeedback", "followUpMode", "execute")))
+    return {"recordKind": "native-workspace-check", "requestId": record.get("requestId"), "nativeCheckTarget": target,
+            "nativeCheckMaterial": material, "nativeAssociation": bool(valid), "jobId": job.name if valid and job else None,
+            "workspacePath": record.get("workspacePath"), "savedAt": record.get("savedAt"), "auditText": record.get("auditText"),
+            "verdict": record.get("verdict"), "statusLabel": "Independent workspace check returned" if record.get("verdict") == "checked" else "Workspace check did not complete"}
 
 
 def latest_coordination_record(data_dir: Path | None, request_id: object = None) -> dict:
@@ -593,6 +627,8 @@ def latest_coordination_record(data_dir: Path | None, request_id: object = None)
     seen = set()
     for entry in targets.entries:
         item = entry["record"]
+        if item.get("recordKind") == "native-workspace-check":
+            continue
         root_id = entry["rootRequestId"]
         key = root_id or item.get("requestId")
         if not isinstance(key, str) or key in seen:
@@ -653,8 +689,14 @@ def saved_current_base(data_dir, job_id, slot=None):
                 and _saved_targets.valid_id(a.get("requestId")) and isinstance(a.get("goal"), str)
                 and isinstance(a.get("workspacePath"), str) and a["workspacePath"].startswith("/"))
     root = None
+    native_target = a.get('nativeCheckTarget')
+    native_valid = (identity and isinstance(native_target, dict) and set(native_target) == {'campaignId', 'attemptId', 'turnRequestId'}
+                    and all(_saved_targets.valid_id(v) for v in native_target.values()) and _preview.valid_material(a.get('nativeCheckMaterial'))
+                    and a.get('allowedInstances') == ['pi'] and a.get('maxTurns') == 2 and a.get('writeAuthorization') is None)
     if identity:
-        if "continuation" not in a:
+        if native_target is not None:
+            root = None
+        elif "continuation" not in a:
             root = a["requestId"]
         elif _saved_targets.valid_descriptor(a["continuation"]):
             d = a["continuation"]
@@ -687,7 +729,8 @@ def saved_current_base(data_dir, job_id, slot=None):
         child = None
     return {"kind": "saved-current-base", "jobId": job_id, "admittedRequestId": a.get("requestId") if identity else None,
             "rootRequestId": root, "goal": a.get("goal") if identity else None, "workspacePath": a.get("workspacePath") if identity else None,
-            "identityConfirmed": bool(identity and root), "followUpMode": "live-read-once" if admission.get("followUpMode") == "live-read-once" else None,
+            **({'nativeCheckTarget': native_target} if native_valid else {}),
+            "identityConfirmed": bool(identity and (root or native_valid)), "followUpMode": "live-read-once" if admission.get("followUpMode") == "live-read-once" else None,
             "state": state, "phase": phase, "pending": pending, "revoked": revoked, "workerGone": gone,
             "unconfirmed": state in ("unknown", "unconfirmed") or outcome.get("status") == "unconfirmed" or ("liveFollowUp" in progress and child is None),
             "allowanceEnd": end, "observedAcceptedChildId": child["requestId"] if child else None,
@@ -1074,6 +1117,7 @@ def native_ingress_workspace(request, endpoint, unix_client, timeout):
 
 
 def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None, status_capture=None, native_capture=None):
+    native_preview = _preview.PreviewBuffer()
     def status_argv(job_id):
         if coordination_data is None:
             return None
@@ -1147,6 +1191,21 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             message_type = request.get("messageType") or request.get("message_type")
             if message_type in {"coordination_start", "coordination_continue", "coordination_stop", "coordination_grant", "coordination_acknowledge"}:
                 status_reads.invalidate()  # Before effects, including implicit acknowledge.
+            if message_type in {"native_workspace_check_prepare", "native_workspace_check_start"}:
+                try:
+                    if coordination_data is None:
+                        raise ValueError('No coordination profile configured for workspace checks.')
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, "Workspace check is unavailable.", database)
+                    if error or continue_runner is None:
+                        raise ValueError(error or "Workspace check is not wired on this workbench.")
+                    start = message_type == "native_workspace_check_start"
+                    if start:
+                        status_reads.invalidate()
+                    result = _preview.run_check(prefix, request.get("payload"), continue_runner, native_preview, coordination_data, start)
+                    self._send(200, json.dumps({"ok": True, "payload": result}).encode(), "application/json")
+                except (ValueError, OSError, TypeError) as error:
+                    self._send(200, json.dumps({"ok": False, "error": str(error), "previewAgain": getattr(error, 'preview_again', False)}).encode(), "application/json")
+                return
             if message_type == "coordination_status":
                 payload = request.get("payload")
                 if not isinstance(payload, dict) or set(payload) != {"jobId"} or not _status.valid_job_id(payload.get("jobId")):
@@ -1203,6 +1262,14 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     return
                 if "lookupRequestId" in payload and not _saved_targets.valid_id(payload["lookupRequestId"]):
                     self._send(200, json.dumps({"ok": False, "error": "The submitted request id is invalid."}).encode(), "application/json")
+                    return
+                if "nativeCampaignId" in payload:
+                    if set(payload) != {"nativeCampaignId"} or not _saved_targets.valid_id(payload["nativeCampaignId"]):
+                        self._send(200, json.dumps({"ok": False, "error": "Choose an exact native goal."}).encode(), "application/json")
+                        return
+                    checks = [native_check_record(coordination_data, r) for r in read_saved_records(coordination_data) if isinstance(r, dict) and r.get("recordKind") == "native-workspace-check"]
+                    checks = [r for r in checks if r["nativeAssociation"] and r["nativeCheckTarget"]["campaignId"] == payload["nativeCampaignId"]]
+                    self._send(200, json.dumps({"ok": True, "payload": {"checks": checks}}).encode(), "application/json")
                     return
                 self._send(200, json.dumps({
                     "ok": True,

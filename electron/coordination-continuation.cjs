@@ -38,7 +38,7 @@ function normalizeContinuationDescriptor(value) {
 }
 
 function validatedContinuationOf(record) {
-  if (!record || typeof record !== "object") return undefined;
+  if (!record || typeof record !== "object" || record.recordKind === 'native-workspace-check') return undefined;
   if (record.continuation === undefined || record.continuation === null) return undefined;
   return normalizeContinuationDescriptor(record.continuation) ?? undefined;
 }
