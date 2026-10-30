@@ -1078,13 +1078,13 @@ test("a granted write turn consumes its grant, keeps the claim ledger semantics,
   }
 });
 
-test("Pi stdin selector is exactly audit/Pi/Linux/readOnly; other turns remain argv", () => {
+test("Pi stdin selector is exactly audit/Pi/Linux-or-Windows/readOnly; other turns remain argv", () => {
   for (const role of ["plan", "review", "execute", "audit"]) {
-    for (const instance of ["pi", "codex", "claude"]) for (const platform of ["linux", "win32"]) {
+    for (const instance of ["pi", "codex", "claude"]) for (const platform of ["linux", "win32", "darwin"]) {
       for (const sandbox of ["readOnly", "workspaceWrite"]) {
         const input = { ...command(instance, "default", `coordinate-${role}-matrix`), sandboxPolicy: { type: sandbox }, promptDelivery: "stdin" };
         const spec = turnSpec(input, {}, platform);
-        const eligible = role === "audit" && instance === "pi" && platform === "linux" && sandbox === "readOnly";
+        const eligible = role === "audit" && instance === "pi" && platform !== "darwin" && sandbox === "readOnly";
         assert.equal(!spec.errorText, eligible, JSON.stringify({ role, instance, platform, sandbox }));
         if (eligible) {
           assert.deepEqual(spec.args, ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text"]);
@@ -1177,6 +1177,24 @@ test("mixed-width Pi stdin accepts exactly 32768 bytes after refusing one extra 
   assert.equal(accepted.messageDispatched, true);
   assert.deepEqual(accepted.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes: 32768, inputEnded: true });
   assert.equal(spawns, 1);
+});
+
+test("a Windows .cmd Pi shim still receives the exact 32768-byte body and EOF through cmd.exe", { skip: process.platform !== "win32" }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-stdin-shim-"));
+  try {
+    const script = path.join(directory, "echo.js"), shim = path.join(directory, "fake-pi.cmd");
+    fs.writeFileSync(script, "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write(JSON.stringify({body:Buffer.concat(b).toString('base64'),args:process.argv.slice(2)})))");
+    fs.writeFileSync(shim, `@echo off
+"${process.execPath}" "${script}" %*
+`);
+    const body = Buffer.from(mixedWidthAuditPrompt(), "utf8");
+    const result = await defaultSpawn({ file: shim, args: ["-p", "--mode", "text"], cwd: directory, env: process.env, stdinBody: body });
+    assert.equal(result.code, 0);
+    assert.equal(result.inputEnded, true);
+    const seen = JSON.parse(result.stdout);
+    assert.equal(Buffer.from(seen.body, "base64").equals(body), true);
+    assert.deepEqual(seen.args, ["-p", "--mode", "text"]);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("production stdin seam sends exact 32768-byte mixed-width UTF-8 input and EOF to a real non-model Node child", async () => {
