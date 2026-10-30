@@ -87,12 +87,12 @@ function nativeContext(snapshot,turn) {
   const crop=(s,n)=>truncateUtf8(typeof s==='string'?s:'',n);
   const reply=crop(turn.replyText,4096);
   if(!Array.isArray(turn.commands)) throw Error('Native command context is unavailable.');
-  const commands=turn.commands.slice(0,6).map(c=>{
-    if(!plain(c) || typeof c.command!=='string' || !['started','completed','failed'].includes(c.state)) throw Error('Malformed Native reported command.');
-    const command=crop(c.command,400),cwd=crop(c.cwd,400),output=crop(c.output,400);
-    return {command:command.text,cwd:cwd.text,state:c.state,exitCode:Number.isInteger(c.exitCode)?c.exitCode:null,output:output.text,truncated:command.truncated||cwd.truncated||output.truncated};
-  });
-  return {reply:reply.text,replyTruncated:reply.truncated||turn.replyTruncated===true,commands,commandsOmitted:Math.max(0,turn.commands.length-6),commandsTruncated:turn.commandsTruncated===true,filesTruncated:turn.filesTruncated===true,comparisonUnavailable:turn.comparisonUnavailable===true,olderTurnsOmitted:snapshot.bounds?.omittedCounts?.turnResults ?? 0};
+  // Host/bootstrap command details can contain private home paths or credentials.
+  // The independent workspace check needs the tracked diff, not those details.
+  // Retain only the bounded observed-entry count and existing omission flags;
+  // never copy command text, cwd or output into the shared material.
+  const commands=[];
+  return {reply:reply.text,replyTruncated:reply.truncated||turn.replyTruncated===true,commands,commandsOmitted:turn.commands.length,commandsTruncated:turn.commandsTruncated===true,filesTruncated:turn.filesTruncated===true,comparisonUnavailable:turn.comparisonUnavailable===true,olderTurnsOmitted:snapshot.bounds?.omittedCounts?.turnResults ?? 0};
 }
 async function resolveTarget(core,selected,target) {
   target=targetOf(target);

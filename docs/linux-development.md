@@ -179,7 +179,9 @@ untouched; there is no second Codex planner, writer or repair round.
    reused, or explicitly granted with the existing action.
 2. Choose **Preview shared material**. The complete external-provider prompt is
    shown, not a summary of it. It includes current tracked HEAD→worktree changes,
-   Native **reported** reply/command facts and every crop/omission notice.
+   the Native **reported** reply, observed command-entry counts and their
+   omission/truncation flags, and every crop/omission notice. Command text,
+   working directory and output are not shared.
    Preexisting or concurrent edits can be included. Known private paths are
    excluded before diff bodies are collected; this is not a credential scanner.
    Allowed content and Native text can still contain sensitive data. To remove
@@ -230,9 +232,11 @@ strict UTF-8 before body reads; explicit literal tracked pathspecs select at
 most 80 paths (1024 bytes each, 16384 path bytes total), never untracked bodies.
 The complete selected raw diff must fit 65536 UTF-8 bytes for comparison. The
 provider crop is at most 16384 bytes, the whole displayed/admitted/stdin prompt
-at most 32768 bytes. The Native reported reply is at most 4096 bytes, with the
-first six command facts in source order and 400-byte excerpts. Limited coverage
-is named; no universal race, secret-free-content or test-execution claim is made.
+at most 32768 bytes. The Native reported reply is at most 4096 bytes. Native
+command details (text, working directory and output) are not shared; only the
+observed-entry count and existing omission/truncation flags are included.
+Limited coverage is named; no universal race, secret-free-content or
+test-execution claim is made.
 
 A real Native documentation improvement followed by a concrete Pi critique of
 that actual diff is still a **future acceptance task**, not an example this
