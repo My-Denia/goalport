@@ -1099,6 +1099,8 @@ function App() {
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
+    ? "Pi is checking this workspace. Send when it finishes, or stop the check above."
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that

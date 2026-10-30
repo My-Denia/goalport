@@ -54,6 +54,19 @@ it('target change fences a late preview and cannot adopt or repin the other goal
  const calls=server();const props={target,eligible:true,job:null,onJob:vi.fn(),onBusy:vi.fn()};const view=render(<NativeWorkspaceCheck {...props}/>);fireEvent.click(screen.getByRole('button',{name:'Check workspace with Pi'}));await screen.findByRole('checkbox');view.rerender(<NativeWorkspaceCheck {...props} target={{...target,campaignId:'other'}}/>);await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);expect(props.onJob).not.toHaveBeenCalled();
 });
 
+it('a first start still waiting on the host reads as starting, never as an earlier request',async()=>{
+ server();const original=fetch;let release=()=>{};const held=new Promise<void>(done=>{release=done;});
+ vi.stubGlobal('fetch',vi.fn(async(u,init)=>{const q=JSON.parse(String(init?.body));if(q.messageType==='native_workspace_check_start')await held;return original(u,init);}));
+ const onJob=vi.fn();render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={onJob} onBusy={vi.fn()}/>);fireEvent.click(screen.getByRole('button',{name:'Check workspace with Pi'}));fireEvent.click(await screen.findByRole('checkbox'));fireEvent.click(screen.getByRole('button',{name:'Preview shared material'}));await screen.findByLabelText('Complete Pi payload');fireEvent.click(screen.getByRole('button',{name:'Check this snapshot'}));
+ expect(await screen.findByText(/Starting the check/)).toBeTruthy();expect(screen.queryByText(/existing submitted check/)).toBeNull();expect((screen.getByRole('button',{name:'Starting…'}) as HTMLButtonElement).disabled).toBe(true);expect(screen.queryByRole('button',{name:'Check previous request'})).toBeNull();
+ release();await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
+});
+
+it('a running check says what Pi is doing once and offers only Stop check, not a dead start button',()=>{
+ render(<NativeWorkspaceCheck target={target} eligible job={{...job,requestId:'r',progress:{activity:'Pi is checking the shared workspace snapshot…'}} as never} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ expect(screen.getAllByText(/Pi is checking the shared workspace snapshot/)).toHaveLength(1);expect(screen.getByRole('button',{name:'Stop check'})).toBeTruthy();expect(screen.queryByRole('button',{name:'Check workspace with Pi'})).toBeNull();
+});
+
 it('renders a returned Pi response as readable safe markdown, not a raw command log',()=>{
  const text='### Specific findings\n\n- A **concrete** doc issue with `Stop check`.\n\n<script>not executable</script>';
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);
