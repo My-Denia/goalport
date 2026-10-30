@@ -34,8 +34,8 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
   const sessionLabel = closingSession ? "Closing…"
     : product?.session?.state === "starting" ? "Starting"
     : product?.session?.state === "attached" ? "Connected"
-    : product?.session?.state === "detached" ? "Detached"
-    : product?.session?.state === "closed" ? "Closed"
+    : product?.session?.state === "detached" ? "Paused"
+    : product?.session?.state === "closed" ? "Ended"
     : product?.session?.state === "unavailable" ? "Unavailable"
     : product?.session?.state === "none" ? "Not started" : null;
 
@@ -74,7 +74,7 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
               </strong>
             </div>
             <div><span>Connection</span><strong>{browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}</strong></div>
-            {sessionLabel ? <div><span>Runtime session</span><strong>{sessionLabel}</strong></div> : null}
+            {sessionLabel ? <div><span>Session</span><strong>{sessionLabel}</strong></div> : null}
             {runtime.provider === "codex" && product?.session?.transport === "exec" ? <div><span>Conversation</span><strong>Codex can't continue this conversation after this turn.</strong></div> : null}
             <div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
             <div>
@@ -84,13 +84,13 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
           </div>
           <div className="diagnostics-actions session-details-actions">
             <button className="button button-quiet" type="button" onClick={onChangeRuntime} disabled={!hasConversation}>
-              Change Runtime
+              Switch agent
             </button>
             {!hideHandoff ? <button className="button button-quiet" type="button" onClick={onOpenHandoff} disabled={held || !hasConversation}>
-              Handoff…
+              Hand over…
             </button> : null}
             {snapshot.connection === "connected" && !held && product?.turn.actions?.includes("close-session") ? (
-              <button className="button button-quiet" type="button" onClick={onCloseSession}>Close Runtime session</button>
+              <button className="button button-quiet" type="button" onClick={onCloseSession}>End session</button>
             ) : null}
             {snapshot.connection === "connected" && !held && product?.turn.actions?.includes("resume-session") ? (
               <button className="button button-quiet" type="button" onClick={onResumeSession}>Resume session</button>

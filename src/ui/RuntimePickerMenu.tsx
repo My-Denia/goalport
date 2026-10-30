@@ -49,7 +49,7 @@ export function RuntimePickerMenu({
 }: RuntimePickerMenuProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const items = (choices ?? runtimes).filter((runtime) => runtime.id !== "scenario" || runtime.id === selectedId);
+  const items = choices ?? runtimes;
   const selectedValue = items.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
 
   useEffect(() => {
@@ -87,8 +87,8 @@ export function RuntimePickerMenu({
                   >
                     <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
                     <span className="runtime-picker-copy">
-                      <strong>{candidate.name}</strong>
-                      {choices ? <small>{candidate.subtitle}</small> : null}
+                      <strong>{candidate.id === "scenario" ? "Demo run" : candidate.name}</strong>
+                      {candidate.id === "scenario" ? <small>No AI, changes nothing</small> : candidate.subtitle && choices ? <small>{candidate.subtitle}</small> : null}
                     </span>
                   </Select.Item>
                 );

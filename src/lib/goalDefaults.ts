@@ -5,6 +5,8 @@ const KEY = "goalport.goalDefaults";
 export interface GoalDefaults {
   workspace: string;
   provider: string;
+  /** False until a goal has been started; a first run gets the default agent. */
+  known: boolean;
 }
 
 export function readGoalDefaults(): GoalDefaults {
@@ -12,14 +14,15 @@ export function readGoalDefaults(): GoalDefaults {
     const value = JSON.parse(localStorage.getItem(KEY) ?? "null");
     return {
       workspace: typeof value?.workspace === "string" ? value.workspace : "",
-      provider: typeof value?.provider === "string" ? value.provider : ""
+      provider: typeof value?.provider === "string" ? value.provider : "",
+      known: value !== null
     };
   } catch {
-    return { workspace: "", provider: "" };
+    return { workspace: "", provider: "", known: false };
   }
 }
 
-export function rememberGoalDefaults(defaults: GoalDefaults): void {
+export function rememberGoalDefaults(defaults: Omit<GoalDefaults, "known">): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(defaults));
   } catch {
