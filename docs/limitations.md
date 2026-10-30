@@ -6,6 +6,7 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 
 - **The desktop distribution targets Windows x64.** Linux Core has a developer entry, not a packaged Linux desktop.
 - Linux Core can run native Codex through the Unix command client ([Linux development](linux-development.md)). Connections are isolated with bounded waits. This does not establish native Claude/Grok or Windows desktop acceptance. Socket ownership and peer checks remain in force; a foreign or unidentifiable stale endpoint is never silently replaced.
+- **The Windows Pi workspace check has no live acceptance yet.** The desktop offers **Check workspace with Pi** beside a Codex goal, with the same exact preview as [Linux](linux-development.md#optional-current-workspace-check-with-pi). Prompt delivery is proven through a real `.cmd` shim with a non-model child, not a real Pi reply. While a check runs on another goal, the composer names it; there is no Open current work strip on the desktop.
 - **No downloadable release.** You build the package from source ([building](building.md)).
 - **Unsigned package.** Windows may warn before running it.
 - **Tauri** is a bounded regression target, not a second product.
