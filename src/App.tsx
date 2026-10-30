@@ -1095,20 +1095,16 @@ function App() {
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
-  const announcedDecisions = useRef(new Set<string>());
-  const wasWorking = useRef(false);
+  // Approvals are announced by the main process; this covers a turn finishing unseen.
+  const workingCampaign = useRef("");
   useEffect(() => {
-    const away = () => document.hidden || !document.hasFocus();
-    const agent = product?.runtime.name?.trim() || "The agent";
-    for (const decision of snapshot.decisions) {
-      if (decision.state !== "pending" || announcedDecisions.current.has(decision.id)) continue;
-      announcedDecisions.current.add(decision.id);
-      if (away()) void client.notify?.(`${agent} needs your OK`, "Open GoalPort to answer.");
-    }
     const working = Boolean(product?.turn.canStop);
-    if (wasWorking.current && !working && away()) void client.notify?.(`${agent} finished`, title || "Your goal is ready.");
-    wasWorking.current = working;
-  }, [snapshot.decisions, product?.turn.canStop]);
+    if (workingCampaign.current === snapshot.activeCampaignId && !working && product?.turn.state === "completed"
+      && (document.hidden || !document.hasFocus())) {
+      void client.notify?.(`${product.runtime.name?.trim() || "The agent"} finished`, title || "Your goal is ready.");
+    }
+    workingCampaign.current = working ? snapshot.activeCampaignId : "";
+  }, [product?.turn.canStop, product?.turn.state, snapshot.activeCampaignId]);
   const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
     || (linuxNativeView && ((linuxCoordinationLive && !currentWork?.nativeCheckTarget) || sidebarUnconfirmed))
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
@@ -2330,7 +2326,7 @@ function App() {
 
   function startingAgent(): string {
     const remembered = readGoalDefaults();
-    if (remembered.known) return remembered.provider;
+    if (remembered.known) return snapshot.runtimes.some(runtime => runtime.id === remembered.provider) ? remembered.provider : "";
     return snapshot.runtimes.some(runtime => runtime.id === "codex" && runtime.support !== "unsupported") ? "codex" : "";
   }
 

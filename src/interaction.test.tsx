@@ -2117,7 +2117,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     await openDraftWithPanel();
     expect(await screen.findByText("2 of 4 authorized model turns left.")).toBeTruthy();
-    expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy();
+    expect(screen.getByText(/Codex and Claude will plan and check this goal./)).toBeTruthy();
     // The paid-api row is displayed (its unselectable reason) but never gets
     // a checkbox, and the summary never claims GoalPort may use it.
     expect(screen.queryByRole("checkbox", { name: "Select Grok" })).toBeNull();
@@ -2139,7 +2139,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     await openDraftWithPanel();
     // Usable row: a selectable checkbox; only Codex is selected by default.
-    expect(screen.getByText("Codex will plan, build and check this goal. Nothing runs until you press Send.")).toBeTruthy();
+    expect(screen.getByText("Codex will plan and check this goal. They change files only if you allow it below. Nothing runs until you press Send.")).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Select Codex" })).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: "Select Claude" })).toBeNull();
     // Blocked row: since-line, Use again, collapsed Technical details.
@@ -2215,7 +2215,7 @@ describe("harness access panel and scoped rounds", () => {
     const unblockIndex = bridge.order.indexOf("unblock:claude");
     expect(bridge.order.slice(unblockIndex + 1)).toContain("discover");
     expect(await screen.findByRole("checkbox", { name: "Select Claude" })).toBeTruthy();
-    expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy();
+    expect(screen.getByText(/Codex and Claude will plan and check this goal./)).toBeTruthy();
   });
 
   it("Use again on a finished result opens a new draft of that goal and does not send", async () => {

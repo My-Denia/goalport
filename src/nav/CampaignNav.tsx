@@ -69,8 +69,8 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
   useEffect(() => {
     if (!goals) return;
     const justFinished = goals.filter((goal) => goal.campaignId !== snapshot.activeCampaignId
-      && lastAttention.current.get(goal.campaignId) === "running" && goal.attention !== "running").map((goal) => goal.campaignId);
-    for (const goal of goals) lastAttention.current.set(goal.campaignId, goal.attention);
+      && lastAttention.current.get(goal.campaignId) === "running" && goal.attention === "complete").map((goal) => goal.campaignId);
+    lastAttention.current = new Map(goals.map((goal) => [goal.campaignId, goal.attention]));
     rememberLastAttention(lastAttention.current);
     setFinished((current) => {
       const next = new Set([...current, ...justFinished]);

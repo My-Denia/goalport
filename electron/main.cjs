@@ -369,7 +369,9 @@ function dbPath() {
 function showToast(title, body) {
   try {
     if (!Notification.isSupported()) return false;
-    new Notification({ title, body }).show();
+    const notification = new Notification({ title, body });
+    notification.on("click", () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+    notification.show();
     return true;
   } catch { return false; }
 }

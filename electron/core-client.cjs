@@ -9,12 +9,12 @@ function createPendingDecisionNotifier(show) {
     const fresh = (Array.isArray(snapshot?.decisions) ? snapshot.decisions : []).filter((decision) =>
       decision?.state === "pending" && typeof decision.id === "string" && decision.id.trim() && !announced.has(decision.id));
     if (!fresh.length) return;
-    const body = fresh.length === 1 ? fresh[0].title || "A permission request needs your answer."
+    const body = fresh.length === 1 ? (fresh[0].title ? fresh[0].title.charAt(0).toUpperCase() + fresh[0].title.slice(1) : "A permission request needs your answer.")
       : `${fresh.length} permission requests need your answer.`;
     try {
       // Optional desktop notifications must never turn an accepted Core
       // command into a transport error. Remember only a delivered toast.
-      if (show("GoalPort decision", body) !== false) fresh.forEach((decision) => announced.add(decision.id));
+      if (show("GoalPort needs your OK", body) !== false) fresh.forEach((decision) => announced.add(decision.id));
     } catch { /* The conversation still contains the pending decisions. */ }
   };
 }

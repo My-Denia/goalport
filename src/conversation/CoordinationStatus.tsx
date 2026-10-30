@@ -485,6 +485,7 @@ export function PiReview({ text, id }: { text: string; id: string }) {
 }
 
 export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, onLeave, onAskCodex }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void; onLeave?: () => void; onAskCodex?: (text: string) => void }) {
+  const elapsed = useElapsed(job.recordKind === 'native-workspace-check' && Boolean(job.active && job.live && !job.revoked));
   const report = job.outcome?.report ?? job.progress?.firstRound;
   // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
   // > live/finished. A stopped job that has settled must say so — the user
@@ -513,7 +514,6 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
         : "This background job finished. Its result is retained below.";
   if (job.recordKind === 'native-workspace-check') {
     const running = job.active && job.live && !job.revoked;
-    const elapsed = useElapsed(Boolean(running));
     const review = report?.auditText;
     const unfinished = !review && !running && !job.revoked;
     return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>

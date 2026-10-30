@@ -120,7 +120,7 @@ export function AuthorizationPanel({
     <section className="authorization-panel" aria-label="Harness access">
       <p className="authorization-panel-lead">
         {selectedNames.length > 0
-          ? `${joinNames(selectedNames)} will plan, build and check this goal. Nothing runs until you press Send.`
+          ? `${joinNames(selectedNames)} will plan and check this goal. They change files only if you allow it below. Nothing runs until you press Send.`
           : "Choose which agents can work on this goal. Nothing runs until you press Send."}
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">

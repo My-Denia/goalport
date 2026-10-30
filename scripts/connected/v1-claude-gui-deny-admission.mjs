@@ -251,14 +251,14 @@ async function clickDeclineThenDuplicateSameId(session, decisionId) {
       const row = rows[0];
       if (!row) return { first: "missing", second: "missing", rowCount: 0, wantId };
       const decline = [...row.querySelectorAll("button")].find(
-        (node) => (node.textContent || "").trim() === "Decline permission"
+        (node) => (node.textContent || "").trim() === "Decline"
       );
       if (!decline || decline.disabled) {
         return { first: decline && decline.disabled ? "disabled" : "missing", second: "missing", rowCount: rows.length, wantId };
       }
       decline.click();
       const second = [...row.querySelectorAll("button")].find(
-        (node) => (node.textContent || "").trim() === "Decline permission"
+        (node) => (node.textContent || "").trim() === "Decline"
       );
       if (!second) return { first: "clicked", second: "missing", rowCount: rows.length, wantId };
       second.click();
