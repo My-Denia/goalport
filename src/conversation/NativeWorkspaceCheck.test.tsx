@@ -49,7 +49,7 @@ it('lost final reply retains only caller identity across return, resolves the sa
 
 it('return keeps the own dated review when the current Attempt has no completed turn yet',async()=>{
  const calls:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q.messageType);return new Response(JSON.stringify({ok:true,payload:{checks:[{requestId:'saved-check',nativeAssociation:true,nativeCheckTarget:target,nativeCheckMaterial:material,statusLabel:'x',auditText:'Concrete saved critique',savedAt:'2026-01-01T00:00:00Z'}]}}));}));
- render(<NativeWorkspaceCheck campaignId={target.campaignId} target={null} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);await screen.findByText('Concrete saved critique');expect((screen.getByRole('button',{name:'Ask Pi to review'}) as HTMLButtonElement).disabled).toBe(true);expect(screen.getByText(/earlier turn/)).toBeTruthy();expect(calls).toEqual(['coordination_list']);
+ render(<NativeWorkspaceCheck campaignId={target.campaignId} target={null} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);await screen.findByText('Concrete saved critique');expect(screen.queryByRole('button',{name:'Ask Pi to review'})).toBeNull();expect(screen.getByText(/earlier turn/)).toBeTruthy();expect(calls).toEqual(['coordination_list']);
 });
 
 it('target change fences a late preview and cannot adopt or repin the other goal',async()=>{
