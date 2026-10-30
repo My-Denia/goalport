@@ -39,6 +39,33 @@ function fixture(child = false) {
     appInfo: async () => ({ version: "test", coordinationConfigured: true }) } as never;
   return { record, terminal, list, start, liveContinue };
 }
+it.each(["unconfirmed", "running"] as const)("desktop interrupted live-read allowance (%s) can be left without replaying or releasing its held folder", async state => {
+  const f = fixture();
+  let current: BackgroundStatus = { ...f.terminal, state, active:true, live:false, outcome:null,
+    pendingCommand: state === "unconfirmed" ? {commandId:"coordinate-plan",idempotencyKey:"pending-original"} : null } as BackgroundStatus;
+  const pending = current.pendingCommand;
+  const acknowledge = vi.fn(async (jobId: string) => {
+    expect(jobId).toBe(current.jobId);
+    current = { ...current, active:false, acknowledgedStuckAt:"2026-01-01T00:00:00Z" };
+    return current;
+  });
+  const command = vi.fn();
+  window.goalportCore = { ...window.goalportCore, command, backgroundStatus:async()=>current, backgroundAcknowledge:acknowledge } as never;
+  render(<App />);
+  await screen.findByRole("button", {name:"Continue in a new send"});
+  expect(screen.getByRole("button", {name:"Continue this goal"}).hasAttribute("disabled")).toBe(true);
+  fireEvent.click(screen.getByRole("button", {name:"Continue in a new send"}));
+  await waitFor(() => expect(acknowledge).toHaveBeenCalledTimes(1));
+  const folder = await screen.findByRole("textbox", {name:/project folder/i}) as HTMLInputElement;
+  expect(folder.value).toBe("");
+  expect((screen.getByRole("textbox", {name:"Message composer"}) as HTMLTextAreaElement).value).toBe(f.record.goal);
+  expect(screen.getByText(/stays reserved until its exit is confirmed/)).toBeTruthy();
+  expect(current.state).toBe(state); expect(current.pendingCommand).toBe(pending);
+  expect(current.counters).toEqual(f.terminal.counters);
+  expect(f.start).not.toHaveBeenCalled(); expect(f.liveContinue).not.toHaveBeenCalled();
+  expect(command).not.toHaveBeenCalled();
+});
+
 async function openBackground() {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "Return to background goal" }));

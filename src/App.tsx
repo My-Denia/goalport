@@ -2107,9 +2107,10 @@ function App() {
   async function handleContinueBackgroundJob() {
     const job = backgroundJob;
     if (!job) return;
-    const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand);
     let current = job;
     const finishedButStillActive = job.active && !job.live && !job.pendingCommand && (job.state === "completed" || job.state === "failed" || job.state === "stopped") && Boolean(job.outcome);
+    const interrupted = job.state === "unconfirmed" || Boolean(job.pendingCommand)
+      || (job.followUpMode === "live-read-once" && job.active && !job.live && !finishedButStillActive);
     if (finishedButStillActive) {
       const release = window.goalportCore?.backgroundReleaseTerminal;
       if (!release) {
@@ -3292,7 +3293,7 @@ function App() {
           </div> : null}
           {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" disabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView} onClick={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView) return; if (!backgroundView && window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(value => !value); }}>{client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView ? "Wait for this to finish." : backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
-            <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live && backgroundJob.followUpMode !== "live-read-once" ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
+            <BackgroundCoordinationStatus job={backgroundJob} onContinue={!backgroundJob.live && (backgroundJob.followUpMode !== "live-read-once" || backgroundJob.active) ? () => { void handleContinueBackgroundJob(); } : undefined} onStopAllowing={() => {
               void window.goalportCore?.backgroundRevoke?.(backgroundJob.jobId).then(setBackgroundJob).catch(() => setBackgroundJob(job => job ? { ...job, live: false, state: "unconfirmed" } : null));
             }} />
             {backgroundJob.followUpMode === "live-read-once" ? <DraftGoalComposer

@@ -477,6 +477,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     && !!job.outcome && !job.live && !job.active && !job.pendingCommand;
   const liveReady = job.live && parseLiveRead(job.liveRead)?.ready === true && job.liveRead?.initialRequestId === job.requestId && !job.pendingCommand && !job.revoked;
   const waitingAllowance = job.followUpMode === "live-read-once" && job.phase === "awaiting-followup";
+  const interruptedRecovery = job.state === "unconfirmed" || Boolean(job.pendingCommand)
+    || (job.followUpMode === "live-read-once" && job.active && !job.live && !job.outcome);
   const sentence = liveReady ? "Ready for one follow-up. No model is running; Continue uses the remaining open allowance."
     : waitingAllowance ? "The open allowance is not confirmed. The checked result is kept; nothing was restarted."
     : job.outcome?.allowanceEnd === "expired" && settled ? "The unused allowance expired. The checked result is kept."
@@ -496,12 +498,12 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
         revoked, even when control is unreachable: revocation itself persists.
         The progress block below stays honestly live-gated. */}
     {job.workspacePath ? <p className="background-job-place" title={job.workspacePath} aria-label={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
-    {onContinue && job.followUpMode !== "live-read-once" ? <div className="coordination-access">
+    {onContinue && !job.live ? <div className="coordination-access">
       <button type="button" className="button button-primary" onClick={onContinue}>
-        {job.state === "unconfirmed" || job.pendingCommand ? "Continue in a new send" : "New send for this goal"}
+        {interruptedRecovery ? "Continue in a new send" : "New send for this goal"}
       </button>
       <span className="coordination-access-caption">
-        {job.state === "unconfirmed" || job.pendingCommand
+        {interruptedRecovery
           ? "The interrupted turn stays unconfirmed and is not replayed. Tools from it may still be running. Nothing is sent until you press Send."
           : "The finished job stays as it is. Nothing is sent until you press Send."}
       </span>
