@@ -56,7 +56,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
             </span>
             <span className="runtime-picker-copy">
               <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Coordinated work") : selected ? selected.name : (runtimeRequiredHint ? "Coordinated goal" : "Choose a Runtime")}</strong>
-              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : coordinationAvailable
+              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "selected" : coordinationAvailable
                 ? "Send without picking, or pick the single-harness path."
                 : (runtimeRequiredHint ?? "Choose a Runtime before sending.")}</small>
             </span>
