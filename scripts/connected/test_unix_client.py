@@ -1009,6 +1009,45 @@ class WireTests(unittest.TestCase):
         self.assertFalse(caught.exception.as_dict()["automaticallyRetried"])
         self.assertEqual(len(self.requests), 1)
 
+    def test_workbench_distinguishes_lost_read_reply_from_entered_mutation(self):
+        # Real local framing, ephemeral HTTP/Unix sockets, no provider/helper/Core.
+        root = Path(self.directory.name).resolve()
+        for kind in ("conversation_send", "start_conversation"):
+            with self.subTest(kind=kind):
+                self.path = str(root / (kind + ".sock"))
+                before = len(self.requests)
+                peer = self.peer(lambda conn, request: None)
+                handler = workbench.make_handler(self.path, root, client, 1, root,
+                    core_binary="/fixture/never-executed", database="/fixture/never-read.sqlite")
+                server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+                thread = threading.Thread(target=server.serve_forever); thread.start()
+                try:
+                    with patch.object(workbench, "coordination_cli_prefix", return_value=(["fixture-not-executed"], None)), patch.object(workbench._status.NativePreflight, "read", return_value=True):
+                        connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                        try:
+                            payload = {"campaignId": "synthetic-campaign", "attemptId": "synthetic-attempt", "message": "once"} if kind == "conversation_send" else {"workspaceRoot": str(root), "provider": "codex", "message": "once"}
+                            connection.request("POST", "/goalport/ipc", json.dumps({"requestId": "synthetic-wire", "messageType": kind, "payload": payload}), {"Content-Type": "application/json"})
+                            response = connection.getresponse(); packet = json.loads(response.read())
+                        finally:
+                            connection.close()
+                    peer.join(2)
+                    self.assertEqual(len(self.requests), before + 1)
+                    if kind == "conversation_send":
+                        self.assertEqual(self.requests[-1]["messageType"], "goal_detail")
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(packet["payload"]["refusalSource"], "workbench-native-preflight")
+                        self.assertEqual(packet["payload"]["rejection"]["reservation"], None)
+                        self.assertEqual(packet["requestId"], "synthetic-wire")
+                        self.assertNotIn("connection", packet)
+                    else:
+                        self.assertEqual(self.requests[-1]["messageType"], kind)
+                        self.assertEqual(response.status, 502)
+                        self.assertNotIn("payload", packet)
+                        self.assertEqual(packet["connection"], "disconnected")
+                finally:
+                    server.shutdown(); server.server_close(); thread.join(3)
+        self.assertFalse(self.errors)
+
     def test_connect_failure_proves_only_not_sent(self):
         with self.assertRaises(client.ClientError) as caught:
             client.call(self.path, "interrupt", {"attemptId": "a"})

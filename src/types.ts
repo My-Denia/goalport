@@ -205,6 +205,9 @@ export interface CoreCommandOutcome {
   duplicate?: boolean;
   error?: string;
   rejection?: CommandRejection;
+  /** Only the Linux transport's strictly validated, invocation-local preflight result. */
+  refusalSource?: "workbench-native-preflight";
+  technical?: string;
 }
 
 export type DeliveryState = "FAILED" | "DELIVERED" | "UNKNOWN";

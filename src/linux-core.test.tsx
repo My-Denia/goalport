@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { getCoreClient, resetCoreClientForTests } from "./ipc";
 import { DEMO_SNAPSHOT, type CoreSnapshot } from "./types";
+import { settleNativeSendIntent, startConversationIntent } from "./lib/sendIntent";
 
 afterEach(() => {
   cleanup();
@@ -697,5 +698,121 @@ describe("Linux Core bridge", () => {
     expect(titlebarCampaign).not.toBeNull();
     expect(titlebarCampaign?.getAttribute("title")).toBe(longGoal);
     expect(titlebarCampaign?.textContent).toBe("This is a very long goal description that sho...");
+  });
+});
+
+function localRefusal(id = "synthetic-stable", method = "start_conversation"): Record<string, unknown> {
+  const reason = "The conversation folder could not be confirmed. Choose an existing accessible absolute folder.";
+  return { protocolVersion: "goalport.ipc.v2", requestId: id, ok: false, error: reason,
+    payload: { requestId: id, accepted: false, messageType: method, refusalSource: "workbench-native-preflight",
+      rejection: { code: "native-preflight-refused", message: reason, deliveryState: "FAILED",
+        nativeDispatchState: "NOT_STARTED", retryMode: "NEW_REQUEST", reservation: null } } };
+}
+
+function refusalBridge(response: () => Response | Promise<Response>, notices: string[] = []) {
+  window.__GOALPORT_LINUX_CORE__ = true;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    const command = JSON.parse(String(init.body));
+    if (["start_conversation", "conversation_send", "rename_conversation"].includes(command.messageType)) return response();
+    return jsonResponse({ ok: true, payload: command.messageType === "goal_overview"
+      ? { overview: { revision: "fixture", truncated: false, goals: [], pending: [] } }
+      : { snapshot: { ...goal("campaign-a", "Goal A"), notices }, revision: "fixture", unchanged: false } });
+  }));
+  return getCoreClient();
+}
+
+describe("strict Linux invocation-local refusal parsing", () => {
+  it.each(["start_conversation", "conversation_send"])("preserves connected snapshot/no global Core label for validated %s", async method => {
+    const raw = localRefusal("synthetic-stable", method);
+    (raw.payload as Record<string, unknown>).technical = "Synthetic bounded diagnostic";
+    const client = refusalBridge(() => jsonResponse(raw), ["Existing Core warning"]);
+    const before = await client.snapshot();
+    const after = method === "start_conversation"
+      ? await client.startConversation!("/fixture/missing", "codex", "draft", "synthetic-stable", true)
+      : await client.conversationSend!("follow", "campaign-a", "attempt-a", "synthetic-stable");
+    expect(after.connection).toBe(before.connection);
+    expect(after.activeCampaignId).toBe(before.activeCampaignId);
+    expect(after.notices).toEqual(before.notices);
+    expect(after.commandOutcome).toEqual({ kind: "refused", requestId: "synthetic-stable", messageType: method,
+      error: raw.error, refusalSource: "workbench-native-preflight", rejection: (raw.payload as Record<string, unknown>).rejection,
+      technical: "Synthetic bounded diagnostic" });
+  });
+
+  const changes: Array<[string, (packet: Record<string, unknown>) => void]> = [
+    ["wrong protocol", p => { p.protocolVersion = "goalport.ipc.v1"; }],
+    ["missing protocol", p => { delete p.protocolVersion; }],
+    ["wrong outer id", p => { p.requestId = "other"; }],
+    ["missing outer id", p => { delete p.requestId; }],
+    ["wrong inner id", p => { (p.payload as Record<string, unknown>).requestId = "other"; }],
+    ["missing inner id", p => { delete (p.payload as Record<string, unknown>).requestId; }],
+    ["wrong method", p => { (p.payload as Record<string, unknown>).messageType = "conversation_send"; }],
+    ["missing method", p => { delete (p.payload as Record<string, unknown>).messageType; }],
+    ["missing accepted", p => { delete (p.payload as Record<string, unknown>).accepted; }],
+    ["missing ok", p => { delete p.ok; }],
+    ["missing payload", p => { delete p.payload; }],
+    ["array payload", p => { p.payload = []; }],
+    ["missing rejection", p => { delete (p.payload as Record<string, unknown>).rejection; }],
+    ["array rejection", p => { (p.payload as Record<string, unknown>).rejection = []; }],
+    ["inconsistent reason", p => { p.error = "Another reason"; }],
+    ["wrong source", p => { (p.payload as Record<string, unknown>).refusalSource = "Core"; }],
+    ["missing source", p => { delete (p.payload as Record<string, unknown>).refusalSource; }],
+    ["accepted true", p => { (p.payload as Record<string, unknown>).accepted = true; }],
+    ["accepted number", p => { (p.payload as Record<string, unknown>).accepted = 0; }],
+    ["ok true", p => { p.ok = true; }],
+    ["ok number", p => { p.ok = 0; }],
+    ["connection claim", p => { p.connection = "disconnected"; }],
+    ["fake snapshot", p => { (p.payload as Record<string, unknown>).snapshot = {}; }],
+    ["raw technical controls", p => { (p.payload as Record<string, unknown>).technical = "a\nb"; }],
+    ["oversize technical utf8", p => { (p.payload as Record<string, unknown>).technical = "界".repeat(683); }],
+    ["non-string technical", p => { (p.payload as Record<string, unknown>).technical = {}; }],
+    ...(["code", "message", "deliveryState", "nativeDispatchState", "retryMode", "reservation"] as const).flatMap(key => [
+      [`missing rejection ${key}`, (p: Record<string, unknown>) => { delete ((p.payload as Record<string, unknown>).rejection as Record<string, unknown>)[key]; }],
+      [`wrong rejection ${key}`, (p: Record<string, unknown>) => { ((p.payload as Record<string, unknown>).rejection as Record<string, unknown>)[key] = key === "reservation" ? {} : "wrong"; }]
+    ] as Array<[string, (p: Record<string, unknown>) => void]>)
+  ];
+  it.each(changes)("does not promote %s to host proof", async (_label, change) => {
+    const raw = localRefusal(); change(raw);
+    const client = refusalBridge(() => jsonResponse(raw));
+    await client.snapshot();
+    const after = await client.startConversation!("/fixture", "codex", "draft", "synthetic-stable", true);
+    expect(after.commandOutcome?.refusalSource).toBeUndefined();
+    expect(after.commandOutcome?.rejection).toBeUndefined();
+    const intent = startConversationIntent("synthetic-stable", "/fixture", "codex", "draft");
+    expect(settleNativeSendIntent(intent, after.commandOutcome)).toEqual({ ...intent, state: "reconcile" });
+  });
+
+  it.each([
+    ["legacy prose", () => jsonResponse({ ok: false, error: "Nothing was sent." })],
+    ["HTTP error despite packet", () => jsonResponse(localRefusal(), 502)],
+    ["malformed JSON", () => new Response("not json")],
+    ["network failure", () => Promise.reject(Error("synthetic lost response"))]
+  ] as const)("keeps %s conservative", async (_label, response) => {
+    const client = refusalBridge(response);
+    await client.snapshot();
+    const after = await client.startConversation!("/fixture", "codex", "draft", "synthetic-stable", true);
+    expect(after.commandOutcome?.kind).not.toBe("accepted");
+    expect(after.commandOutcome?.refusalSource).toBeUndefined();
+    expect(after.commandOutcome?.rejection).toBeUndefined();
+  });
+
+  it("does not trust a valid-looking host packet for a non-send command", async () => {
+    const client = refusalBridge(() => jsonResponse(localRefusal("synthetic-stable", "rename_conversation")));
+    await client.snapshot();
+    const after = await client.renameConversation!("campaign-a", "title");
+    expect(after.commandOutcome?.refusalSource).toBeUndefined();
+    expect(after.notices[0]).toMatch(/^Core refused:/);
+  });
+
+  it("cannot publish a late host refusal into a newly pinned view", async () => {
+    let resolve!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>(done => { resolve = done; });
+    const client = refusalBridge(() => pendingResponse);
+    await client.snapshot();
+    const pending = client.startConversation!("/fixture", "codex", "draft", "synthetic-stable", true);
+    client.pinView?.("campaign-other");
+    resolve(jsonResponse(localRefusal()));
+    const after = await pending;
+    expect(after.commandOutcome?.refusalSource).toBeUndefined();
+    expect(after.notices).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("native_workbench", Path(__file__).with_name("linux-workbench.py"))
 w = importlib.util.module_from_spec(spec)
@@ -34,12 +35,17 @@ class NativeIngressTests(unittest.TestCase):
         self.clear, self.clean = True, True
         self.snapshot = {"activeCampaignId": "campaign-a", "project": {"workspaceRoot": self.workspace}, "activeTask": {"id": "task-a"}, "attempt": {"id": "attempt-a"}}
         self.bad_reply = False
+        self.call_error = None
         owner = self
         class FakeCore:
             MAX_FRAME_BYTES = 1024 * 1024
             class ClientError(Exception): pass
             def call(self, endpoint, kind, payload, timeout, request_id=None):
                 owner.calls.append((kind, copy.deepcopy(payload), request_id))
+                if owner.call_error:
+                    error = owner.call_error(kind)
+                    if error:
+                        raise error
                 return {"protocolVersion": "goalport.ipc.v2", "requestId": "wrong" if owner.bad_reply else request_id, "ok": True,
                         "payload": {"accepted": True, "requestId": request_id, "snapshot": copy.deepcopy(owner.snapshot)}}
         class Capture:
@@ -61,13 +67,15 @@ class NativeIngressTests(unittest.TestCase):
     def close(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=3)
 
-    def post(self, kind, payload, wrapper=None):
-        packet = {"messageType": kind, "requestId": "caller-stable", "payload": payload}
+    def post(self, kind, payload, wrapper=None, request_id="caller-stable"):
+        packet = {"messageType": kind, "requestId": request_id, "payload": payload}
         if wrapper is not None: packet["nativeTarget"] = wrapper
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=4)
         try:
             conn.request("POST", "/goalport/ipc", json.dumps(packet), {"Content-Type": "application/json"})
-            return json.loads(conn.getresponse().read())
+            response = conn.getresponse()
+            self.last_status = response.status
+            return json.loads(response.read())
         finally: conn.close()
 
     def rows(self):
@@ -144,6 +152,75 @@ class NativeIngressTests(unittest.TestCase):
         self.assertTrue(self.post("continue_in_isolated_workspace", {"attemptId":"Core-owned-history", "targetWorkspace":str(target)})["ok"])
         self.assertEqual(self.captures[-1][-2:], ["--workspace", str(target)])
         self.assertEqual([k for k, _, _ in self.calls], ["continue_in_isolated_workspace"])
+
+    def assert_send_refusal(self, reply, kind, stage):
+        reason = w.NATIVE_PREFLIGHT_REASONS[stage]
+        self.assertEqual(self.last_status, 200)
+        self.assertEqual(reply, {
+            "protocolVersion": "goalport.ipc.v2", "requestId": "caller-stable", "ok": False, "error": reason,
+            "payload": {"requestId": "caller-stable", "accepted": False, "messageType": kind,
+                        "refusalSource": "workbench-native-preflight",
+                        "rejection": {"code": "native-preflight-refused", "message": reason, "deliveryState": "FAILED",
+                                      "nativeDispatchState": "NOT_STARTED", "retryMode": "NEW_REQUEST", "reservation": None}},
+        })
+        self.assertNotIn("connection", reply)
+        self.assertNotIn("snapshot", reply["payload"])
+        self.assertNotIn("Errno", reply["error"])
+        self.assertNotIn(self.workspace, reply["error"])
+
+    def test_two_send_folder_target_and_policy_refusals_have_only_correlated_local_proof(self):
+        start = {"workspaceRoot": str(self.root / "known-missing"), "provider": "codex", "message": "draft"}
+        self.assert_send_refusal(self.post("start_conversation", start), "start_conversation", "folder")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.captures, [])
+        follow = {"campaignId": "campaign-a", "attemptId": "attempt-a", "message": "follow"}
+        for error_type in (self.fake.ClientError, OSError):
+            with self.subTest(error=error_type.__name__):
+                self.call_error = lambda kind: error_type("synthetic lookup failure")
+                self.assert_send_refusal(self.post("conversation_send", follow), "conversation_send", "target")
+                self.assertTrue(all(kind == "goal_detail" for kind, _, _ in self.calls))
+        self.call_error = None
+        for kind, payload in (("start_conversation", {**start, "workspaceRoot": self.workspace}), ("conversation_send", follow)):
+            with self.subTest(kind=kind):
+                self.clear = False
+                self.assert_send_refusal(self.post(kind, payload), kind, "reservations")
+                self.assertNotIn(kind, [k for k, _, _ in self.calls])
+        self.clear = True
+        with patch.object(w, "coordination_cli_prefix", return_value=(None, "synthetic unavailable prefix")):
+            self.assert_send_refusal(self.post("start_conversation", {**start, "workspaceRoot": self.workspace}), "start_conversation", "reservations")
+
+    def test_preflight_oserror_human_mapping_and_bad_correlation_never_claims_no_forward(self):
+        for kind, stage in (("start_conversation", "folder"), ("conversation_send", "target")):
+            for error_type in (FileNotFoundError, PermissionError, ValueError):
+                with self.subTest(kind=kind, error=error_type.__name__), patch.object(w, "native_ingress_workspace", side_effect=error_type("raw /private/fixture not headline")):
+                    self.assert_send_refusal(self.post(kind, {}), kind, stage)
+        self.assertEqual(self.calls, [])
+        for bad_id in (None, "", "has space", "x" * 257, 123, {"wrong": True}):
+            reply = self.post("start_conversation", {"workspaceRoot": str(self.root / "missing")}, request_id=bad_id)
+            self.assertNotIn("payload", reply)
+            self.assertNotIn("refusalSource", reply)
+
+    def test_post_forward_errors_keep_old_unknown_path_for_both_sends(self):
+        for kind, payload, wrapper, _ in self.rows()[:2]:
+            for error_type in (self.fake.ClientError, OSError, ValueError):
+                with self.subTest(kind=kind, error=error_type.__name__):
+                    self.call_error = lambda current: error_type("synthetic mutation error") if current == kind else None
+                    reply = self.post(kind, payload, wrapper)
+                    self.assertEqual(self.last_status, 502)
+                    self.assertFalse(reply["ok"])
+                    self.assertNotIn("payload", reply)
+                    self.assertIn(kind, [k for k, _, _ in self.calls])
+
+    def test_other_native_commands_keep_legacy_refusal_body_and_status(self):
+        self.clear = False
+        for kind, payload, wrapper, _ in self.rows()[2:]:
+            with self.subTest(kind=kind):
+                reply = self.post(kind, payload, wrapper)
+                self.assertEqual(self.last_status, 200)
+                self.assertFalse(reply["ok"])
+                self.assertNotIn("payload", reply)
+                self.assertEqual(reply["connection"], "disconnected")
+                self.assertNotIn(kind, [k for k, _, _ in self.calls])
 
     def test_excluded_reads_stop_permission_close_recheck_revoke_recovery_remain_reachable(self):
         self.clear = False

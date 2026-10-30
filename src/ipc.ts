@@ -1145,8 +1145,41 @@ function normalizeGoalOverview(value: unknown): GoalOverview {
   };
 }
 
+// Validate RAW host data before any permissive Core normalizer can turn a
+// missing/malformed reservation into null. This proof belongs to this HTTP call.
+function nativePreflightRefusal(record: Record<string, unknown>, sentId: string, method: string): Pick<CoreCommandOutcome, "refusalSource" | "rejection" | "technical"> | undefined {
+  if (method !== "start_conversation" && method !== "conversation_send") return undefined;
+  if (!/^[A-Za-z0-9._-]{1,256}$/.test(sentId)
+    || record.protocolVersion !== IPC_PROTOCOL_VERSION || record.requestId !== sentId || record.ok !== false
+    || typeof record.error !== "string" || !record.error.trim() || record.error.length > 512
+    || /[\u0000-\u001f\u007f-\u009f]/.test(record.error)
+    || Object.keys(record).some(key => !["protocolVersion", "requestId", "ok", "error", "payload"].includes(key))) return undefined;
+  const payload = record.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const row = payload as Record<string, unknown>;
+  if (row.requestId !== sentId || row.accepted !== false || row.messageType !== method
+    || row.refusalSource !== "workbench-native-preflight"
+    || Object.keys(row).some(key => !["requestId", "accepted", "messageType", "refusalSource", "rejection", "technical"].includes(key))) return undefined;
+  const raw = row.rejection;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const rejection = raw as Record<string, unknown>;
+  if (Object.keys(rejection).length !== 6
+    || rejection.code !== "native-preflight-refused" || rejection.message !== record.error
+    || rejection.deliveryState !== "FAILED" || rejection.nativeDispatchState !== "NOT_STARTED"
+    || rejection.retryMode !== "NEW_REQUEST" || rejection.reservation !== null) return undefined;
+  if ("technical" in row && (typeof row.technical !== "string"
+    || /[\u0000-\u001f\u007f-\u009f]/.test(row.technical)
+    || new TextEncoder().encode(row.technical).length > 2048)) return undefined;
+  return {
+    refusalSource: "workbench-native-preflight",
+    rejection: { code: "native-preflight-refused", message: record.error, deliveryState: "FAILED",
+      nativeDispatchState: "NOT_STARTED", retryMode: "NEW_REQUEST", reservation: null },
+    ...(typeof row.technical === "string" ? { technical: row.technical } : {})
+  };
+}
+
 class CoreRequestRefused extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly nativeRefusal?: Pick<CoreCommandOutcome, "refusalSource" | "rejection" | "technical">) {
     super(message);
     this.name = "CoreRequestRefused";
   }
@@ -1468,12 +1501,14 @@ class LinuxCoreClient implements CoreClient {
     } catch (error) {
       if (generation < this.appliedGeneration) return this.lastSnapshot;
       if (isCoreRefusal(error)) {
+        if (error.nativeRefusal && viewGeneration !== this.viewGeneration) return this.lastSnapshot;
         const message = errorMessage(error);
         return this.commitSnapshot(generation, {
           ...this.lastSnapshot,
           preview: false,
-          commandOutcome: commandOutcome(command, "refused", message),
-          notices: [`Core refused: ${message}`, ...this.lastSnapshot.notices.filter((notice) => notice !== `Core refused: ${message}`)]
+          commandOutcome: { ...commandOutcome(command, "refused", message), ...error.nativeRefusal },
+          notices: error.nativeRefusal ? this.lastSnapshot.notices
+            : [`Core refused: ${message}`, ...this.lastSnapshot.notices.filter((notice) => notice !== `Core refused: ${message}`)]
         });
       }
       const message = errorMessage(error);
@@ -1527,7 +1562,7 @@ class LinuxCoreClient implements CoreClient {
     const record = parsed as Record<string, unknown>;
     if (record.ok !== true) {
       const message = typeof record.error === "string" ? record.error : "Core refused the request";
-      throw new CoreRequestRefused(message);
+      throw new CoreRequestRefused(message, nativePreflightRefusal(record, requestIdValue, messageType));
     }
     return record;
   }
