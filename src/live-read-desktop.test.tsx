@@ -51,6 +51,8 @@ it("a running workspace check stays beside its goal and never takes over the des
   await screen.findByRole("region", { name: "Workspace check" });
   expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
   expect(screen.getByRole("button", { name: "Stop check" })).toBeTruthy();
+  // A long command log must not squeeze the conversation and this button out of view.
+  expect(screen.getByText("Workspace results").closest("details")?.open).toBe(false);
 });
 
 it.each(["unconfirmed", "running"] as const)("desktop interrupted live-read allowance (%s) can be left without replaying or releasing its held folder", async state => {

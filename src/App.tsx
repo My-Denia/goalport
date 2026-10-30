@@ -4000,7 +4000,7 @@ function App() {
                 <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
               </div>
 
-              {client.mode === "linux-core" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
+              {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
                 <details className="native-turn-results">
                   <summary>Workspace results</summary>
                   <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
