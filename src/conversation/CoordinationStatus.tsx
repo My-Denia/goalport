@@ -466,6 +466,18 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 }
 
 /** The user returns to the SAME live job, not a draft or saved permission. */
+/** The answer first; the working behind it stays one click away. */
+export function PiReview({ text, id }: { text: string; id: string }) {
+  const body = text.trim();
+  const split = body.search(/\n\s*\n/);
+  const lead = split < 0 ? body : body.slice(0, split);
+  const rest = split < 0 ? '' : body.slice(split).trim();
+  return <div className="tl-agent-body native-check-review">
+    {renderMarkdownBody(lead, `pi-review-lead-${id}`)}
+    {rest ? <details><summary>Full review</summary>{renderMarkdownBody(rest, `pi-review-${id}`)}</details> : null}
+  </div>;
+}
+
 export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, onLeave }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void; onLeave?: () => void }) {
   const report = job.outcome?.report ?? job.progress?.firstRound;
   // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
@@ -493,17 +505,23 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
         : job.revoked ? "Access stopped. The current turn may finish; no further turn will start. This does not undo edits or confirm tools stopped."
         : job.live ? "This goal is running on its own. You can close GoalPort and return to this same job."
         : "This background job finished. Its result is retained below.";
-  if (job.recordKind === 'native-workspace-check') return <section className="background-job" aria-label="Workspace check" data-job-id={job.jobId}>
-    <h3>{settled && job.state === 'completed' ? 'Independent workspace check returned' : 'Independent workspace check'}</h3>
-    <p role="status">{job.state === 'unconfirmed' ? 'The check outcome is unconfirmed. Nothing will be replayed.' : job.revoked && !settled ? 'Check access stopped. The current Pi turn may finish; no further turn will start.' : settled ? 'This response covers the shared snapshot only, not later edits or native authorship.' : 'Pi is checking the shared workspace snapshot. You can return to this goal later.'}</p>
-    {job.workspacePath ? <p title={job.workspacePath}>{job.workspacePath}</p> : null}
-    {job.active && !job.revoked && job.live ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop check</button> : null}
-    {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <><p role="status">This check is no longer running and its outcome is unconfirmed. Leaving it lets you work in other folders. This folder stays reserved until its exit is confirmed, and nothing is sent again.</p><button type="button" className="button button-small button-outline" onClick={onLeave}>Leave this check</button></> : null}
-    {job.progress?.activity && !settled && !job.progress.activity.startsWith('Pi is checking the shared workspace snapshot') ? <p>{job.progress.activity}</p> : null}
-    {report?.auditText ? <div className="tl-agent-body" style={{fontSize:14,lineHeight:1.55}}>{renderMarkdownBody(report.auditText, `native-check-${job.jobId}`)}</div> : null}
-    {job.outcome?.error ? <p role="status">{job.outcome.error}</p> : null}
-    {job.nativeCheckMaterial ? <details><summary>Shared snapshot · {job.nativeCheckMaterial.coverage.limited ? 'Limited' : 'Selected tracked changes'} · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
-  </section>;
+  if (job.recordKind === 'native-workspace-check') {
+    const running = job.active && job.live && !job.revoked;
+    const review = report?.auditText;
+    const unfinished = !review && !running && !job.revoked;
+    return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>
+      <h3>{review ? "Pi's review" : running ? "Pi is reviewing Codex's changes…" : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
+      {running ? <p role="status">You can close this window. The review will be here when you come back.</p> : null}
+      {unfinished ? <p role="status">Your files weren't changed. You can ask for another review.</p> : null}
+      {review ? <PiReview text={review} id={job.jobId} /> : null}
+      <div className="native-check-actions">
+        {running ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop review</button> : null}
+        {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <button type="button" className="button button-small button-outline" onClick={onLeave}>Dismiss</button> : null}
+      </div>
+      {job.outcome?.error ? <details><summary>Technical details</summary><p>{job.outcome.error}</p></details> : null}
+      {job.nativeCheckMaterial ? <details><summary>What Pi was sent · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
+    </section>;
+  }
   return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>
     <h2>{job.goal}</h2><p role="status">{sentence}</p>
     {/* Stop allowing stays reachable while the admission is active and not

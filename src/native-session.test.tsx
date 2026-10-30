@@ -61,8 +61,8 @@ it("keeps native chat primary by folding saved workspace results without discard
 it('keeps one native composer, draft node/focus and IME/Enter behavior through the optional check dialog',async()=>{
  window.__GOALPORT_LINUX_CORE__=true;window.history.replaceState(null,'','/goals/campaign-native');
  const f=server({active:true,completed:true,results:[{requestId:'turn-check',replyState:'completed',replyText:'Synthetic result',baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}]});
- render(<App/>);const check=await screen.findByRole('button',{name:'Check workspace with Pi'});const composer=screen.getByRole('textbox',{name:'Message composer'});fireEvent.change(composer,{target:{value:'Retain this native draft'}});composer.focus();
- await waitFor(()=>expect((check as HTMLButtonElement).disabled).toBe(false));fireEvent.click(check);await screen.findByRole('dialog',{name:'Check workspace with Pi'});expect(document.querySelectorAll('textarea[aria-label="Message composer"]')).toHaveLength(1);expect(document.querySelector('textarea[aria-label="Message composer"]')).toBe(composer);fireEvent.click(screen.getByRole('button',{name:'Cancel'}));await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());await waitFor(()=>expect(screen.getByRole('textbox',{name:'Message composer'})).toBe(composer));expect((composer as HTMLTextAreaElement).value).toBe('Retain this native draft');
+ render(<App/>);const check=await screen.findByRole('button',{name:'Ask Pi to review'});const composer=screen.getByRole('textbox',{name:'Message composer'});fireEvent.change(composer,{target:{value:'Retain this native draft'}});composer.focus();
+ await waitFor(()=>expect((check as HTMLButtonElement).disabled).toBe(false));fireEvent.click(check);await screen.findByRole('dialog',{name:'Ask Pi to review'});expect(document.querySelectorAll('textarea[aria-label="Message composer"]')).toHaveLength(1);expect(document.querySelector('textarea[aria-label="Message composer"]')).toBe(composer);fireEvent.click(screen.getByRole('button',{name:'Cancel'}));await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());await waitFor(()=>expect(screen.getByRole('textbox',{name:'Message composer'})).toBe(composer));expect((composer as HTMLTextAreaElement).value).toBe('Retain this native draft');
  composer.focus();fireEvent.compositionStart(composer);fireEvent.keyDown(composer,{key:'Enter',code:'Enter',isComposing:true});fireEvent.compositionEnd(composer);expect(f.calls.filter(c=>c.messageType==='conversation_send')).toHaveLength(0);expect(window.location.pathname).toBe('/goals/campaign-native');
 });
 
@@ -74,7 +74,7 @@ it('keeps native goal A pinned while the one current-work strip names check B, w
  const job={jobId:'00000000-0000-4000-8000-000000000002',requestId:'check-b',goal:'Native B',workspacePath:'/fixture/b',recordKind:'native-workspace-check',nativeCheckTarget,nativeCheckMaterial,piCapacity,state:'running',active:true,live:true,revoked:false,workerPid:123,readMaxTurns:2,writeMaxTurns:null,counters:{readTurnsLeft:1},pendingCommand:null,completedCommands:[],progress:{activity:'Pi is checking B'},outcome:null};
  const base={kind:'saved-current-base',jobId:job.jobId,admittedRequestId:job.requestId,rootRequestId:null,goal:job.goal,workspacePath:job.workspacePath,identityConfirmed:true,nativeCheckTarget,followUpMode:null,state:'running',phase:'running',pending:'none',revoked:false,workerGone:false,unconfirmed:false,active:true,allowanceEnd:null,observedAcceptedChildId:null,globalSlot:{kind:'occupied',jobId:job.jobId,admittedRequestId:job.requestId},profileUnconfirmed:false,leftoverHeld:false};
  const f=server({active:true,completed:true,results:[{requestId:'turn-a',replyState:'completed',baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}],latest:{record:null,roots:[],line:'Pi is checking B',jobId:job.jobId,currentBase:base,globalSlot:base.globalSlot},status:{source:'host-status',jobId:job.jobId,job}});
- render(<App/>);await screen.findByText('Current work — Native B');await waitFor(()=>expect(f.calls.some(c=>c.messageType==='coordination_status')).toBe(true));expect(window.location.pathname).toBe('/goals/campaign-native');expect(screen.getByRole('textbox',{name:'Message composer'})).toBeTruthy();expect(screen.queryByRole('region',{name:'Workspace check'})).toBeNull();expect(screen.getAllByLabelText('Current work')).toHaveLength(1);expect(f.calls.some(c=>['select_campaign','conversation_send','resume_session','close_session'].includes(c.messageType))).toBe(false);
+ render(<App/>);await screen.findByText('Current work — Native B');await waitFor(()=>expect(f.calls.some(c=>c.messageType==='coordination_status')).toBe(true));expect(window.location.pathname).toBe('/goals/campaign-native');expect(screen.getByRole('textbox',{name:'Message composer'})).toBeTruthy();expect(screen.queryByRole('region',{name:'Pi review'})).toBeNull();expect(screen.getAllByLabelText('Current work')).toHaveLength(1);expect(f.calls.some(c=>['select_campaign','conversation_send','resume_session','close_session'].includes(c.messageType))).toBe(false);
 });
 
 it("normalizes missing/null/unrecognized configured and actual transport to unknown, never guesses from a native id", () => {
@@ -119,7 +119,7 @@ it("native draft uses no Pi/background gate, refuses ~ locally, preserves input 
   const starts = f.calls.filter(c => c.messageType === "start_conversation"); expect(starts).toHaveLength(1);
   expect(starts[0].payload).toEqual({workspaceRoot:"/fixture/native", provider:"codex", message:"Synthetic native goal", requireNativeSession:true});
   expect(screen.getByRole("textbox", {name:"Message composer"})).toBeTruthy();
-  expect(screen.getByText("Codex app-server · native conversation context")).toBeTruthy();
+  expect(screen.queryByText(/app-server/)).toBeNull();
   expect(f.calls.filter(c => ["coordination_start", "coordination_grant", "coordination_continue", "resume_native_session"].includes(c.messageType))).toHaveLength(0);
 });
 
@@ -157,11 +157,11 @@ it("pinned native client sends only new text and explicit campaign/attempt, keep
 it("details distinguish actual exec/unknown/app-server without labeling other providers Codex exec", () => {
   const snapshot = packet(true); const props = {open:true,onClose:vi.fn(),snapshot,product:snapshot.productConversation,onChangeRuntime:vi.fn(),onOpenHandoff:vi.fn(),onCloseSession:vi.fn(),onResumeSession:vi.fn(),onOpenWorkspaceFolder:vi.fn()};
   const view = render(<SessionDetails {...props} product={{...props.product!,session:{state:"attached",nativeIdKnown:true,transport:"exec"}}} />);
-  expect(screen.getByText("One-shot Codex; native session continuation is unavailable")).toBeTruthy();
+  expect(screen.getByText("Codex can't continue this conversation after this turn.")).toBeTruthy();
   view.rerender(<SessionDetails {...props} product={{...props.product!,session:{state:"detached",nativeIdKnown:true,transport:"unknown"}}} />);
-  expect(screen.getByText("Transport not confirmed")).toBeTruthy();
+  expect(screen.queryByText("Transport not confirmed")).toBeNull();
   view.rerender(<SessionDetails {...props} product={{...props.product!,runtime:{state:"selected",provider:"claude",name:"Claude"},session:{state:"attached",nativeIdKnown:true,transport:"unknown"}}} />);
-  expect(screen.queryByText(/One-shot Codex/)).toBeNull();
+  expect(screen.queryByText(/can't continue this conversation/)).toBeNull();
 });
 
 it("a late native start cannot adopt the client view after explicit navigation", async () => {
@@ -275,7 +275,7 @@ it.each([false, true])("synchronous guard blocks a second submit while %s native
   const f = server({ active, sendResponse: async command => { await pending; return refusedSend(command); } });
   const classify = vi.spyOn(intentHelpers, "settleNativeSendIntent");
   render(<App />);
-  if (active) await screen.findByText("Codex app-server · native conversation context");
+  if (active) await screen.findByRole("textbox", { name: "Message composer" });
   const input = await screen.findByRole("textbox", { name: "Message composer" });
   if (!active) fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/missing" } });
   fireEvent.change(input, { target: { value: "One invocation" } });
@@ -295,7 +295,7 @@ it("a later conversation host refusal retains earlier unknown send and original 
   let first = true;
   const f = server({ active: true, sendResponse: command => { if (first) { first = false; throw Error("synthetic unknown"); } return refusedSend(command); } });
   render(<App />);
-  await screen.findByText("Codex app-server · native conversation context");
+  await screen.findByRole("textbox", { name: "Message composer" });
   const input = await screen.findByRole("textbox", { name: "Message composer" });
   fireEvent.change(input, { target: { value: "Original follow-up" } }); fireEvent.submit(input.closest("form")!);
   const check = await screen.findByRole("button", { name: "Check result" });
@@ -318,7 +318,7 @@ it.each([false, true])("defensive stale sending in %s native composer reconciles
   const classify = vi.spyOn(intentHelpers, "settleNativeSendIntent").mockImplementationOnce(intent => ({ ...intent, state: "sending" }));
   const f = server({ active, sendResponse: () => reply({ ok: false, error: "synthetic interrupted presentation" }) });
   render(<App />);
-  if (active) await screen.findByText("Codex app-server · native conversation context");
+  if (active) await screen.findByRole("textbox", { name: "Message composer" });
   const input = await screen.findByRole("textbox", { name: "Message composer" });
   if (!active) fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/original" } });
   fireEvent.change(input, { target: { value: "Keep original identity" } });

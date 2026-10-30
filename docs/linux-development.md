@@ -167,17 +167,13 @@ snapshot; it does not verify who authored it or certify the native turn.
 
 ### Optional current-workspace check with Pi
 
-After the newest Codex turn completes, **Check workspace with Pi** keeps the
+After the newest Codex turn completes, **Ask Pi to review** keeps the
 conversation in place. The user can inspect exactly what will be shared before
 allowing one independent readonly response. The native draft and session remain
 untouched; there is no second Codex planner, writer or repair round.
 
-1. Open the secondary check action on the native goal. The configured Pi
-   capacity checkbox starts off. It uses the same exact requested pair and
-   **Billing not confirmed** control as coordinated work; no free-text model or
-   default capacity is substituted. Existing profile Background Send consent is
-   reused, or explicitly granted with the existing action.
-2. Choose **Preview shared material**. The complete external-provider prompt is
+1. Choose **Ask Pi to review** on the native goal. The dialog reads the changes straight away and lists which files go where. **See exactly what's sent** opens the complete prompt. Pressing **Send to Pi** is the consent for this request and for keeping it running after the window closes.
+2. The preview is built from what is on disk at that moment. The complete external-provider prompt is
    shown, not a summary of it. It includes current tracked HEAD→worktree changes,
    the Native **reported** reply, observed command-entry counts and their
    omission/truncation flags, and every crop/omission notice. Command text,
@@ -204,7 +200,7 @@ differs from ending the Codex conversation. Change documentation only.” Suppos
 the resulting sentence says, “Stop check immediately ends the Pi check; your
 Codex conversation stays open.”
 
-1. Once the turn completes, optionally open **Check workspace with Pi** and
+1. Once the turn completes, optionally open **Ask Pi to review** and
    choose **Preview shared material**. In that exact shared snapshot, inspect
    the changed sentence and its surrounding diff, the Native reported reply and
    command-omission counts, and any crop/omission notices. Confirm the intended hunk is

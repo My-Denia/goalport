@@ -75,11 +75,7 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
             </div>
             <div><span>Connection</span><strong>{browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}</strong></div>
             {sessionLabel ? <div><span>Runtime session</span><strong>{sessionLabel}</strong></div> : null}
-            {runtime.provider === "codex" ? <div><span>Transport</span><strong>{product?.session?.transport === "app-server"
-              ? "Codex app-server · native conversation context"
-              : product?.session?.transport === "exec"
-                ? "One-shot Codex; native session continuation is unavailable"
-                : "Transport not confirmed"}</strong></div> : null}
+            {runtime.provider === "codex" && product?.session?.transport === "exec" ? <div><span>Conversation</span><strong>Codex can't continue this conversation after this turn.</strong></div> : null}
             <div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
             <div>
               <span>Approvals</span>

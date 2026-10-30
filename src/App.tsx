@@ -1101,12 +1101,14 @@ function App() {
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : nativeCheckBusy
+    ? "Sending to Pi. You can send when the review finishes."
     : nativeCheckJob?.active && !nativeCheckJob.live && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? "This check is no longer running. Leave it above to work in other folders; this folder stays reserved."
+    ? "Pi's review stopped. Dismiss it above to keep going."
     : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? nativeCheckJob.revoked ? "The check is stopping. Send when it has finished." : "Pi is checking this workspace. Send when it finishes, or stop the check above."
+    ? nativeCheckJob.revoked ? "Stopping the review. You can send when it has finished." : "Pi is reviewing. You can send when it finishes."
     : client.mode === "electron" && nativeCheckJob?.active
-    ? `Pi is checking ${nativeCheckJob.goal}. Send when it finishes.`
+    ? `Pi is reviewing ${nativeCheckJob.goal}. You can send when it finishes.`
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that

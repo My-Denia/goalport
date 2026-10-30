@@ -38,6 +38,8 @@ function isTurnCopyCode(code: string): code is TurnCopyCode {
 
 export function turnErrorCopy(turn: ProductTurn): string | undefined {
   const code = turn.reasonCode;
+  // Core's fallback names its internal state; say what it means for the user.
+  if (turn.reason?.includes("no send is offered")) return "This session has ended. Start a new goal to keep working.";
   if (!code) return turn.reason;
   if (isProviderFailureCode(code)) return PROVIDER_COPY[code] ?? turn.reason;
   if (isTurnCopyCode(code)) return TURN_COPY[code] ?? turn.reason;
