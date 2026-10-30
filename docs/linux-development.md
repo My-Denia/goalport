@@ -66,7 +66,7 @@ python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.s
   --database /tmp/goalport-dev/core.sqlite
 ```
 
-Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Send stays off until Keep working after closing is selected. Switching goals and reading another goal from `detail` are independent.
+Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. New goal defaults to **Coordinated work**. Its Send stays off until Keep working after closing and its harness choices are ready. A qualified Core also offers **Codex conversation**, described below; that mode does not require Pi or Background Send consent. Switching goals and reading another goal from `detail` are independent.
 
 Every operation goes through the production v2 protocol and Core's existing
 permission and delivery rules. A timeout after sending a mutation means its
@@ -74,6 +74,92 @@ delivery is unknown. The client prints the request ID and never retries it
 automatically. Read diagnostics and reconcile before deciding what to do next.
 `watch` echoes Core's opaque revision; unchanged polls return a small response without retransmitting the conversation. `--timeout` sets a whole-exchange deadline. `command TYPE --payload-file file.json`
 is available for the same production commands, without bypassing validation.
+
+## Native Codex conversations in the workbench
+
+New goal offers exactly two modes when Core advertises the configured Codex
+app-server adapter: Coordinated work (the default) and Codex conversation.
+Older Core builds, exec configuration or unknown transport do not offer a new
+Codex conversation; existing goals remain readable. This advertisement confirms
+an adapter kind, not sign-in, quota, billing, an effective model or verified
+provider capabilities.
+
+Choosing Codex is local draft intent (`/#codex/new`), not a session start.
+Enter an existing absolute folder such as `/path/to/project`. Empty, relative,
+`~` and `~/project` paths are refused before native dispatch with:
+`Codex conversations need an absolute folder path, for example /path/to/project.`
+Coordinated work keeps its existing home-folder expansion.
+
+The native first send uses the existing Core `start_conversation` with literal
+`requireNativeSession:true`. Core freezes the complete Runtime binding once,
+before new rows/reservations/session creation, and consumes it in the factory.
+A constrained start cannot fall back to one-shot exec. Absent constraint retains
+legacy hashing and behavior; false, null and nonboolean constraints are invalid.
+The same recorded request is not sent again. An ambiguous response keeps the
+draft's stable request for explicit result reconciliation, not automatic replay.
+
+The resulting `/goals/campaign-…` address is a Core conversation, not a
+coordinated result. Its title, folder, permissions, Stop and details belong to
+that goal even when another coordinated job is current. Session details and the
+timeline show actual registered app-server / one-shot exec / unconfirmed
+transport. Stored or synthetic session IDs alone do not prove continuity.
+
+Native chat stays primary: saved file/command details are retained under the
+collapsed **Workspace results** disclosure. Opening it uses a bounded scroll
+area rather than pushing the conversation and input out of the viewport.
+
+Closing the page does not close the Core session. On return, an attached session
+can accept an explicit new message. A detached, known nonterminal session can use
+the existing **Resume session** action only when Core offers it; that attaches
+the stored native handle without replaying a message. A refused or unavailable
+Resume remains blocked, not replaced with a new conversation. Closed Codex is
+not resumable; a cancelled-turn successor is a new Attempt/session. Native Stop
+interrupts the displayed turn; idle Close Runtime session is a separate guarded
+action. A single Codex conversation has no independent Pi-check claim.
+
+### Competing-work preflight
+
+Only explicit native admission/send ingress runs the read-only
+`native-preflight` operation in the existing Node host. The Python bridge uses
+the same bounded capture as status reads (3 seconds, 4 MiB stdout, 16 KiB private
+stderr), with a separate single-line `native preflight:` parser. No helper is
+started by passive saved-result/Core reads.
+
+- `native-preflight --workspace ABS`: validate/canonicalize an existing folder;
+  require `outstanding(root) === false`, a complete held-workspace inventory,
+  no global/candidate block and an exact candidate echo.
+- `native-preflight --global`: require no outstanding work, complete inventory,
+  no global block and zero remaining holds, including acknowledged-left holds.
+  Exactly one mode is required. Missing profile, malformed facts or timeout
+  refuses before the native Core mutation.
+- Start checks its explicit folder; send checks the explicit campaign and exact
+  fresh active Attempt/task via `goal_detail`. Runtime selection preserves
+  Core's new-Attempt policy when no Attempt was supplied.
+- Resume and handoff/reassign use workbench-only
+  `nativeTarget:{campaignId:<pinned view>}`. The bridge strips this lookup key
+  before Core; supplied payload and wrapper campaigns must agree. Historical
+  Attempt sources are refused here, not guessed from shared selection.
+- Isolated Continue checks its explicit **target** folder; source lineage and
+  source heldness remain Core-owned. Legacy campaign creation, queue override
+  and owner-action commands use conservative global preflight.
+- Read/history/receipt, Stop/cancel, permission responses (allow or deny), idle
+  close, recheck and authorization revoke stay reachable under original Core
+  guards. This is a closed product ingress table, not a claim that arbitrary
+  native Core commands or external CLI clients are guarded.
+
+Preflight is a fresh observation, not a permission certificate or a
+cross-process transaction. Node/Core lease, outbox, unknown-delivery,
+authorization and held-responsibility checks remain final. Session lifetime,
+turn responsibility, native campaign permissions and coordinated worker budget
+remain separate; none revives another's authorization.
+
+For bounded native-turn diagnostics, the existing pinned snapshot timeline
+projects provider-supplied native thread/turn hashes and the session hash for
+the expected Attempt. A completed turn's nested `turn.id` uses the same parser
+as `turnId`. Missing provider references remain missing. Existing paged
+history is available; no new journal or session store is introduced. Source and
+synthetic tests are not evidence of installed-binary consumption, real provider
+context recall, restart recovery, billing or three-width GUI acceptance.
 
 ## Coordinated goals
 
@@ -266,9 +352,15 @@ Honesty rules the client keeps:
 
 New explicit Codex→Pi, background, four-read admissions with a recorded Pi
 capacity and no file-change authorization can keep the original worker and RAM
-scope after a saved **Plan checked** result. The current work row says **Ready**,
-not that a model is running. Closing/returning or reading status sends no model
-turn and never extends the fixed 15-minute idle window. The saved-result composer
+scope after a saved **Plan checked** result. Saved content appears first; the
+current work row says **Checking** until a matching host/worker status is received.
+Only that acknowledgement can show **Ready**, not a model running or remaining
+access recovered from disk. Closing/returning or reading status sends no model
+turn and never extends the worker's original 15-minute idle deadline. A previously
+received Ready observation survives a refresh only for the same job, request,
+root and selected view, with all passive base/slot observations unchanged and
+nonnegative. Pending work, revocation, a gone/unknown owner, changed slot, local
+action, status failure, navigation or that original expiry clears it immediately. The saved-result composer
 is the single Continue action: empty Enter sends nothing, explicit Continue may
 have no additional instruction. Other saved goals remain readable, not spendable.
 
@@ -289,10 +381,26 @@ worker budget, 12-second control timeout and 15-second CLI/HTTP operation budget
 Unknown delivery keeps the draft and original child ID. Reconcile that ID through
 status; do not invent a retry ID or replay a turn.
 
-Stop wakes the idle worker immediately. New goal uses an idle-only guarded revoke,
-then waits up to five seconds for the matching terminal job, no pending command
-and released slot before opening an empty safe draft. If active work wins that
-race, New goal does not stop it and keeps the current view. The stopped/expired
+Stop wakes the idle worker immediately. New goal uses the existing idle-only
+guarded revoke, then waits within one fixed five-second transaction for strict
+status of the captured job/request/root: terminal stopped/completed, matching
+outcome, inactive, no pending command or contradictory live state. It also reads
+a fresh passive global slot: only empty, with no unconfirmed/leftover-held
+negative observation, permits the local safe draft. A foreign occupied slot
+blocks; a stale pointer to this same job is still ending, not free. Unknown slot
+data is not empty. If active work wins the guarded revoke race, New goal does
+not stop it and keeps the current view.
+
+An invalidated status helper may need its original three-second budget to drain;
+a fresh read can need another three seconds. Both must fit in the same five-second
+UI attempt, never an extended deadline or a second simultaneous helper. Failure
+keeps the view and draft and explicitly offers another New goal click to check
+again. That explicit retry first confirms the captured identity, without revoking
+an already ended worker again. A prior revoke receipt alone is not settlement.
+New goal never sends a model turn or clears a hold. An explicit idle Stop keeps
+its captured job/request/root for the same later confirmation: its receipt and
+passive done label do not let the next New goal skip strict status and the fresh
+slot check. The stopped/expired
 unused allowance is separate from its checked result; no child report is invented.
 A later intentional Continue is labeled as a **new allowance**, not recovered
 remaining access. Inspecting another goal never ends the current allowance.
@@ -327,6 +435,32 @@ unavailable instead of falling back to another goal or a new Start. Core campaig
 addresses remain separate; explicitly opening a Core goal leaves the coordinated
 fragment.
 
+Passive `coordination_latest`, `coordination_list` and exact `coordination_detail`
+read only the local saved projection: record, roots/history, remembered labels,
+descriptive `currentBase`, `savedAllowanceView` and `globalSlot`. They do not run
+Node, Core, control, discovery or models. Saved labels cannot supply a live ACK,
+counters, acceptance confirmation or permission.
+
+Separate `coordination_status` requires an exact UUID-v4 **job** ID (not a saved
+request ID), with no latest/current fallback or caller-supplied profile/executable.
+It returns either `source: host-status` with a validated matching host job or
+`source: unavailable`, `job: null` and a fixed plain reason. Existing Node status
+and its 800 ms RAM acknowledgement remain unchanged. Only active current-mode
+work, a matching unresolved action or explicit New goal confirmation needs this
+read; settled history and blank New goal do not fan out status calls.
+
+The HTTP leader owns the childless status process and two short-lived binary pipe
+readers. It retains at most 4 MiB stdout and 16 KiB stderr, concurrently draining
+both; overflow fails the whole read. Execution cuts off at 2.5 seconds with the
+remaining 0.5 seconds reserved for direct-helper kill/reap/pipe/thread cleanup.
+Exactly one UTF-8 job-projection line is accepted. Same-job waiters share the
+original three-second deadline; a different job while busy is unavailable.
+Mutations invalidate pending display results before effects, then let that helper
+drain. There is no TTL/last-good status cache or replacement before confirmed
+cleanup. If OS cleanup is still unconfirmed, owned references remain on the entry
+until a later explicit read can confirm it; there is no autonomous reaper. These
+are bounded ordinary-child checks, not a hard real-time OS guarantee.
+
 The workbench keeps the saved result visible and presents a compact follow-up
 composer with one **Continue** action. A non-empty follow-up can be sent with
 Enter; an empty follow-up continues the existing goal only when Continue is
@@ -360,7 +494,22 @@ still apply when Continue is clicked. Unsent follow-up text and dirty choices
 survive A→B→A navigation in the resident page and are shared by earlier results
 within A. The URL preserves selection across reload; unsent text is not promised
 across a browser/process restart. Refused, lost or unconfirmed admission replies
-retain text and choices; HTTP success alone does not count as admission.
+retain text and choices; HTTP success alone does not count as admission. New
+Linux Start/new-allowance actions hold one caller request ID from the first
+explicit send and forward it unchanged through HTTP to the existing CLI
+`--request-id`; a live child retains its separate `liveRequestId`. An uncertain
+send locks its original text/ID rather than creating another send.
+
+A passive unique `submissionCandidate` is only an exact-job lookup key. Resolving
+an uncertain admission requires strict matching host status for the submitted ID,
+canonical absolute folder, goal/root and coherent active/live or terminal facts.
+Same text, a foreign ID, aliases, pending/unconfirmed status, ambiguous/missing
+candidates or timeouts keep the uncertainty. Live-child association requires the
+exact accepted child ID or matching closed child ACK, never its parent's ID or a
+disk observation. Old clients/reloaded pages without a recoverable submitted ID
+may view matching existing work read-only, but cannot prove that THIS lost Start
+was admitted by text alone. They keep the not-confirmed sentence and draft; no
+automatic resend, new ID, generic latest-status adoption or new intent store.
 
 Current work is separate from the selected saved result. While B is running,
 revoked-but-current, unknown or held, A remains readable and labeled Saved result;

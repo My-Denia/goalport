@@ -1,9 +1,9 @@
 import { expect, it } from "vitest";
 import { liveAcceptedRequest, matchingAcknowledgedLiveReady, parseLiveRead } from "./liveRead";
-import type { CoordinatedCurrentJob, SavedTargetResult } from "./savedTargetView";
+import type { HostCurrentJob, SavedTargetResult } from "./savedTargetView";
 const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
-const ack = { mode: "live-read-once" as const, ready: true, initialRequestId: "initial", fromRequestId: "initial", rootRequestId: "root", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: "2026-01-01T00:15:00Z", reason: null };
-const job: CoordinatedCurrentJob = { jobId: "job", requestId: "initial", rootRequestId: "root", workspacePath: "/work", identityConfirmed: true, line: "Ready", followUpMode: "live-read-once", liveRead: ack };
+const ack = { mode: "live-read-once" as const, ready: true, initialRequestId: "initial", fromRequestId: "initial", rootRequestId: "root", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: "2099-01-01T00:15:00Z", reason: null };
+const job: HostCurrentJob = { source: "host-status", jobId: "job", requestId: "initial", rootRequestId: "root", workspacePath: "/work", identityConfirmed: true, line: "Ready", followUpMode: "live-read-once", liveRead: ack };
 const selected: SavedTargetResult = { requestId: "initial", rootRequestId: "root", rootLatestId: "initial", goal: "Goal", workspacePath: "/work", verdict: "checked", outcome: "Plan checked", relationStatus: "valid", relationUnavailableReason: null, piCapacity: pair, rememberedIntent: { background: true, write: false, piCapacity: pair } };
 it("parses a CLOSED RAM acknowledgement, rejects malformed, pending, wrong/older/root/pair readiness", () => {
  expect(parseLiveRead(ack)).toEqual(ack);

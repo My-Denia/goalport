@@ -1,6 +1,6 @@
 import { samePiPair } from "../../electron/pi-capacity.mjs";
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
-import type { CoordinatedCurrentJob, SavedTargetResult } from "./savedTargetView";
+import type { HostCurrentJob, SavedTargetResult } from "./savedTargetView";
 export interface LiveReadStatus {
   mode: "live-read-once";
   ready: boolean;
@@ -30,11 +30,12 @@ export function parseLiveRead(value: unknown): LiveReadStatus | null {
     || (v.ready && (!v.readonly || v.pending || v.revoked || v.childRequestId !== null || v.remainingReads === null || v.remainingReads < 2 || !v.expiresAt || v.reason !== null))) return null;
   return { ...v };
 }
-export function matchingAcknowledgedLiveReady(job: CoordinatedCurrentJob | null, selected: SavedTargetResult | null, pair?: PiCapacitySelection): boolean {
+export function matchingAcknowledgedLiveReady(job: HostCurrentJob | null, selected: SavedTargetResult | null, pair?: PiCapacitySelection): boolean {
   const live = parseLiveRead(job?.liveRead);
-  return !!(job?.identityConfirmed && job.followUpMode === "live-read-once" && selected && live?.ready
+  return !!(job?.source === "host-status" && job.identityConfirmed && job.followUpMode === "live-read-once" && selected && live?.ready
     && live.initialRequestId === job.requestId && live.fromRequestId === selected.requestId && job.requestId === selected.requestId
     && live.rootRequestId === selected.rootRequestId && job.rootRequestId === selected.rootRequestId
+    && live.expiresAt !== null && Date.now() < Date.parse(live.expiresAt)
     && selected.rootLatestId === selected.requestId && selected.workspacePath === job.workspacePath
     && samePiPair(selected.piCapacity, pair) && samePiPair(selected.rememberedIntent?.piCapacity, pair)
     && selected.rememberedIntent?.background === true && selected.rememberedIntent.write === false);

@@ -277,7 +277,7 @@ describe("Linux Core bridge", () => {
       const body = JSON.parse(String(init.body));
       if (body.messageType === "coordination_latest") return jsonResponse({ ok: true, payload: {
         record: null, line: "Codex is making changes…", jobId: "first-live",
-        currentGoal: { goal: "Append pong", workspacePath: "/work" }, currentJob: { requestId: "first-request", rootRequestId: "first-request", jobId: "first-live", goal: "Append pong", workspacePath: "/work", identityConfirmed: true, line: "Codex is making changes…" }, reason: "no coordinated result saved",
+        currentGoal: { goal: "Append pong", workspacePath: "/work" }, currentBase: { kind: "saved-current-base", admittedRequestId: "first-request", rootRequestId: "first-request", jobId: "first-live", goal: "Append pong", workspacePath: "/work", identityConfirmed: true, followUpMode: null, state: "running", phase: "planning", pending: "present", revoked: false, workerGone: false, unconfirmed: false, active: true, allowanceEnd: null, observedAcceptedChildId: null, globalSlot: { kind: "occupied", jobId: "first-live", admittedRequestId: "first-request" }, profileUnconfirmed: false, leftoverHeld: false }, reason: "no coordinated result saved",
       } });
       if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
       if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
@@ -432,6 +432,7 @@ describe("Linux Core bridge", () => {
     await waitFor(() => expect(calls.filter((c) => c.messageType === "coordination_continue").length).toBe(continueCountBefore + 1));
     const firstContinue = calls.filter((c) => c.messageType === "coordination_continue")[0];
     expect(firstContinue.payload).toEqual({
+      requestId: expect.any(String),
       fromRequestId: "req-r1",
       followUp: "",
       write: true,
