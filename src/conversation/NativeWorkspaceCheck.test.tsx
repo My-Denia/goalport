@@ -67,6 +67,13 @@ it('a running check says what Pi is doing once and offers only Stop check, not a
  expect(screen.getAllByText(/Pi is checking the shared workspace snapshot/)).toHaveLength(1);expect(screen.getByRole('button',{name:'Stop check'})).toBeTruthy();expect(screen.queryByRole('button',{name:'Check workspace with Pi'})).toBeNull();
 });
 
+it('on the desktop it talks only to the preload bridge and accepts a Windows folder',async()=>{
+ const seen:string[]=[];const fetchSpy=vi.fn();vi.stubGlobal('fetch',fetchSpy);
+ window.goalportCore={nativeCheck:async(type:string,payload:{piCapacity?:unknown})=>{seen.push(type);return {ok:true,payload:type==='coordination_list'?{checks:[]}:{workspacePath:'C:\\work\\project',backgroundSendConsent:true,offer:{instanceId:'pi',piCapacity:{offer:pair,catalog:[pair]}}}};}} as never;
+ try{render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);fireEvent.click(screen.getByRole('button',{name:'Check workspace with Pi'}));await screen.findByRole('checkbox');expect(screen.getByLabelText('Check folder').textContent).toBe('Folder: C:\\work\\project');expect(seen).toContain('native_workspace_check_prepare');expect(fetchSpy).not.toHaveBeenCalled();}
+ finally{delete window.goalportCore;}
+});
+
 it('renders a returned Pi response as readable safe markdown, not a raw command log',()=>{
  const text='### Specific findings\n\n- A **concrete** doc issue with `Stop check`.\n\n<script>not executable</script>';
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);

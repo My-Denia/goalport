@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld("goalportCore", {
   // Forward unchanged; only the trusted main-process scope grants consent.
   backgroundSendConsent: (action) => ipcRenderer.invoke("goalport:background-send-consent", action),
   backgroundStart: (input) => ipcRenderer.invoke("goalport:background-start", input),
+  nativeCheck: (messageType, payload) => ipcRenderer.invoke("goalport:native-check", messageType, payload),
   backgroundStatus: (jobId) => ipcRenderer.invoke("goalport:background-status", jobId),
   backgroundHeldWorkspaces: (...args) => ipcRenderer.invoke("goalport:background-held-workspaces", ...args),
   backgroundRevoke: (jobId, payload) => payload === undefined ? ipcRenderer.invoke("goalport:background-revoke", jobId) : ipcRenderer.invoke("goalport:background-revoke", jobId, payload),

@@ -690,6 +690,8 @@ function App() {
         const epoch = desktopStatusEpoch.current;
         const job = await read();
         if (cancelled || epoch !== desktopStatusEpoch.current) return;
+        // A workspace check belongs beside its own goal, never in the job view.
+        if (job?.recordKind === "native-workspace-check") { setNativeCheckJob(job); return; }
         const freshIntent = desktopNewAllowanceIntent.current;
         if (freshIntent?.unknown && job?.requestId === freshIntent.input.requestId) {
           freshIntent.unknown = false;
@@ -1100,7 +1102,9 @@ function App() {
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
     : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? "Pi is checking this workspace. Send when it finishes, or stop the check above."
+    ? nativeCheckJob.revoked ? "The check is stopping. Send when it has finished." : "Pi is checking this workspace. Send when it finishes, or stop the check above."
+    : client.mode === "electron" && nativeCheckJob?.active
+    ? `Pi is checking ${nativeCheckJob.goal}. Send when it finishes.`
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
@@ -4022,7 +4026,7 @@ function App() {
                   onChooseRuntime={() => setChooserFocusSignal((value) => value + 1)}
                   onDiagnose={() => setDiagnosticsOpen(true)}
                 />
-                {linuxNativeView && snapshot.attempt.provider === 'codex' ? <NativeWorkspaceCheck
+                {(linuxNativeView || (client.mode === 'electron' && hasGoal && !backgroundView && coordinatedRoute === null && Boolean(window.goalportCore?.nativeCheck))) && snapshot.attempt.provider === 'codex' ? <NativeWorkspaceCheck
                   key={snapshot.activeCampaignId}
                   campaignId={snapshot.activeCampaignId}
                   target={snapshot.turnResults?.length ? {campaignId:snapshot.activeCampaignId,attemptId:snapshot.attempt.id,turnRequestId:snapshot.turnResults[snapshot.turnResults.length-1].requestId} : null}
