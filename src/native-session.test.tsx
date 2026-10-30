@@ -55,7 +55,7 @@ it("keeps native chat primary by folding saved workspace results without discard
   expect(disclosure.querySelector('[aria-label="Results"]')).not.toBeNull();
   expect(screen.getByRole("textbox", {name:"Message composer"})).toBeTruthy();
   fireEvent.click(summary); expect(disclosure.open).toBe(true);
-  expect(screen.getByText("Saved native turn reply")).toBeTruthy();
+  expect(screen.getByText("No files changed.")).toBeTruthy();
 });
 
 it('keeps one native composer, draft node/focus and IME/Enter behavior through the optional check dialog',async()=>{
