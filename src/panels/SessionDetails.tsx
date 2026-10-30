@@ -4,6 +4,7 @@ import { GoalLayer } from "../ui/GoalLayer";
 
 interface SessionDetailsProps {
   browserPreview?: boolean;
+  hideHandoff?: boolean;
   open: boolean;
   onClose: () => void;
   snapshot: CoreSnapshot;
@@ -23,7 +24,7 @@ interface SessionDetailsProps {
  * No capability catalog, no evidence ledger, no internal identifiers; those
  * live in the separate Developer diagnostics surface.
  */
-export function SessionDetails({ browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder, closingSession = false }: SessionDetailsProps) {
+export function SessionDetails({ hideHandoff = false, browserPreview = false, open, onClose, snapshot, product, onChangeRuntime, onOpenHandoff, onCloseSession, onResumeSession, onOpenWorkspaceFolder, closingSession = false }: SessionDetailsProps) {
   const pendingCount = snapshot.decisions.filter((decision) => decision.state === "pending").length;
   const state = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const runtime = product?.runtime ?? { state: "none" as const, provider: "", name: "" };
@@ -74,6 +75,11 @@ export function SessionDetails({ browserPreview = false, open, onClose, snapshot
             </div>
             <div><span>Connection</span><strong>{browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}</strong></div>
             {sessionLabel ? <div><span>Runtime session</span><strong>{sessionLabel}</strong></div> : null}
+            {runtime.provider === "codex" ? <div><span>Transport</span><strong>{product?.session?.transport === "app-server"
+              ? "Codex app-server · native conversation context"
+              : product?.session?.transport === "exec"
+                ? "One-shot Codex; native session continuation is unavailable"
+                : "Transport not confirmed"}</strong></div> : null}
             <div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
             <div>
               <span>Approvals</span>
@@ -84,9 +90,9 @@ export function SessionDetails({ browserPreview = false, open, onClose, snapshot
             <button className="button button-quiet" type="button" onClick={onChangeRuntime} disabled={!hasConversation}>
               Change Runtime
             </button>
-            <button className="button button-quiet" type="button" onClick={onOpenHandoff} disabled={held || !hasConversation}>
+            {!hideHandoff ? <button className="button button-quiet" type="button" onClick={onOpenHandoff} disabled={held || !hasConversation}>
               Handoff…
-            </button>
+            </button> : null}
             {snapshot.connection === "connected" && !held && product?.turn.actions?.includes("close-session") ? (
               <button className="button button-quiet" type="button" onClick={onCloseSession}>Close Runtime session</button>
             ) : null}

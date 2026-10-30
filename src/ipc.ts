@@ -199,7 +199,7 @@ export interface CoreClient {
    * for compatibility with older CoreClient fixtures; the desktop
    * implementations dispatch the new command.
    */
-  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot>;
+  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string, requireNativeSession?: true): Promise<CoreSnapshot>;
   /** Explicit Send on an existing conversation: `conversation_send`, gated by product.turn.canSend upstream. */
   conversationSend?(message: string, campaignId: string, attemptId: string | undefined, requestId: string): Promise<CoreSnapshot>;
   historyPage?(request: HistoryPageRequest): Promise<HistoryPage>;
@@ -1164,6 +1164,7 @@ class LinuxCoreClient implements CoreClient {
   readonly mode = "linux-core" as const;
   private viewCampaignId = "";
   private viewPinned = false;
+  private viewGeneration = 0;
   private revision = "";
   private suspended = false;
   private generation = 0;
@@ -1173,6 +1174,7 @@ class LinuxCoreClient implements CoreClient {
   private lastSnapshot: CoreSnapshot = { ...EMPTY_SNAPSHOT, preview: false, notices: [] };
 
   pinView(campaignId: string): void {
+    this.viewGeneration += 1;
     if (!campaignId) return;
     this.viewCampaignId = campaignId;
     this.viewPinned = true;
@@ -1260,6 +1262,7 @@ class LinuxCoreClient implements CoreClient {
   async selectCampaign(campaignId: string): Promise<CoreSnapshot> {
     const generation = this.claimGeneration();
     this.mutationDepth += 1;
+    this.viewGeneration += 1;
     const previousView = this.viewCampaignId;
     const previousRevision = this.revision;
     const previousPinned = this.viewPinned;
@@ -1341,8 +1344,8 @@ class LinuxCoreClient implements CoreClient {
     return Promise.resolve();
   }
 
-  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string): Promise<CoreSnapshot> {
-    return this.mutate("start_conversation", { workspaceRoot, provider, message }, true, stableRequestId);
+  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string, requireNativeSession?: true): Promise<CoreSnapshot> {
+    return this.mutate("start_conversation", { workspaceRoot, provider, message, ...(requireNativeSession ? { requireNativeSession } : {}) }, true, stableRequestId);
   }
 
   async conversationSend(message: string, campaignId: string, attemptId: string | undefined, stableRequestId: string): Promise<CoreSnapshot> {
@@ -1436,6 +1439,7 @@ class LinuxCoreClient implements CoreClient {
     stableRequestId?: string
   ): Promise<CoreSnapshot> {
     const generation = this.claimGeneration();
+    const viewGeneration = this.viewGeneration;
     this.mutationDepth += 1;
     const command: CoreCommand = {
       protocolVersion: IPC_PROTOCOL_VERSION,
@@ -1449,6 +1453,7 @@ class LinuxCoreClient implements CoreClient {
       const snapshot = resolveCoreSnapshot(payloadOf(response).snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       if (generation < this.appliedGeneration) return this.lastSnapshot;
+      if (viewGeneration !== this.viewGeneration) return this.lastSnapshot;
       if (adoptView && snapshot.activeCampaignId) {
         this.viewCampaignId = snapshot.activeCampaignId;
         this.viewPinned = true;
@@ -1508,7 +1513,9 @@ class LinuxCoreClient implements CoreClient {
           requestId: requestIdValue,
           entityVersion: 1,
           messageType,
-          payload
+          payload,
+          ...(["resume_native_session", "handoff", "reassign"].includes(messageType) && this.viewPinned && this.viewCampaignId
+            ? { nativeTarget: { campaignId: this.viewCampaignId } } : {})
         })
       });
     } catch (error) {

@@ -76,6 +76,7 @@ const USAGE = [
   "",
   "Commands:",
   "  discover                 Installed/authenticated harnesses, auth type and health.",
+  "  native-preflight         Read-only --workspace ABS or --global competing-work check.",
   "  grant-access             Save the durable Background Send consent.",
   "  revoke-access            Remove the durable Background Send consent.",
   "  run                      Admit one coordinated goal. Writes only with both write flags.",
@@ -114,6 +115,7 @@ const USAGE = [
 const OPTIONS = {
   goal: { type: "string" },
   workspace: { type: "string" },
+  global: { type: "boolean" },
   instances: { type: "string" },
   turns: { type: "string" },
   "write-instances": { type: "string" },
@@ -852,7 +854,46 @@ function commandResult(parsed, io, context) {
   return 0;
 }
 
+async function commandNativePreflight(parsed, io, context) {
+  const flags = parsed.values;
+  const hasWorkspace = Object.hasOwn(flags, "workspace");
+  const global = flags.global === true;
+  const allowed = new Set(["workspace", "global", "data-dir", "pipe", "core-binary", "database"]);
+  if (hasWorkspace === global || Object.keys(flags).some(key => !allowed.has(key))) {
+    return refuse(io, "native-preflight requires exactly one of --workspace ABS or --global.");
+  }
+  let candidate;
+  try {
+    if (!fs.statSync(context.dataDir).isDirectory()) throw new Error("profile unavailable");
+    // Confirm absence from readable directories, not existsSync(EACCES) == false.
+    const profileEntries = fs.readdirSync(context.dataDir);
+    if (profileEntries.includes("coordination-jobs")) {
+      const storeRoot = path.join(context.dataDir, "coordination-jobs");
+      const storeEntries = fs.readdirSync(storeRoot);
+      if (storeEntries.includes("jobs")) fs.readdirSync(path.join(storeRoot, "jobs"));
+    }
+    if (hasWorkspace) {
+      if (typeof flags.workspace !== "string" || !path.isAbsolute(flags.workspace)) throw new Error("absolute folder required");
+      candidate = fs.realpathSync(flags.workspace);
+      if (!path.isAbsolute(candidate) || !fs.statSync(candidate).isDirectory()) throw new Error("folder unavailable");
+    }
+    const read = readHost(context, io);
+    if (!read.ok) return refuse(io, read.message);
+    const outstanding = read.host.outstanding(candidate);
+    const inventory = read.host.heldWorkspaces(candidate);
+    const clear = outstanding === false && inventory?.complete === true && inventory.globalBlock === false
+      && Array.isArray(inventory.holds) && (global ? inventory.holds.length === 0
+        : inventory.candidate === candidate && inventory.candidateBlocked === false);
+    if (!clear) return refuse(io, "Competing work or workspace reservations could not be cleared. Nothing was sent.");
+    write(io, `native preflight: ${JSON.stringify({ mode: global ? "global" : "workspace", ...(global ? {} : { workspace: candidate }), outstanding, inventory })}`);
+    return 0;
+  } catch {
+    return refuse(io, "Competing work or workspace reservations could not be checked. Nothing was sent.");
+  }
+}
+
 const HANDLERS = {
+  "native-preflight": commandNativePreflight,
   discover: commandDiscover,
   "grant-access": commandGrant,
   "revoke-access": commandRevoke,

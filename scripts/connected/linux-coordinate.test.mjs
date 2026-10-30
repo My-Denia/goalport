@@ -30,6 +30,53 @@ const SUBSCRIPTION_PROVIDERS = [
   { instanceId: "claude", displayName: "Claude", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "opus", isDefault: true }] },
 ];
 
+test("native-preflight is an exact read-only W/G operation, not discovery/Core/status", async t => {
+  const f = fixture(t, { discover: async () => { throw Error("no discovery"); }, snapshot: async () => { throw Error("no Core"); }, spawn: () => { throw Error("no process"); } });
+  const missing = await invoke(f, ["native-preflight", "--global"], { withCore: false });
+  assert.equal(missing.code, 1); assert.equal(fs.existsSync(f.dataDir), false);
+  fs.mkdirSync(f.dataDir);
+  for (const flags of [["--workspace", path.join(f.workspace, ".")], ["--global"]]) {
+    const read = await invoke(f, ["native-preflight", ...flags], { withCore: false });
+    assert.equal(read.code, 0, read.stderr);
+    const lines = read.stdout.trim().split("\n");
+    assert.equal(lines.length, 1);
+    const facts = JSON.parse(lines[0].slice("native preflight: ".length));
+    assert.equal(facts.outstanding, false); assert.equal(facts.inventory.complete, true); assert.equal(facts.inventory.globalBlock, false);
+    if (flags[0] === "--workspace") { assert.equal(facts.workspace, fs.realpathSync(f.workspace)); assert.equal(facts.inventory.candidate, facts.workspace); assert.equal(facts.inventory.candidateBlocked, false); }
+    else { assert.equal(facts.mode, "global"); assert.deepEqual(facts.inventory.holds, []); assert.equal(Object.hasOwn(facts, "workspace"), false); }
+  }
+  assert.deepEqual(fs.readdirSync(f.dataDir), [], "a preflight never creates a profile/store/grant");
+  assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
+test("native-preflight rejects missing/mutually exclusive/foreign flags, nonabsolute roots and incomplete inventory", async t => {
+  const f = fixture(t);
+  fs.mkdirSync(f.dataDir);
+  for (const flags of [[], ["--global", "--workspace", f.workspace], ["--workspace", "relative"], ["--workspace", "~"], ["--workspace", ""], ["--workspace", path.join(f.root, "missing")], ["--global", "--goal", "not allowed"], ["--global", "--background"]]) {
+    assert.equal((await invoke(f, ["native-preflight", ...flags])).code, 1, JSON.stringify(flags));
+  }
+  const jobs = path.join(f.dataDir, "coordination-jobs", "jobs"); fs.mkdirSync(jobs, { recursive: true });
+  fs.writeFileSync(path.join(jobs, "malformed-inventory"), "fixture");
+  for (const flags of [["--workspace", f.workspace], ["--global"]]) assert.equal((await invoke(f, ["native-preflight", ...flags])).code, 1);
+  assert.equal(f.launches.length, 0); assert.equal(f.snapshotCalls.length, 0);
+});
+
+test("native-preflight refuses active and acknowledged-left same-folder holds without reviving work", async t => {
+  const f = fixture(t);
+  await invoke(f, ["grant-access"]);
+  const launched = await invoke(f, runArgs(f, { requestId: "native-competing" }));
+  assert.equal(launched.code, 0, launched.stderr);
+  const id = jobIdOf(launched);
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", f.workspace])).code, 1);
+  const left = await invoke(f, ["acknowledge", "--job", id]);
+  assert.equal(left.code, 0, left.stderr);
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", f.workspace])).code, 1);
+  assert.equal((await invoke(f, ["native-preflight", "--global"])).code, 1);
+  const other = fs.mkdtempSync(path.join(f.root, "other-"));
+  assert.equal((await invoke(f, ["native-preflight", "--workspace", other])).code, 0);
+  assert.equal(f.launches.length, 1);
+});
+
 let sequence = 0;
 
 function writeFixtureFile(root, name, text) {

@@ -19,6 +19,7 @@ function capitalize(word: string): string {
 }
 
 interface DraftRuntimePickerProps {
+  linuxEntry?: boolean;
   runtimes: RuntimeProfile[];
   provider: string;
   connected: boolean;
@@ -28,17 +29,23 @@ interface DraftRuntimePickerProps {
 }
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
-function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect }: DraftRuntimePickerProps) {
+function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect, linuxEntry = false }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
+  const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
+  const choices = linuxEntry ? [
+    { id: "", name: "Coordinated work", subtitle: "Plan and work with an independent check" },
+    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no independent Pi check" }] : [])
+  ] : undefined;
   return (
     <div className="runtime-picker draft-runtime-picker">
       <RuntimePickerMenu
         runtimes={runtimes}
+        choices={choices}
         selectedId={provider}
         triggerClassName="runtime-picker-button"
-        triggerAriaLabel="Select Runtime"
+        triggerAriaLabel={linuxEntry ? "Choose goal mode" : "Select Runtime"}
         emptyText="No Runtime information from Core yet."
-        blockedHint={!connected ? "Reconnect Core to select." : null}
+        blockedHint={!connected ? "Reconnect Core to select." : linuxEntry && !nativeAvailable ? "Codex conversations are unavailable: Core has not confirmed the app-server adapter." : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}
         onSelect={onSelect}
         triggerContent={(
@@ -47,8 +54,8 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
               {selected ? selected.name[0] : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{selected ? selected.name : (runtimeRequiredHint ? "Coordinated goal" : "Choose a Runtime")}</strong>
-              <small>{coordinationAvailable
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Coordinated work") : selected ? selected.name : (runtimeRequiredHint ? "Coordinated goal" : "Choose a Runtime")}</strong>
+              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : coordinationAvailable
                 ? "Send without picking, or pick the single-harness path."
                 : (runtimeRequiredHint ?? "Choose a Runtime before sending.")}</small>
             </span>
@@ -61,6 +68,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
 }
 
 interface DraftGoalComposerProps {
+  linuxEntry?: boolean;
   draft: GoalDraftValue;
   runtimes: RuntimeProfile[];
   connected: boolean;
@@ -177,7 +185,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const allowanceExplained = useRef(false);
@@ -205,7 +213,7 @@ export function DraftGoalComposer({
   const canSubmit = isLinuxActiveTarget
     ? (!busy && !inputsLocked && !continueDisabled && draft.message.trim().length > 0 && Boolean(onContinueCoordination))
     : (!busy
-       && !inputsLocked
+       && (!inputsLocked || (linuxEntry && draft.provider === "codex" && retryLabel === "Check result"))
        && !waitingOn
        && (!blockedFromSending || Boolean(retryLabel))
        && connected
@@ -279,8 +287,9 @@ export function DraftGoalComposer({
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
 
-        {linuxCanStartCoordination && !draft.provider.trim() ? null : (
+        {linuxCanStartCoordination && !draft.provider.trim() && !linuxEntry ? null : (
           <DraftRuntimePicker
+            linuxEntry={linuxEntry}
             runtimes={runtimes}
             provider={draft.provider}
             connected={connected}

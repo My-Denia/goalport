@@ -56,7 +56,7 @@ import { conversationTitle, headlineState, formatTimestamp } from "./lib/display
 import { GoalDialog } from "./ui/GoalDialog";
 import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAnchor";
 import { useCoreSnapshot } from "./lib/useCoreSnapshot";
-import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute, coordinatedRouteFromLocation, setCoordinatedRoute, type CoordinatedRoute } from "./lib/goalRoute";
+import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute, coordinatedRouteFromLocation, setCoordinatedRoute, isNativeDraftRoute, setNativeDraftRoute, type CoordinatedRoute } from "./lib/goalRoute";
 import { admittedIdentity, continuationUnavailable, type SavedTargetPayload, type SavedTargetResult, type SavedTargetSummary, type CoordinatedCurrentJob, type HostCurrentJob, type SavedCurrentBase, type SavedAllowanceView } from "./coordination/savedTargetView";
 import { useConversationDrafts } from "./lib/useConversationDrafts";
 import {
@@ -213,6 +213,11 @@ function App() {
   snapshotRef.current = snapshot;
   const { drafts: campaignDrafts, setDrafts: setCampaignDrafts, intents: sendIntents, setIntents: setSendIntents, update: updateCampaignDraft } = useConversationDrafts();
   const [draftGoal, setDraftGoal] = useState<GoalDraft | null>(null);
+  const [nativeDraft, setNativeDraft] = useState(() => client.mode === "linux-core" && isNativeDraftRoute());
+  const nativeDraftRef = useRef(nativeDraft);
+  nativeDraftRef.current = nativeDraft;
+  const nativeGoalDraftRef = useRef<GoalDraft | null>(null);
+  if (nativeDraft && draftGoal) nativeGoalDraftRef.current = draftGoal;
   const [coordination, setCoordination] = useState<CoordinationView | null>(null);
   // Harness-access panel state for a runtime-less draft (M4): one discovery
   // per draft open, the user's selection, and a mirror of the authorized
@@ -543,7 +548,43 @@ function App() {
     const previous = coordinatedOptions.current.get(key);
     coordinatedOptions.current.set(key, { background: backgroundConsent, write: linuxWrite, piCapacity: linuxPiSelection, restored: optionsRestored, dirty: previous?.dirty ?? false, sourceRequestId: previous?.sourceRequestId ?? null });
   }
+  function openNativeDraft(value?: GoalDraftValue, fromLocation = false) {
+    stashCoordinatedDraft();
+    abandonCoordination();
+    coordinatedDraftKey.current = "";
+    coordinatedRouteRef.current = null;
+    setCoordinatedView(null);
+    setNativeDraft(true);
+    nativeDraftRef.current = true;
+    setLinuxShowingFreshDraft(true);
+    linuxFreshDraft.current = true;
+    setSelectedPlanId(null);
+    setBackgroundView(false);
+    setDraftDismissed(false);
+    setDraftError(null);
+    setDraftBlocked(false);
+    client.pinView?.(""); // Fence late native mutations without selecting another Core goal.
+    const retained = nativeGoalDraftRef.current;
+    setDraftGoal(retained?.intent ? retained : { workspace: value?.workspace ?? retained?.workspace ?? draftGoalRef.current?.workspace ?? "",
+      message: value?.message ?? retained?.message ?? draftGoalRef.current?.message ?? "", provider: "codex",
+      requestId: freshRequestId(), baselineCampaignId: snapshotRef.current.activeCampaignId });
+    if (!fromLocation) setNativeDraftRoute();
+    setSelectionRefresh(v => v + 1);
+  }
+  function changeNativeDraft(value: GoalDraftValue) {
+    if (draftGoalRef.current?.intent?.state === "sending" || draftGoalRef.current?.intent?.state === "reconcile") return;
+    if (value.provider === "") {
+      openCoordinated({ kind: "new" });
+      setDraftGoal(current => current ? { ...current, workspace: value.workspace, message: value.message } : current);
+      return;
+    }
+    setDraftError(null);
+    setDraftGoal(current => current ? { ...current, ...value, requestId: current.intent ? freshRequestId() : current.requestId, intent: undefined } : current);
+  }
   function openCoordinated(route: CoordinatedRoute, replace = false, fromLocation = false) {
+    if (nativeDraftRef.current) { abandonCoordination(); client.pinView?.(""); }
+    setNativeDraft(false);
+    nativeDraftRef.current = false;
     // A deliberate view transition relinquishes auto-follow for the submitted
     // result; a later explicit parent route must stay pinned to that parent.
     localAdmission.current = null;
@@ -597,7 +638,8 @@ function App() {
     setConfirmedEmptyProfile(snapshot.activeCampaignId.trim() === "");
   }, [booted, projectionUnavailable, snapshot.activeCampaignId]);
   const selectedPlan = plans.find((plan) => plan.requestId === selectedPlanId) ?? null;
-  const draftActive = selectedPlan === null && ((client.mode === "linux-core" && coordinatedRoute !== null) || draftGoal !== null
+  const linuxNativeView = client.mode === "linux-core" && !nativeDraft && coordinatedRoute === null && hasGoal;
+  const draftActive = selectedPlan === null && ((client.mode === "linux-core" && (coordinatedRoute !== null || nativeDraft)) || draftGoal !== null
     || (confirmedEmptyProfile && !hasGoal && !draftDismissed));
 
   useEffect(() => {
@@ -840,7 +882,7 @@ function App() {
   // ever submitted again from it.
   useEffect(() => {
     // A coordinated draft belongs to its routed root, not Core's shared campaign.
-    if (client.mode === "linux-core" && coordinatedRouteRef.current !== null) return;
+    if (client.mode === "linux-core" && (coordinatedRouteRef.current !== null || nativeDraftRef.current)) return;
     if (!draftGoal) return;
     if (!draftGoal.intent && snapshot.activeCampaignId && snapshot.activeCampaignId !== draftGoal.baselineCampaignId) {
       if (draftGoal.acceptNextCampaign) {
@@ -860,7 +902,7 @@ function App() {
   // Never fires while a text field has focus or a modal dialog is open.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (client.mode === "linux-core") return;
+      if (client.mode === "linux-core" && (nativeDraftRef.current || coordinatedRouteRef.current !== null)) return;
       if (!(event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "i")) return;
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
@@ -1063,13 +1105,25 @@ function App() {
     if (client.mode === "linux-core" && !linuxShowingFreshDraft && (coordinatedRoute !== null || Boolean(linuxCoordinationGoal || linuxCoordinationRequest))) {
       return;
     }
+    if (nativeGoalDraftRef.current?.intent?.state === "reconcile" && draftGoal?.requestId !== nativeGoalDraftRef.current.requestId) {
+      setDraftError({ sentence: "The Codex send is not confirmed. Return to its draft and check the result before starting another goal." });
+      return;
+    }
     if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && (linuxActionBusy || admissionUnsaid.current || admissionIntent.current?.unknown))) return;
     const retrying = canExplicitlyRetry(draftGoal.intent);
     if (draftBlocked && !retrying) return;
     const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();
     const provider = draftGoal.intent?.provider ?? draftGoal.provider;
     const message = draftGoal.intent?.message ?? draftGoal.message.trim();
+    if (client.mode === "linux-core" && provider && !workspace.startsWith("/")) {
+      setDraftError({ sentence: "Codex conversations need an absolute folder path, for example /path/to/project." });
+      return;
+    }
     if (!workspace || !message) return;
+    if (!retrying && client.mode === "linux-core" && provider && (provider !== "codex" || !snapshot.runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server"))) {
+      setDraftError({ sentence: "Core has not confirmed the Codex app-server adapter. Nothing was sent." });
+      return;
+    }
     if (workspaceHeldByBackground(workspace)) {
       setDraftError({ sentence: draftHeldSentence });
       return;
@@ -1655,7 +1709,7 @@ function App() {
       : startConversationIntent(draftGoal.requestId, workspace, provider, message);
     setDraftGoal((current) => current ? { ...current, intent } : current);
     try {
-      const next = await client.startConversation(workspace, provider, message, intent.requestId);
+      const next = await client.startConversation(workspace, provider, message, intent.requestId, client.mode === "linux-core" ? true : undefined);
       // New goal replaced this send. Publishing its campaign first would close
       // the replacement draft and put the user on the goal they just left.
       if (epoch !== draftEpoch.current) return;
@@ -1673,6 +1727,18 @@ function App() {
         return;
       }
       closeDraft(false);
+      if (client.mode === "linux-core" && next.activeCampaignId) {
+        coordinatedDraftKey.current = "";
+        coordinatedRouteRef.current = null;
+        setCoordinatedView(null);
+        nativeDraftRef.current = false;
+        nativeGoalDraftRef.current = null;
+        setNativeDraft(false);
+        setLinuxShowingFreshDraft(false);
+        linuxFreshDraft.current = false;
+        pushGoalRoute(next.activeCampaignId);
+        setSelectionRefresh(v => v + 1);
+      }
     } catch (error) {
       // A client that genuinely rejects instead of returning a snapshot is
       // definite ONLY for the known competing-background guard. Every other
@@ -2099,6 +2165,10 @@ function App() {
   }
 
   async function handleNewGoal() {
+    if (nativeGoalDraftRef.current?.intent) {
+      openNativeDraft();
+      return;
+    }
     if (client.mode !== "linux-core" && desktopNewAllowanceIntent.current?.unknown) {
       setLiveMessage(BACKGROUND_ADMISSION_UNCONFIRMED_SENTENCE); return;
     }
@@ -2601,6 +2671,9 @@ function App() {
     // Narrow widths: choosing any goal, including the active one, puts the
     // drawer away so the conversation is what the user sees next.
     if (window.innerWidth <= 860) setNavCollapsed(true);
+    nativeDraftRef.current = false;
+    setNativeDraft(false);
+    if (client.mode === "linux-core") pushGoalRoute(campaignId);
     if (campaignId === snapshot.activeCampaignId) {
       if (client.mode === "linux-core") setActiveNotice((current) => current?.sentence === "That goal is no longer available." || current?.sentence.startsWith("That address is no longer available.") ? null : current);
       return;
@@ -2747,6 +2820,7 @@ function App() {
           }
         }
         if (payload.ok === false) { setSavedReadError("Saved results could not be read. Continue is unavailable."); return; }
+        if (nativeDraftRef.current || isNativeDraftRoute()) return;
         if (!route && !campaignIdFromLocation() && !admissionUnsaid.current) {
           const initialId = job?.requestId ?? payload.record?.requestId;
           if (initialId) { openCoordinated({ kind: "result", requestId: initialId }, true); return; }
@@ -2842,6 +2916,10 @@ function App() {
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     const previous = document.title;
+    if (nativeDraft || linuxNativeView) {
+      document.title = `${nativeDraft ? "New Codex conversation" : conversationTitle(snapshot) || "Codex conversation"} — GoalPort`;
+      return () => { document.title = previous; };
+    }
     const goal = !linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal.trim() : "";
     const short = goal.length > 48 ? `${goal.slice(0, 45)}...` : goal;
     const pending = linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Allowing Background Send." || linuxCoordinationLine === "Leaving this unreplayed.";
@@ -2850,13 +2928,14 @@ function App() {
     const addressNotice = !admissionUnsaidLine && !linuxActionBusy && !linuxGranting && !sidebarUnconfirmed && !leftUnreplayed && !linuxLeftoverHeld && !linuxHoldLine && !workerGone && !linuxHarnessSentence && !linuxConsentMissing && backgroundConsent && linuxDiscoverChecked && !coreReadFailed && (activeNotice?.sentence === "That goal is no longer available." || activeNotice?.sentence.startsWith("That address is no longer available.")) ? activeNotice.sentence : "";
     document.title = (selectedPlan && (linuxActionBusy || linuxGranting) ? (pending ? linuxCoordinationLine : "Wait for this to finish.") : (addressNotice === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : addressNotice) || (lineSaysAdmissionUnsaid(linuxCoordinationLine) ? linuxCoordinationLine : linuxCoordinationLine?.includes("No further turn was sent.") ? (short ? `${short} — stopped` : "Stopped. No further turn was sent.") : pending ? linuxCoordinationLine : !linuxShowingFreshDraft && leftUnreplayed ? (short ? `${short} — unreplayed` : "The interrupted job stays unreplayed; the same request id cannot be admitted again.") : linuxHoldLine ? linuxCoordinationLine : !linuxShowingFreshDraft && sidebarUnconfirmed ? (linuxCoordinationLive ? "This goal's exit is not confirmed, so another goal cannot start yet." : short ? `${short} — not confirmed` : "This goal's exit is not confirmed.") : leftoverSlotLine ? (short ? `${short} — slot held` : leftoverSlotLine) : !linuxShowingFreshDraft && sidebarFailed.current && failedLine.current ? failedLine.current : linuxHarnessSentence && !linuxCoordinationLive ? linuxHarnessSentence : linuxCoordinationLine === "Background Send is allowed." ? linuxCoordinationLine : linuxConsentMissing && !linuxCoordinationLive ? "Background Send is not ready in this GoalPort window yet." : selectedPlan?.verdict === "stopped" ? "Stopped. No further turn was sent." : (short ? (workerGone ? `${short} — worker gone` : sidebarUnconfirmed ? `${short} — not confirmed` : leftUnreplayed ? `${short} — unreplayed` : linuxCoordinationLive ? `${short} — running` : short) : linuxShowingFreshDraft ? "New goal" : "GoalPort"))) ?? "GoalPort";
     return () => { document.title = previous; };
-  }, [client.mode, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld, linuxActionBusy, leftUnreplayed, backgroundConsent, linuxDiscoverChecked, activeNotice, snapshot, selectedPlan]);
+  }, [client.mode, nativeDraft, linuxNativeView, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld, linuxActionBusy, leftUnreplayed, backgroundConsent, linuxDiscoverChecked, activeNotice, snapshot, selectedPlan]);
 
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
     let generation = 0;
     let inFlight = false;
+    if (nativeDraft || linuxNativeView || isNativeDraftRoute()) return undefined;
     const check = (periodic = false) => {
       if (periodic && linuxRouteAwareDiscovery.current) return; // New Pi metadata is never a status poll.
       if (inFlight) return;
@@ -2903,25 +2982,28 @@ function App() {
     let legacyTicks = 0;
     const timer = window.setInterval(() => { legacyTicks++; if (linuxHarnessProblemRef.current || legacyTicks % 4 === 0) check(true); }, 2000); // Legacy: 2s blocked / 8s healthy. New metadata is never polled.
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [client.mode, linuxCoordinationGoal, linuxShowingFreshDraft, linuxDiscoverNonce, draftGoal?.workspace]);
+  }, [client.mode, nativeDraft, linuxNativeView, linuxCoordinationGoal, linuxShowingFreshDraft, linuxDiscoverNonce, draftGoal?.workspace]);
 
   useEffect(() => {
-    if (client.mode !== "linux-core" || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
+    if (client.mode !== "linux-core" || nativeDraft || linuxShowingFreshDraft || !linuxCoordinationWorkspace || !draftGoal) return;
     if (draftGoal.workspace === linuxCoordinationWorkspace) return;
     setDraftGoal({ ...draftGoal, workspace: linuxCoordinationWorkspace });
   }, [client.mode, linuxShowingFreshDraft, linuxCoordinationWorkspace, draftGoal, snapshot.project.workspaceRoot]);
 
   useEffect(() => {
     if (client.mode !== "linux-core" || !booted) return undefined;
-    const miss = coordinatedRouteFromLocation() ? "" : client.takeRouteMiss?.() ?? "";
+    if (isNativeDraftRoute() && !draftGoalRef.current) openNativeDraft(undefined, true);
+    const miss = coordinatedRouteFromLocation() || isNativeDraftRoute() ? "" : client.takeRouteMiss?.() ?? "";
     if (miss) {
       setActiveNotice({ sentence: linuxCoordinationGoal ? "That address is no longer available. This did not replace the workbench goal." : "That goal is no longer available.", technical: miss });
       if (!linuxCoordinationGoal) replaceGoalRoute(snapshot.activeCampaignId || null);
     }
     const onPop = () => {
+      if (isNativeDraftRoute()) { openNativeDraft(undefined, true); return; }
       const coordinated = coordinatedRouteFromLocation();
       if (coordinated) { openCoordinated(coordinated, false, true); return; }
       stashCoordinatedDraft();
+      if (nativeDraftRef.current) { closeDraft(true); nativeDraftRef.current = false; setNativeDraft(false); }
       coordinatedDraftKey.current = "";
       coordinatedRouteRef.current = null;
       setCoordinatedView(null);
@@ -3071,15 +3153,15 @@ function App() {
       <TitleBar
         browserPreview={client.mode === "browser-preview"}
         snapshot={snapshot}
-        campaignTitle={client.mode === "linux-core" ? (selectedPlan && (linuxActionBusy || linuxGranting) ? (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send." ? linuxCoordinationLine : "Wait for this to finish.") : selectedPlan?.verdict === "stopped" ? (selectedPlan.goal.trim() ? `${selectedPlan.goal.trim()} — stopped` : "Stopped. No further turn was sent.") : (!linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal : null)) : hasGoal && !(backgroundView && backgroundJob) ? title : null}
-        workspaceLabel={backgroundView && backgroundJob?.workspacePath ? (workspaceFolder(backgroundJob.workspacePath) || backgroundJob.workspacePath) : selectedPlan?.verdict === "stopped" && !(linuxActionBusy || linuxGranting) && selectedPlan.workspacePath.trim() ? (workspaceFolder(selectedPlan.workspacePath) || selectedPlan.workspacePath) : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() ? (workspaceFolder(draftGoal.workspace.trim()) || draftGoal.workspace.trim()) : "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? (workspaceFolder(linuxCoordinationWorkspace) || linuxCoordinationWorkspace) : client.mode === "linux-core" ? "No folder" : null}
-        workspaceTitle={backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : selectedPlan?.verdict === "stopped" && !(linuxActionBusy || linuxGranting) && selectedPlan.workspacePath.trim() ? selectedPlan.workspacePath : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() || "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? linuxCoordinationWorkspace : client.mode === "linux-core" ? "No folder" : null}
+        campaignTitle={linuxNativeView ? title : nativeDraft ? "New Codex conversation" : client.mode === "linux-core" ? (selectedPlan && (linuxActionBusy || linuxGranting) ? (linuxCoordinationLine === "Sending." || linuxCoordinationLine === "Stopping this goal." || linuxCoordinationLine === "Recording the stop." || linuxCoordinationLine === "Continuing." || linuxCoordinationLine === "Leaving this unreplayed." || linuxCoordinationLine === "Allowing Background Send." ? linuxCoordinationLine : "Wait for this to finish.") : selectedPlan?.verdict === "stopped" ? (selectedPlan.goal.trim() ? `${selectedPlan.goal.trim()} — stopped` : "Stopped. No further turn was sent.") : (!linuxShowingFreshDraft && linuxCoordinationGoal ? linuxCoordinationGoal : null)) : hasGoal && !(backgroundView && backgroundJob) ? title : null}
+        workspaceLabel={linuxNativeView ? (workspaceFolder(snapshot.project.workspaceRoot) || snapshot.project.workspaceRoot || "No folder") : nativeDraft ? (workspaceFolder(draftGoal?.workspace ?? "") || "No folder") : backgroundView && backgroundJob?.workspacePath ? (workspaceFolder(backgroundJob.workspacePath) || backgroundJob.workspacePath) : selectedPlan?.verdict === "stopped" && !(linuxActionBusy || linuxGranting) && selectedPlan.workspacePath.trim() ? (workspaceFolder(selectedPlan.workspacePath) || selectedPlan.workspacePath) : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() ? (workspaceFolder(draftGoal.workspace.trim()) || draftGoal.workspace.trim()) : "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? (workspaceFolder(linuxCoordinationWorkspace) || linuxCoordinationWorkspace) : client.mode === "linux-core" ? "No folder" : null}
+        workspaceTitle={linuxNativeView ? snapshot.project.workspaceRoot : nativeDraft ? (draftGoal?.workspace || "No folder") : backgroundView && backgroundJob?.workspacePath ? backgroundJob.workspacePath : selectedPlan?.verdict === "stopped" && !(linuxActionBusy || linuxGranting) && selectedPlan.workspacePath.trim() ? selectedPlan.workspacePath : client.mode === "linux-core" && linuxShowingFreshDraft ? (draftGoal?.workspace.trim() || "No folder") : client.mode === "linux-core" && linuxCoordinationWorkspace && !linuxShowingFreshDraft ? linuxCoordinationWorkspace : client.mode === "linux-core" ? "No folder" : null}
         appInfo={appInfo}
         navCollapsed={navCollapsed}
         onToggleNav={() => setNavCollapsed((value) => !value)}
         detailsOpen={detailsOpen}
-        onToggleDetails={() => { if (client.mode === "linux-core") return; setDetailsOpen((value) => !value); }}
-        detailsDisabled={client.mode === "linux-core"}
+        onToggleDetails={() => { if (client.mode === "linux-core" && !linuxNativeView) return; setDetailsOpen((value) => !value); }}
+        detailsDisabled={client.mode === "linux-core" && !linuxNativeView}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         onNewGoal={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || (linuxCoordinationLive && !idleNewGoalReady && !pendingIdleClose.current))) return; backgroundAttached.current = true; void handleNewGoal(); }}
         newGoalDisabled={desktopLiveNewGoalBlocked || (client.mode === "linux-core" && (linuxActionBusy || linuxGranting || admissionUnsaid.current || liveIntent.current?.unknown === true || (!pendingIdleClose.current && ((linuxCoordinationLive && !idleNewGoalReady) || sidebarUnconfirmed || workerGone || linuxLeftoverHeld || linuxHoldLine))))}
@@ -3275,8 +3357,29 @@ function App() {
               />
             </div>
 ) : draftActive ? (() => {
+            if (nativeDraft) {
+              const value = draftGoal ?? { workspace: "", provider: "codex", message: "" };
+              const nativeComposer = <DraftGoalComposer
+                linuxEntry draft={value} runtimes={snapshot.runtimes}
+                connected={snapshot.connection === "connected"} busy={draftBusy}
+                blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || sidebarUnconfirmed || workerGone || linuxLeftoverHeld || admissionUnsaid.current || admissionIntent.current?.unknown === true || liveIntent.current?.unknown === true || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
+                waitingOn={null} retryLabel={draftRetryLabel}
+                error={draftError ?? (draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : currentWorkReason ? { sentence: currentWorkReason } : null)}
+                canBrowse={false} coordinationAvailable={false}
+                workspacePlaceholder="/path/to/project"
+                workspaceHint="Codex conversations need an absolute folder path, for example /path/to/project."
+                inputsLocked={draftGoal?.intent?.state === "reconcile"}
+                onBrowse={() => undefined} onChange={changeNativeDraft} onSubmit={handleDraftSend}
+                onDiscard={() => { if (!draftGoal?.intent) { openCoordinated({ kind: "new" }); } }}
+              />;
+              return <><div className="timeline-scroll" tabIndex={-1} aria-label="New Codex conversation">
+                <GoalStatusHeading {...nativeComposer.props} />
+                <p className="draft-hint">One Codex conversation, without an independent Pi check. Closing this page does not end the Runtime session.</p>
+              </div><div className="composer-dock">{nativeComposer}</div></>;
+            }
             const draftComposer = (
                   <DraftGoalComposer
+                    linuxEntry={client.mode === "linux-core" && linuxShowingFreshDraft}
                     draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || "", provider: "", message: "" }}
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
@@ -3628,6 +3731,7 @@ function App() {
                     keepRunningHint={client.mode === "linux-core" && linuxDiscoverChecked && !backgroundConsent && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) && !linuxHarnessSentence && !linuxConsentMissing ? "Keep working after closing must be explicitly selected." : null}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
+                      if (client.mode === "linux-core" && value.provider === "codex") { openNativeDraft(value); return; }
                       if (client.mode === "linux-core") {
                         if (draftGoal?.workspace !== value.workspace) { linuxWorkspaceExpansion.current = null; setLinuxPiSelection(undefined); setLinuxPiSnapshot(null); setLinuxDiscoverChecked(false); }
                         coordinatedText.current[coordinatedDraftKey.current] = value.message;
@@ -3838,7 +3942,12 @@ function App() {
                 <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
               </div>
 
-              <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
+              {client.mode === "linux-core" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
+                <details className="native-turn-results">
+                  <summary>Workspace results</summary>
+                  <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
+                </details>
+              ) : null) : <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />}
 
               <BackgroundAttention
                 snapshot={snapshot}
@@ -3917,6 +4026,7 @@ function App() {
             onClose={() => setDetailsOpen(false)}
             snapshot={snapshot}
             product={product}
+            hideHandoff={client.mode === "linux-core"}
             onChangeRuntime={() => {
               setDetailsOpen(false);
               setChooserFocusSignal((value) => value + 1);

@@ -66,7 +66,7 @@ python3 scripts/connected/linux-workbench.py --endpoint /tmp/goalport-dev/core.s
   --database /tmp/goalport-dev/core.sqlite
 ```
 
-Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. Type a workspace path in the new-goal form. Send stays off until Keep working after closing is selected. Switching goals and reading another goal from `detail` are independent.
+Open `http://127.0.0.1:4173`. The bridge accepts that host only. A browser POST must use `application/json` and the page's own origin; another site cannot use a simple `text/plain` POST to reach Core. New goal defaults to **Coordinated work**. Its Send stays off until Keep working after closing and its harness choices are ready. A qualified Core also offers **Codex conversation**, described below; that mode does not require Pi or Background Send consent. Switching goals and reading another goal from `detail` are independent.
 
 Every operation goes through the production v2 protocol and Core's existing
 permission and delivery rules. A timeout after sending a mutation means its
@@ -74,6 +74,92 @@ delivery is unknown. The client prints the request ID and never retries it
 automatically. Read diagnostics and reconcile before deciding what to do next.
 `watch` echoes Core's opaque revision; unchanged polls return a small response without retransmitting the conversation. `--timeout` sets a whole-exchange deadline. `command TYPE --payload-file file.json`
 is available for the same production commands, without bypassing validation.
+
+## Native Codex conversations in the workbench
+
+New goal offers exactly two modes when Core advertises the configured Codex
+app-server adapter: Coordinated work (the default) and Codex conversation.
+Older Core builds, exec configuration or unknown transport do not offer a new
+Codex conversation; existing goals remain readable. This advertisement confirms
+an adapter kind, not sign-in, quota, billing, an effective model or verified
+provider capabilities.
+
+Choosing Codex is local draft intent (`/#codex/new`), not a session start.
+Enter an existing absolute folder such as `/path/to/project`. Empty, relative,
+`~` and `~/project` paths are refused before native dispatch with:
+`Codex conversations need an absolute folder path, for example /path/to/project.`
+Coordinated work keeps its existing home-folder expansion.
+
+The native first send uses the existing Core `start_conversation` with literal
+`requireNativeSession:true`. Core freezes the complete Runtime binding once,
+before new rows/reservations/session creation, and consumes it in the factory.
+A constrained start cannot fall back to one-shot exec. Absent constraint retains
+legacy hashing and behavior; false, null and nonboolean constraints are invalid.
+The same recorded request is not sent again. An ambiguous response keeps the
+draft's stable request for explicit result reconciliation, not automatic replay.
+
+The resulting `/goals/campaign-…` address is a Core conversation, not a
+coordinated result. Its title, folder, permissions, Stop and details belong to
+that goal even when another coordinated job is current. Session details and the
+timeline show actual registered app-server / one-shot exec / unconfirmed
+transport. Stored or synthetic session IDs alone do not prove continuity.
+
+Native chat stays primary: saved file/command details are retained under the
+collapsed **Workspace results** disclosure. Opening it uses a bounded scroll
+area rather than pushing the conversation and input out of the viewport.
+
+Closing the page does not close the Core session. On return, an attached session
+can accept an explicit new message. A detached, known nonterminal session can use
+the existing **Resume session** action only when Core offers it; that attaches
+the stored native handle without replaying a message. A refused or unavailable
+Resume remains blocked, not replaced with a new conversation. Closed Codex is
+not resumable; a cancelled-turn successor is a new Attempt/session. Native Stop
+interrupts the displayed turn; idle Close Runtime session is a separate guarded
+action. A single Codex conversation has no independent Pi-check claim.
+
+### Competing-work preflight
+
+Only explicit native admission/send ingress runs the read-only
+`native-preflight` operation in the existing Node host. The Python bridge uses
+the same bounded capture as status reads (3 seconds, 4 MiB stdout, 16 KiB private
+stderr), with a separate single-line `native preflight:` parser. No helper is
+started by passive saved-result/Core reads.
+
+- `native-preflight --workspace ABS`: validate/canonicalize an existing folder;
+  require `outstanding(root) === false`, a complete held-workspace inventory,
+  no global/candidate block and an exact candidate echo.
+- `native-preflight --global`: require no outstanding work, complete inventory,
+  no global block and zero remaining holds, including acknowledged-left holds.
+  Exactly one mode is required. Missing profile, malformed facts or timeout
+  refuses before the native Core mutation.
+- Start checks its explicit folder; send checks the explicit campaign and exact
+  fresh active Attempt/task via `goal_detail`. Runtime selection preserves
+  Core's new-Attempt policy when no Attempt was supplied.
+- Resume and handoff/reassign use workbench-only
+  `nativeTarget:{campaignId:<pinned view>}`. The bridge strips this lookup key
+  before Core; supplied payload and wrapper campaigns must agree. Historical
+  Attempt sources are refused here, not guessed from shared selection.
+- Isolated Continue checks its explicit **target** folder; source lineage and
+  source heldness remain Core-owned. Legacy campaign creation, queue override
+  and owner-action commands use conservative global preflight.
+- Read/history/receipt, Stop/cancel, permission responses (allow or deny), idle
+  close, recheck and authorization revoke stay reachable under original Core
+  guards. This is a closed product ingress table, not a claim that arbitrary
+  native Core commands or external CLI clients are guarded.
+
+Preflight is a fresh observation, not a permission certificate or a
+cross-process transaction. Node/Core lease, outbox, unknown-delivery,
+authorization and held-responsibility checks remain final. Session lifetime,
+turn responsibility, native campaign permissions and coordinated worker budget
+remain separate; none revives another's authorization.
+
+For bounded native-turn diagnostics, the existing pinned snapshot timeline
+projects provider-supplied native thread/turn hashes and the session hash for
+the expected Attempt. A completed turn's nested `turn.id` uses the same parser
+as `turnId`. Missing provider references remain missing. Existing paged
+history is available; no new journal or session store is introduced. Source and
+synthetic tests are not evidence of installed-binary consumption, real provider
+context recall, restart recovery, billing or three-width GUI acceptance.
 
 ## Coordinated goals
 
