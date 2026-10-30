@@ -1,17 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import type { CoreSnapshot, GoalCard } from "../types";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
+import { shortGoalTitle } from "../conversation/shortGoalTitle";
 
 interface CampaignNavProps {
   snapshot: CoreSnapshot;
   collapsed: boolean;
   plans?: readonly { requestId: string; title: string; active: boolean; verdict: CoordinationVerdict | null; savedAt?: string | null }[];
   onSelectPlan?: (requestId: string) => void;
+  savedTargets?: readonly { requestId: string; title: string; workspacePath: string; outcome: string | null; statusLabel?: string; active: boolean; reason?: string | null }[];
+  onSelectSavedTarget?: (requestId: string) => void;
+  savedTargetOwnsView?: boolean;
   onSelectCampaign: (id: string) => void;
   onSelectProject: (id: string) => void;
   onRenameCampaign: (id: string, title: string) => void;
-  runningJob?: { goal: string; stateLabel: string; viewing: boolean } | null;
+  runningJob?: { goal: string; stateLabel: string; viewing: boolean; locked?: boolean; workspace?: string; returnHint?: string | null } | null;
+  navigationLocked?: boolean;
+  navigationLockedReason?: string | null;
   onOpenRunningJob?: () => void;
+  projectOverride?: string;
+  failedOpenId?: string;
+  goalListUnreadable?: boolean;
+  newGoalEnabled?: boolean;
+  plansUnreadable?: boolean;
+  /** The composer is already saying this, so the sidebar does not repeat it. */
+  plansSentenceVisible?: boolean;
 }
 
 /**
@@ -24,15 +37,26 @@ interface CampaignNavProps {
  * reachable. At narrow widths the same markup becomes an off-canvas drawer
  * opened from the title bar toggle.
  */
-export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, onOpenRunningJob }: CampaignNavProps) {
+function runningJobDetail(label: string): string {
+  if (label === "Unreplayed") return "Unreplayed. The same request id cannot be admitted again.";
+  if (label === "Not confirmed") return "Not confirmed. This goal's exit is not confirmed.";
+  if (label === "Not admitted") return "Not admitted. The reply did not say the goal was admitted.";
+  if (label === "Worker gone") return "Worker gone. Its exit is not confirmed.";
+  if (label === "Failed") return "Failed. The last action did not succeed.";
+  if (label === "Slot held") return "Slot held. The next valid send will release it.";
+  if (label === "Stopped") return "Stopped. No further turn was sent.";
+  return label;
+}
+
+export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, savedTargets = [], onSelectSavedTarget, savedTargetOwnsView = false, onSelectCampaign, onSelectProject, onRenameCampaign, runningJob = null, navigationLocked = false, navigationLockedReason = null, onOpenRunningJob, projectOverride, failedOpenId, goalListUnreadable = false, newGoalEnabled = false, plansUnreadable = false, plansSentenceVisible = true }: CampaignNavProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const overview = snapshot.goalOverview;
-  const backgroundOwnsView = runningJob?.viewing === true;
+  const backgroundOwnsView = savedTargetOwnsView || runningJob?.viewing === true;
   const campaignListUnavailable = !overview && snapshot.bounds?.projectionUnavailable === true
     && snapshot.campaigns.length === 0;
-  const goalCount = overview ? overview.goals.length : snapshot.campaigns.length;
+  const goalCount = savedTargets.length + (overview ? overview.goals.length : snapshot.campaigns.length);
 
   useEffect(() => {
     if (renamingId) renameInputRef.current?.focus();
@@ -51,19 +75,20 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
   return (
     <nav className={`campaign-nav${collapsed ? " nav-collapsed" : ""}`} aria-label="Workspace and goals">
       <div className="nav-head">
-        <label className="project-switcher" aria-label="Select project">
-          <span className="project-avatar" aria-hidden="true">G</span>
+        <label className="project-switcher" aria-label={projectOverride || "Select project"}>
+          <span className="project-avatar" aria-hidden="true">{projectOverride ? "·" : "G"}</span>
           <span className="project-switcher-copy">
-            <strong>{snapshot.project.name}</strong>
+            <strong>{projectOverride || snapshot.project.name}</strong>
           </span>
-          {overview ? (
-            <span className="project-select project-select-static">{snapshot.project.name || "Workspace"}</span>
+          {projectOverride || overview ? (
+            <span className="project-select project-select-static">{projectOverride || snapshot.project.name || "Workspace"}</span>
           ) : (
             <select
               className="project-select"
               aria-label="Project"
               value={snapshot.selectedProjectId || snapshot.project.id}
-              onChange={(event) => onSelectProject(event.target.value)}
+              disabled={navigationLocked}
+              onChange={(event) => { if (!navigationLocked) onSelectProject(event.target.value); }}
             >
               {(snapshot.projects.length > 0 ? snapshot.projects : [snapshot.project]).map((project) => (
                 <option key={project.id} value={project.id}>{project.name}</option>
@@ -75,30 +100,44 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
 
       <div className="sidebar-section-title">
         <span>Goals</span>
-        <span className="count-badge" aria-label={campaignListUnavailable ? "Goal list unavailable" : undefined}>
-          {campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
+        <span className="count-badge" aria-label={goalListUnreadable ? `The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}` : campaignListUnavailable ? "Goal list unavailable" : undefined}>
+          {goalListUnreadable || campaignListUnavailable ? "–" : goalCount + (runningJob ? 1 : 0)}
         </span>
       </div>
+      {!collapsed && navigationLockedReason ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
 
       <div className="campaign-list">
+        {savedTargets.map(item => (
+          <button key={item.requestId} type="button" className={`campaign-item coordinated-target-item${item.active ? " campaign-active" : ""}`}
+            title={`${item.title} — ${item.workspacePath}`} aria-label={`${item.title}, ${item.workspacePath}`}
+            onClick={() => onSelectSavedTarget?.(item.requestId)}>
+            <span className="campaign-state" aria-hidden="true" />
+            <span className="campaign-item-copy"><strong title={item.title}>{shortGoalTitle(item.title)}</strong><small title={item.workspacePath}>{item.workspacePath.split(/[\\/]/).filter(Boolean).at(-1) || item.workspacePath}</small><small title={item.reason || item.statusLabel || "Saved result"}>{item.reason || item.statusLabel || "Saved result"}</small></span>
+            {item.active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
+          </button>
+        ))}
         {runningJob ? (
           <button
             className={`campaign-item${runningJob.viewing ? " campaign-active" : ""}`}
             type="button"
-            onClick={() => onOpenRunningJob?.()}
+            disabled={runningJob.locked}
+            title={`${runningJob.goal} — ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? ` — ${runningJob.workspace}` : ""}${runningJob.returnHint ? `. ${runningJob.returnHint}` : ""}`}
+            aria-label={`${runningJob.goal}, ${runningJobDetail(runningJob.stateLabel)}${runningJob.workspace ? `, ${runningJob.workspace}` : ""}${runningJob.returnHint ? `. ${runningJob.returnHint}` : ""}`}
+            onClick={() => { if (!runningJob.locked) onOpenRunningJob?.(); }}
           >
             <span className="campaign-state campaign-state-active" aria-hidden="true" />
             <span className="campaign-item-copy">
               <strong>{runningJob.goal}</strong>
-              <small>{runningJob.stateLabel}</small>
+              <small>{runningJob.returnHint ?? runningJobDetail(runningJob.stateLabel)}</small>
             </span>
             {runningJob.viewing ? <span className="active-arrow" aria-hidden="true">›</span> : null}
           </button>
         ) : null}
-        {campaignListUnavailable ? (
-          <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
-        ) : goalCount === 0 && !runningJob ? (
-          <p className="nav-empty">No goals yet. Start one from the top bar.</p>
+        {goalListUnreadable ? (collapsed ? null : <p className="nav-empty" role="status">{`The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}`}</p>) : null}
+        {campaignListUnavailable && !projectOverride ? (
+          collapsed ? null : <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
+        ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
+          collapsed ? null : <p className="nav-empty">{projectOverride ? "No goals yet. Start one with New goal." : "No goals yet. Start one from the top bar."}</p>
         ) : overview ? (
           overview.goals.map((goal) => {
             const active = !backgroundOwnsView && goal.campaignId === snapshot.activeCampaignId;
@@ -127,13 +166,15 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={goal.workspaceRoot}
-                    onClick={() => onSelectCampaign(goal.campaignId)}
+                    title={failedOpenId === goal.campaignId ? `${goal.title} — Could not open. Not the workbench. — ${goal.workspaceRoot}` : goal.workspaceRoot}
+                    aria-label={collapsed ? goal.title : undefined}
+                    disabled={navigationLocked}
+                    onClick={() => { if (!navigationLocked) onSelectCampaign(goal.campaignId); }}
                   >
                     <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{goal.title}</strong>
-                      {attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
+                      {failedOpenId === goal.campaignId ? <small>Could not open. Not the workbench.</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
@@ -144,7 +185,9 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     type="button"
                     aria-label="Rename goal"
                     title="Rename this goal"
+                    disabled={navigationLocked}
                     onClick={() => {
+                      if (navigationLocked) return;
                       setRenamingId(goal.campaignId);
                       setRenameDraft(goal.title);
                     }}
@@ -183,12 +226,15 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                   <button
                     className={`campaign-item${active ? " campaign-active" : ""}`}
                     type="button"
-                    title={collapsed ? titleFor(campaign.id, campaign.title) : undefined}
-                    onClick={() => onSelectCampaign(campaign.id)}
+                    title={failedOpenId === campaign.id ? `${titleFor(campaign.id, campaign.title)} — Could not open. Not the workbench.` : collapsed ? titleFor(campaign.id, campaign.title) : undefined}
+                    aria-label={collapsed ? titleFor(campaign.id, campaign.title) : undefined}
+                    disabled={navigationLocked}
+                    onClick={() => { if (!navigationLocked) onSelectCampaign(campaign.id); }}
                   >
                     <span className={`campaign-state campaign-state-${campaign.state}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{titleFor(campaign.id, campaign.title)}</strong>
+                      {failedOpenId === campaign.id ? <small>Could not open. Not the workbench.</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
@@ -199,7 +245,9 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                     type="button"
                     aria-label="Rename goal"
                     title="Rename this goal"
+                    disabled={navigationLocked}
                     onClick={() => {
+                      if (navigationLocked) return;
                       setRenamingId(campaign.id);
                       setRenameDraft(titleFor(campaign.id, campaign.title));
                     }}
@@ -213,11 +261,13 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
         )}
       </div>
 
+      {!collapsed && plansUnreadable && plansSentenceVisible ? <p className="nav-empty" role="status">Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.</p> : null}
+      {!collapsed && navigationLockedReason && plans.length > 0 ? <p className="nav-empty" role="status">{navigationLockedReason}</p> : null}
       {plans.length > 0 ? (
         <>
           <div className="sidebar-section-title">
             <span>Plans</span>
-            <span className="count-badge">{plans.length}</span>
+            <span className="count-badge" aria-label={plansUnreadable ? "Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds." : undefined}>{plansUnreadable ? "–" : plans.length}</span>
           </div>
           <div className="campaign-list">
             {plans.map((plan) => (
@@ -225,9 +275,10 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, onS
                 <button
                   className={`campaign-item${plan.active ? " campaign-active" : ""}`}
                   type="button"
-                  onClick={() => onSelectPlan?.(plan.requestId)}
-                  title={planSubline(plan.verdict, plan.savedAt)}
-                  aria-label={`Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
+                  disabled={navigationLocked || plansUnreadable}
+                  onClick={() => { if (!navigationLocked && !plansUnreadable) onSelectPlan?.(plan.requestId); }}
+                  title={plansUnreadable ? "Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds." : planSubline(plan.verdict, plan.savedAt)}
+                  aria-label={plansUnreadable ? `Plan: ${plan.title}. Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds.` : `Plan: ${plan.title}, ${planSubline(plan.verdict, plan.savedAt)}`}
                 >
                   <span className={`campaign-state ${planStateClass(plan.verdict)}`} aria-hidden="true" />
                   <span className="campaign-item-copy">

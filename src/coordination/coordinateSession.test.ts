@@ -603,6 +603,74 @@ describe("coordinate session", () => {
   });
 });
 
+describe("Linux Pi audit transport through session and request reconstruction", () => {
+  const piProvider = { ...providersWithThird[1]!, instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const material = { status: "available" as const, complete: true, changed: true, beforeDiff: "before", afterDiff: Array.from({ length: 120 }, (_, i) => `+file-change-${i}: 中文😀 retained multi-file material`).join("\n") };
+  const ready = { connected: true, sendAuthorized: true, providers: [providersWithThird[0]!, piProvider], stopReason: null };
+  const host = { goal, workspacePath, sendKey: "stdin-session", auditPromptTransport: "linux-pi-stdin" as const, allowedInstances: ["codex", "pi"], writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 2 } };
+  const ok = (text: string): CoordinateLaunchResult => ({ text, errorText: "", dispatched: true, turnsRemaining: 8, writeTurnsRemaining: 1 });
+
+  it.each([false, true])("replacement re-derives its own capacity (Pi first=$0)", async piFirst => {
+    const third = providersWithThird[1]!;
+    const roster = [providersWithThird[0]!, ...(piFirst ? [piProvider, third] : [third, piProvider])];
+    const transport = recordingTransport([ok("plan"), ok("VERDICT: carry-out"), { ...ok("report"), executionEvidence: material },
+      { text: "", errorText: "not installed", dispatched: false, stopCode: "not-installed", turnsRemaining: 8, writeTurnsRemaining: 0 }, ok("VERDICT: verified")]);
+    const state = await runCoordinateSession({ ...host, catalog: catalogFromProviderSnapshots(roster), allowedInstances: ["codex", "pi", "claude"] },
+      { sendAuthorized: true, allowedInstances: ["codex", "pi", "claude"] }, transport);
+    expect(state.verdict).toBe("verified");
+    const audits = transport.calls.slice(3) as Array<CoordinateTurnCommand & { auditInputEvidenceCoverage: import("./coordinateGoal").AuditInputEvidenceCoverage }>;
+    expect(audits).toHaveLength(2);
+    for (const audit of audits) {
+      const pi = audit.modelSelection.instanceId === "pi";
+      expect(audit.promptDelivery).toBe(pi ? "stdin" : undefined);
+      expect(audit.auditInputEvidenceCoverage.promptBudgetBytes).toBe(pi ? 32768 : 4096);
+      expect(audit.auditInputEvidenceCoverage.cropped).toBe(!pi);
+      expect(Object.hasOwn(audit.auditInputEvidenceCoverage, "windowsCmdWorstCaseChars")).toBe(!pi);
+    }
+    expect(state.auditInputEvidenceCoverage).toEqual(audits[1]!.auditInputEvidenceCoverage);
+  });
+
+  it("initial, revised and corrective inputs retain host capability; coverage survives view and feedback", async () => {
+    const calls: CoordinateTurnCommand[] = [];
+    let reviews = 0;
+    let audits = 0;
+    const view = await requestCoordination({ ...host, beforePlanRevision: async () => true, beforeRepair: async () => true }, ready, {
+      async launch(command) {
+        calls.push(command);
+        const role = command.commandId.split("-")[1];
+        if (role === "review") return ok(++reviews === 1 ? "Fix plan\nVERDICT: revise" : "VERDICT: carry-out");
+        if (role === "audit") return ok(++audits === 1 ? "Check repair\nVERDICT: revise" : "VERDICT: verified");
+        if (role === "execute") return { ...ok("Actual changes reported"), executionEvidence: material };
+        return ok("Bounded plan");
+      },
+    });
+    expect(calls).toHaveLength(10);
+    expect(view.verdict).toBe("verified");
+    const auditCommands = calls.filter(command => command.commandId.startsWith("coordinate-audit-"));
+    expect(auditCommands).toHaveLength(2);
+    for (const command of auditCommands) {
+      expect(command.promptDelivery).toBe("stdin");
+      expect(command.initialMessage.text).toContain(material.afterDiff);
+      expect(new TextEncoder().encode(command.initialMessage.text).length).toBeGreaterThan(8192);
+    }
+    expect(view.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", promptBudgetBytes: 32768, cropped: false });
+    expect(view.feedbackHistory?.[0]?.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", promptBudgetBytes: 32768, cropped: false });
+    expect(view.planRevisionHistory).toHaveLength(1);
+    expect(calls.filter(command => !command.commandId.startsWith("coordinate-audit-")).every(command => !Object.hasOwn(command, "promptDelivery"))).toBe(true);
+  });
+
+  it("an unknown stdin audit stops without replacement or another role, retaining supplied material", async () => {
+    const transport = recordingTransport([ok("plan"), ok("VERDICT: carry-out"), { ...ok("report"), executionEvidence: material },
+      { text: "unconfirmed partial output", errorText: "Input delivery unconfirmed", dispatched: null, auditInputTransport: { instanceId: "pi", promptDelivery: "stdin", inputBytes: 9000, inputEnded: false } }]);
+    const view = await requestCoordination({ ...host, beforeRepair: async () => { throw Error("must not repair"); } }, ready, transport);
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).not.toBe("verified");
+    expect(view.auditText).toBe("unconfirmed partial output");
+    expect(view.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", cropped: false });
+    expect(view.feedbackHistory).toBeUndefined();
+  });
+});
+
 // All extra-catalog cases are synthetic staffing fixtures, not third-native admission.
 describe("explicitly authorized execution and independent audit", () => {
   const catalog = catalogFromProviderSnapshots(providersWithThird);
@@ -735,6 +803,38 @@ describe("explicitly authorized execution and independent audit", () => {
     expect(transport.calls).toHaveLength(2);
     expect(state.verdict).toBe("checked");
     expect(state.messageDispatched).toBe(true);
+  });
+  it("carries executionEvidence from executor launch to audit prompt and final session state", async () => {
+    const evidence = {
+      status: "available" as const,
+      complete: true,
+      changed: true,
+      beforeDiff: "BEFORE_SESSION_AUDIT_MARKER",
+      afterDiff: "--- a/pong.txt\n+++ b/pong.txt\n@@ -0,0 +1 @@\n+pong\nAFTER_SESSION_AUDIT_MARKER",
+      untrackedFiles: [{ path: "new.txt", size: 24, content: "NEW_FILE_SESSION_AUDIT_MARKER", binary: false as const }],
+      comparisonBaseline: { headCommit: "2dbea545040c2bb3bdc66b95602975adc951d5a0", capturedAt: "2026-10-28T00:00:00Z" },
+      reason: "Changes observed",
+    };
+
+    const { state, transport } = await run([
+      planReply,
+      reviewReply,
+      { ...executeReply, executionEvidence: evidence },
+      auditReply,
+    ]);
+
+    expect(transport.calls).toHaveLength(4);
+    expect(state.verdict).toBe("verified");
+    expect(state.executionEvidence).toEqual(evidence);
+    // Audit turn (call 3) must have received the captured evidence in its prompt!
+    const auditPrompt = transport.calls[3]!.initialMessage.text;
+    expect(auditPrompt).toContain("Captured workspace evidence");
+    expect(auditPrompt).toContain("+pong");
+    expect(auditPrompt).toContain("BEFORE_SESSION_AUDIT_MARKER");
+    expect(auditPrompt).toContain("NEW_FILE_SESSION_AUDIT_MARKER");
+    expect(state.auditInputEvidenceCoverage).toBeDefined();
+    expect(state.auditInputEvidenceText).toContain("NEW_FILE_SESSION_AUDIT_MARKER");
+    expect(auditPrompt.endsWith(state.auditInputEvidenceText!)).toBe(true);
   });
   it.each(["VERDICT: revise", "VERDICT: stop", "VERDICT: verified", "Looks fine."])("does not write without a checked review: %s", async (text) => {
     const { state, transport } = await run([planReply, ok(text)]);
@@ -1528,5 +1628,105 @@ describe("one pre-write plan revision", () => {
     // The corrective prompts carry the revised pass's actual evidence.
     expect(transport.calls[6]?.initialMessage.text).toContain("Execution critique after the revised pass.");
     expect(transport.calls[6]?.initialMessage.text).toContain("Inspect the CURRENT workspace");
+  });
+
+  describe("actual full continuation prompt bounds", () => {
+    const continuation = { parentRequestId: "parent", rootRequestId: "root", originalGoal: goal, followUp: "Inspect the result" };
+    it.each([false, true])("refuses a review after appending the actual planner output (scoped=%s)", async scoped => {
+      const catalog = catalogFromProviderSnapshots(providers);
+      const events: CoordinateSessionEvent[] = [];
+      const transport = recordingTransport([{ text: "文".repeat(34_000), errorText: "", dispatched: true, turnsRemaining: 3 }]);
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "full-bound", continuation },
+        { sendAuthorized: true, ...(scoped ? { allowedInstances: catalog.map(x => x.instanceId) } : {}), onEvent: e => events.push(e) }, transport);
+      expect(transport.calls).toHaveLength(1);
+      expect(state.commands).toHaveLength(1);
+      expect(state.planText).toBe("文".repeat(34_000));
+      expect(state.messageDispatched).toBe(true);
+      expect(state.stopReason).toMatch(/100,000-byte/);
+      expect(state.stopReason).not.toMatch(/no turn was sent/i);
+      expect(events.filter(e => e.kind === "started").map(e => e.role)).toEqual(scoped ? ["planning"] : []);
+      if (scoped) expect(state.authorizedTurnsLeft).toBe(3);
+    });
+    it("retains checked plan/review and counters when the evidence command itself is oversized", async () => {
+      const catalog = catalogFromProviderSnapshots(providersWithThird);
+      const events: CoordinateSessionEvent[] = [];
+      const plan = "x".repeat(55_000);
+      const review = `${"y".repeat(55_000)}\nVERDICT: carry-out`;
+      const transport = recordingTransport([
+        { text: plan, errorText: "", dispatched: true, turnsRemaining: 3, writeTurnsRemaining: 1 },
+        { text: review, errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 },
+      ]);
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "execution-bound", continuation,
+        writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 1 } },
+        { sendAuthorized: true, allowedInstances: catalog.map(x => x.instanceId), onEvent: e => events.push(e) }, transport);
+      expect(transport.calls).toHaveLength(2);
+      expect(state.planText).toBe(plan);
+      expect(state.reviewText).toBe(review);
+      expect(state.authorizedTurnsLeft).toBe(2);
+      expect(state.authorizedWriteTurnsLeft).toBe(1);
+      expect(state.messageDispatched).toBe(true);
+      expect(state.stopReason).toMatch(/execution was not sent/);
+      expect(events.filter(e => e.kind === "started").map(e => e.role)).toEqual(["planning", "review"]);
+    });
+    it("retains a failed dispatch when replacement construction refuses an oversized prompt", async () => {
+      const catalog = catalogFromProviderSnapshots(providersWithThird);
+      const changing = { ...continuation };
+      const launch = vi.fn(async () => {
+        changing.followUp = "文".repeat(34_000);
+        return { text: "partial planning fact", errorText: "usage limit reached", dispatched: true, turnsRemaining: 3 };
+      });
+      const state = await runCoordinateSession({ catalog, goal, workspacePath, sendKey: "replacement-bound", continuation: changing },
+        { sendAuthorized: true, allowedInstances: catalog.map(x => x.instanceId) }, { launch });
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(state.messageDispatched).toBe(true);
+      expect(state.planText).toBe("partial planning fact");
+      expect(state.authorizedTurnsLeft).toBe(3);
+      expect(state.stopReason).toMatch(/100,000-byte/);
+    });
+  });
+
+  describe("Continuation descriptor in full session", () => {
+    const continuation = {
+      parentRequestId: "parent-req-001",
+      rootRequestId: "root-req-001",
+      originalGoal: "Root original goal for session",
+      followUp: "Follow-up coordination for session",
+    };
+
+    it("propagates continuation through initial planning and revision", async () => {
+      const results: CoordinateLaunchResult[] = [
+        { text: "Flawed plan.\n", errorText: "", dispatched: true, turnsRemaining: 5, writeTurnsRemaining: 2 },
+        { text: "Needs work.\nVERDICT: revise", errorText: "", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 2 },
+        { text: "Revised plan.", errorText: "", dispatched: true, turnsRemaining: 3, writeTurnsRemaining: 2 },
+        { text: "Accepted.\nVERDICT: carry-out", errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 2 },
+        { text: "Executed.", errorText: "", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 },
+        { text: "Verified.\nVERDICT: verified", errorText: "", dispatched: true, turnsRemaining: 1, writeTurnsRemaining: 1 },
+      ];
+      const transport = recordingTransport(results);
+      const view = await requestCoordination(
+        {
+          goal: continuation.originalGoal,
+          workspacePath,
+          sendKey: "session-cont-send",
+          continuation,
+          allowedInstances: ["codex", "claude", "grok"],
+          writeAuthorization: { instances: ["codex", "claude", "grok"], workspaceRoot: workspacePath, remaining: 2 },
+          beforePlanRevision: async () => true,
+        },
+        { connected: true, sendAuthorized: true, providers: providersWithThird, stopReason: null },
+        transport,
+      );
+
+      expect(transport.calls).toHaveLength(6);
+      // Initial planning turn has Original goal and Current follow-up
+      expect(transport.calls[0]?.initialMessage.text).toContain("Original goal:\nRoot original goal for session");
+      expect(transport.calls[0]?.initialMessage.text).toContain("Current follow-up:\nFollow-up coordination for session");
+
+      // Revised planning turn also carries Original goal and Current follow-up
+      expect(transport.calls[2]?.initialMessage.text).toContain("Original goal:\nRoot original goal for session");
+      expect(transport.calls[2]?.initialMessage.text).toContain("Current follow-up:\nFollow-up coordination for session");
+
+      expect(view.verdict).toBe("verified");
+    });
   });
 });

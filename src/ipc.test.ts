@@ -113,7 +113,7 @@ describe("Core client preview transport", () => {
         turn: { state: "failed", can_send: false, can_stop: false, reason_code: "provider-quota", actions: ["diagnose"] }
       }
     });
-    expect(snapshot?.productConversation?.session).toEqual({ state: "attached", nativeIdKnown: true });
+    expect(snapshot?.productConversation?.session).toEqual({ state: "attached", nativeIdKnown: true, transport: "unknown" });
     expect(snapshot?.productConversation?.turn).toEqual(expect.objectContaining({ state: "failed", canSend: false, reasonCode: "provider-quota", actions: ["diagnose"] }));
   });
 
@@ -128,7 +128,7 @@ describe("Core client preview transport", () => {
       }
     });
     expect(snapshot?.productConversation?.runtime.state).toBe("starting");
-    expect(snapshot?.productConversation?.session).toEqual({ state: "starting", nativeIdKnown: false });
+    expect(snapshot?.productConversation?.session).toEqual({ state: "starting", nativeIdKnown: false, transport: "unknown" });
     expect(snapshot?.productConversation?.items).toEqual(DEMO_SNAPSHOT.productConversation!.items);
     expect(snapshot?.productConversation?.turn).toEqual(expect.objectContaining({ canSend: false, canStop: true }));
   });

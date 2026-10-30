@@ -1,7 +1,10 @@
 import type { BackgroundStatus } from "../coordination/backgroundStatus";
+import { parseLiveRead } from "../coordination/liveRead";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
 import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
 import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
+import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
+import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
 
@@ -17,6 +20,9 @@ export interface CoordinationStatusProps {
   auditText?: string | null;
   executionHarness?: string | null;
   auditHarness?: string | null;
+  executionEvidence?: ExecutionWorkspaceEvidence | null;
+  auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  auditInputEvidenceText?: string | null;
   verdict: CoordinationVerdict | null;
   /** Presentation only: a background Stop with a proven settled outcome. */
   stoppedOutcome?: boolean;
@@ -179,7 +185,21 @@ function RetainedRoundSection({ round, heading }: { round: CoordinationRoundFact
         <dt>Review harness</dt><dd>{fact(round.reviewHarness)}</dd>
         <dt>Plan</dt><dd>{fact(round.planText)}</dd>
         <dt>Check</dt><dd>{fact(round.reviewText)}</dd>
-        <dt>Changes{round.executionHarness ? ` — ${round.executionHarness}` : ""}</dt><dd>{fact(round.executionText)}</dd>
+        {round.executionEvidence ? (
+          <dd>
+            <WorkspaceEvidenceDetails
+              evidence={round.executionEvidence}
+              executionText={round.executionText}
+              executionHarness={round.executionHarness}
+              auditInputEvidenceCoverage={round.auditInputEvidenceCoverage}
+              auditInputEvidenceText={round.auditInputEvidenceText}
+            />
+          </dd>
+        ) : (
+          <>
+            <dt>Changes{round.executionHarness ? ` — ${round.executionHarness}` : ""}</dt><dd>{fact(round.executionText)}</dd>
+          </>
+        )}
         <dt>Independent verification{round.auditHarness ? ` — ${round.auditHarness}` : ""}</dt><dd>{fact(round.auditText)}</dd>
         <dt>Stop reason</dt><dd>{fact(round.stopReason)}</dd>
       </dl>
@@ -203,6 +223,9 @@ export function CoordinationStatus({
   auditText,
   executionHarness,
   auditHarness,
+  executionEvidence,
+  auditInputEvidenceCoverage,
+  auditInputEvidenceText,
   verdict,
   stopReason,
   planningQuota,
@@ -229,10 +252,10 @@ export function CoordinationStatus({
   const saved = savedLabel(savedAt);
   // An assigned writer alone is not evidence it launched: the read-budget
   // feasibility stop assigns one before refusing all edits.
-  const executionEvidence = Boolean(executionText || auditHarness || auditText)
+  const hasExecutionActivity = Boolean(executionText || auditHarness || auditText || executionEvidence)
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
-    <section className="coordination-status" aria-label="Plan and check">
+    <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
       <dl className="coordination-outcome">
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
@@ -250,11 +273,17 @@ export function CoordinationStatus({
           above is the revised pass.
         </p>
       ) : null}
-      {verdict === "checked" && !executionHarness && !executionText ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
-      {executionEvidence ? (
+      {verdict === "checked" && !executionHarness && !executionText && !executionEvidence ? <p>The plan passed its check. No harness is allowed to change files, so this stopped here.</p> : null}
+      {hasExecutionActivity ? (
         <article className="coordination-result" aria-label="Workspace changes result">
           <h3>Changes{executionHarness ? ` — ${executionHarness}` : ""}</h3>
-          <p>{fact(executionText ?? null)}</p>
+          <WorkspaceEvidenceDetails
+            evidence={executionEvidence}
+            executionText={executionText}
+            executionHarness={executionHarness}
+            auditInputEvidenceCoverage={auditInputEvidenceCoverage}
+            auditInputEvidenceText={auditInputEvidenceText}
+          />
           {(verdict === "failed" || (!auditText && verdict !== "verified")) && !stopReason.toLowerCase().includes("inspect")
             ? <p>Files may have changed. Inspect the workspace before sending a new goal; this write will not be retried automatically.</p> : null}
         </article>
@@ -446,7 +475,13 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     && !job.live && !job.active && !job.pendingCommand;
   const settled = (job.state === "completed" || job.state === "failed" || stoppedOutcome)
     && !!job.outcome && !job.live && !job.active && !job.pendingCommand;
-  const sentence = job.state === "unconfirmed"
+  const liveReady = job.live && parseLiveRead(job.liveRead)?.ready === true && job.liveRead?.initialRequestId === job.requestId && !job.pendingCommand && !job.revoked;
+  const waitingAllowance = job.followUpMode === "live-read-once" && job.phase === "awaiting-followup";
+  const sentence = liveReady ? "Ready for one follow-up. No model is running; Continue uses the remaining open allowance."
+    : waitingAllowance ? "The open allowance is not confirmed. The checked result is kept; nothing was restarted."
+    : job.outcome?.allowanceEnd === "expired" && settled ? "The unused allowance expired. The checked result is kept."
+    : job.outcome?.allowanceEnd === "idle-stopped" && stoppedOutcome ? "The unused allowance was stopped. The checked result is kept."
+    : job.state === "unconfirmed"
     ? "Progress unavailable or interrupted; the outcome is unconfirmed. GoalPort did not restart this job and will not replay it."
     : stoppedOutcome
       ? "This goal was stopped and has settled. Whatever completed before the stop is retained below."
@@ -460,8 +495,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     {/* Stop allowing stays reachable while the admission is active and not
         revoked, even when control is unreachable: revocation itself persists.
         The progress block below stays honestly live-gated. */}
-    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
-    {onContinue ? <div className="coordination-access">
+    {job.workspacePath ? <p className="background-job-place" title={job.workspacePath} aria-label={job.workspacePath}>{workspaceFolder(job.workspacePath)}</p> : null}
+    {onContinue && job.followUpMode !== "live-read-once" ? <div className="coordination-access">
       <button type="button" className="button button-primary" onClick={onContinue}>
         {job.state === "unconfirmed" || job.pendingCommand ? "Continue in a new send" : "New send for this goal"}
       </button>
@@ -475,10 +510,10 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
       <button type="button" className="button button-outline" aria-label="Stop" onClick={onStopAllowing}>Stop</button>
       {job.state === "unconfirmed" ? <span className="coordination-access-caption">{STOP_ALLOWING_CAPTION}</span> : null}
     </div> : null}
-    {job.active && job.live && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
+    {job.active && job.live && !waitingAllowance && !liveReady && job.state !== "unconfirmed" ? <CoordinationProgress failures={job.progress?.failures ?? []} activity={job.progress?.activity ?? null}
       repair={job.progress?.repair === true} planRevision={job.progress?.planRevision === true} remaining={null} maxTurns={null}
       writeRemaining={null} maxWriteTurns={null} /> : null}
-    {report ? <CoordinationStatus plain {...report} stoppedOutcome={stoppedOutcome} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
+    {report ? <CoordinationStatus plain {...report} stoppedOutcome={stoppedOutcome && !(job.followUpMode === "live-read-once" && job.outcome?.allowanceEnd === "idle-stopped" && report.verdict === "checked")} goal={job.goal} feedbackHistory={report.feedbackHistory ?? []} planRevisionHistory={report.planRevisionHistory ?? []} /> : null}
     {!report && job.completedCommands.map(command => command.facts.text ? <article className="coordination-result" key={command.commandId}><h3>Completed {command.commandId.startsWith("coordinate-plan-") ? "plan" : command.commandId.startsWith("coordinate-review-") ? "check" : command.commandId.startsWith("coordinate-execute-") ? "changes" : "verification"}</h3><p>{command.facts.text}</p></article> : null)}
     {job.outcome?.error ? <p>{job.outcome.error}</p> : null}
     <details className="technical-details"><summary>Technical details</summary><p>Job: {job.jobId}; worker: {job.workerPid ?? "unconfirmed"}</p>
@@ -488,6 +523,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
 
 function workspaceFolder(root: string): string {
   const trimmed = root.replace(/[\\/]+$/, "");
+  if (trimmed === "~") return trimmed;
   const slash = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  const name = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+  return trimmed.startsWith("~/") ? `~/${name}` : name;
 }

@@ -1,12 +1,17 @@
 import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
 import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
-import type { RoundEvent, SavedPlan } from "./coordination/savedPlan";
+import type { RoundEvent, SavedPlan, SavedTargetContinuation, SavedTargetRelationStatus } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
+
+export type { SavedTargetContinuation, SavedTargetRelationStatus };
 
 export type CoordinationRecord = Omit<SavedPlan, "roundEvents" | "authorizedTurnsLeft" | "authorizedWriteTurnsLeft" | "scopeExhausted"> & {
   /** Optional for records saved before completed recovery events existed. */
   readonly roundEvents?: readonly RoundEvent[];
+  readonly continuation?: SavedTargetContinuation;
+  readonly relationStatus?: SavedTargetRelationStatus;
+  readonly relationUnavailableReason?: string | null;
 };
 import {
   appendPreviewConversationMessage,
@@ -194,7 +199,7 @@ export interface CoreClient {
    * for compatibility with older CoreClient fixtures; the desktop
    * implementations dispatch the new command.
    */
-  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string): Promise<CoreSnapshot>;
+  startConversation?(workspaceRoot: string, provider: string, message: string, requestId: string, requireNativeSession?: true): Promise<CoreSnapshot>;
   /** Explicit Send on an existing conversation: `conversation_send`, gated by product.turn.canSend upstream. */
   conversationSend?(message: string, campaignId: string, attemptId: string | undefined, requestId: string): Promise<CoreSnapshot>;
   historyPage?(request: HistoryPageRequest): Promise<HistoryPage>;
@@ -341,7 +346,8 @@ declare global {
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
-      backgroundRevoke?: (jobId: string) => Promise<BackgroundStatus>;
+      backgroundRevoke?: (jobId: string, payload?: { onlyIfReadyFromRequestId: string }) => Promise<BackgroundStatus>;
+      backgroundContinue?: (jobId: string, payload: { requestId: string; fromRequestId: string; followUp: string }) => Promise<BackgroundStatus>;
       backgroundAcknowledge?: (jobId: string) => Promise<BackgroundStatus>;
       backgroundReleaseTerminal?: (jobId: string) => Promise<BackgroundStatus>;
       coordinationAuthorize?: (scope: {
@@ -1158,6 +1164,7 @@ class LinuxCoreClient implements CoreClient {
   readonly mode = "linux-core" as const;
   private viewCampaignId = "";
   private viewPinned = false;
+  private viewGeneration = 0;
   private revision = "";
   private suspended = false;
   private generation = 0;
@@ -1167,6 +1174,7 @@ class LinuxCoreClient implements CoreClient {
   private lastSnapshot: CoreSnapshot = { ...EMPTY_SNAPSHOT, preview: false, notices: [] };
 
   pinView(campaignId: string): void {
+    this.viewGeneration += 1;
     if (!campaignId) return;
     this.viewCampaignId = campaignId;
     this.viewPinned = true;
@@ -1205,13 +1213,25 @@ class LinuxCoreClient implements CoreClient {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       if (envelope.unchanged === true) {
         this.revision = typeof envelope.revision === "string" ? envelope.revision : this.revision;
-        return this.commitSnapshot(generation, { ...this.lastSnapshot, preview: false, goalOverview: overview });
+        return this.commitSnapshot(generation, {
+          ...this.lastSnapshot,
+          preview: false,
+          connection: "connected",
+          goalOverview: overview,
+          notices: this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Goal list read failed:")),
+        });
       }
       const snapshot = resolveCoreSnapshot(envelope.snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       if (!this.viewPinned && !this.viewCampaignId && snapshot.activeCampaignId) this.viewCampaignId = snapshot.activeCampaignId;
       this.revision = typeof envelope.revision === "string" ? envelope.revision : "";
-      return this.commitSnapshot(generation, { ...snapshot, preview: false, goalOverview: overview });
+      const openFailure = this.lastSnapshot.notices.filter((notice) => notice.startsWith("Goal open failed:"));
+      return this.commitSnapshot(generation, {
+        ...snapshot,
+        preview: false,
+        goalOverview: overview,
+        notices: [...openFailure, ...(snapshot.notices ?? []).filter((notice) => !notice.startsWith("Goal open failed:"))],
+      });
     } catch (error) {
       if (mutationAtStart !== 0 || this.mutationDepth !== 0 || generation < this.appliedGeneration) return this.lastSnapshot;
       const message = errorMessage(error);
@@ -1235,13 +1255,14 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(error, "Goal list read failed");
     }
   }
 
   async selectCampaign(campaignId: string): Promise<CoreSnapshot> {
     const generation = this.claimGeneration();
     this.mutationDepth += 1;
+    this.viewGeneration += 1;
     const previousView = this.viewCampaignId;
     const previousRevision = this.revision;
     const previousPinned = this.viewPinned;
@@ -1273,7 +1294,7 @@ class LinuxCoreClient implements CoreClient {
           notices: [notice, ...this.lastSnapshot.notices.filter((item) => item !== notice)]
         });
       }
-      return this.fail(error);
+      return this.fail(new Error(`${campaignId}: ${errorMessage(error)}`), "Goal open failed");
     } finally {
       this.mutationDepth -= 1;
     }
@@ -1323,8 +1344,8 @@ class LinuxCoreClient implements CoreClient {
     return Promise.resolve();
   }
 
-  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string): Promise<CoreSnapshot> {
-    return this.mutate("start_conversation", { workspaceRoot, provider, message }, true, stableRequestId);
+  async startConversation(workspaceRoot: string, provider: string, message: string, stableRequestId: string, requireNativeSession?: true): Promise<CoreSnapshot> {
+    return this.mutate("start_conversation", { workspaceRoot, provider, message, ...(requireNativeSession ? { requireNativeSession } : {}) }, true, stableRequestId);
   }
 
   async conversationSend(message: string, campaignId: string, attemptId: string | undefined, stableRequestId: string): Promise<CoreSnapshot> {
@@ -1418,6 +1439,7 @@ class LinuxCoreClient implements CoreClient {
     stableRequestId?: string
   ): Promise<CoreSnapshot> {
     const generation = this.claimGeneration();
+    const viewGeneration = this.viewGeneration;
     this.mutationDepth += 1;
     const command: CoreCommand = {
       protocolVersion: IPC_PROTOCOL_VERSION,
@@ -1431,6 +1453,7 @@ class LinuxCoreClient implements CoreClient {
       const snapshot = resolveCoreSnapshot(payloadOf(response).snapshot);
       if (!snapshot) throw new Error("Core returned an invalid snapshot");
       if (generation < this.appliedGeneration) return this.lastSnapshot;
+      if (viewGeneration !== this.viewGeneration) return this.lastSnapshot;
       if (adoptView && snapshot.activeCampaignId) {
         this.viewCampaignId = snapshot.activeCampaignId;
         this.viewPinned = true;
@@ -1466,13 +1489,14 @@ class LinuxCoreClient implements CoreClient {
     }
   }
 
-  private fail(error: unknown): CoreSnapshot {
+  private fail(error: unknown, label = "Core request failed"): CoreSnapshot {
     const message = errorMessage(error);
+    const notice = `${label}: ${message}`;
     this.lastSnapshot = {
       ...this.lastSnapshot,
       preview: false,
       connection: "disconnected",
-      notices: [`Core request failed: ${message}`, ...this.lastSnapshot.notices.filter((notice) => !notice.startsWith("Core request failed:"))]
+      notices: [notice, ...this.lastSnapshot.notices.filter((item) => !item.startsWith(`${label}:`))]
     };
     return this.lastSnapshot;
   }
@@ -1489,7 +1513,9 @@ class LinuxCoreClient implements CoreClient {
           requestId: requestIdValue,
           entityVersion: 1,
           messageType,
-          payload
+          payload,
+          ...(["resume_native_session", "handoff", "reassign"].includes(messageType) && this.viewPinned && this.viewCampaignId
+            ? { nativeTarget: { campaignId: this.viewCampaignId } } : {})
         })
       });
     } catch (error) {

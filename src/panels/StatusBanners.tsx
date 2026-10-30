@@ -13,6 +13,7 @@ interface StatusBannersProps {
   activeNotice: ActiveNotice | null;
   onDismissNotice: () => void;
   onReconnect: () => void;
+  hideCoreConnection?: boolean;
 }
 
 /**
@@ -21,7 +22,7 @@ interface StatusBannersProps {
  * Success paths are deliberately quiet — no banner is raised for accepted
  * sends, renames, reconnects or handoffs.
  */
-export function StatusBanners({ browserPreview = false, snapshot, activeNotice, onDismissNotice, onReconnect }: StatusBannersProps) {
+export function StatusBanners({ browserPreview = false, snapshot, activeNotice, onDismissNotice, onReconnect, hideCoreConnection = false }: StatusBannersProps) {
   const hold = snapshot.stopResponsibility;
   const disconnected = snapshot.connection === "disconnected";
   const reconnecting = snapshot.connection === "reconnecting" || snapshot.connection === "degraded";
@@ -36,7 +37,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           <div><strong>Browser preview</strong><span>Try the interface with sample data. No Core or Runtime receives work.</span></div>
         </div>
       ) : null}
-      {capacityLimited ? (
+      {capacityLimited && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
           <div>
@@ -48,7 +49,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </button>
         </div>
       ) : null}
-      {historyWindowAdvanced ? (
+      {historyWindowAdvanced && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">↥</span>
           <div>
@@ -57,7 +58,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </div>
         </div>
       ) : null}
-      {hold ? (
+      {hold && !hideCoreConnection ? (
         <div className={`banner banner-held${hold.blocksCurrentWorkspace === false ? " banner-related" : ""}`} role="status">
           <span className="banner-glyph" aria-hidden="true">■</span>
           <div>
@@ -70,7 +71,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           </div>
         </div>
       ) : null}
-      {disconnected ? (
+      {disconnected && !hideCoreConnection ? (
         <div className="banner banner-error" role="alert">
           <span className="banner-glyph" aria-hidden="true">⚠</span>
           <div>
@@ -83,7 +84,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
             Reconnect
           </button>
         </div>
-      ) : reconnecting ? (
+      ) : reconnecting && !hideCoreConnection ? (
         <div className="banner banner-warn" role="status">
           <span className="banner-glyph" aria-hidden="true">↻</span>
           <div>
@@ -95,7 +96,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
       {activeNotice ? (
         <div className="banner banner-notice" role="status">
           <div className="banner-notice-text">
-            {activeNotice.sentence}
+            {activeNotice.sentence === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : activeNotice.sentence}
             {activeNotice.technical ? (
               <details className="technical-details">
                 <summary>Technical details</summary>

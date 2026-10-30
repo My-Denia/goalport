@@ -5,9 +5,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TitleBar } from "./TitleBar";
+import { shortGoalTitle } from "../conversation/shortGoalTitle";
 import { DEMO_SNAPSHOT } from "../types";
 
 afterEach(cleanup);
+
+it("short display titles preserve whole Unicode characters without changing the full goal", () => {
+  const full = "😀".repeat(60);
+  expect(shortGoalTitle(full)).toBe("😀".repeat(45) + "...");
+  expect(full).toBe("😀".repeat(60));
+});
 
 function mountTitleBar(overrides: Partial<Parameters<typeof TitleBar>[0]> = {}) {
   const spies = {

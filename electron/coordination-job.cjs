@@ -5,10 +5,13 @@
 // owned by coordination-scope.cjs in the worker process. Disk counters below
 // are display/recovery facts only.
 const fs = require("node:fs");
+const { normalizePiCapacity } = require("./pi-capacity.mjs");
+const liveRead = require("./live-read-once.cjs");
 const net = require("node:net");
 const path = require("node:path");
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { coreConnectEndpoint, endpointSocketLeafName } = require("./launch-config.cjs");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor } = require("./coordination-continuation.cjs");
 
 const STORE_DIRECTORY = "coordination-jobs";
 const JOBS_DIRECTORY = "jobs";
@@ -30,7 +33,7 @@ const OUTCOME_STATES = new Set(["completed", "failed", "stopped", "unconfirmed"]
 const RELEASE_STATES = new Set(["completed", "failed", "stopped"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
 const COUNTER_KEYS = new Set(["readTurnsRemaining", "writeTurnsRemaining"]);
-const MAX_CONTROL_BYTES = 8192;
+const MAX_CONTROL_BYTES = liveRead.MAX_CONTROL_BYTES;
 const MAX_PROGRESS_BYTES = 4 * 1024 * 1024;
 
 function refusal(code, message, cause) {
@@ -169,6 +172,49 @@ function normalizeExecutionFeedback(value) {
   };
 }
 
+function normalizeContinuation(value) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw refusal("invalid-admission", "continuation must be an object.");
+  const keys = Object.keys(value);
+  if (keys.length !== 4 || !keys.every((key) => ["parentRequestId", "rootRequestId", "originalGoal", "followUp"].includes(key))) {
+    throw refusal("invalid-admission", "continuation must contain exactly parentRequestId, rootRequestId, originalGoal, and followUp.");
+  }
+  const parentRequestId = optionalText(value.parentRequestId, "continuation.parentRequestId");
+  if (!parentRequestId || !/^[A-Za-z0-9._-]+$/.test(parentRequestId) || parentRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.parentRequestId contains invalid characters.");
+  }
+  const rootRequestId = optionalText(value.rootRequestId, "continuation.rootRequestId");
+  if (!rootRequestId || !/^[A-Za-z0-9._-]+$/.test(rootRequestId) || rootRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.rootRequestId contains invalid characters.");
+  }
+  if (typeof value.originalGoal !== "string") {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a string.");
+  }
+  const originalGoal = value.originalGoal.trim();
+  if (originalGoal.length === 0) {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a non-empty string.");
+  }
+  if (originalGoal.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.originalGoal exceeds 100,000 characters.");
+  }
+  if (typeof value.followUp !== "string") {
+    throw refusal("invalid-admission", "continuation.followUp must be a string.");
+  }
+  const followUp = value.followUp.trim();
+  if (followUp.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.followUp exceeds 100,000 characters.");
+  }
+  if (originalGoal.length + followUp.length > 100_000) {
+    throw refusal("invalid-admission", "The combined length of originalGoal and followUp exceeds 100,000 characters.");
+  }
+  return {
+    parentRequestId,
+    rootRequestId,
+    originalGoal,
+    followUp,
+  };
+}
+
 // This whitelist is the immutable caller-provided admission. It is not a live
 // scope and is never reconstructed from coordination-records.json or history.
 function normalizeAdmissionInput(input, platform = process.platform) {
@@ -219,6 +265,13 @@ function normalizeAdmissionInput(input, platform = process.platform) {
   };
   const executionFeedback = normalizeExecutionFeedback(input.executionFeedback);
   if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
+  const continuation = normalizeContinuation(input.continuation);
+  if (continuation !== undefined) normalized.continuation = continuation;
+  if (Object.hasOwn(input, "piCapacity")) {
+    const selection = normalizePiCapacity(input.piCapacity);
+    if (!selection || !allowedInstances.includes("pi")) throw refusal("invalid-admission", "The requested Pi capacity is malformed or Pi is not selected.");
+    normalized.piCapacity = selection;
+  }
   return normalized;
 }
 
@@ -573,6 +626,8 @@ function createCoordinationJobStore(profileDirectory, {
       jobId,
       requestId: admission.input.requestId,
       admission: admission.input,
+      ...(admission.followUpMode === liveRead.MODE && liveRead.eligible(admission.input) ? { followUpMode: liveRead.MODE } : {}),
+      ...(Object.hasOwn(progress, "liveFollowUp") ? { liveFollowUp: progress.liveFollowUp } : {}),
       state: progress.state,
       revoked: progress.revoked,
       revokeRequestedAt: progress.revokeRequestedAt ?? null,
@@ -627,7 +682,7 @@ function createCoordinationJobStore(profileDirectory, {
       // arrive re-cased, so the comparison folds case there only.
       if (typeof progress.acknowledgedStuckAt === "string") {
         if (normalized.requestId === incoming.requestId) {
-          throw refusal("stuck-acknowledged", "This interrupted send stays unreplayed. Start a new send; the old turn is not repeated.");
+          throw refusal("stuck-acknowledged", "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
         }
         if (!released) {
           const held = workspaceIdentity(normalized.workspacePath, platform);
@@ -646,8 +701,11 @@ function createCoordinationJobStore(profileDirectory, {
     return { sameRequest, holders };
   }
 
-  function compareDuplicate(existing, normalized) {
-    if (stableJson(existing.admission.input) !== stableJson(normalized)) {
+  function compareDuplicate(existing, normalized, metadata) {
+    // A legacy request never gets upgraded by a newer host's default emission.
+    const recordedMode = existing.admission.followUpMode;
+    if (stableJson(existing.admission.input) !== stableJson(normalized)
+      || (recordedMode !== undefined && recordedMode !== metadata.followUpMode)) {
       return { ok: false, reason: "request-conflict", existingJobId: existing.jobId };
     }
     const status = statusFor(existing.jobId);
@@ -657,15 +715,19 @@ function createCoordinationJobStore(profileDirectory, {
     return { ok: true, created: false, existing: true, jobId: existing.jobId, status };
   }
 
-  function startAdmission(input) {
+  function startAdmission(input, metadata = {}) {
     requireWritable();
     const normalized = normalizeAdmissionInput(input, platform);
+    if (!isPlainObject(metadata) || Object.keys(metadata).some(k => k !== "followUpMode")
+      || (metadata.followUpMode !== undefined && (metadata.followUpMode !== liveRead.MODE || !liveRead.eligible(normalized)))) {
+      throw refusal("invalid-admission", "This follow-up mode is not eligible for the immutable admission.");
+    }
     mkdirStore();
     const active = readActive();
     if (active) {
       const admission = assertActive(active.jobId);
       if (admission.input.requestId === normalized.requestId) {
-        return compareDuplicate({ jobId: active.jobId, admission }, normalized);
+        return compareDuplicate({ jobId: active.jobId, admission }, normalized, metadata);
       }
       return { ok: false, reason: "active-job-exists", existingJobId: active.jobId, status: statusFor(active.jobId) };
     }
@@ -676,7 +738,7 @@ function createCoordinationJobStore(profileDirectory, {
       return { ok: false, reason: "workspace-held", existingJobId: holder.jobId, status: statusFor(holder.jobId) };
     }
     if (previous.sameRequest.length > 1) throw refusal("duplicate-job-history", "More than one job has this request id; no replacement was authorized.");
-    if (previous.sameRequest.length === 1) return compareDuplicate(previous.sameRequest[0], normalized);
+    if (previous.sameRequest.length === 1) return compareDuplicate(previous.sameRequest[0], normalized, metadata);
 
     const jobId = idFactory();
     if (!isJobId(jobId)) throw refusal("invalid-job-id", "The job id generator returned an invalid id.");
@@ -687,7 +749,8 @@ function createCoordinationJobStore(profileDirectory, {
       throw refusal("invalid-control-token", "The local control credential could not be created.");
     }
     fsApi.mkdirSync(jobDir, { recursive: false, mode: 0o700 });
-    const admission = { schema: ADMISSION_SCHEMA, jobId, createdAt, input: normalized };
+    const admission = { schema: ADMISSION_SCHEMA, jobId, createdAt, input: normalized,
+      ...(metadata.followUpMode ? { followUpMode: metadata.followUpMode } : {}) };
     const initialProgress = {
       schema: PROGRESS_SCHEMA,
       jobId,
@@ -721,7 +784,7 @@ function createCoordinationJobStore(profileDirectory, {
         try { fsApi.rmSync(jobDir, { recursive: true, force: true }); } catch { /* orphan remains a refusal fact */ }
         if (occupied) {
           if (occupied.requestId === normalized.requestId) {
-            return compareDuplicate({ jobId: occupied.jobId, admission: readAdmission(occupied.jobId) }, normalized);
+            return compareDuplicate({ jobId: occupied.jobId, admission: readAdmission(occupied.jobId) }, normalized, metadata);
           }
           return { ok: false, reason: "active-job-exists", existingJobId: occupied.jobId, status: statusFor(occupied.jobId) };
         }
@@ -810,6 +873,45 @@ function createCoordinationJobStore(profileDirectory, {
     if (Object.hasOwn(patch, "display")) next.display = patch.display === null ? null : cloneJson(patch.display, "Progress display");
     if (Object.hasOwn(patch, "counters")) next.counters = patch.counters === null ? null : checkCounters(patch.counters);
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
+    return statusFor(jobId);
+  }
+
+  function readOwnedLiveFollowUpContext(jobId, records) {
+    const admission = readAdmission(jobId);
+    if (records === undefined) {
+      try { records = JSON.parse(fsApi.readFileSync(path.join(profileRoot, "coordination-records.json"), "utf8")); }
+      catch { return null; }
+    }
+    return liveRead.ownedContext(admission.input, admission.followUpMode, readProgress(jobId).liveFollowUp, records);
+  }
+
+  function recordLiveFollowUpAccepted(jobId, context, ownerToken) {
+    requireWritable();
+    assertOwner(jobId, ownerToken);
+    const admission = readAdmission(jobId), current = readProgress(jobId);
+    if (OUTCOME_STATES.has(current.state) || current.revoked || current.pendingCommand || current.acknowledgedStuckAt) throw refusal("live-unavailable", "The open allowance is no longer idle.");
+    let records;
+    try { records = JSON.parse(fsApi.readFileSync(path.join(profileRoot, "coordination-records.json"), "utf8")); } catch { records = null; }
+    const fresh = liveRead.ownedContext(admission.input, admission.followUpMode, context, records);
+    if (!fresh || fresh.phase !== "accepted") throw refusal("invalid-live-context", "The accepted follow-up context is invalid.");
+    if (Object.hasOwn(current, "liveFollowUp")) {
+      if (stableJson({ ...current.liveFollowUp, phase: "accepted" }) !== stableJson(fresh)) throw refusal("live-conflict", "This allowance already accepted a different follow-up.");
+      return statusFor(jobId);
+    }
+    const targets = require("./saved-targets.cjs").resolveSavedTargets(records);
+    if (targets.head(fresh.rootRequestId) !== admission.input.requestId || records.some(record => record.requestId === fresh.requestId)) {
+      throw refusal("invalid-live-context", "The latest initial result changed; nothing was accepted.");
+    }
+    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...current, liveFollowUp: cloneJson(fresh, "Accepted follow-up"), phase: "followup-accepted", updatedAt: now() });
+    return statusFor(jobId);
+  }
+
+  function updateLiveFollowUpPhase(jobId, phase, ownerToken) {
+    requireWritable();
+    assertOwner(jobId, ownerToken);
+    const current = readProgress(jobId), context = readOwnedLiveFollowUpContext(jobId);
+    if (!context || OUTCOME_STATES.has(current.state) || !["running", "completed", "unconfirmed"].includes(phase)) throw refusal("invalid-live-context", "The follow-up context is unavailable.");
+    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...current, liveFollowUp: { ...context, phase }, updatedAt: now() });
     return statusFor(jobId);
   }
 
@@ -1032,7 +1134,7 @@ function createCoordinationJobStore(profileDirectory, {
     return controlEndpointFor(profileEndpoint, options);
   }
 
-  function startControlServer({ jobId, endpoint, token } = {}) {
+  function startControlServer({ jobId, endpoint, token, getLiveReadStatus, onContinue, beforeGuardedRevoke, onRevoke } = {}) {
     requireWritable();
     assertActive(jobId);
     if (!readClaim(jobId)) throw refusal("worker-not-claimed", "The job control endpoint belongs to its claimed worker only.");
@@ -1054,33 +1156,53 @@ function createCoordinationJobStore(profileDirectory, {
       const reply = (value) => {
         if (replied) return;
         replied = true;
-        try { socket.end(`${JSON.stringify(value)}\n`); } catch { socket.destroy(); }
+        try {
+          const frame = `${JSON.stringify(value)}\n`;
+          socket.end(Buffer.byteLength(frame) <= MAX_CONTROL_BYTES ? frame : '{"ok":false,"error":"invalid-control-response"}\n');
+        } catch { socket.destroy(); }
       };
       socket.setTimeout(5000, () => reply({ ok: false, error: "control-timeout" }));
       socket.on("error", () => { if (!replied) socket.destroy(); });
-      socket.on("data", (chunk) => {
-        if (replied) return;
+      let handling = false;
+      socket.on("data", async (chunk) => {
+        if (replied || handling) return;
         buffer = Buffer.concat([buffer, chunk]);
         if (buffer.length > MAX_CONTROL_BYTES) return reply({ ok: false, error: "invalid-request" });
         const newline = buffer.indexOf(0x0a);
         if (newline < 0) return;
         if (newline !== buffer.length - 1) return reply({ ok: false, error: "invalid-request" });
         let request;
-        try { request = JSON.parse(buffer.subarray(0, newline).toString("utf8")); } catch { return reply({ ok: false, error: "invalid-request" }); }
+        try { request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline))); } catch { return reply({ ok: false, error: "invalid-request" }); }
         const keys = isPlainObject(request) ? Object.keys(request).sort().join(",") : "";
-        if (keys !== "operation,schema,token" || request.schema !== CONTROL_SCHEMA || !equalSecret(request.token, secret)) {
+        if (!["operation,schema,token", "operation,payload,schema,token"].includes(keys) || request.schema !== CONTROL_SCHEMA || !equalSecret(request.token, secret)) {
           return reply({ ok: false, error: "unauthorized" });
         }
-        if (request.operation !== "status" && request.operation !== "revoke") {
-          return reply({ ok: false, error: "unsupported-operation" });
-        }
+        let payload;
+        try { payload = liveRead.controlPayload(request.operation, request.payload); }
+        catch (error) { return reply({ ok: false, error: error.message }); }
+        handling = true;
+        socket.setTimeout(request.operation === "continue" ? 12000 : 5000);
         try {
-          const full = request.operation === "status" ? statusFor(jobId) : revoke(jobId);
-          // Live identity and revocation must fit even when the accepted goal
-          // or retained reports do not. Never put statusFor() on this socket.
-          reply({ ok: true, status: controlAcknowledgement(full) });
-        } catch {
-          reply({ ok: false, error: "state-unavailable" });
+          let full;
+          if (request.operation === "continue") {
+            if (typeof onContinue !== "function") throw refusal("live-unavailable", "Live Continue is unavailable.");
+            await onContinue(payload);
+            full = statusFor(jobId);
+          } else if (request.operation === "revoke") {
+            if (payload) {
+              if (typeof beforeGuardedRevoke !== "function") throw refusal("live-unavailable", "The allowance cannot be ended as idle.");
+              // Synchronous worker check and marker creation are indivisible in
+              // this event loop: never mark a stale Ready view's active child.
+              beforeGuardedRevoke(payload);
+            }
+            try { full = revoke(jobId); }
+            catch (error) { onRevoke?.({ storageError: true }); throw error; }
+            onRevoke?.({ storageError: false });
+          } else full = statusFor(jobId);
+          const live = typeof getLiveReadStatus === "function" ? liveRead.liveStatus(getLiveReadStatus(full)) : null;
+          reply({ ok: true, status: controlAcknowledgement({ ...full, ...(live ? { liveRead: live } : {}) }) });
+        } catch (error) {
+          reply({ ok: false, error: error.code || "state-unavailable" });
         }
       });
     });
@@ -1137,6 +1259,10 @@ function createCoordinationJobStore(profileDirectory, {
     getActiveStatus,
     claimWorker,
     updateProgress,
+    recordLiveFollowUpAccepted,
+    updateLiveFollowUpPhase,
+    readOwnedLiveFollowUpContext,
+    assertWorkerOwner: (jobId, ownerToken) => { assertOwner(jobId, ownerToken); return true; },
     recordPendingCommand,
     completeCommand,
     revoke,
@@ -1162,6 +1288,7 @@ function controlAcknowledgement(status) {
     writeTurnsRemaining: status.counters?.writeTurnsRemaining ?? null,
     workerPid: status.startupClaim?.pid ?? null,
     claimed: status.startupClaim !== null,
+    ...(liveRead.liveStatus(status.liveRead) ? { liveRead: liveRead.liveStatus(status.liveRead) } : {}),
   };
   if (Buffer.byteLength(`${JSON.stringify({ ok: true, status: ack })}\n`) > MAX_CONTROL_BYTES) {
     throw refusal("invalid-control-response", "The job control acknowledgement does not fit; no claim was cleared.");
@@ -1169,10 +1296,12 @@ function controlAcknowledgement(status) {
   return ack;
 }
 
-function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
+function requestControl(endpoint, token, operation, { timeoutMs = 5000, payload } = {}) {
   if (typeof endpoint !== "string" || !endpoint.trim()) return Promise.reject(refusal("invalid-endpoint", "The profile control endpoint is unavailable."));
   if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) return Promise.reject(refusal("invalid-control-token", "The local control credential is unavailable."));
-  if (operation !== "status" && operation !== "revoke") return Promise.reject(refusal("unsupported-operation", "Only status and revoke control requests are supported."));
+  let frame;
+  try { frame = liveRead.controlFrame(token, operation, payload); }
+  catch (error) { return Promise.reject(error.code ? error : refusal(error.message, "The control payload was refused; nothing was sent.")); }
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(endpoint);
     let buffer = Buffer.alloc(0);
@@ -1194,16 +1323,16 @@ function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
       if (newline < 0) return;
       if (newline !== buffer.length - 1) return finish(refusal("invalid-control-response", "The job control response is malformed."));
       let response;
-      try { response = JSON.parse(buffer.subarray(0, newline).toString("utf8")); } catch {
+      try { response = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline))); } catch {
         return finish(refusal("invalid-control-response", "The job control response is malformed."));
       }
       if (!isPlainObject(response) || response.ok !== true || !isPlainObject(response.status)) {
-        return finish(refusal("control-refused", "The job control request was refused; no claim was cleared."));
+        return finish(refusal("control-refused", "The job control request was refused; no claim was cleared.", response?.error));
       }
       finish(null, response.status);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ schema: CONTROL_SCHEMA, token, operation })}\n`);
+      socket.write(frame);
     });
   });
 }

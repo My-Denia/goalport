@@ -9,7 +9,9 @@ afterEach(() => {
   cleanup();
   resetCoreClientForTests();
   delete window.__GOALPORT_LINUX_CORE__;
+  try { sessionStorage.clear(); } catch { /* ignore */ }
   vi.unstubAllGlobals();
+  window.history.replaceState(null, "", "/");
 });
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -161,6 +163,91 @@ describe("Linux Core bridge", () => {
     expect((await client.snapshot()).activeCampaignId).toBe("campaign-b");
   });
 
+  it("points an empty Linux draft at the coordinated CLI and does not invent a coordination bridge", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = {
+      ...DEMO_SNAPSHOT,
+      preview: false,
+      connection: "connected" as const,
+      activeCampaignId: "",
+      campaigns: [],
+      notices: [],
+    };
+    let missingHarness = false;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null, harnesses: missingHarness ? ["codex"] : ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({ ok: true, payload: { roots: [{ requestId: "coordinate-verified", rootRequestId: "coordinate-verified", title: "Name the two files", workspacePath: "/home/you/project", outcome: "Verified" }], record: { requestId: "coordinate-verified", rootRequestId: "coordinate-verified", rootLatestId: "coordinate-verified", relationStatus: "legacy-root", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line.", change: "Codex added pong under before.", rememberedIntent: { background: true, write: false } }, reason: null } });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", true);
+    expect(screen.queryByText("Project folder")).toBeNull();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("readOnly", true);
+    expect(screen.getByLabelText("Project folder").getAttribute("title")).toBe("/home/you/project");
+    expect(screen.queryByText("Workspace")).toBeNull();
+    expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
+    expect(screen.queryByText("Choose a Runtime")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
+    expect(await screen.findByText("The two files are named and nothing was edited.")).toBeTruthy();
+    expect(screen.getByText("What was checked")).toBeTruthy();
+    expect(screen.getByText("Executor report")).toBeTruthy();
+    await waitFor(() => expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project"));
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", true);
+    expect(screen.getByText("Last used options restored")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue this goal" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.getAllByRole("region", { name: "Name the two files" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(document.title).toBe("Name the two files");
+    expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
+    expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/home/you/project");
+    // This navigation/discovery fixture admits no work. Unknown-admission behavior is tested separately below.
+    expect(vi.mocked(fetch).mock.calls.some(call => String(call[1]?.body).includes('"messageType":"coordination_continue"'))).toBe(false);
+    missingHarness = true;
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
+    expect(await screen.findByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    missingHarness = false;
+    await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
+    expect(screen.getByText("Signed in: Codex, Pi.")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", false);
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/home/you/project");
+    expect(screen.getByRole("button", { name: /Name the two files/ }).className).not.toContain("campaign-active");
+    fireEvent.click(screen.getByRole("button", { name: /Name the two files/ }));
+    expect(await screen.findByRole("heading", { name: "Name the two files" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue this goal" }).closest(".dialog-actions")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".timeline-scroll")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".draft-composer")).toBeNull();
+    expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
+    expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
+    expect(screen.getByRole("heading", { name: "Name the two files" }).closest(".draft-composer")).toBeNull();
+    expect(window.goalportCore?.coordinateDiscover).toBeUndefined();
+    expect(window.goalportCore?.coordinateLaunch).toBeUndefined();
+  });
+
   it("keeps Core connected when a request is refused", async () => {
     window.__GOALPORT_LINUX_CORE__ = true;
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
@@ -180,5 +267,435 @@ describe("Linux Core bridge", () => {
     expect(refused.connection).toBe("connected");
     expect(refused.commandOutcome?.kind).toBe("refused");
     expect(refused.notices[0]).toMatch(/^Core refused:/);
+  });
+
+  it("restores the first active goal on return before there is any saved result", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    window.history.replaceState(null, "", "/");
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: "", campaigns: [], notices: [] };
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.messageType === "coordination_latest") return jsonResponse({ ok: true, payload: {
+        record: null, line: "Codex is making changes…", jobId: "first-live",
+        currentGoal: { goal: "Append pong", workspacePath: "/work" }, currentBase: { kind: "saved-current-base", admittedRequestId: "first-request", rootRequestId: "first-request", jobId: "first-live", goal: "Append pong", workspacePath: "/work", identityConfirmed: true, followUpMode: null, state: "running", phase: "planning", pending: "present", revoked: false, workerGone: false, unconfirmed: false, active: true, allowanceEnd: null, observedAcceptedChildId: null, globalSlot: { kind: "occupied", jobId: "first-live", admittedRequestId: "first-request" }, profileUnconfirmed: false, leftoverHeld: false }, reason: "no coordinated result saved",
+      } });
+      if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snapshot", snapshot: empty } });
+    }));
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Append pong" })).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/work");
+    expect(screen.getByRole("button", { name: "Stop Append pong" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+  });
+
+  it("restores retained goal/result/evidence through live Stop polls and terminal or unconfirmed remounts", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    window.history.replaceState(null, "", "/");
+    const empty: CoreSnapshot = {
+      ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: "", campaigns: [], notices: [],
+    };
+    const record = {
+      requestId: "prior", rootRequestId: "prior", rootLatestId: "prior", relationStatus: "legacy-root",
+      goal: "Retain previous pong",
+      workspacePath: "/work",
+      verdict: "verified",
+      planningHarness: "Codex",
+      reviewHarness: "Pi",
+      executionEvidence: {
+        status: "available", complete: true, changed: true,
+        beforeDiff: "CAPTURED_BEFORE_PONG_TOKEN",
+        afterDiff: "CAPTURED_PRIOR_PONG_TOKEN",
+        beforeUntrackedFiles: [],
+        untrackedFiles: [{ path: "pong.txt", size: 25, content: "CAPTURED_NEW_FILE_PONG_TOKEN", binary: false }],
+      },
+      auditInputEvidenceCoverage: { totalEvidenceBytes: 100, includedEvidenceBytes: 100, cropped: false, promptBytes: 1000 },
+      auditInputEvidenceText: "EXACT_PRIOR_AUDIT_INPUT_TOKEN",
+      change: "executor prior report",
+      detail: "prior audit",
+      outcome: "prior verified result",
+    };
+    let projection: "live" | "terminal" | "unconfirmed" = "live";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_latest") {
+        const live = projection === "live" ? {
+          line: "Access stopped; the current turn may finish, but no further turn was sent.", jobId: "job-current", record,
+        } : projection === "terminal" ? {
+          line: null, jobId: null, record: { ...record, verdict: "stopped", outcome: "Stopped. No further turn was sent. Existing workspace edits remain." },
+        } : {
+          line: "This goal's exit is not confirmed, so another goal cannot start yet.", jobId: "job-current",
+          record: { ...record, verdict: "unconfirmed", outcome: "previous unconfirmed result" },
+        };
+        return jsonResponse({ ok: true, payload: { ...live, reason: null } });
+      }
+      if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "overview", truncated: false, goals: [], pending: [] } } });
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snapshot", snapshot: empty } });
+    }));
+
+    const first = render(<App />);
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter((call) => String(call[1]?.body).includes("coordination_latest")).length).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByLabelText("Project folder")).toHaveProperty("value", "/work");
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("CAPTURED_NEW_FILE_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("EXACT_PRIOR_AUDIT_INPUT_TOKEN")).toBeTruthy();
+    expect(screen.getByText("Saved result")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "Current work" }).textContent).toContain("not confirmed");
+    expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
+    expect(document.querySelector(".titlebar-workspace")?.getAttribute("title")).toBe("/work");
+    expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull();
+    expect(screen.queryByLabelText("Allow Codex to change files in this workspace")).toBeNull();
+    expect(screen.getByRole("button", { name: "Continue this goal" })).toHaveProperty("disabled", true);
+
+    first.unmount();
+    projection = "terminal";
+    const terminal = render(<App />);
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText(/Stopped\. No further turn was sent\. Existing workspace edits remain\./)).toBeTruthy();
+    terminal.unmount();
+
+    projection = "unconfirmed";
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Retain previous pong" })).toBeTruthy();
+    expect(screen.getByText("CAPTURED_PRIOR_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText("CAPTURED_NEW_FILE_PONG_TOKEN")).toBeTruthy();
+    expect(screen.getByText(/This goal's exit is not confirmed/)).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull();
+    expect(screen.queryByLabelText("Allow Codex to change files in this workspace")).toBeNull();
+  });
+
+  it("R1: parses IPC type, count and payload for primary click, nonempty Enter, empty explicit Continue, empty Enter and New goal", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    const calls: Array<{ messageType: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string; payload: Record<string, unknown> };
+      calls.push(body);
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({
+          ok: true,
+          payload: {
+            record: {
+              requestId: "req-r1", rootRequestId: "req-r1", rootLatestId: "req-r1", relationStatus: "legacy-root",
+              verdict: "verified",
+              planningHarness: "Codex",
+              reviewHarness: "Pi",
+              goal: "Perform task A",
+              workspacePath: "/home/you/work",
+              outcome: "Verified clean",
+              rememberedIntent: { background: true, write: true },
+            },
+            reason: null,
+          },
+        });
+      }
+      if (body.messageType === "coordination_continue") {
+        return jsonResponse({ ok: true, payload: { stdout: "The goal was admitted with request id req-cont; its worker runs detached.\n" } });
+      }
+      if (body.messageType === "coordination_start") {
+        return jsonResponse({ ok: true, payload: { stdout: "The goal was admitted with request id req-start; its worker runs detached.\n" } });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Perform task A" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    const continueBtn = screen.getByRole("button", { name: "Continue this goal" });
+    expect(continueBtn).toBeTruthy();
+    expect(continueBtn).toHaveProperty("disabled", false);
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", true);
+    expect(screen.getByText("Last used options restored")).toBeTruthy();
+
+    const textarea = screen.getByRole("textbox", { name: /message composer/i });
+    expect(textarea).toHaveProperty("placeholder", "Add a follow-up (optional)");
+
+    // 1. Empty Enter emits no dispatch
+    const continueCountBefore = calls.filter((c) => c.messageType === "coordination_continue").length;
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(calls.filter((c) => c.messageType === "coordination_continue").length).toBe(continueCountBefore);
+    expect(calls.filter((c) => c.messageType === "coordination_start").length).toBe(0);
+
+    // 2. Empty explicit Continue button click dispatches coordination_continue with followUp: ""
+    fireEvent.click(continueBtn);
+    await waitFor(() => expect(calls.filter((c) => c.messageType === "coordination_continue").length).toBe(continueCountBefore + 1));
+    const firstContinue = calls.filter((c) => c.messageType === "coordination_continue")[0];
+    expect(firstContinue.payload).toEqual({
+      requestId: expect.any(String),
+      fromRequestId: "req-r1",
+      followUp: "",
+      write: true,
+      background: true,
+      instances: "codex,pi",
+    });
+    expect(calls.filter((c) => c.messageType === "coordination_start").length).toBe(0);
+  });
+
+  it("R1: blocked Continue is disabled and never falls back to coordination_start", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    const calls: Array<{ messageType: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string; payload: Record<string, unknown> };
+      calls.push(body);
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({
+          ok: true,
+          payload: {
+            record: {
+              requestId: "req-blocked", rootRequestId: "req-blocked", rootLatestId: "req-blocked", relationStatus: "legacy-root",
+              verdict: "verified",
+              planningHarness: "Codex",
+              reviewHarness: "Pi",
+              goal: "Blocked check",
+              workspacePath: "/home/you/work",
+              outcome: "Verified clean",
+              rememberedIntent: { background: false, write: false },
+            },
+            reason: null,
+          },
+        });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Blocked check" })).toBeTruthy();
+    // Continue button exists, but is disabled because backgroundConsent is false
+    const continueBtn = screen.getByRole("button", { name: "Continue this goal" });
+    expect(continueBtn).toHaveProperty("disabled", true);
+    // Send button must NOT exist
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(screen.getByText("Keep working after closing must be explicitly selected.")).toBeTruthy();
+
+    const textarea = screen.getByRole("textbox", { name: /message composer/i });
+    fireEvent.change(textarea, { target: { value: "Try sending anyway" } });
+    // Nonempty Enter while blocked: must NOT dispatch continue or start!
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    // Clicking disabled Continue: must NOT dispatch continue or start!
+    fireEvent.click(continueBtn);
+    expect(calls.filter((c) => c.messageType === "coordination_continue").length).toBe(0);
+    expect(calls.filter((c) => c.messageType === "coordination_start").length).toBe(0);
+
+    // Checking Keep working after closing enables Continue
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    expect(continueBtn).toHaveProperty("disabled", false);
+    // Nonempty Enter now submits via guarded Continue path!
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(calls.some((c) => c.messageType === "coordination_continue")).toBe(true));
+    const call = calls.find((c) => c.messageType === "coordination_continue")!;
+    expect(call.payload.followUp).toBe("Try sending anyway");
+    expect(calls.filter((c) => c.messageType === "coordination_start").length).toBe(0);
+  });
+
+  it("R2/R3: polls and resident navigation preserve dirty options; New goal starts false",  async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    let pollCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        pollCount += 1;
+        return jsonResponse({
+          ok: true,
+          payload: {
+            roots: [{ requestId: "req-lifecycle", rootRequestId: "req-lifecycle", title: "Lifecycle goal", workspacePath: "/home/you/work", outcome: "Verified" }],
+            record: {
+              requestId: "req-lifecycle", rootRequestId: "req-lifecycle", rootLatestId: "req-lifecycle", relationStatus: "legacy-root",
+              verdict: "verified",
+              planningHarness: "Codex",
+              reviewHarness: "Pi",
+              goal: "Lifecycle goal",
+              workspacePath: "/home/you/work",
+              outcome: "Verified",
+              rememberedIntent: { background: true, write: false },
+            },
+            reason: null,
+          },
+        });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Lifecycle goal" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", true);
+    expect(screen.getByText("Last used options restored")).toBeTruthy();
+
+    // 1. User unchecks option -> Last used options restored note is removed
+    fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.queryByText("Last used options restored")).toBeNull();
+
+    // 2. New goal resets both options to false and displays Start a goal
+    fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
+    expect(screen.queryByText("Last used options restored")).toBeNull();
+
+    // 3. Resident return preserves the user's dirty choices, not the admission baseline
+    fireEvent.click(screen.getByRole("button", { name: /Lifecycle goal/ }));
+    expect(await screen.findByRole("heading", { name: "Lifecycle goal" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
+    expect(screen.getByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toHaveProperty("checked", false);
+    expect(screen.queryByText("Last used options restored")).toBeNull();
+  });
+
+  it("keeps an unknown Continue draft without stale restore or Start controls", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    const calls: Array<{ messageType: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string; payload: Record<string, unknown> };
+      calls.push(body);
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({ ok: true, payload: { record: {
+          requestId: "saved-before-unknown", rootRequestId: "saved-before-unknown", rootLatestId: "saved-before-unknown", relationStatus: "legacy-root",
+          verdict: "verified",
+          planningHarness: "Codex",
+          reviewHarness: "Pi",
+          goal: "Saved goal with uncertain continuation",
+          workspacePath: "/home/you/work",
+          outcome: "Verified",
+          rememberedIntent: { background: true, write: true },
+        }, reason: null } });
+      }
+      if (body.messageType === "coordination_continue") {
+        // Transport/JSON succeeded but did not establish admission.
+        return jsonResponse({ ok: true, payload: { stdout: "" } });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Saved goal with uncertain continuation" })).toBeTruthy();
+    expect(screen.getByText("Last used options restored")).toBeTruthy();
+    const textarea = screen.getByRole("textbox", { name: "Message composer" });
+    fireEvent.change(textarea, { target: { value: "Retain this exact follow-up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Continue this goal" }));
+
+    await waitFor(() => expect(screen.getAllByText(/Continue returned without saying the goal was admitted\./).length).toBeGreaterThan(0));
+    expect(textarea).toHaveProperty("value", "Retain this exact follow-up");
+    expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull();
+    expect(screen.queryByLabelText("Allow Codex to change files in this workspace")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(calls.filter((call) => call.messageType === "coordination_continue")).toHaveLength(1);
+    expect(calls.filter((call) => call.messageType === "coordination_start")).toHaveLength(0);
+
+    // Unknown delivery keeps the draft but cannot advertise settled options.
+    expect(screen.queryByText("Last used options restored")).toBeNull();
+  });
+
+
+  it("puts the fresh goal input before permission, without inventing discovery or subscription claims", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    let harnesses: string[] = [];
+    const mutations: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (["coordination_start", "coordination_continue", "coordination_grant"].includes(body.messageType)) mutations.push(body.messageType);
+      if (body.messageType === "coordination_discover") return jsonResponse({ ok: true, payload: { harnesses, consentMissing: true } });
+      if (body.messageType === "coordination_latest") return jsonResponse({ ok: true, payload: { record: null } });
+      if (body.messageType === "goal_overview") return jsonResponse({ ok: true, payload: { overview: { revision: "o", truncated: false, goals: [], pending: [] } } });
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "s", snapshot: empty } });
+    }));
+    const unknown = render(<App />);
+    expect(await screen.findByRole("button", { name: "Allow background work" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.queryByText(/Uses your existing subscriptions/)).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Allow Codex to change files in this workspace" })).toBeNull();
+    unknown.unmount();
+    harnesses = ["codex", "pi"];
+    render(<App />);
+    const allow = await screen.findByRole("button", { name: "Allow Codex and Pi to work" });
+    const editor = screen.getByRole("textbox", { name: "Message composer" });
+    expect(editor).toHaveProperty("placeholder", "What would you like to accomplish?");
+    expect(editor.compareDocumentPosition(allow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: /Continue/i })).toBeNull();
+    expect(mutations).toEqual([]);
+  });
+
+  it("R4: discovers eligible names, hides neutral Linux pill, displays short title with full title attribute", async () => {
+    window.__GOALPORT_LINUX_CORE__ = true;
+    const empty = { ...DEMO_SNAPSHOT, preview: false, connection: "connected" as const, activeCampaignId: "", campaigns: [], notices: [] };
+    const longGoal = "This is a very long goal description that should be displayed in a compact format in headings and titlebar";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { messageType: string };
+      if (body.messageType === "coordination_discover") {
+        return jsonResponse({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"] } });
+      }
+      if (body.messageType === "coordination_latest") {
+        return jsonResponse({
+          ok: true,
+          payload: {
+            record: {
+              requestId: "req-r4", rootRequestId: "req-r4", rootLatestId: "req-r4", relationStatus: "legacy-root",
+              verdict: "verified",
+              planningHarness: "Codex",
+              reviewHarness: "Pi",
+              goal: longGoal,
+              workspacePath: "/home/you/work",
+              outcome: "Verified",
+              rememberedIntent: { background: true, write: false },
+            },
+            reason: null,
+          },
+        });
+      }
+      if (body.messageType === "goal_overview") {
+        return jsonResponse({ ok: true, payload: { overview: { revision: "overview-1", truncated: false, goals: [], pending: [] } } });
+      }
+      return jsonResponse({ ok: true, payload: { unchanged: false, revision: "snap-1", snapshot: empty } });
+    }));
+
+    render(<App />);
+    // Heading displays short title (< 48 chars with ...), full goal is in title and aria-label
+    const heading = await screen.findByRole("heading", { name: longGoal });
+    expect(heading).toBeTruthy();
+    expect(heading.getAttribute("title")).toBe(longGoal);
+    expect(heading.textContent).toContain("This is a very long goal description that sho...");
+
+    // Linux neutral connection pill is hidden when connected
+    expect(screen.queryByText("This status is not the workbench connection")).toBeNull();
+    expect(document.querySelector(".connection-neutral")).toBeNull();
+
+    // TitleBar campaign text is short title, title tooltip is full goal
+    const titlebarCampaign = document.querySelector(".titlebar-campaign");
+    expect(titlebarCampaign).not.toBeNull();
+    expect(titlebarCampaign?.getAttribute("title")).toBe(longGoal);
+    expect(titlebarCampaign?.textContent).toBe("This is a very long goal description that sho...");
   });
 });

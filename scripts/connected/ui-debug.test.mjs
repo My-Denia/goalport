@@ -11,7 +11,32 @@ import {
   hitTest, parseArgs, parseLocalUrl, runProtocol, snapshotExpression
 } from "./ui-debug.mjs";
 
+import { attachGoalPort } from "./v1-cdp.mjs";
+
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "ui-debug.mjs");
+
+test("isolated CDP attachment uses the exact page URL after a restored goal changes its title", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  class OpenSocket extends EventTarget {
+    readyState = 1;
+    close() { this.readyState = 3; }
+  }
+  globalThis.fetch = async () => ({ json: async () => [
+    { type: "page", title: "GoalPort", url: "http://127.0.0.1:9999/", webSocketDebuggerUrl: "ws://wrong" },
+    { type: "page", title: "Append pong — running", url: "http://127.0.0.1:4186/", webSocketDebuggerUrl: "ws://right" },
+  ] });
+  globalThis.WebSocket = OpenSocket;
+  try {
+    const client = await attachGoalPort(1234, { pageUrl: "http://127.0.0.1:4186/" });
+    assert.equal(client.page.title, "Append pong — running");
+    assert.equal(client.page.webSocketDebuggerUrl, "ws://right");
+    client.close();
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.WebSocket = originalWebSocket;
+  }
+});
 
 const connectedBody = {
   width: 1440, height: 900, title: "GoalPort",
