@@ -1138,6 +1138,7 @@ async function createWindow() {
     ...state.bounds,
     minWidth: 480,
     minHeight: 420,
+    backgroundColor: "#101013",
     title: `GoalPort ${appVersion} · ${profile?.testMode ? "Synthetic test" : (launchChannel ? channelLabel(launchChannel) : "RC")}`,
     titleBarStyle: "hidden",
     titleBarOverlay: {
