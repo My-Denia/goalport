@@ -1,3 +1,4 @@
+import { useElapsed } from "../lib/useElapsed";
 import type { BackgroundStatus } from "../coordination/backgroundStatus";
 import { parseLiveRead } from "../coordination/liveRead";
 import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict";
@@ -512,10 +513,11 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
         : "This background job finished. Its result is retained below.";
   if (job.recordKind === 'native-workspace-check') {
     const running = job.active && job.live && !job.revoked;
+    const elapsed = useElapsed(Boolean(running));
     const review = report?.auditText;
     const unfinished = !review && !running && !job.revoked;
     return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>
-      <h3>{review ? "Pi's review" : running ? "Pi is reviewing Codex's changes…" : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
+      <h3>{review ? "Pi's review" : running ? `Pi is reviewing Codex's changes · ${elapsed}` : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
       {running ? <p role="status">Keep working or close this window. The review will be here when it's done.</p> : null}
       {unfinished ? <p role="status">Your files weren't changed. You can ask for another review.</p> : null}
       {review ? <PiReview text={review} id={job.jobId} /> : null}

@@ -599,6 +599,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .review-verdict-good { background: rgba(92, 200, 140, 0.14); color: #7fd8a4; }
 .review-verdict-attention { background: rgba(240, 180, 90, 0.14); color: #f0c078; }
 .review-verdict-unclear { background: rgba(255, 255, 255, 0.07); color: var(--ink-soft); }
+.decision-request h2 { margin: 0 0 8px; color: var(--ink); font-size: 14px; font-weight: 700; }
+.decision-action { max-height: 180px; margin: 0 0 10px; padding: 8px 10px; overflow: auto; border-radius: 6px; background: var(--bg); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .md-table { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 13px; }
 .md-table th, .md-table td { padding: 5px 9px; border: 1px solid var(--line); text-align: left; vertical-align: top; }

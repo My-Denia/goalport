@@ -6,10 +6,10 @@ interface BackgroundAttentionProps {
 }
 
 const LABEL: Record<GoalCard["attention"], string> = {
-  running: "Running",
-  awaiting_approval: "Waiting for your approval",
-  failed: "Failed",
-  needs_recovery: "Needs a session resume",
+  running: "Working",
+  awaiting_approval: "Needs your OK",
+  failed: "Stopped with a problem",
+  needs_recovery: "Send a message to continue",
   idle: "",
   complete: ""
 };

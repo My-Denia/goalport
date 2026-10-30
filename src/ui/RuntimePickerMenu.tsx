@@ -1,7 +1,6 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { Select } from "@base-ui/react/select";
 import type { RuntimeProfile } from "../types";
-import { supportStatusLabel } from "../lib/display";
 
 interface RuntimePickerMenuProps {
   runtimes: RuntimeProfile[];
@@ -50,7 +49,7 @@ export function RuntimePickerMenu({
 }: RuntimePickerMenuProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const items = choices ?? runtimes;
+  const items = (choices ?? runtimes).filter((runtime) => runtime.id !== "scenario" || runtime.id === selectedId);
   const selectedValue = items.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
 
   useEffect(() => {
@@ -89,11 +88,8 @@ export function RuntimePickerMenu({
                     <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
                     <span className="runtime-picker-copy">
                       <strong>{candidate.name}</strong>
-                      <small>{candidate.subtitle}</small>
+                      {choices ? <small>{candidate.subtitle}</small> : null}
                     </span>
-                    {!choices && runtime ? <span className={`support-chip support-${runtime.support}`}>
-                      {supportStatusLabel(runtime)}
-                    </span> : null}
                   </Select.Item>
                 );
               })}

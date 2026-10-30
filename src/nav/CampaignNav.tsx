@@ -62,6 +62,22 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
     if (renamingId) renameInputRef.current?.focus();
   }, [renamingId]);
 
+  // A goal that finished while the user was elsewhere says so until they open it.
+  const lastAttention = useRef(new Map<string, GoalCard["attention"]>());
+  const [finished, setFinished] = useState<ReadonlySet<string>>(new Set());
+  const goals = overview?.goals;
+  useEffect(() => {
+    if (!goals) return;
+    const justFinished = goals.filter((goal) => goal.campaignId !== snapshot.activeCampaignId
+      && lastAttention.current.get(goal.campaignId) === "running" && goal.attention !== "running").map((goal) => goal.campaignId);
+    for (const goal of goals) lastAttention.current.set(goal.campaignId, goal.attention);
+    setFinished((current) => {
+      const next = new Set([...current, ...justFinished]);
+      next.delete(snapshot.activeCampaignId);
+      return next.size === current.size && [...next].every((id) => current.has(id)) ? current : next;
+    });
+  }, [goals, snapshot.activeCampaignId]);
+
   // Core projects the persisted title for every goal, not just the active one.
   const titleFor = (_campaignId: string, title: string): string => title;
 
@@ -174,7 +190,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
                     <span className={`campaign-state ${attentionClass(goal)}`} aria-hidden="true" />
                     <span className="campaign-item-copy">
                       <strong>{goal.title}</strong>
-                      {failedOpenId === goal.campaignId ? <small>Could not open. Not the workbench.</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : null}
+                      {failedOpenId === goal.campaignId ? <small>Could not open. Not the workbench.</small> : attentionText(goal) ? <small>{attentionText(goal)}</small> : finished.has(goal.campaignId) ? <small>Done</small> : null}
                     </span>
                     {active ? <span className="active-arrow" aria-hidden="true">›</span> : null}
                   </button>
@@ -347,20 +363,10 @@ function attentionClass(goal: GoalCard): string {
 
 function attentionText(goal: GoalCard): string {
   switch (goal.attention) {
-    case "awaiting_approval":
-      return "Needs approval";
-    case "failed":
-      return "Failed";
-    case "needs_recovery":
-      return "Needs resume";
-    case "running":
-      return "Running";
-    case "idle":
-    case "complete":
-      return "";
-    default: {
-      const unreachable: never = goal.attention;
-      return unreachable;
-    }
+    case "running": return "Working";
+    case "awaiting_approval": return "Needs your OK";
+    case "failed": return "Stopped with a problem";
+    case "needs_recovery": return "Send a message to continue";
+    default: return "";
   }
 }
