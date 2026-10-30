@@ -4024,7 +4024,7 @@ function App() {
                   <h2>{title || snapshot.activeTask.title}</h2>
                   {activeCampaign?.goal && activeCampaign.goal.trim() !== product?.items.find(item => item.kind === "user-message")?.body.trim() ? <p>{activeCampaign.goal}</p> : null}
                 </div>
-                {taskState.label === "Ready" || taskState.label === "Completed" ? null : <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>}
+                {["Ready", "Completed", "Working"].includes(taskState.label) ? null : <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>}
               </div>
 
               {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
@@ -4039,10 +4039,6 @@ function App() {
                 onOpen={(campaignId) => { void selectCampaign(campaignId); }}
               />
 
-              <PendingApprovals
-                snapshot={snapshot}
-                onPermissionDecision={(decisionId, allow) => { void handlePermissionDecision(decisionId, allow); }}
-              />
 
               <div className="timeline-scroll" ref={anchor.ref} onScroll={anchor.handleScroll} tabIndex={-1} aria-label="Conversation timeline">
                 <ProductConversationView
@@ -4069,6 +4065,10 @@ function App() {
                 ) : null}
               </div>
 
+              <PendingApprovals
+                snapshot={snapshot}
+                onPermissionDecision={(decisionId, allow) => { void handlePermissionDecision(decisionId, allow); }}
+              />
               {heldPanel ? (
                 <BlockedWorkPanel
                   hold={heldPanel}
