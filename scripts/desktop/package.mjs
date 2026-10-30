@@ -17,7 +17,7 @@ export const STAGED_APP_MODULES = Object.freeze([
   "profile-manager.cjs", "window-state.cjs", "coordinate-service.cjs", "coordinate-guard.cjs",
   "coordination-scope.cjs", "coordination-record.cjs", "coordination-continuation.cjs", "harness-health.cjs", "cli-coordinate.cjs", "execution-workspace-evidence.cjs",
   "harness-runtime.cjs", "coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "coordination-core-guard.cjs",
-  "background-send-consent.cjs"
+  "background-send-consent.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs", "live-read-once.cjs"
 ]);
 export const ROOT_BUILD_INPUTS = Object.freeze([
   "Cargo.lock", "Cargo.toml", "index.html", "package.json", "pnpm-lock.yaml", "rust-toolchain.toml",

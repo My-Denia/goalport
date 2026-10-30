@@ -5,13 +5,14 @@ import App from "./App";
 import { resetCoreClientForTests } from "./ipc";
 import { DEMO_SNAPSHOT } from "./types";
 import { CampaignNav } from "./nav/CampaignNav";
+import { BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import type { CoordinatedCurrentJob, SavedTargetResult } from "./coordination/savedTargetView";
 import { coordinatedRouteFromLocation, setCoordinatedRoute, replaceGoalRoute } from "./lib/goalRoute";
 
 afterEach(() => {
   cleanup(); resetCoreClientForTests(); delete window.__GOALPORT_LINUX_CORE__;
   sessionStorage.clear(); window.history.replaceState(null, "", "/");
-  vi.unstubAllGlobals(); vi.restoreAllMocks();
+  vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 const response = (body: unknown) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
 function fixture(hash = "#coordinated/result/a") {
@@ -21,10 +22,22 @@ function fixture(hash = "#coordinated/result/a") {
   const root = (id: string): SavedTargetResult => ({ requestId: id, rootRequestId: id, rootLatestId: id, goal: `Goal ${id.toUpperCase()}`, workspacePath: `/work/${id}`, verdict: "verified", outcome: `Actual saved ${id.toUpperCase()}`, relationStatus: "legacy-root", relationUnavailableReason: null, rememberedIntent: { background: true, write: id === "a" }, detail: `Independent check ${id}`, change: `Executor report ${id}` });
   const records: Record<string, SavedTargetResult> = { a: root("a"), b: root("b") };
   let current: CoordinatedCurrentJob | null = null;
+  let allowanceJob: import("./coordination/backgroundStatus").BackgroundStatus | null = null;
+  let stopEffect: (() => void) | undefined;
+  let statusBarrier: Promise<void> | undefined;
+  let statusOverride: unknown;
+  let statusHook: ((payload: Record<string, unknown>) => Promise<unknown>) | undefined;
+  let baseOverride: Partial<import("./coordination/savedTargetView").SavedCurrentBase> = {};
+  let slotOverride: import("./coordination/savedTargetView").GlobalSlot | undefined;
+  let submissionCandidate: import("./coordination/savedTargetView").SubmissionCandidate | null = null;
+  let pi: import("./coordination/catalogFromProviders").ProviderSnapshot | undefined;
+  let harnesses: string[] | undefined;
+  let expandedWorkspace: string | null | undefined;
   let held = false;
   let offline = false;
   let coreEnabled = false;
   let admitted: unknown = { ok: false, error: "Fixture refusal" };
+  let admissionEffect: (() => void) | undefined;
   const calls: { messageType: string; payload: Record<string, unknown> }[] = [];
   const polls: (() => void)[] = [];
   vi.spyOn(window, "setInterval").mockImplementation((handler, ms) => {
@@ -39,15 +52,34 @@ function fixture(hash = "#coordinated/result/a") {
       const roots = ["a", "b"].map(id => ({ requestId: records[id].rootLatestId ?? id, reason: records[id].rootLatestId ? null : "The latest result cannot be identified.", rootRequestId: id, title: records[id].goal, workspacePath: records[id].workspacePath, outcome: `Summary ${id.toUpperCase()}` }));
       return response({ ok: true, payload: { ok: true, roots, profileLatestId: "b", record: selected,
         history: Object.values(records).filter(r => r.rootRequestId === selected?.rootRequestId).map(r => ({ requestId: r.requestId, savedAt: r.requestId === "a" ? "2026-01-01" : "2026-01-02", outcome: r.outcome })),
-        currentJob: current, line: held ? null : current?.line, jobId: held ? null : current?.jobId, unconfirmedGoal: current?.line.includes("not confirmed"), leftoverHeld: held } });
+        currentBase: current ? { kind: "saved-current-base", jobId: current.jobId, admittedRequestId: current.requestId ?? null, rootRequestId: current.rootRequestId ?? null,
+          goal: current.goal ?? null, workspacePath: current.workspacePath ?? null, identityConfirmed: current.identityConfirmed, followUpMode: current.followUpMode ?? null,
+          state: "running", phase: current.followUpMode ? "awaiting-followup" : "planning", pending: "none", revoked: false, workerGone: false,
+          unconfirmed: current.line.includes("not confirmed"), active: true, allowanceEnd: null, observedAcceptedChildId: null,
+          globalSlot: slotOverride ?? { kind: "occupied", jobId: current.jobId, admittedRequestId: current.requestId ?? "unknown" }, profileUnconfirmed: false, leftoverHeld: held, ...baseOverride } : null,
+        savedAllowanceView: allowanceJob ? { kind: "saved-allowance", jobId: allowanceJob.jobId, initialRequestId: allowanceJob.requestId, rootRequestId: allowanceJob.requestId,
+          state: allowanceJob.state, phase: allowanceJob.phase ?? null, allowanceEnd: allowanceJob.outcome?.allowanceEnd ?? null } : null,
+        globalSlot: slotOverride ?? (current ? { kind: "occupied", jobId: current.jobId, admittedRequestId: current.requestId ?? "unknown" } : { kind: "empty" }),
+        submissionCandidate, line: held ? null : current?.followUpMode ? "Checking the open allowance. Your saved result is kept." : current?.line,
+        jobId: held ? null : current?.jobId, unconfirmedGoal: current?.line.includes("not confirmed") ?? false, leftoverHeld: held } });
     }
-    if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: ["codex", "pi"], consentMissing: false } });
+    if (body.messageType === "coordination_status") {
+      if (statusHook) return response({ ok: true, payload: await statusHook(body.payload) });
+      await statusBarrier;
+      if (statusOverride !== undefined) return response({ ok: true, payload: statusOverride });
+      const status = allowanceJob ?? (current ? { jobId: current.jobId, requestId: current.requestId, goal: current.goal, workspacePath: current.workspacePath,
+        state: "running", active: true, live: true, revoked: false, workerPid: 1, readMaxTurns: 4, writeMaxTurns: null, counters: null, pendingCommand: null,
+        completedCommands: [], progress: { activity: current.line }, outcome: null, followUpMode: current.followUpMode, liveRead: current.liveRead, phase: "awaiting-followup" } : null);
+      return response({ ok: true, payload: status ? { source: "host-status", job: status, jobId: body.payload.jobId } : { source: "unavailable", job: null, jobId: body.payload.jobId, reason: "The open allowance could not be confirmed." } });
+    }
+    if (body.messageType === "coordination_discover") return response({ ok: true, payload: { sentence: null, harnesses: harnesses ?? (pi ? ["codex"] : ["codex", "pi"]), workspaceRoot: expandedWorkspace === undefined ? body.payload.workspaceRoot : expandedWorkspace, pi: pi ? { ...pi, piCapacity: { ...pi.piCapacity, workspacePath: body.payload.workspaceRoot } } : undefined, consentMissing: false } });
     if (body.messageType === "coordination_continue" || body.messageType === "coordination_start") {
       if (admitted instanceof Error) throw admitted;
+      admissionEffect?.();
       return response(admitted);
     }
     if (body.messageType === "coordination_acknowledge") { held = false; current = null; return response({ ok: true, payload: { stdout: "The interrupted job stays unreplayed; the same request id cannot be admitted again." } }); }
-    if (body.messageType === "coordination_stop") return response({ ok: true, payload: { stdout: "revoked: true\npending command: still-running\n" } });
+    if (body.messageType === "coordination_stop") { stopEffect?.(); return response({ ok: true, payload: { stdout: "revoked: true\npending command: still-running\n" } }); }
     if (body.messageType === "goal_overview") return response({ ok: true, payload: { overview: { revision: "fixture", truncated: false, goals: coreEnabled ? [{ campaignId: "campaign-core", projectId: "project-core", workspaceRoot: "/core", title: "Core goal", attention: "idle" }] : [], pending: [] } } });
     const snapshot = coreEnabled ? { ...empty, activeCampaignId: "campaign-core", campaigns: [{ ...DEMO_SNAPSHOT.campaigns[0], id: "campaign-core", title: "Core goal" }], productConversation: { ...DEMO_SNAPSHOT.productConversation!, title: "Core goal" } } : empty;
     return response({ ok: true, payload: { revision: "fixture", unchanged: false, snapshot } });
@@ -57,7 +89,9 @@ function fixture(hash = "#coordinated/result/a") {
     records.a.rootLatestId = "a2";
     records.a2 = { ...records.a, requestId: "a2", outcome: "Actual child A", relationStatus: "valid", continuation: { parentRequestId: "a", rootRequestId: "a", originalGoal: "Goal A", followUp: "New instruction" }, rememberedIntent: { background: true, write: false } };
   };
-  return { calls, records, tick, child, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown) { admitted = value; } };
+  return { calls, records, tick, child, expansion(value: string | null) { expandedWorkspace = value; },
+    deferredStatus(value?: Promise<void>) { statusBarrier = value; }, statusRead(value: typeof statusHook) { statusHook = value; }, status(value: unknown) { statusOverride = value; }, base(value: typeof baseOverride) { baseOverride = value; }, slot(value: typeof slotOverride) { slotOverride = value; }, candidate(value: typeof submissionCandidate) { submissionCandidate = value; },
+    allowance(value: typeof allowanceJob) { allowanceJob = value; }, stop(effect: () => void) { stopEffect = effect; }, harnesses(value: string[]) { harnesses = value; }, pi(value: typeof pi) { pi = value; }, core(value: boolean) { coreEnabled = value; }, job(value: CoordinatedCurrentJob | null) { current = value; }, held(value: boolean) { held = value; }, offline(value: boolean) { offline = value; }, reply(value: unknown, onRequest?: () => void) { admitted = value; admissionEffect = onRequest; } };
 }
 const text = () => screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
 const continuation = () => screen.getByRole("button", { name: "Continue this goal" });
@@ -190,18 +224,19 @@ it.each(["refusal", "network", "unknown"])("%s keeps text and choices and never 
   await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1));
   await waitFor(() => expect(continuation()).toHaveProperty("disabled", true));
   expect(text().value).toBe("Exact follow-up 中文");
-  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload).toEqual({ fromRequestId: "a", followUp: "Exact follow-up 中文", write: true, background: true, instances: "codex,pi" });
+  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload).toEqual({ requestId: expect.any(String), fromRequestId: "a", followUp: "Exact follow-up 中文", write: true, background: true, instances: "codex,pi" });
   expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
   expect(screen.getByRole("button", { name: /^New goal(?:\.|$)/ })).toHaveProperty("disabled", true);
 });
 
 it("admitted reply binds its new ID; only its eventual saved child advances locally; B completion never steals A", async () => {
-  const f = fixture(); f.reply({ ok: true, payload: { stdout: "job: job-a2\nrequest: a2\nThe goal was admitted with request id a2; its worker runs detached.\n" } });
+  vi.spyOn(crypto, "randomUUID").mockReturnValue("a2" as ReturnType<typeof crypto.randomUUID>);
+  const f = fixture(); f.reply({ ok: true, payload: { stdout: "job: job-a2\nrequest: a2\nThe goal was admitted with request id a2; its worker runs detached.\n" } }, () => f.job({ jobId: "job-a2", requestId: "a2", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, line: "Codex is planning…" }));
   render(<App />); await screen.findByRole("heading", { name: "Goal A" });
   fireEvent.change(text(), { target: { value: "New instruction" } });
   fireEvent.click(continuation());
   await waitFor(() => expect(text().value).toBe(""));
-  expect(screen.getByText("Current work — Goal A")).toBeTruthy();
+  await waitFor(() => expect(screen.getByText("Current work — Goal A")).toBeTruthy());
   f.job({ jobId: "job-a2", requestId: "a2", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, line: "Codex is planning…" });
   await f.tick();
   expect(window.location.hash).toBe("#coordinated/result/a");
@@ -217,6 +252,7 @@ it("admitted reply binds its new ID; only its eventual saved child advances loca
 });
 
 it("deliberate history navigation cancels local admission auto-follow before returning to an older parent", async () => {
+  vi.spyOn(crypto, "randomUUID").mockReturnValue("a2" as ReturnType<typeof crypto.randomUUID>);
   const f = fixture();
   f.reply({ ok: true, payload: { stdout: "job: job-a2\nrequest: a2\nThe goal was admitted with request id a2; its worker runs detached.\n" } });
   render(<App />); await screen.findByRole("heading", { name: "Goal A" });
@@ -290,6 +326,373 @@ it.each(["invalid", "head-tie"])("%s preserves the saved result but refuses cont
   expect(screen.getByText("Actual saved A")).toBeTruthy();
   expect(continuation()).toHaveProperty("disabled", true);
   expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+const requestedPi = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+const configuredPi = { instanceId: "pi", installed: true, enabled: true, availability: "available", auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: { ...requestedPi, model: "beta" }, catalog: [{ provider: "Fixture", model: "alpha" }, { provider: "Fixture", model: "beta" }] } };
+
+it("restores apiKey-classified OWN requested route despite changed defaults; polls preserve dirty draft and do not reread native metadata", async () => {
+  const f = fixture(); f.pi(configuredPi);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  const choice = await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(choice).toHaveProperty("checked", true);
+  expect(screen.getByText(/Requested: Fixture\/alpha/)).toBeTruthy();
+  expect(screen.queryByText(/Requested: Fixture\/beta/)).toBeNull();
+  fireEvent.change(text(), { target: { value: "Keep own draft" } });
+  const before = f.calls.filter(c => c.messageType === "coordination_discover").length;
+  await f.tick(); expect(text().value).toBe("Keep own draft");
+  expect(f.calls.filter(c => c.messageType === "coordination_discover").length).toBe(before);
+  fireEvent.click(screen.getByRole("button", { name: "Goal B, /work/b" }));
+  await screen.findByRole("heading", { name: "Goal B" });
+  fireEvent.click(screen.getByRole("button", { name: "Goal A, /work/a" }));
+  await screen.findByRole("heading", { name: "Goal A" });
+  expect(text().value).toBe("Keep own draft");
+  expect(screen.getByRole("checkbox", { name: "Use Pi's configured capacity for this goal" })).toHaveProperty("checked", true);
+  fireEvent.click(continuation());
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1));
+  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload.fromRequestId).toBe("a");
+  expect(f.calls.some(c => c.messageType === "coordination_start")).toBe(false);
+});
+it("saved unavailable or malformed requested Pi route preserves actual result but disables Continue without falling back", async () => {
+  const f = fixture(); f.pi({ ...configuredPi, availability: "unavailable" });
+  f.records.a.piCapacity = requestedPi; f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(screen.getByText("Actual saved A")).toBeTruthy();
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByRole("checkbox", { name: "Use Pi's configured capacity for this goal" })).toHaveProperty("checked", true);
+  fireEvent.change(text(), { target: { value: "Unsent" } }); fireEvent.keyDown(text(), { key: "Enter" });
+  expect(text().value).toBe("Unsent"); expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+it("New goal starts Pi intent off and selects only the current configured offer", async () => {
+  const f = fixture("#coordinated/new"); f.pi(configuredPi);
+  render(<App />);
+  const choice = await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(choice).toHaveProperty("checked", false);
+  expect(screen.getByText(/Requested: Fixture\/beta/)).toBeTruthy();
+  fireEvent.click(choice); expect(choice).toHaveProperty("checked", true);
+  await f.tick(); expect(choice).toHaveProperty("checked", true);
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+it("a selected Pi goal sends only Codex and Pi even with Claude signed in", async () => {
+  const f = fixture(); f.pi(configuredPi); f.harnesses(["claude", "codex"]);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(screen.getByText(/Selected roles: Codex plans · Pi independently checks/)).toBeTruthy();
+  fireEvent.click(continuation());
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1));
+  expect(f.calls.find(c => c.messageType === "coordination_continue")?.payload.instances).toBe("codex,pi");
+});
+it("a selected Pi goal without Codex stays unsent and explains the missing planner", async () => {
+  const f = fixture(); f.pi(configuredPi); f.harnesses(["claude"]);
+  f.records.a.piCapacity = requestedPi;
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: requestedPi };
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.queryByText(/Selected roles: Codex plans/)).toBeNull();
+  expect(screen.getAllByText(/Codex is needed/).length).toBeGreaterThan(0);
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toEqual([]);
+});
+
+function liveFixture(hash = "#coordinated/result/a") {
+  const f = fixture(hash);
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+  f.pi({ instanceId: "pi", displayName: "Pi", driver: "pi", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "unknown", type: "apiKey" }, models: [], piCapacity: { offer: pair, catalog: [{ provider: "Fixture", model: "alpha" }] } });
+  f.records.a.piCapacity = pair; f.records.a.verdict = "checked"; f.records.a.statusLabel = "Plan checked";
+  f.records.a.rememberedIntent = { background: true, write: false, piCapacity: pair };
+  const liveRead = { mode: "live-read-once" as const, ready: true, initialRequestId: "a", fromRequestId: "a", rootRequestId: "a", remainingReads: 2, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: new Date(Date.now() + 900000).toISOString(), reason: null };
+  const job: CoordinatedCurrentJob = { jobId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", requestId: "a", rootRequestId: "a", goal: "Goal A", workspacePath: "/work/a", identityConfirmed: true, followUpMode: "live-read-once", liveRead, line: "Ready for one follow-up. No model is running." };
+  f.job(job);
+  return { ...f, jobValue: job, liveRead };
+}
+
+it("live Ready has one composer Continue, empty Enter does not send, explicit empty Continue keeps caller ID through lost ACK and matching status", async () => {
+  const f = liveFixture(); render(<App />);
+  await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(screen.getAllByRole("button", { name: /Continue this goal/ })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: /New send for this goal/ })).toBeNull();
+  fireEvent.keyDown(text(), { key: "Enter" });
+  expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(0);
+  f.reply(new Error("lost fixture ack"));
+  f.job({ ...f.jobValue, liveRead: { ...f.liveRead, ready: false, reason: "unconfirmed" } });
+  fireEvent.change(text(), { target: { value: "Keep this exact draft" } });
+  fireEvent.click(continuation());
+  await screen.findByText(/follow-up and request id are kept/);
+  const call = f.calls.find(c => c.messageType === "coordination_continue")!;
+  expect(call.payload).toMatchObject({ fromRequestId: "a", followUp: "Keep this exact draft", write: false, background: true, instances: "codex,pi" });
+  expect(typeof call.payload.liveRequestId).toBe("string");
+  expect(text().value).toBe("Keep this exact draft"); expect(text()).toHaveProperty("disabled", true);
+  f.job({ ...f.jobValue, liveRead: { ...f.liveRead, ready: false, childRequestId: String(call.payload.liveRequestId), reason: "busy" } });
+  await f.tick(); await waitFor(() => expect(text().value).toBe(""));
+  expect(f.calls.filter(c => c.messageType === "coordination_start")).toHaveLength(0);
+  expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(1);
+});
+
+it("Ready B cannot spend A's result or end B when inspecting A; New goal on matching idle result waits for terminal release", async () => {
+  const f = liveFixture("#coordinated/result/b"); render(<App />);
+  await screen.findByRole("heading", { name: "Goal B" });
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: /^New goal(?:\.|$)/ })).toHaveProperty("disabled", true);
+  fireEvent.click(screen.getByRole("button", { name: "Goal A, /work/a" }));
+  await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  f.stop(() => {
+    f.job(null);
+    f.allowance({ jobId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", requestId: "a", goal: "Goal A", workspacePath: "/work/a", state: "stopped", active: false, live: false, revoked: true, workerPid: null, pendingCommand: null, completedCommands: [], counters: null, progress: null, readMaxTurns: 4, writeMaxTurns: null, followUpMode: "live-read-once", outcome: { status: "stopped", allowanceEnd: "idle-stopped" } });
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
+  expect(f.calls.find(c => c.messageType === "coordination_stop")?.payload).toEqual({ jobId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", onlyIfReadyFromRequestId: "a" });
+  expect(f.calls.filter(c => c.messageType === "coordination_start" || c.messageType === "coordination_continue")).toHaveLength(0);
+  expect(text().value).toBe("");
+});
+
+it("malformed or stale live acknowledgement refuses Continue with no fresh Start fallback and preserves dirty draft/focus", async () => {
+  const f = liveFixture(); f.job({ ...f.jobValue, liveRead: { ...f.liveRead, rootRequestId: "b" } });
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  fireEvent.change(text(), { target: { value: "Do not lose this" } }); text().focus(); await f.tick();
+  expect(continuation()).toHaveProperty("disabled", true); fireEvent.click(continuation());
+  expect(text().value).toBe("Do not lose this"); expect(document.activeElement).toBe(text());
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toHaveLength(0);
+});
+
+it("a waiting new-mode row without fresh RAM Ready never claims a running model or renders a second Continue", () => {
+  const job: import("./coordination/backgroundStatus").BackgroundStatus = { jobId: "job", requestId: "a", goal: "Goal A", state: "running", active: true, live: true, revoked: false, workerPid: 1, pendingCommand: null, completedCommands: [], counters: null, readMaxTurns: 4, writeMaxTurns: null, outcome: null, progress: { activity: "Ready for one follow-up. No model is running." }, phase: "awaiting-followup", followUpMode: "live-read-once" };
+  render(<BackgroundCoordinationStatus job={job} onStopAllowing={() => {}} onContinue={() => {}} />);
+  expect(screen.getByText(/open allowance is not confirmed/)).toBeTruthy();
+  expect(screen.queryByText(/running on its own/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /Continue|New send/ })).toBeNull();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+});
+
+it("saved content and editable draft paint before a deferred host ACK; only current controls check", async () => {
+  const f = liveFixture(); let release!: () => void;
+  f.deferredStatus(new Promise<void>(resolve => { release = resolve; }));
+  render(<App />);
+  await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(f.calls.some(c => c.messageType === "coordination_status")).toBe(true));
+  expect(screen.getByText("Plan checked", { selector: ".conversation-heading p" })).toBeTruthy();
+  expect(screen.getByText("Executor report a")).toBeTruthy();
+  expect(continuation()).toHaveProperty("disabled", true);
+  fireEvent.change(text(), { target: { value: "Typing before status" } }); text().focus();
+  expect(text()).toHaveProperty("disabled", false);
+  expect(screen.queryByText("Ready for one follow-up. No model is running.")).toBeNull();
+  await act(async () => { release(); });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  expect(text().value).toBe("Typing before status"); expect(document.activeElement).toBe(text());
+  expect(f.calls.filter(c => mutationTypes.has(c.messageType))).toHaveLength(0);
+});
+
+it("current A status cannot repin saved B, borrow its pair, or replace its focused draft", async () => {
+  const f = liveFixture("#coordinated/result/b"); let release!: () => void;
+  f.deferredStatus(new Promise<void>(resolve => { release = resolve; }));
+  render(<App />); await screen.findByRole("heading", { name: "Goal B" });
+  fireEvent.change(text(), { target: { value: "B stays independent" } }); text().focus();
+  await act(async () => { release(); });
+  await waitFor(() => expect(f.calls.some(c => c.messageType === "coordination_status")).toBe(true));
+  expect(window.location.hash).toBe("#coordinated/result/b");
+  expect(screen.getByText("Actual saved B")).toBeTruthy();
+  expect(text().value).toBe("B stays independent"); expect(document.activeElement).toBe(text());
+  expect(continuation()).toHaveProperty("disabled", true);
+});
+
+it("a pre-navigation A ACK cannot replace newly confirmed current B or steal B's draft/focus", async () => {
+  const f = liveFixture(); let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const host = (current: CoordinatedCurrentJob) => ({ jobId: current.jobId, requestId: current.requestId, goal: current.goal, workspacePath: current.workspacePath,
+    state: "running", active: true, live: true, revoked: false, workerPid: 1, readMaxTurns: 4, writeMaxTurns: null, counters: null,
+    pendingCommand: null, completedCommands: [], progress: null, outcome: null, followUpMode: "live-read-once", liveRead: current.liveRead, phase: "awaiting-followup" });
+  const b = { ...f.jobValue, jobId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", requestId: "b", rootRequestId: "b", goal: "Goal B", workspacePath: "/work/b",
+    liveRead: { ...f.liveRead, initialRequestId: "b", fromRequestId: "b", rootRequestId: "b" } };
+  f.records.b.piCapacity = f.records.a.piCapacity; f.records.b.rememberedIntent = f.records.a.rememberedIntent;
+  f.statusRead(async payload => {
+    const current = payload.jobId === f.jobValue.jobId ? f.jobValue : b;
+    if (current === f.jobValue) await barrier;
+    return { source: "host-status", job: host(current), jobId: current.jobId };
+  });
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(f.calls.some(c => c.messageType === "coordination_status")).toBe(true));
+  f.job(b); fireEvent.click(screen.getByRole("button", { name: "Goal B, /work/b" }));
+  await screen.findByRole("heading", { name: "Goal B" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "B draft after navigation" } }); text().focus();
+  await act(async () => { release(); });
+  expect(screen.getByText("Current work — Goal B")).toBeTruthy();
+  expect(window.location.hash).toBe("#coordinated/result/b"); expect(text().value).toBe("B draft after navigation");
+  expect(document.activeElement).toBe(text()); expect(continuation()).toHaveProperty("disabled", false);
+});
+
+it.each([
+  { revoked: true }, { pending: "present" as const }, { allowanceEnd: "expired" as const }, { workerGone: true },
+  { workerGone: "unknown" as const }, { state: "unknown" }, { unconfirmed: true },
+  { globalSlot: { kind: "unknown" as const } }, { globalSlot: { kind: "occupied" as const, jobId: "foreign", admittedRequestId: "foreign" } },
+  { observedAcceptedChildId: "child" }, { profileUnconfirmed: true }, { leftoverHeld: true },
+])("a negative/unknown base %j drops Ready before any status call while keeping saved draft", async negative => {
+  const f = liveFixture(); render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "Keep exact draft" } });
+  const count = f.calls.filter(c => c.messageType === "coordination_status").length;
+  f.base(negative); await f.tick();
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByText("Plan checked", { selector: ".conversation-heading p" })).toBeTruthy(); expect(text().value).toBe("Keep exact draft");
+  expect(f.calls.filter(c => c.messageType === "coordination_status")).toHaveLength(count);
+});
+
+it("the original worker expiry clears Ready without another status response or receipt-time extension", async () => {
+  const f = liveFixture();
+  f.job({ ...f.jobValue, liveRead: { ...f.liveRead, expiresAt: new Date(Date.now() + 450).toISOString() } });
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "Expiry keeps text" } });
+  const before = f.calls.filter(c => c.messageType === "coordination_status").length;
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", true));
+  expect(f.calls.filter(c => c.messageType === "coordination_status")).toHaveLength(before);
+  expect(text().value).toBe("Expiry keeps text"); expect(screen.getByText("Plan checked", { selector: ".conversation-heading p" })).toBeTruthy();
+});
+
+it("settled historical views and a blank New goal never ask status merely to paint", async () => {
+  const f = liveFixture("#coordinated/new"); render(<App />);
+  await screen.findByRole("textbox", { name: /message composer/i }); await f.tick();
+  expect(f.calls.filter(c => c.messageType === "coordination_status")).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "Goal B, /work/b" }));
+  await screen.findByRole("heading", { name: "Goal B" });
+  // Actual current mode A now deserves one read; no per-root/row fanout.
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_status").length).toBeGreaterThan(0));
+  expect(f.calls.filter(c => c.messageType === "coordination_status").every(c => c.payload.jobId === f.jobValue.jobId)).toBe(true);
+  f.job(null); const before = f.calls.filter(c => c.messageType === "coordination_status").length;
+  await f.tick(); expect(f.calls.filter(c => c.messageType === "coordination_status")).toHaveLength(before);
+});
+
+it("legacy no-ID uncertainty cannot be cleared by passive live/terminal data or a matching goal string", async () => {
+  const f = liveFixture(); sessionStorage.setItem("goalport.linux.admissionUnsaid", "The send returned without saying the goal was admitted.");
+  // Use the existing storage key's helper format rather than a fabricated submitted ID.
+  render(<App />); await screen.findByRole("heading", { name: "Goal A" }); await f.tick();
+  expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).toBe("The send returned without saying the goal was admitted.");
+  expect(continuation()).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: /^New goal(?:\.|$)/ })).toHaveProperty("disabled", true);
+  expect(f.calls.filter(c => c.messageType === "coordination_start")).toHaveLength(0);
+});
+
+it.each([["/fixture/new", "/fixture/new"], ["~", "/fixture/home"], ["~/proj", "/fixture/home/proj"]])("lost Start from %s holds and sends canonical %s for exact strict association", async (enteredWorkspace, canonicalWorkspace) => {
+  const f = fixture("#coordinated/new"); f.expansion(canonicalWorkspace); f.reply(new Error("lost fixture response"));
+  render(<App />); await screen.findByRole("textbox", { name: /message composer/i });
+  fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: enteredWorkspace } });
+  fireEvent.change(text(), { target: { value: "New exact goal" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false));
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).not.toBeNull());
+  const sent = f.calls.find(c => c.messageType === "coordination_start")!.payload;
+  expect(typeof sent.requestId).toBe("string"); expect(sent.workspaceRoot).toBe(canonicalWorkspace); expect(text().value).toBe("New exact goal");
+  expect(text()).toHaveProperty("disabled", true);
+  const id = String(sent.requestId), jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  f.candidate({ kind: "submission-candidate", jobId, admittedRequestId: "same-text-wrong-id", rootRequestId: id, goal: "New exact goal", workspacePath: canonicalWorkspace, identityConfirmed: true, active: true });
+  await f.tick(); expect(f.calls.filter(c => c.messageType === "coordination_status")).toHaveLength(0);
+  expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).not.toBeNull();
+  f.candidate({ kind: "submission-candidate", jobId, admittedRequestId: id, rootRequestId: id, goal: "New exact goal", workspacePath: canonicalWorkspace, identityConfirmed: true, active: true });
+  const status = { jobId, requestId: "same-text-wrong-id", goal: "New exact goal", workspacePath: canonicalWorkspace, state: "running", active: true, live: true, revoked: false, workerPid: 1, readMaxTurns: 4, writeMaxTurns: null, counters: null, pendingCommand: null, completedCommands: [], progress: null, outcome: null };
+  f.status({ source: "host-status", job: status, jobId }); await f.tick();
+  expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).not.toBeNull();
+  expect(text().value).toBe("New exact goal");
+  f.status({ source: "unavailable", job: null, jobId, reason: "The open allowance could not be confirmed." }); await f.tick();
+  expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).not.toBeNull();
+  f.status({ source: "host-status", job: { ...status, requestId: id }, jobId }); await f.tick();
+  await waitFor(() => expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).toBeNull());
+  expect(f.calls.filter(c => c.messageType === "coordination_start")).toHaveLength(1);
+  expect(f.calls.filter(c => c.messageType === "coordination_status").every(c => c.payload.jobId === jobId)).toBe(true);
+  expect(f.calls.filter(c => c.messageType === "coordination_continue")).toHaveLength(0);
+});
+
+it("an unresolved home-folder path stays editable and sends no admission", async () => {
+  const f = fixture("#coordinated/new"); f.expansion(null);
+  render(<App />); await screen.findByRole("textbox", { name: /message composer/i });
+  fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "~/proj" } });
+  fireEvent.change(text(), { target: { value: "Keep unresolved draft" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", false));
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await screen.findByText("The home-folder path could not be resolved. Recheck the folder before sending.");
+  expect(text().value).toBe("Keep unresolved draft"); expect(text().disabled).toBe(false);
+  expect(sessionStorage.getItem("goalport.linux.admissionUnsaid")).toBeNull();
+  expect(f.calls.filter(c => c.messageType === "coordination_start")).toHaveLength(0);
+});
+
+it.each(["foreign", "unknown"])("New goal keeps the view when terminal B has %s global slot evidence", async kind => {
+  const f = liveFixture(); render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "Keep while ending" } });
+  f.stop(() => {
+    f.job(null); f.slot(kind === "foreign" ? { kind: "occupied", jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", admittedRequestId: "foreign" } : { kind: "unknown" });
+    f.allowance({ jobId: f.jobValue.jobId, requestId: "a", goal: "Goal A", workspacePath: "/work/a", followUpMode: "live-read-once", state: "stopped", active: false, live: false, revoked: true, workerPid: null, pendingCommand: null, completedCommands: [], counters: null, progress: null, readMaxTurns: 4, writeMaxTurns: null, outcome: { status: "stopped" } });
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await screen.findByText(kind === "foreign" ? "Another goal owns the work slot. Your current view is kept." : "The work slot could not be confirmed. Your view is kept.");
+  expect(window.location.hash).toBe("#coordinated/result/a"); expect(text().value).toBe("Keep while ending");
+  expect(f.calls.filter(c => c.messageType === "coordination_stop")).toHaveLength(1);
+});
+
+it("explicit idle Stop retains its close identity: passive done cannot skip strict status/slot confirmation on New goal", async () => {
+  const f = liveFixture(); render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "Keep after Stop" } });
+  f.stop(() => {
+    f.job(null);
+    f.allowance({ jobId: f.jobValue.jobId, requestId: "a", goal: "Goal A", workspacePath: "/work/a", followUpMode: "live-read-once", state: "stopped", active: false, live: false, revoked: true, workerPid: null, pendingCommand: null, completedCommands: [], counters: null, progress: null, readMaxTurns: 4, writeMaxTurns: null, outcome: { status: "stopped", allowanceEnd: "idle-stopped" } });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Stop Goal A" }));
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "coordination_stop")).toHaveLength(1));
+  await f.tick(); expect(window.location.hash).toBe("#coordinated/result/a"); expect(text().value).toBe("Keep after Stop");
+  const before = f.calls.filter(c => c.messageType === "coordination_status").length;
+  f.slot({ kind: "occupied", jobId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", admittedRequestId: "foreign" });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await screen.findByText("Another goal owns the work slot. Your current view is kept.");
+  expect(f.calls.filter(c => c.messageType === "coordination_status").length).toBeGreaterThan(before);
+  expect(window.location.hash).toBe("#coordinated/result/a"); expect(text().value).toBe("Keep after Stop");
+  f.slot({ kind: "empty" });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
+  expect(f.calls.filter(c => c.messageType === "coordination_stop")).toHaveLength(1);
+  expect(f.calls.filter(c => ["coordination_start", "coordination_continue"].includes(c.messageType))).toHaveLength(0);
+});
+
+it("New goal drain timeout keeps identity; explicit confirmation retry does not revoke an ended worker again", async () => {
+  const f = liveFixture(); render(<App />); await screen.findByRole("heading", { name: "Goal A" });
+  await waitFor(() => expect(continuation()).toHaveProperty("disabled", false));
+  fireEvent.change(text(), { target: { value: "Retain through drain" } });
+  vi.useFakeTimers();
+  const started = performance.now(); let freshHelpers = 0;
+  const ended = { jobId: f.jobValue.jobId, requestId: "a", goal: "Goal A", workspacePath: "/work/a", followUpMode: "live-read-once", state: "stopped", active: false, live: false, revoked: true, workerPid: null, pendingCommand: null, completedCommands: [], counters: null, progress: null, readMaxTurns: 4, writeMaxTurns: null, outcome: { status: "stopped" } };
+  f.stop(() => {
+    f.job(null);
+    f.statusRead(async () => {
+      if (performance.now() - started < 3000) return { source: "unavailable", job: null, jobId: f.jobValue.jobId, reason: "The open allowance could not be confirmed." };
+      freshHelpers++;
+      await new Promise(resolve => window.setTimeout(resolve, 3000));
+      return { source: "host-status", job: ended, jobId: f.jobValue.jobId };
+    });
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(5001); });
+  expect(window.location.hash).toBe("#coordinated/result/a"); expect(text().value).toBe("Retain through drain");
+  expect(screen.getByText(/You can click New goal again to check/)).toBeTruthy();
+  expect(freshHelpers).toBe(1); // Three-second drain plus fresh three-second read cannot fit in five.
+  await act(async () => { await vi.advanceTimersByTimeAsync(1001); });
+  expect(window.location.hash).toBe("#coordinated/result/a"); // Late completion is abandoned, not draft release.
+  f.statusRead(undefined);
+  f.status({ source: "host-status", job: ended, jobId: f.jobValue.jobId });
+  fireEvent.click(screen.getByRole("button", { name: /^New goal(?:\.|$)/ }));
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(window.location.hash).toBe("#coordinated/new");
+  expect(f.calls.filter(c => c.messageType === "coordination_stop")).toHaveLength(1);
+  expect(f.calls.filter(c => ["coordination_start", "coordination_continue"].includes(c.messageType))).toHaveLength(0);
 });
 
 it("goal route helper keeps coordinated selection separate from Core replacement and rejects malformed routes", () => {

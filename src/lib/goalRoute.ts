@@ -1,6 +1,12 @@
 /** The goal on this page. Refresh reads it back; Core's shared selection does not. */
 
 const GOAL_PREFIX = "/goals/";
+export function isNativeDraftRoute(location: Pick<Location, "hash"> = window.location): boolean {
+  return location.hash === "#codex/new";
+}
+export function setNativeDraftRoute(replace = false): void {
+  window.history[replace ? "replaceState" : "pushState"](null, "", "/#codex/new");
+}
 
 export type CoordinatedRoute = { kind: "new" } | { kind: "result"; requestId: string } | { kind: "unavailable" };
 export function coordinatedRouteFromLocation(location: Pick<Location, "hash"> = window.location): CoordinatedRoute | null {
@@ -35,7 +41,7 @@ export function goalPath(campaignId: string | null): string {
 
 export function replaceGoalRoute(campaignId: string | null): void {
   const next = goalPath(campaignId);
-  if (coordinatedRouteFromLocation() !== null) return;
+  if (coordinatedRouteFromLocation() !== null || isNativeDraftRoute()) return;
   if (`${window.location.pathname}${window.location.search}` === next) return;
   window.history.replaceState(null, "", next);
 }

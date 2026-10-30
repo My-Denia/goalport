@@ -1,5 +1,6 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
+import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
 
 export const MAX_CONTINUATION_PROMPT_BYTES = 100_000;
 export const MAX_CONTINUATION_CHARS = 100_000;
@@ -68,6 +69,8 @@ export interface AuditInputEvidenceCoverage {
   /** Actual UTF-8 bytes of the COMPLETE assembled audit prompt. */
   readonly promptBytes: number;
   readonly promptBudgetBytes?: number;
+  /** Descriptive only; the runtime independently guards the command selector. */
+  readonly promptDelivery?: "stdin" | "argv";
   readonly windowsCmdWorstCaseChars?: number;
   readonly croppedSections?: readonly string[];
 }
@@ -78,6 +81,8 @@ export interface AuditInputEvidenceCoverage {
 // reserve covers the executable and fixed audit argv on the supported route.
 export const MAX_AUDIT_PROMPT_BYTES = 4096;
 export const AUDIT_EVIDENCE_RESERVE_BYTES = 2048;
+export const LINUX_PI_AUDIT_PROMPT_BYTES = 32768;
+export const LINUX_PI_AUDIT_EVIDENCE_RESERVE_BYTES = 16384;
 export const WINDOWS_CMD_ESCAPE_FACTOR = 6;
 export const WINDOWS_CMD_LAUNCH_RESERVE_CHARS = 4096;
 export const WINDOWS_CMD_MAX_CHARS = 32767;
@@ -217,6 +222,8 @@ export function formatEvidenceForAudit(
 export interface SyntheticCatalogInstance {
   readonly instanceId: string;
   readonly name: string;
+  readonly piCapacity?: PiCapacityMetadata;
+  readonly piCredentialKind?: string;
   readonly defaultModel?: string;
   readonly models?: readonly (string | CatalogModel)[];
   readonly overageWindowIds?: readonly string[];
@@ -255,6 +262,11 @@ export interface ExecutionFeedback {
 
 export interface CoordinateGoalInput {
   readonly catalog: readonly SyntheticCatalogInstance[];
+  readonly piCapacity?: PiCapacitySelection;
+  /** Server-derived existing-parent context only, never renderer/admission authority. */
+  readonly legacyPiContinuation?: boolean;
+  /** In-memory worker capability; never an admission, grant, or UI setting. */
+  readonly auditPromptTransport?: "linux-pi-stdin";
   readonly writeAuthorization?: CoordinationWriteAuthorization;
   readonly goal: string;
   readonly workspacePath: string;
@@ -292,6 +304,8 @@ export interface CoordinateGoalInput {
 
 /** Exclusions applied on top of the base catalog filters. */
 export interface EligibilityFilter {
+  readonly piCapacity?: PiCapacitySelection;
+  readonly legacyPiContinuation?: boolean;
   /** Instance ids that may not receive a role (failed turns, roles already assigned). */
   readonly exclude?: readonly string[];
   /** Draft avoidance (Send again without X) — blocked like persisted health. */
@@ -458,10 +472,13 @@ export function eligibleInstances(
   const exclude = new Set(filter.exclude ?? []);
   const avoid = new Set(filter.avoidInstances ?? []);
   const allowed = filter.allowedInstances === undefined ? null : new Set(filter.allowedInstances);
-  return uniqueInstances(catalog).filter((instance) => {
+  const eligible = uniqueInstances(catalog).filter((instance) => {
     const named = allowed !== null && allowed.has(instance.instanceId);
     // An explicitly named harness whose sign-in type is unknown can take a
     // role. It is not added to the default pool, and it is not a subscription.
+    if (instance.instanceId === "pi" && instance.piCapacity) {
+      return named && !avoid.has("pi") && !exclude.has("pi") && selectedPiEligible(instance, filter.piCapacity, filter.legacyPiContinuation === true);
+    }
     const explicitUnknown = named && instance.billing === "unknown"
       && instance.enabled !== false && instance.installed !== false
       && instance.launchable !== false && instance.authenticated !== false
@@ -473,6 +490,11 @@ export function eligibleInstances(
     if (allowed !== null && !allowed.has(instance.instanceId)) return false;
     return true;
   });
+  // A deliberate Pi capacity choice is a Codex + Pi role contract, not a
+  // third candidate that can silently lose its role to another subscription.
+  return filter.piCapacity
+    ? ["codex", "pi"].flatMap(id => eligible.filter(instance => instance.instanceId === id))
+    : eligible;
 }
 
 function quotaLabelsFor(instances: readonly SyntheticCatalogInstance[]): Record<string, QuotaWord> {
@@ -504,9 +526,9 @@ function stopped(quotaLabels: Readonly<Record<string, QuotaWord>>, stopReason: s
  * a different instance derives a different id, which is what makes a
  * recovery turn a fresh grant instead of a resend.
  */
-function commandKey(role: "plan" | "review" | "execute" | "audit", instanceId: string, text: string, sendKey: string): string {
+function commandKey(role: "plan" | "review" | "execute" | "audit", instanceId: string, text: string, sendKey: string, piCapacity?: PiCapacitySelection): string {
   let hash = 2166136261;
-  const data = `${role}\n${instanceId}\n${sendKey}\n${text}`;
+  const data = `${role}\n${instanceId}\n${sendKey}\n${text}` + (instanceId === "pi" && piCapacity ? `\npi-capacity\n${JSON.stringify([piCapacity.provider, piCapacity.model])}` : "");
   for (let index = 0; index < data.length; index += 1) {
     hash ^= data.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
@@ -618,12 +640,15 @@ function turnCommand(input: {
   workspacePath: string;
   text: string;
   write?: boolean;
+  piCapacity?: PiCapacitySelection;
 }): CoordinateTurnCommand {
   return {
     type: "goalport.coordinateTurn",
     commandId: input.commandId,
     projectId: "coordinate-project",
-    modelSelection: { instanceId: input.instance.instanceId, model: publishedModel(input.instance) },
+    modelSelection: input.instance.instanceId === "pi" && input.piCapacity
+      ? { instanceId: "pi", provider: input.piCapacity.provider, model: input.piCapacity.model }
+      : { instanceId: input.instance.instanceId, model: publishedModel(input.instance) },
     runtimeMode: "approval-required",
     approvalPolicy: "never",
     sandboxPolicy: { type: input.write ? "workspaceWrite" : "readOnly" },
@@ -646,7 +671,8 @@ export function replacementCommand(
   const text = role === "plan" ? plannerText(input) : reviewText(input);
   assertContinuationPrompt(input, text);
   const command = turnCommand({
-    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey)),
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey), input.piCapacity),
+    piCapacity: input.piCapacity,
     instance,
     workspacePath: input.workspacePath,
     text,
@@ -696,7 +722,8 @@ export function evidenceCommand(
     ].join("\n");
     assertContinuationPrompt(input, text);
     const command = turnCommand({
-      commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
+      commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
+      piCapacity: input.piCapacity,
       instance, workspacePath: input.workspacePath, text, write: true,
     });
     if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
@@ -705,6 +732,11 @@ export function evidenceCommand(
     return command;
   }
 
+  // Re-derive for the final selected instance on EVERY initial/replacement
+  // audit. A non-Pi replacement cannot inherit the previous Pi's capacity.
+  const stdin = input.auditPromptTransport === "linux-pi-stdin" && instance.instanceId === "pi";
+  const promptBudget = stdin ? LINUX_PI_AUDIT_PROMPT_BYTES : MAX_AUDIT_PROMPT_BYTES;
+  const evidenceReservation = stdin ? LINUX_PI_AUDIT_EVIDENCE_RESERVE_BYTES : AUDIT_EVIDENCE_RESERVE_BYTES;
   const instruction = input.executionFeedback
     ? "Independently inspect the current workspace read-only against the newly approved corrective plan, its execution report, and captured workspace evidence. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop."
     : "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.";
@@ -734,14 +766,14 @@ export function evidenceCommand(
   let baseCroppedSections: string[] = [];
   let evidenceText = fullEvidence.text;
   let coverage = fullEvidence.coverage;
-  if (fullPromptBytes > MAX_AUDIT_PROMPT_BYTES) {
-    const evidenceReserve = Math.min(AUDIT_EVIDENCE_RESERVE_BYTES, utf8Bytes(fullEvidence.text));
-    const baseBudget = MAX_AUDIT_PROMPT_BYTES - evidenceReserve - 1;
+  if (fullPromptBytes > promptBudget) {
+    const evidenceReserve = Math.min(evidenceReservation, utf8Bytes(fullEvidence.text));
+    const baseBudget = promptBudget - evidenceReserve - 1;
     const variableBaseBudget = Math.max(0, baseBudget - utf8Bytes(instruction) - 1);
     const fittedBase = fitSections(baseSections, variableBaseBudget);
     baseCroppedSections = fittedBase.croppedSections;
     baseText = `${instruction}\n${fittedBase.text}`;
-    const availableForEvidence = Math.max(0, MAX_AUDIT_PROMPT_BYTES - utf8Bytes(baseText) - 1);
+    const availableForEvidence = Math.max(0, promptBudget - utf8Bytes(baseText) - 1);
     const deliveredEvidence = formatEvidenceForAudit(evidence.executionEvidence, availableForEvidence);
     evidenceText = deliveredEvidence.text;
     coverage = deliveredEvidence.coverage;
@@ -751,23 +783,26 @@ export function evidenceCommand(
     ...coverage,
     cropped: baseCroppedSections.length > 0 || coverage.cropped,
     promptBytes: utf8Bytes(text),
-    promptBudgetBytes: MAX_AUDIT_PROMPT_BYTES,
-    windowsCmdWorstCaseChars: windowsCmdWorstCaseChars(text),
+    promptBudgetBytes: promptBudget,
+    // Old absent-capability records keep their exact legacy key set.
+    ...(stdin ? { promptDelivery: "stdin" as const } : {}),
+    ...(!stdin ? { windowsCmdWorstCaseChars: windowsCmdWorstCaseChars(text) } : {}),
     croppedSections: [...baseCroppedSections, ...(coverage.croppedSections ?? [])],
   };
-  if (actualCoverage.promptBytes > MAX_AUDIT_PROMPT_BYTES ||
-      (actualCoverage.windowsCmdWorstCaseChars ?? 0) > WINDOWS_CMD_MAX_CHARS) {
+  if (actualCoverage.promptBytes > promptBudget ||
+      (!stdin && (actualCoverage.windowsCmdWorstCaseChars ?? 0) > WINDOWS_CMD_MAX_CHARS)) {
     throw new Error("The assembled audit prompt exceeded its transport budget.");
   }
 
   const command = turnCommand({
-    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey)),
+    commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
+    piCapacity: input.piCapacity,
     instance, workspacePath: input.workspacePath, text, write: false,
   });
   if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
     throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
   }
-  return { ...command, auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
+  return { ...command, ...(stdin ? { promptDelivery: "stdin" as const } : {}), auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
 }
 
 /**
@@ -781,6 +816,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   const usable = eligibleInstances(unique, {
     avoidInstances: input.avoidInstances,
     allowedInstances: input.allowedInstances,
+    piCapacity: input.piCapacity,
+    legacyPiContinuation: input.legacyPiContinuation,
   });
   if (input.catalog.length === 0) {
     return stopped(
@@ -868,8 +905,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
 
   const identitySendKey = commandIdentitySendKey(input, input.sendKey);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey), instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey), instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: planner, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {

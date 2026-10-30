@@ -641,6 +641,25 @@ test("full capture, exact delivered audit subset and coverage round-trip while l
   }
 });
 
+test("optional audit transport round-trips top-level and both histories; old and invalid fields stay absent", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-transport-record-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const base = { totalEvidenceBytes: 12000, includedEvidenceBytes: 12000, cropped: false, promptBytes: 15000, promptBudgetBytes: 32768, croppedSections: [] };
+  for (const promptDelivery of [undefined, "stdin", "argv", null, "unknown"]) {
+    const coverage = { ...base, ...(promptDelivery === undefined ? {} : { promptDelivery }) };
+    const expected = { ...base, ...(["stdin", "argv"].includes(promptDelivery) ? { promptDelivery } : {}) };
+    const id = `transport-${String(promptDelivery)}`;
+    const fact = firstRoundFact({ auditInputEvidenceCoverage: coverage });
+    saveRecord(directory, record({ requestId: id, auditInputEvidenceCoverage: coverage, feedbackHistory: [fact], planRevisionHistory: [fact] }));
+    const loaded = readRecords(directory).find(item => item.requestId === id);
+    for (const actual of [loaded.auditInputEvidenceCoverage, loaded.feedbackHistory[0].auditInputEvidenceCoverage, loaded.planRevisionHistory[0].auditInputEvidenceCoverage]) {
+      assert.deepEqual(actual, expected);
+      assert.equal(Object.hasOwn(actual, "promptDelivery"), ["stdin", "argv"].includes(promptDelivery));
+      assert.equal(Object.hasOwn(actual, "windowsCmdWorstCaseChars"), false);
+    }
+  }
+});
+
 test("valid new continuation descriptor round-trips with CJK, emoji, and empty follow-up", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-continuation-roundtrip-"));
   try {

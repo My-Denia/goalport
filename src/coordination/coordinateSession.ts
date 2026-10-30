@@ -1,3 +1,4 @@
+import { normalizeRequestedPiCapacity, type PiPair } from "../../electron/pi-capacity.mjs";
 import {
   coordinateGoal,
   assertContinuationPrompt,
@@ -28,7 +29,16 @@ export type CoordinationStopCode =
   | "scope-exhausted"
   | "scope-revoked";
 
+export interface AuditInputTransport {
+  readonly instanceId: "pi";
+  readonly promptDelivery: "stdin";
+  /** Host UTF-8 bytes and stream-end confirmation, not model consumption. */
+  readonly inputBytes: number;
+  readonly inputEnded: boolean;
+}
+
 export interface CoordinateLaunchResult {
+  readonly requestedPiCapacity?: PiPair;
   readonly text: string;
   readonly errorText: string;
   readonly prepared?: boolean;
@@ -52,6 +62,7 @@ export interface CoordinateLaunchResult {
   readonly writeTurnsRemaining?: number | null;
   readonly scopeExhausted?: boolean;
   readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputTransport?: AuditInputTransport;
 }
 
 export interface EnvironmentBlockedInfo {
@@ -90,6 +101,7 @@ export interface CoordinateSessionOptions {
 }
 
 export interface CoordinateSessionState extends CoordinateGoalState {
+  readonly requestedPiCapacity?: PiPair;
   readonly planText: string | null;
   readonly reviewText: string | null;
   readonly executionText?: string | null;
@@ -492,6 +504,7 @@ async function runRecoveryRound(
   let turnsRemaining: number | null | undefined;
   let writeTurnsRemaining: number | null | undefined = write?.remaining;
   let dispatchState: "unsent" | "sent" | "unknown" = "unsent";
+  let requestedPiCapacity: PiPair | undefined;
 
   const mergeDispatch = (value: boolean | null | undefined) => {
     if (value === true) dispatchState = "sent";
@@ -502,6 +515,8 @@ async function runRecoveryRound(
   const poolFor = (role: CoordinationRole) => eligibleInstances(input.catalog, {
     avoidInstances: input.avoidInstances,
     allowedInstances: role === "execution" ? write?.instances : input.allowedInstances,
+    piCapacity: input.piCapacity,
+    legacyPiContinuation: input.legacyPiContinuation,
     exclude: [...failed],
   }).filter((item) => !used.has(usedKey(role, item.instanceId)));
   const counterpart = (role: CoordinationRole): CoordinationRole | null =>
@@ -539,6 +554,7 @@ async function runRecoveryRound(
       reviewQuota: review ? plan.quotaLabels[review.instanceId] ?? null : null,
       roles: planning && review ? plan.roles : [],
       commands: launched, quotaLabels: plan.quotaLabels, planText, reviewText,
+      ...(requestedPiCapacity ? { requestedPiCapacity } : {}),
       verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
       ...(write ? {
         executionText, auditText,
@@ -650,6 +666,8 @@ async function runRecoveryRound(
       } else {
         result = await transport.launch(launchCommand);
       }
+      const requested = normalizeRequestedPiCapacity(result.requestedPiCapacity);
+      if (requested && instance.instanceId === "pi") requestedPiCapacity = requested;
       mergeDispatch(result.dispatched);
       turnsRemaining = result.turnsRemaining ?? null;
       if (write) writeTurnsRemaining = result.writeTurnsRemaining ?? null;

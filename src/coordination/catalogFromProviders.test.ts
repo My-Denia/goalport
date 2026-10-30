@@ -24,6 +24,19 @@ function usableInstance(instanceId: string, environmentHealth?: unknown) {
 }
 
 describe("catalog auth billing", () => {
+  it.each(["oauth-only", "apiKey-only", "mixed", "unreported"])("keeps new Linux Pi %s billing unknown, out of the unnamed pool, eligible only with exact intent", kind => {
+    const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+    const pi = { ...baseProvider, instanceId: "pi", auth: { status: "invalid_state", type: kind === "apiKey-only" ? "apiKey" : kind === "unreported" ? "unknown" : "subscription", credentialKind: kind }, piCapacity: { catalog: [{ provider: "Fixture", model: "alpha" }], offer: pair } };
+    const catalog = catalogFromProviderSnapshots([baseProvider, pi]);
+    expect(catalog[1].billing).toBe("unknown");
+    expect(catalog[1].authenticated).toBeUndefined();
+    expect(usableInstanceIds(catalog)).toEqual(["codex"]);
+    const input = { catalog, allowedInstances: ["codex", "pi"], goal: "Inspect", workspacePath: "/fixture", sendKey: "intent" };
+    expect(coordinateGoal(input).commands).toHaveLength(0);
+    expect(coordinateGoal({ ...input, piCapacity: pair }).commands).toHaveLength(2);
+    const unavailable = catalogFromProviderSnapshots([baseProvider, { ...pi, auth: { ...pi.auth, status: "unauthenticated" } }]);
+    expect(coordinateGoal({ ...input, catalog: unavailable, piCapacity: pair }).commands).toHaveLength(0);
+  });
   it("keeps a confirmed subscription usable and does not treat unknown auth as one", () => {
     const catalog = catalogFromProviderSnapshots([
       usableInstance("codex"),

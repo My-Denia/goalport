@@ -190,6 +190,9 @@ export function ProductConversationView({ product, loadingEarlier = false, onLoa
   const nodes = useMemo(() => renderItems(visibleItems, onChooseRuntime, onDiagnose), [visibleItems, onChooseRuntime, onDiagnose]);
   return (
     <div className="timeline-inner" data-product-conversation="true">
+      {product.runtime.provider === "codex" ? <p className="draft-hint" role="status">{product.session?.transport === "app-server"
+        ? "Codex app-server · native conversation context"
+        : product.session?.transport === "exec" ? "One-shot Codex; native session continuation is unavailable" : "Transport not confirmed"}</p> : null}
       {product.pageInfo?.hasOlder && onLoadEarlier ? (
         <button className="button button-quiet history-load-earlier" type="button" onClick={onLoadEarlier} disabled={loadingEarlier}>
           {loadingEarlier ? "Loading earlier…" : "Load earlier"}

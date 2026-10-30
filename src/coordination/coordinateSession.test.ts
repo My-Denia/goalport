@@ -603,6 +603,74 @@ describe("coordinate session", () => {
   });
 });
 
+describe("Linux Pi audit transport through session and request reconstruction", () => {
+  const piProvider = { ...providersWithThird[1]!, instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const material = { status: "available" as const, complete: true, changed: true, beforeDiff: "before", afterDiff: Array.from({ length: 120 }, (_, i) => `+file-change-${i}: 中文😀 retained multi-file material`).join("\n") };
+  const ready = { connected: true, sendAuthorized: true, providers: [providersWithThird[0]!, piProvider], stopReason: null };
+  const host = { goal, workspacePath, sendKey: "stdin-session", auditPromptTransport: "linux-pi-stdin" as const, allowedInstances: ["codex", "pi"], writeAuthorization: { instances: ["codex"], workspaceRoot: workspacePath, remaining: 2 } };
+  const ok = (text: string): CoordinateLaunchResult => ({ text, errorText: "", dispatched: true, turnsRemaining: 8, writeTurnsRemaining: 1 });
+
+  it.each([false, true])("replacement re-derives its own capacity (Pi first=$0)", async piFirst => {
+    const third = providersWithThird[1]!;
+    const roster = [providersWithThird[0]!, ...(piFirst ? [piProvider, third] : [third, piProvider])];
+    const transport = recordingTransport([ok("plan"), ok("VERDICT: carry-out"), { ...ok("report"), executionEvidence: material },
+      { text: "", errorText: "not installed", dispatched: false, stopCode: "not-installed", turnsRemaining: 8, writeTurnsRemaining: 0 }, ok("VERDICT: verified")]);
+    const state = await runCoordinateSession({ ...host, catalog: catalogFromProviderSnapshots(roster), allowedInstances: ["codex", "pi", "claude"] },
+      { sendAuthorized: true, allowedInstances: ["codex", "pi", "claude"] }, transport);
+    expect(state.verdict).toBe("verified");
+    const audits = transport.calls.slice(3) as Array<CoordinateTurnCommand & { auditInputEvidenceCoverage: import("./coordinateGoal").AuditInputEvidenceCoverage }>;
+    expect(audits).toHaveLength(2);
+    for (const audit of audits) {
+      const pi = audit.modelSelection.instanceId === "pi";
+      expect(audit.promptDelivery).toBe(pi ? "stdin" : undefined);
+      expect(audit.auditInputEvidenceCoverage.promptBudgetBytes).toBe(pi ? 32768 : 4096);
+      expect(audit.auditInputEvidenceCoverage.cropped).toBe(!pi);
+      expect(Object.hasOwn(audit.auditInputEvidenceCoverage, "windowsCmdWorstCaseChars")).toBe(!pi);
+    }
+    expect(state.auditInputEvidenceCoverage).toEqual(audits[1]!.auditInputEvidenceCoverage);
+  });
+
+  it("initial, revised and corrective inputs retain host capability; coverage survives view and feedback", async () => {
+    const calls: CoordinateTurnCommand[] = [];
+    let reviews = 0;
+    let audits = 0;
+    const view = await requestCoordination({ ...host, beforePlanRevision: async () => true, beforeRepair: async () => true }, ready, {
+      async launch(command) {
+        calls.push(command);
+        const role = command.commandId.split("-")[1];
+        if (role === "review") return ok(++reviews === 1 ? "Fix plan\nVERDICT: revise" : "VERDICT: carry-out");
+        if (role === "audit") return ok(++audits === 1 ? "Check repair\nVERDICT: revise" : "VERDICT: verified");
+        if (role === "execute") return { ...ok("Actual changes reported"), executionEvidence: material };
+        return ok("Bounded plan");
+      },
+    });
+    expect(calls).toHaveLength(10);
+    expect(view.verdict).toBe("verified");
+    const auditCommands = calls.filter(command => command.commandId.startsWith("coordinate-audit-"));
+    expect(auditCommands).toHaveLength(2);
+    for (const command of auditCommands) {
+      expect(command.promptDelivery).toBe("stdin");
+      expect(command.initialMessage.text).toContain(material.afterDiff);
+      expect(new TextEncoder().encode(command.initialMessage.text).length).toBeGreaterThan(8192);
+    }
+    expect(view.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", promptBudgetBytes: 32768, cropped: false });
+    expect(view.feedbackHistory?.[0]?.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", promptBudgetBytes: 32768, cropped: false });
+    expect(view.planRevisionHistory).toHaveLength(1);
+    expect(calls.filter(command => !command.commandId.startsWith("coordinate-audit-")).every(command => !Object.hasOwn(command, "promptDelivery"))).toBe(true);
+  });
+
+  it("an unknown stdin audit stops without replacement or another role, retaining supplied material", async () => {
+    const transport = recordingTransport([ok("plan"), ok("VERDICT: carry-out"), { ...ok("report"), executionEvidence: material },
+      { text: "unconfirmed partial output", errorText: "Input delivery unconfirmed", dispatched: null, auditInputTransport: { instanceId: "pi", promptDelivery: "stdin", inputBytes: 9000, inputEnded: false } }]);
+    const view = await requestCoordination({ ...host, beforeRepair: async () => { throw Error("must not repair"); } }, ready, transport);
+    expect(transport.calls).toHaveLength(4);
+    expect(view.verdict).not.toBe("verified");
+    expect(view.auditText).toBe("unconfirmed partial output");
+    expect(view.auditInputEvidenceCoverage).toMatchObject({ promptDelivery: "stdin", cropped: false });
+    expect(view.feedbackHistory).toBeUndefined();
+  });
+});
+
 // All extra-catalog cases are synthetic staffing fixtures, not third-native admission.
 describe("explicitly authorized execution and independent audit", () => {
   const catalog = catalogFromProviderSnapshots(providersWithThird);

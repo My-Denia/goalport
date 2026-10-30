@@ -22,8 +22,8 @@ test("every real IPC channel uses one fail-closed sender gate", () => {
   const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
   assert.doesNotMatch(source, /ipcMain\.handle\(/);
   const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 27);
-  for (const channel of ["goalport:background-send-consent", "goalport:background-start", "goalport:background-status", "goalport:background-revoke", "goalport:background-acknowledge", "goalport:background-release-terminal", "goalport:background-held-workspaces"]) assert.ok(channels.includes(channel));
+  assert.equal(channels.length, 28);
+  for (const channel of ["goalport:background-send-consent", "goalport:background-start", "goalport:background-status", "goalport:background-continue", "goalport:background-revoke", "goalport:background-acknowledge", "goalport:background-release-terminal", "goalport:background-held-workspaces"]) assert.ok(channels.includes(channel));
   for (const channel of channels) {
     const f = fixture(); let calls = 0;
     f.handle(channel, () => ++calls);

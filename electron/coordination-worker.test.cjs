@@ -1,4 +1,6 @@
 const { test } = require("node:test");
+// Keep the additive lifecycle cases in the existing test:coordination entry.
+require("./live-read-once.test.cjs");
 const { randomUUID } = require("node:crypto");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -21,8 +23,8 @@ async function scenario(t, options = {}) {
   let authorizations = 0;
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
-  const roster = options.providers ?? providers;
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), backgroundConsent: true });
+  const roster = (options.providers ?? providers).map(provider => options.piCapacity && provider.instanceId === "pi" ? { ...provider, auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: options.piCapacity, catalog: [{ provider: options.piCapacity.provider, model: options.piCapacity.model }], workspacePath: directory } } : provider);
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), ...(options.piCapacity ? { piCapacity: options.piCapacity } : {}), backgroundConsent: true });
   if (options.storeDecorator) {
     options.store = options.storeDecorator(options.store ?? store, start);
   }
@@ -31,6 +33,7 @@ async function scenario(t, options = {}) {
     launches.push(command);
     if (options.onLaunch) options.onLaunch(command, launches.length);
     if (options.revokeAt === launches.length) store.revoke(start.jobId);
+    if (options.runtimeRun) return options.runtimeRun(command, runtime.stateDir);
     const n = launches.length;
     const role = command.commandId.split("-")[1];
     const text = role === "review" ? (options.reviewAt?.[n] ?? "Execute this plan.\nVERDICT: carry-out") : role === "audit" ? `Tests checked.\nVERDICT: ${options.secondRevise || n === 4 ? "revise" : "verified"}` : role === "execute" ? "Changed fixture." : "A bounded plan.";
@@ -53,9 +56,11 @@ async function scenario(t, options = {}) {
     } };
   }
   let backgroundEngineInputValue;
-  const workerEngine = options.captureExecutionFeedback ? {
+  let requestCoordinationInputValue;
+  const workerEngine = options.captureExecutionFeedback || options.captureRequest ? {
     ...engine,
     backgroundEngineInput: input => { backgroundEngineInputValue = input; return engine.backgroundEngineInput(input); },
+    requestCoordination: (...args) => { requestCoordinationInputValue = args[0]; return engine.requestCoordination(...args); },
   } : engine;
   const controlEndpoint = process.platform === "win32" ? String.raw`\\.\pipe\goalport-worker-test-` + randomUUID() : path.join(directory, "control.sock");
   if (options.consentGranted) fs.writeFileSync(path.join(directory, "background-send-consent.json"), JSON.stringify({ allowed: true, grantedAt: new Date().toISOString() }) + "\n");
@@ -65,8 +70,74 @@ async function scenario(t, options = {}) {
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
   }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
-  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue };
+  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue, requestCoordinationInputValue };
 }
+test("bound Pi own admission reaches engine, actual launch facts and saved requested projection without a provider", async t => {
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const r = await scenario(t, { providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, readOnly: true, captureRequest: true, runtimeRun: async command => ({ ok: true, messageDispatched: true, text: command.commandId.includes("review") ? "VERDICT: carry-out" : "A bounded fixture plan", ...(command.modelSelection.instanceId === "pi" ? { requestedPiCapacity: { provider: "Fixture", model: "alpha" } } : {}) }) });
+  assert.deepEqual(r.requestCoordinationInputValue.piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.status.completedCommands[1].facts.requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.launches[1].modelSelection, { instanceId: "pi", provider: "Fixture", model: "alpha" });
+});
+
+test("Linux worker derives capability after the closed builder; real stdin facts survive completed or pending command", { skip: process.platform !== "linux" }, async t => {
+  const { runCliTurn, defaultSpawn } = require("./cli-coordinate.cjs");
+  const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  for (const unknown of [false, true]) {
+    let auditChild;
+    let childClosed;
+    let actualInput;
+    const ran = await scenario(t, {
+      providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, captureRequest: true,
+      runtimeRun: async (command, stateDir) => {
+        const role = command.commandId.split("-")[1];
+        if (role !== "audit") return { ok: true, messageDispatched: true, text: role === "review" ? "VERDICT: carry-out" : "Bounded plan and report", ...(role === "execute" ? { executionEvidence: { status: "available", complete: true, changed: true, beforeDiff: "before", afterDiff: "+real captured change\n".repeat(420) } } : {}) };
+        actualInput = command.initialMessage.text;
+        return runCliTurn(command, { stateDir, piCapacity, metadataExec: async () => ({ code: 0, stdout: "provider model context max-out thinking images\nFixture alpha 128K 16K yes yes\n" }), spawnTurn: spec => defaultSpawn({ ...spec, file: process.execPath,
+          args: ["-e", unknown ? "setInterval(()=>{},1000)" : "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write('Read '+Buffer.concat(b).length+' host bytes.\\nVERDICT: verified'))"],
+          register(child) {
+            auditChild = child;
+            childClosed = new Promise(resolve => child.once("close", resolve));
+            if (unknown) throw Error("registered real child, then setup failed");
+          },
+        }) });
+      },
+    });
+    try {
+      assert.equal(ran.requestCoordinationInputValue.auditPromptTransport, "linux-pi-stdin");
+      assert.equal(Object.hasOwn(ran.backgroundEngineInputValue, "auditPromptTransport"), false);
+      assert.equal(Object.hasOwn(engine.backgroundEngineInput(ran.backgroundEngineInputValue), "auditPromptTransport"), false);
+      assert.equal(ran.launches.length, 4);
+      const inputBytes = Buffer.byteLength(actualInput);
+      assert.ok(inputBytes > 8192 && inputBytes <= 32768);
+      const facts = unknown ? ran.status.progress.partialResult : ran.status.completedCommands.at(-1).facts;
+      assert.deepEqual(facts.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes, inputEnded: !unknown });
+      assert.equal(facts.dispatched, unknown ? null : true);
+      assert.equal(fs.existsSync(path.join(ran.directory, "harness-state", `claim-${ran.launches[3].commandId}`)), true);
+      const grantsFile = path.join(ran.directory, "harness-state", "send-authorization");
+      assert.equal(fs.existsSync(grantsFile) && fs.readFileSync(grantsFile, "utf8").includes(ran.launches[3].commandId), false);
+      assert.equal(ran.status.counters.readTurnsRemaining, 3);
+      if (unknown) {
+        assert.equal(ran.status.pendingCommand.commandId, ran.launches[3].commandId);
+        assert.equal(ran.status.completedCommands.length, 3);
+        assert.throws(() => ran.store.claimWorker(ran.jobId), /no replacement|already|unconfirmed/);
+      } else {
+        assert.equal(ran.status.pendingCommand, null);
+        assert.match(facts.text, new RegExp(`Read ${inputBytes} host bytes`));
+        assert.equal(ran.records[0].auditInputEvidenceCoverage.promptDelivery, "stdin");
+        assert.equal(ran.records[0].auditInputEvidenceCoverage.cropped, false);
+      }
+    } finally {
+      if (auditChild.exitCode === null && auditChild.signalCode === null) auditChild.kill("SIGKILL");
+      await childClosed;
+    }
+  }
+});
+
 test("one confirmed harness with write authorization stops before any workspace write and cannot be replayed", async t => {
   const ran = await scenario(t, {
     providers: [providers[0]],

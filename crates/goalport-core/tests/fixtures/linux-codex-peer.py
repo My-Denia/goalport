@@ -13,6 +13,8 @@ pending_permission_turn = None
 pending_callbacks = []
 scenario_file = workspace / "peer-scenario"
 scenario = scenario_file.read_text().strip() if scenario_file.exists() else "quota-then-success"
+if scenario == "native-session" and (workspace / "turn-count").exists():
+    turns = int((workspace / "turn-count").read_text())
 with (workspace / "process-starts").open("a") as started:
     started.write(f"{os.getpid()}\n")
 
@@ -35,6 +37,9 @@ for line in sys.stdin:
         continue
     method = message.get("method")
     request_id = message.get("id")
+    if scenario in ("native-session", "native-title-tools"):
+        with (workspace / "native-requests.jsonl").open("a") as requests:
+            requests.write(json.dumps(message) + "\n")
     if method == "initialize" and request_id is not None:
         if scenario == "stall-initialize":
             (workspace / "initialize-entered").write_text("ready")
@@ -152,13 +157,13 @@ for line in sys.stdin:
         elif scenario == "permission-reuse":
             pending_permission_turn = turn_id
             send({"id": "rpc-A", "method": "item/commandExecution/requestApproval", "params": {"threadId": "local-thread", "turnId": turn_id, "itemId": "rpc-A", "command": "echo fixture"}})
-        elif turns == 1 and scenario != "complete-first":
+        elif turns == 1 and scenario not in ("complete-first", "native-session", "native-title-tools"):
             error = {"message": "fixture limit reached", "codexErrorInfo": "usageLimitExceeded"}
             send({"method": "error", "params": {"threadId": "local-thread", "turnId": turn_id, "error": error, "willRetry": True}})
             send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": turn_id, "status": "failed", "error": error}}})
         else:
             send({"method": "item/agentMessage/delta", "params": {"threadId": "local-thread", "turnId": turn_id, "delta": "I will inspect the code."}})
-            send({"method": "item/commandExecution/started", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "commandExecution"}}})
+            send({"method": "item/started" if scenario == "native-title-tools" else "item/commandExecution/started", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "commandExecution"}}})
             send({"method": "item/agentMessage/completed", "params": {"threadId": "local-thread", "turnId": turn_id, "item": {"type": "agentMessage", "text": "local peer completed"}}})
             send({"method": "turn/completed", "params": {"threadId": "local-thread", "turn": {"id": turn_id, "status": "completed"}}})
     elif method == "turn/interrupt" and scenario in ("permission-stop", "permission-two-stop") and request_id is not None:
