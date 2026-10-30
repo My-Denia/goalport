@@ -92,11 +92,16 @@ function ActionableError({ item, onChooseRuntime, onDiagnose }: { item: ProductC
 }
 
 /** One grouped, collapsed row of REAL tool activity. No invented time/actions. */
+function stepLabel(count: number): string {
+  if (count === 0) return "Working notes";
+  return count === 1 ? "1 step" : `${count} steps`;
+}
+
 /** Everything an agent said on the way to its answer, folded so the answer stands alone. */
 function WorkingGroup({ items, agentName }: { items: ProductConversationItem[]; agentName: string }) {
   return (
     <details className="activity-group" data-kind="working">
-      <summary><span aria-hidden="true">⌁</span>{items.length === 1 ? "1 step" : `${items.length} steps`}</summary>
+      <summary><span aria-hidden="true">⌁</span>{stepLabel(items.filter((item) => item.kind === "activity-summary").length)}</summary>
       {items.map((item) => item.kind === "assistant-message"
         ? <AssistantMessage key={item.id} agentName={agentName} item={item} />
         : <p className="activity-step" key={item.id}><span>{item.body}</span><Timestamp value={item.timestamp} /></p>)}

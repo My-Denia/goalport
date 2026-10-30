@@ -272,6 +272,7 @@ fn permission_request_round_trip_selects_option() {
             PermissionResponse {
                 request_id: request_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("decision should reach the reader");
@@ -319,6 +320,7 @@ fn permission_deny_selects_reject_once() {
             PermissionResponse {
                 request_id,
                 allow: false,
+                for_session: false,
             },
         )
         .expect("decision should reach the reader");
@@ -1016,6 +1018,7 @@ fn stale_cancel_does_not_affect_next_permission() {
             PermissionResponse {
                 request_id: request_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("decision reaches the reader");
@@ -1191,6 +1194,7 @@ fn cancel_after_publish_is_never_drained() {
             PermissionResponse {
                 request_id: "grok-stale-decision-0".into(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("a stale command can be enqueued");
@@ -1365,6 +1369,7 @@ fn latched_cancel_does_not_reach_a_later_turn() {
             PermissionResponse {
                 request_id: request_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("decision reaches the reader");
@@ -1414,6 +1419,7 @@ fn resumed_session_permission_ids_do_not_collide() {
             PermissionResponse {
                 request_id: first_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("decision reaches the reader");

@@ -42,6 +42,9 @@ pub struct ProductConversation {
     pub turn: ProductTurn,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
+    /// What the agent is doing right now, while a tool is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
     /// Additive beyond the packet's minimum wire shape: the deterministic
     /// product title (rename > first prompt, normalized to the first 44 Unicode
     /// characters > root task title). The sidebar needs it from Core.
@@ -190,6 +193,15 @@ pub fn product_conversation(
     } else {
         None
     };
+    let current_step = if turn.can_stop && turn.state == "running" {
+        store
+            .latest_turn_tool_activity(&context.attempt.id)
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .and_then(running_step)
+    } else {
+        None
+    };
     Ok(ProductConversation {
         items,
         page_info,
@@ -197,6 +209,7 @@ pub fn product_conversation(
         session,
         turn,
         result_summary,
+        current_step,
         title,
     })
 }
@@ -509,6 +522,37 @@ fn inside_shell(command: &str) -> &str {
     command
 }
 
+/// The first statement that does something; agents open with `cd` and the like.
+fn main_statement(command: &str) -> &str {
+    command
+        .split("; ")
+        .flat_map(|part| part.split(" && "))
+        .map(str::trim)
+        .find(|part| {
+            let lower = part.to_ascii_lowercase();
+            !part.is_empty()
+                && !part.starts_with('$')
+                && !["cd ", "set-location", "get-location", "pwd"].iter().any(|noise| lower.starts_with(noise))
+        })
+        .unwrap_or(command)
+}
+
+/// A step still in progress, or nothing once the newest tool event has ended.
+fn running_step(payload: &Value) -> Option<String> {
+    if payload.get("status").and_then(Value::as_str) != Some("started") {
+        return None;
+    }
+    let tool = payload.get("toolName").or_else(|| payload.get("tool")).and_then(Value::as_str)?;
+    let done = activity_sentence(tool, "completed", Some(payload));
+    Some(match done.strip_prefix("Ran ") {
+        Some(rest) => format!("Running {rest}"),
+        None => match done.strip_prefix("Changed ") {
+            Some(rest) => format!("Changing {rest}"),
+            None => format!("{done}…"),
+        },
+    })
+}
+
 /// The list under Files changed has the full path; a step only needs the name.
 fn short_path(path: &str) -> &str {
     let absolute = path.starts_with('/') || path.as_bytes().get(1) == Some(&b':');
@@ -531,10 +575,11 @@ fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> Strin
         .map(str::trim)
         .filter(|command| !command.is_empty())
     {
-        let command = inside_shell(command);
-        let first_line = command.lines().next().unwrap_or(command);
+        let whole = inside_shell(command);
+        let part = main_statement(whole);
+        let first_line = part.lines().next().unwrap_or(part);
         let mut shown: String = first_line.chars().take(COMMAND_LIMIT).collect();
-        if shown.len() < command.len() {
+        if shown.len() < whole.len() {
             shown.push('…');
         }
         return if failed { format!("Failed: {shown}") } else { format!("Ran {shown}") };
@@ -1193,7 +1238,7 @@ pub fn campaign_send_authorized(store: &Store, campaign_id: &str) -> Result<bool
 
 #[cfg(test)]
 mod activity_sentence_tests {
-    use super::activity_sentence;
+    use super::{activity_sentence, running_step};
     use serde_json::json;
 
     #[test]
@@ -1217,6 +1262,22 @@ mod activity_sentence_tests {
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "git status"}))), "Ran git status");
         assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["C:\\Users\\me\\repo\\GUIDE.md"]}))), "Changed GUIDE.md");
         assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["docs/guide.md"]}))), "Changed docs/guide.md");
+    }
+
+    #[test]
+    fn steps_lead_with_the_statement_that_matters() {
+        let body = |command: &str| activity_sentence("Bash", "completed", Some(&json!({"command": command})));
+        assert_eq!(body("Get-Location; git status; git branch"), "Ran git status…");
+        assert_eq!(body("cd src && npm test"), "Ran npm test…");
+        assert_eq!(body("$x = 1; npm test"), "Ran npm test…");
+    }
+
+    #[test]
+    fn only_an_unfinished_tool_is_a_running_step() {
+        assert_eq!(running_step(&json!({"tool": "commandExecution", "status": "started", "command": "npm test"})).as_deref(), Some("Running npm test"));
+        assert_eq!(running_step(&json!({"tool": "fileChange", "status": "started", "paths": ["a.md"]})).as_deref(), Some("Changing a.md"));
+        assert_eq!(running_step(&json!({"tool": "Read", "status": "started"})).as_deref(), Some("Read a file…"));
+        assert_eq!(running_step(&json!({"tool": "commandExecution", "status": "completed", "command": "npm test"})), None);
     }
 
     #[test]

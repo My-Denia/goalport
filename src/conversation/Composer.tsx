@@ -124,6 +124,8 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, curren
     ? "Some tools may still be running. Your draft stays here while the workspace is protected."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
+      : turn.state === "waiting-permission"
+      ? `${runtime?.name ?? "The agent"} is waiting for your OK`
       : turn.canStop
       ? `${runtime?.name ?? "The agent"} is working · ${elapsed}${currentStep ? ` · ${currentStep}` : ""}`
       : canCarryOn

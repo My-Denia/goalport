@@ -2,7 +2,7 @@ import type { CoreSnapshot } from "../types";
 
 interface PendingApprovalsProps {
   snapshot: CoreSnapshot;
-  onPermissionDecision: (decisionId: string, allow: boolean) => void;
+  onPermissionDecision: (decisionId: string, allow: boolean, forSession?: boolean) => void;
 }
 
 /**
@@ -30,6 +30,7 @@ export function PendingApprovals({ snapshot, onPermissionDecision }: PendingAppr
               : decision.facts.map((fact) => <pre className="decision-action" key={fact}>{fact}</pre>)}
             <div className="decision-actions">
               <button className="button button-accent" type="button" onClick={() => onPermissionDecision(decision.id, true)} disabled={held || decision.actionKnown === false}>Allow once</button>
+              {decision.sessionAnswer && decision.actionKnown !== false ? <button className="button button-outline" type="button" onClick={() => onPermissionDecision(decision.id, true, true)} disabled={held}>Allow for this session</button> : null}
               <button className="button button-danger" type="button" aria-label="Decline permission" onClick={() => onPermissionDecision(decision.id, false)}>Decline</button>
             </div>
             {held ? <p className="decision-hold-note">Allow is off until the earlier stop is confirmed. You can still decline.</p> : null}

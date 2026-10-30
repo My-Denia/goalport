@@ -169,7 +169,7 @@ export interface CoreClient {
   snapshot(): Promise<CoreSnapshot>;
   createCampaign(workspaceRoot: string, goal: string): Promise<CoreSnapshot>;
   sendMessage(message: string, campaignId: string, attemptId: string, taskId?: string): Promise<CoreSnapshot>;
-  resolveDecision(decisionId: string, allow?: boolean): Promise<CoreSnapshot>;
+  resolveDecision(decisionId: string, allow?: boolean, forSession?: boolean): Promise<CoreSnapshot>;
   reconnect(): Promise<CoreSnapshot>;
   handoff?(provider: string, oldAttemptId: string, instruction: string): Promise<CoreSnapshot>;
   startCore(): Promise<CoreSnapshot>;
@@ -607,13 +607,13 @@ class TauriCoreClient implements CoreClient {
     return this.dispatch(command);
   }
 
-  async resolveDecision(decisionId: string, allow = false): Promise<CoreSnapshot> {
+  async resolveDecision(decisionId: string, allow = false, forSession = false): Promise<CoreSnapshot> {
     const command: CoreCommand = {
       protocolVersion: IPC_PROTOCOL_VERSION,
       requestId: requestId(),
       entityVersion: this.entityVersion,
       messageType: "resolve_decision",
-      payload: { decisionId, allow }
+      payload: { decisionId, allow, ...(forSession ? { forSession } : {}) }
     };
     return this.dispatch(command);
   }
@@ -1350,8 +1350,8 @@ class LinuxCoreClient implements CoreClient {
     return this.mutate("send_message", payload, false);
   }
 
-  async resolveDecision(decisionId: string, allow = false): Promise<CoreSnapshot> {
-    return this.mutate("resolve_decision", { decisionId, allow }, false);
+  async resolveDecision(decisionId: string, allow = false, forSession = false): Promise<CoreSnapshot> {
+    return this.mutate("resolve_decision", { decisionId, allow, ...(forSession ? { forSession } : {}) }, false);
   }
 
   async reconnect(): Promise<CoreSnapshot> {

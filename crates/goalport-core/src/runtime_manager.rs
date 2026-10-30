@@ -2076,6 +2076,8 @@ struct ApprovalBinding {
     thread_id: String,
     turn_id: String,
     item_id: Option<String>,
+    /// Codex accepts a session-wide answer for commands and file changes only.
+    session_answer: bool,
     /// The request event has been handed to the projection.
     projected: bool,
     /// Turn closed or the registration ended. Accept must not be written.
@@ -2101,6 +2103,14 @@ fn codex_decision_id(registration: &str, turn_id: &str, rpc_id: &str) -> String 
 
 const PERMISSION_BINDING_ERROR: &str =
     "permission binding does not match the published turn or item";
+
+fn codex_decision(response: &PermissionResponse, session_answer: bool) -> &'static str {
+    match (response.allow, response.for_session && session_answer) {
+        (false, _) => "decline",
+        (true, true) => "acceptForSession",
+        (true, false) => "accept",
+    }
+}
 
 fn approval_binding_from_frame(value: &Value) -> Option<ApprovalBinding> {
     let method = value.get("method").and_then(Value::as_str)?;
@@ -2130,6 +2140,7 @@ fn approval_binding_from_frame(value: &Value) -> Option<ApprovalBinding> {
         thread_id: field("threadId").unwrap_or_default(),
         turn_id: field("turnId").unwrap_or_default(),
         item_id: field("itemId"),
+        session_answer: lower.contains("commandexecution") || lower.contains("filechange"),
         projected: false,
         unanswerable: false,
     })
@@ -3183,7 +3194,7 @@ impl CodexProcess {
         }
         let write = self.send_json(&json!({
             "id": binding.rpc_json,
-            "result": { "decision": if response.allow { "accept" } else { "decline" } }
+            "result": { "decision": codex_decision(&response, binding.session_answer) }
         }));
         if let Err(error) = write {
             // A missing stdin fails before any byte. An error from the write
@@ -8565,6 +8576,9 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
             "kind": "native-permission",
             "text": command.map(|text| bounded_text(&text))
         });
+        if lower.contains("commandexecution") || lower.contains("filechange") {
+            payload["sessionAnswer"] = json!(true);
+        }
         if let Some(id) = provider_request_id {
             payload["providerRequestId"] = json!(id);
         }
@@ -9380,6 +9394,7 @@ mod tests {
                     PermissionResponse {
                         request_id: "permission-firewall".into(),
                         allow: true,
+                        for_session: false,
                     },
                 )
                 .unwrap_err(),
@@ -9515,6 +9530,7 @@ mod tests {
             .permission_response(crate::adapters::PermissionResponse {
                 request_id: decision_id.into(),
                 allow: true,
+                for_session: false,
             })
             .unwrap_err()
             .to_string()
@@ -9720,6 +9736,25 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_session_answer_is_only_sent_where_codex_accepts_one() {
+        let answer = |allow, for_session, session_answer| {
+            let response = PermissionResponse { request_id: "d".into(), allow, for_session };
+            codex_decision(&response, session_answer)
+        };
+        assert_eq!(answer(true, true, true), "acceptForSession");
+        assert_eq!(answer(true, false, true), "accept");
+        assert_eq!(answer(true, true, false), "accept");
+        assert_eq!(answer(false, true, true), "decline");
+        let frame = |method: &str| json!({ "id": 1, "method": method, "params": {} });
+        assert!(approval_binding_from_frame(&frame("item/commandExecution/requestApproval")).unwrap().session_answer);
+        assert!(approval_binding_from_frame(&frame("item/fileChange/requestApproval")).unwrap().session_answer);
+        assert!(!approval_binding_from_frame(&frame("item/permissions/requestApproval")).unwrap().session_answer);
+        let payload = |method: &str| normalized_codex_payload(method, &frame(method)).unwrap();
+        assert_eq!(payload("item/fileChange/requestApproval")["sessionAnswer"], true);
+        assert!(payload("item/permissions/requestApproval").get("sessionAnswer").is_none());
     }
 
     #[test]

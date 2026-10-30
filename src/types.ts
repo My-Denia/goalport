@@ -114,6 +114,8 @@ export interface ProductConversation {
   title: string;
   /** Excerpt of an actually committed completed turn; never inferred success. */
   resultSummary?: string;
+  /** What the agent is doing right now, while a tool is still running. */
+  currentStep?: string;
 }
 
 export type NativeSessionTransport = "app-server" | "exec" | "unknown";
@@ -194,7 +196,8 @@ export function normalizeProductConversation(value: unknown): ProductConversatio
       ? { state: sessionRaw.state as "starting" | "attached" | "unavailable" | "detached" | "closed" | "none", nativeIdKnown: sessionRaw.nativeIdKnown === true || sessionRaw.native_id_known === true, transport: normalizeNativeSessionTransport(sessionRaw.transport) }
       : undefined,
     title: asText(raw.title, ""),
-    resultSummary: optionalText(raw.resultSummary ?? raw.result_summary)
+    resultSummary: optionalText(raw.resultSummary ?? raw.result_summary),
+    currentStep: optionalText(raw.currentStep ?? raw.current_step)
   };
 }
 
@@ -314,6 +317,8 @@ export interface RuntimeProfile {
 
 export interface DecisionRequest {
   actionKnown?: boolean;
+  /** The agent can remember this answer for matching actions in the session. */
+  sessionAnswer?: boolean;
   id: string;
   title: string;
   kind: "permission" | "policy" | "handoff" | "lease";
@@ -1285,6 +1290,7 @@ function normalizeDecision(value: unknown): DecisionRequest | null {
   return {
     id,
     actionKnown: (raw.actionKnown ?? raw.action_known) === false ? false : undefined,
+    sessionAnswer: (raw.sessionAnswer ?? raw.session_answer) === true ? true : undefined,
     title: asText(raw.title, "Runtime approval"),
     kind: kind === "policy" || kind === "handoff" || kind === "lease" ? kind : "permission",
     facts: Array.isArray(raw.facts) ? raw.facts.map((fact) => asText(fact, "")).filter(Boolean) : [],

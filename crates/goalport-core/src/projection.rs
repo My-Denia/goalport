@@ -160,6 +160,8 @@ pub struct UiRuntimeCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct UiDecision {
     pub action_known: bool,
+    #[serde(default)]
+    pub session_answer: bool,
     pub id: String,
     pub title: String,
     pub kind: String,
@@ -1276,6 +1278,7 @@ impl UiController {
                         state: "none".into(),
                         native_id_known: false,
                     },
+                    current_step: None,
                     turn: ProductTurn {
                         state: "idle".into(),
                         can_stop: false,
@@ -4869,10 +4872,22 @@ impl UiController {
             .get("allow")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let for_session = allow
+            && request
+                .payload
+                .get("forSession")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         let decision = self
             .store
             .get_decision(&decision_id)
             .map_err(store_message)?;
+        // Record what the runtime can actually honour, not only what was pressed.
+        let for_session = for_session
+            && self
+                .store
+                .permission_takes_session_answer(&decision.attempt_id, &decision_id)
+                .map_err(store_message)?;
         if decision.state != DecisionState::Pending {
             return Err(format!(
                 "decision {decision_id} is {:?}; only pending decisions can be resolved",
@@ -4903,6 +4918,7 @@ impl UiController {
             PermissionResponse {
                 request_id: decision_id.clone(),
                 allow,
+                for_session,
             },
         ) {
             let text = error.to_string();
@@ -4950,6 +4966,7 @@ impl UiController {
         let mut payload = json!({
             "decisionId": decision_id,
             "allow": allow,
+            "forSession": for_session,
             "attemptId": decision.attempt_id,
             "campaignId": task.campaign_id,
             "taskId": attempt.task_id,
@@ -5664,10 +5681,18 @@ impl UiController {
                     continue;
                 }
                 let stopped = self.runtime_manager.interrupt(&attempt.id);
-                let (requested, confirmed, reason) = match stopped {
+                let (requested, mut confirmed, reason) = match stopped {
                     Ok(result) => (result.requested, result.confirmed, result.reason),
                     Err(error) => (true, false, Some(error.to_string())),
                 };
+                // Remembered approvals no longer pause at a request, so an
+                // unanswered interrupt would leave them running after a revoke.
+                if !confirmed
+                    && self.store.attempt_answered_for_session(&attempt.id).map_err(store_message)?
+                    && self.runtime_manager.close_attempt(&attempt.id).is_ok()
+                {
+                    confirmed = true;
+                }
                 if confirmed {
                     self.persist_event(
                         &attempt.id,
@@ -7539,8 +7564,12 @@ fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
         .ok()
         .map(|attempt| attempt.provider)
         .unwrap_or_else(|| "Runtime".into());
+    let session_answer = store
+        .permission_takes_session_answer(&decision.attempt_id, &decision.id)
+        .unwrap_or(false);
     UiDecision {
         action_known: action.is_some(),
+        session_answer,
         id: decision.id,
         title: format!("{provider} wants your approval"),
         kind: decision.kind,
