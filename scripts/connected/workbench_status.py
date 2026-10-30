@@ -111,6 +111,34 @@ def parse_projection(raw, job_id):
         return None
 
 
+def parse_native_preflight(raw, workspace):
+    """Separate fixed projection, not the UUID job/status wire contract."""
+    try:
+        lines = [line for line in raw.decode("utf-8", errors="strict").splitlines() if line.strip()]
+        prefix = "native preflight: "
+        if len(lines) != 1 or not lines[0].startswith(prefix):
+            return False
+        value = json.loads(lines[0][len(prefix):])
+        global_mode = workspace is None
+        if not isinstance(value, dict) or set(value) != ({"mode", "outstanding", "inventory"} if global_mode else {"mode", "workspace", "outstanding", "inventory"}):
+            return False
+        if value["mode"] != ("global" if global_mode else "workspace") or value["outstanding"] is not False:
+            return False
+        inventory = value["inventory"]
+        if not isinstance(inventory, dict) or inventory.get("complete") is not True or inventory.get("globalBlock") is not False or not isinstance(inventory.get("holds"), list):
+            return False
+        if global_mode:
+            return set(inventory) == {"holds", "complete", "globalBlock"} and inventory["holds"] == []
+        return (set(inventory) == {"holds", "complete", "globalBlock", "candidate", "candidateBlocked"}
+                and value["workspace"] == workspace and inventory["candidate"] == workspace
+                and inventory["candidateBlocked"] is False
+                and all(isinstance(hold, dict) and set(hold) == {"jobId", "workspacePath"}
+                        and valid_job_id(hold["jobId"]) and isinstance(hold["workspacePath"], str)
+                        and hold["workspacePath"].startswith("/") for hold in inventory["holds"]))
+    except (UnicodeError, ValueError, TypeError, KeyError):
+        return False
+
+
 class StatusCapture:
     def __init__(self, argv, env, cwd, deadline, *, popen=subprocess.Popen, clock=time.monotonic):
         self.argv, self.env, self.cwd, self.deadline = argv, env, cwd, deadline
@@ -205,6 +233,36 @@ class StatusCapture:
         clean = self.cleanup()
         success = clean and self.clock() <= self.deadline and not self.failed.is_set() and all(self.eof)
         return (self.buffers[0] if success else None), clean
+
+
+class NativePreflight:
+    """One bounded explicit read. Retain only unclean helper ownership, never a permit/cache."""
+    def __init__(self, env_for, cwd, *, capture=StatusCapture, clock=time.monotonic):
+        self.env_for, self.cwd, self.capture, self.clock = env_for, cwd, capture, clock
+        self.lock = threading.Lock()
+        self.pending = None
+
+    def read(self, argv, workspace=None):
+        if not self.lock.acquire(blocking=False):
+            return False
+        try:
+            if self.pending is not None:
+                if not self.pending.cleanup(nonblocking=True):
+                    return False
+                self.pending = None
+            self.pending = self.capture(argv, self.env_for(), self.cwd, self.clock() + TOTAL_SECONDS)
+            raw, clean = self.pending.run()
+            if clean:
+                self.pending = None
+            return clean and raw is not None and parse_native_preflight(raw, workspace)
+        except (OSError, ValueError, TypeError, RuntimeError, AttributeError):
+            if self.pending is not None:
+                self.pending.kill_once()
+                if self.pending.cleanup():
+                    self.pending = None
+            return False
+        finally:
+            self.lock.release()
 
 
 class InFlightStatus:

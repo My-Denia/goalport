@@ -157,6 +157,28 @@ pub struct RuntimeProcessBinding {
     pub executable_sha256: String,
 }
 
+/// Configured Codex adapter kind, not authentication or capability verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexTransportKind {
+    AppServer,
+    Exec,
+}
+
+impl CodexTransportKind {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::AppServer => "app-server", Self::Exec => "exec" }
+    }
+}
+
+pub fn configured_codex_transport() -> CodexTransportKind {
+    if std::env::var("GOALPORT_CODEX_TRANSPORT").ok().as_deref() == Some("exec") {
+        CodexTransportKind::Exec
+    } else {
+        CodexTransportKind::AppServer
+    }
+}
+
 enum ManagedRuntime {
     Scenario(Box<ScenarioAdapter>),
     Codex(Box<CodexProcess>),
@@ -300,6 +322,8 @@ fn confirm_against_binding(
 #[derive(Debug, Clone)]
 struct Registration {
     binding: RuntimeBinding,
+    /// Copied from the constructed variant, only to preserve that fact during a loan.
+    native_transport: Option<CodexTransportKind>,
     /// Minted per successful registration on this manager. A replacement would
     /// necessarily change it, which is what makes "not replaced" observable for
     /// variants whose process epoch and session id are constants.
@@ -705,12 +729,7 @@ impl RuntimeManager {
             "codex" => {
                 let executable = executable.unwrap_or_else(|| resolve_native_executable("codex"));
                 let approval_policy = native_approval_policy()?;
-                let transport =
-                    if std::env::var("GOALPORT_CODEX_TRANSPORT").ok().as_deref() == Some("exec") {
-                        "exec"
-                    } else {
-                        "app-server"
-                    };
+                let transport = configured_codex_transport().as_str();
                 (
                     Some(executable),
                     Some(transport.to_owned()),
@@ -748,6 +767,16 @@ impl RuntimeManager {
         self.registrations
             .get(attempt_id)
             .map(|registration| &registration.binding)
+    }
+
+    /// Actual registered adapter, never inferred from a binding label or session id.
+    pub fn codex_transport(&self, attempt_id: &str) -> Option<CodexTransportKind> {
+        match self.attempts.get(attempt_id) {
+            Some(ManagedRuntime::Codex(_)) => Some(CodexTransportKind::AppServer),
+            Some(ManagedRuntime::CodexExec(_)) => Some(CodexTransportKind::Exec),
+            None if self.busy_attempts.contains_key(attempt_id) => self.registrations.get(attempt_id).and_then(|registration| registration.native_transport),
+            _ => None,
+        }
     }
 
     /// The per-manager registration sequence number of this attempt's Runtime.
@@ -1221,7 +1250,17 @@ impl RuntimeManager {
         version: impl Into<String>,
         workspace_root: &Path,
     ) -> Result<RuntimeIdentitySummary, AdapterError> {
-        let provider = provider.trim().to_ascii_lowercase();
+        let binding = Self::intended_binding(provider, executable, version, workspace_root)?;
+        self.select_runtime_from_binding(attempt_id, binding)
+    }
+
+    /// Consume the admission's frozen choice. No environment, executable or policy lookup.
+    pub fn select_runtime_from_binding(
+        &mut self,
+        attempt_id: &str,
+        binding: RuntimeBinding,
+    ) -> Result<RuntimeIdentitySummary, AdapterError> {
+        let provider = binding.provider.clone();
         if attempt_id.trim().is_empty() || provider.is_empty() {
             return Err(AdapterError::InvalidRequest(
                 "attempt_id and provider are required".into(),
@@ -1238,39 +1277,43 @@ impl RuntimeManager {
             )));
         }
         self.ensure_provider_allowed(&provider)?;
-        let version = version.into();
-        let binding =
-            Self::intended_binding(&provider, executable, version.clone(), workspace_root)?;
+        let version = binding.version.clone();
+        let workspace_root = &binding.workspace_root;
         let executable = binding.executable.clone();
+        let required_executable = || executable.clone().ok_or_else(||
+            AdapterError::InvalidRequest("frozen native binding has no executable".into()));
         let runtime = match provider.as_str() {
             "scenario" => ManagedRuntime::Scenario(Box::new(
                 ScenarioAdapter::new("scenario").with_cancel_support(true),
             )),
             "codex" => {
-                let executable = executable.unwrap_or_else(|| resolve_native_executable("codex"));
-                let approval_policy = native_approval_policy()?;
-                if std::env::var("GOALPORT_CODEX_TRANSPORT").ok().as_deref() != Some("exec") {
+                let executable = required_executable()?;
+                let approval_policy = binding.approval_policy.clone().ok_or_else(||
+                    AdapterError::InvalidRequest("frozen Codex binding has no approval policy".into()))?;
+                if binding.transport.as_deref() == Some("app-server") {
                     ManagedRuntime::Codex(Box::new(CodexProcess::new(
                         executable,
                         version.clone(),
                         workspace_root.to_path_buf(),
                         approval_policy,
                     )))
-                } else {
+                } else if binding.transport.as_deref() == Some("exec") {
                     ManagedRuntime::CodexExec(Box::new(CodexExecProcess::new(
                         executable,
                         version.clone(),
                         workspace_root.to_path_buf(),
                     )))
+                } else {
+                    return Err(AdapterError::InvalidRequest("unknown frozen Codex transport".into()));
                 }
             }
             "claude" => ManagedRuntime::Claude(Box::new(ClaudeStreamProcess::new(
-                executable.unwrap_or_else(|| resolve_native_executable("claude")),
+                required_executable()?,
                 version.clone(),
                 workspace_root.to_path_buf(),
             ))),
             "grok" => ManagedRuntime::Grok(Box::new(GrokAcpProcess::new(
-                executable.unwrap_or_else(|| resolve_native_executable("grok")),
+                required_executable()?,
                 version.clone(),
                 workspace_root.to_path_buf(),
             ))),
@@ -1281,6 +1324,11 @@ impl RuntimeManager {
             }
         };
         let summary = runtime.identity_summary();
+        let native_transport = match &runtime {
+            ManagedRuntime::Codex(_) => Some(CodexTransportKind::AppServer),
+            ManagedRuntime::CodexExec(_) => Some(CodexTransportKind::Exec),
+            _ => None,
+        };
         self.attempts.insert(attempt_id.to_owned(), runtime);
         self.selected_provider
             .insert(attempt_id.to_owned(), provider);
@@ -1290,6 +1338,7 @@ impl RuntimeManager {
             attempt_id.to_owned(),
             Registration {
                 binding,
+                native_transport,
                 seq: self.registration_counter,
                 identity,
             },
@@ -3369,11 +3418,7 @@ impl CodexProcess {
                     Value::String(sha256_hex(thread_id.as_bytes())),
                 );
             }
-            if let Some(turn_id) = value
-                .get("params")
-                .and_then(|params| params.get("turnId"))
-                .map(bounded_scalar)
-            {
+            if let Some(turn_id) = codex_frame_turn_id(value) {
                 object.insert(
                     "native_turn_hash".into(),
                     Value::String(sha256_hex(turn_id.as_bytes())),
@@ -9018,9 +9063,19 @@ fn resolve_native_executable(provider: &str) -> PathBuf {
             candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("codex.exe")));
         }
     }
+    #[cfg(not(windows))]
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join(provider)));
+    }
     candidates
         .into_iter()
         .find(|candidate| loadable_executable(candidate))
+        .map(|candidate| {
+            #[cfg(not(windows))]
+            { std::fs::canonicalize(&candidate).unwrap_or(candidate) }
+            #[cfg(windows)]
+            { candidate }
+        })
         .unwrap_or_else(|| PathBuf::from(provider))
 }
 
@@ -9938,6 +9993,25 @@ time.sleep(30)
     }
 
     #[test]
+    fn actual_variant_transport_survives_a_loan_but_not_a_missing_registration() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = RuntimeManager::new();
+        manager.select_runtime_from_binding("variant", RuntimeBinding {
+            provider: "codex".into(), version: "fixture".into(),
+            executable: Some(directory.path().join("never-executed")), workspace_root: directory.path().to_path_buf(),
+            transport: Some("app-server".into()), approval_policy: Some("on-request".into()),
+        }).unwrap();
+        manager.registrations.get_mut("variant").unwrap().binding.transport = Some("exec".into());
+        assert_eq!(manager.codex_transport("variant"), Some(CodexTransportKind::AppServer));
+        let worker = manager.lend_attempts(&["variant".into()], None).unwrap();
+        assert_eq!(manager.codex_transport("variant"), Some(CodexTransportKind::AppServer));
+        manager.return_attempts(&["variant".into()], worker).unwrap();
+        assert_eq!(manager.codex_transport("variant"), Some(CodexTransportKind::AppServer));
+        manager.close_attempt("variant").unwrap();
+        assert_eq!(manager.codex_transport("variant"), None);
+    }
+
+    #[test]
     fn native_event_exposes_only_hashed_provider_identifiers() {
         let mut process = CodexProcess::new(
             PathBuf::from("codex"),
@@ -9972,6 +10046,16 @@ time.sleep(30)
         assert!(event.payload["provider_event_hash"].as_str().is_some());
         assert!(!event.process_epoch_id.contains("Users"));
         assert!(!event.process_epoch_id.contains("private-workspace"));
+        for (method, params) in [
+            ("turn/started", json!({"threadId":"private-thread", "turnId":"first-turn"})),
+            ("turn/completed", json!({"threadId":"private-thread", "turn":{"id":"first-turn", "status":"completed"}})),
+            ("turn/completed", json!({"threadId":"private-thread", "turn":{"id":"second-turn", "status":"completed"}})),
+        ] {
+            let nested = process.native_event("attempt", method, &json!({"method":method, "params":params})).unwrap();
+            assert_eq!(nested.attempt_id, "attempt");
+            assert_eq!(nested.payload["native_thread_hash"], sha256_hex(b"private-thread"));
+            assert!(nested.payload["native_turn_hash"] == sha256_hex(b"first-turn") || nested.payload["native_turn_hash"] == sha256_hex(b"second-turn"));
+        }
     }
 
     /// A Claude process with a bound, already-past-deadline Stop and no live

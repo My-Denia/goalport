@@ -5,6 +5,8 @@ import { supportStatusLabel } from "../lib/display";
 
 interface RuntimePickerMenuProps {
   runtimes: RuntimeProfile[];
+  /** UI-only mode choices; not invented Core Runtime profiles. */
+  choices?: { id: string; name: string; subtitle: string }[];
   /** Selected provider id; empty when nothing is chosen yet. */
   selectedId: string;
   /** Content of the trigger button (avatar, labels, chevron). */
@@ -34,6 +36,7 @@ interface RuntimePickerMenuProps {
  */
 export function RuntimePickerMenu({
   runtimes,
+  choices,
   selectedId,
   triggerContent,
   triggerClassName,
@@ -47,7 +50,8 @@ export function RuntimePickerMenu({
 }: RuntimePickerMenuProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const selectedValue = runtimes.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
+  const items = choices ?? runtimes;
+  const selectedValue = items.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
 
   useEffect(() => {
     if (!focusSignal || focusSignal <= 0) return;
@@ -57,7 +61,7 @@ export function RuntimePickerMenu({
 
   return (
     <Select.Root value={selectedValue} open={open} onOpenChange={setOpen}
-      onValueChange={(value) => { if (value) onSelect(value); }}>
+      onValueChange={(value) => { if (value !== null) onSelect(value); }}>
       <Select.Trigger
         ref={triggerRef}
         className={triggerClassName}
@@ -70,8 +74,9 @@ export function RuntimePickerMenu({
         <Select.Positioner sideOffset={6} collisionPadding={10} alignItemWithTrigger={false}>
           <Select.Popup className="runtime-picker-list">
             <Select.List aria-label="Runtimes" style={{ display: "grid", gap: 2 }}>
-              {runtimes.map((candidate) => {
-                const disabled = isItemDisabled ? isItemDisabled(candidate) : false;
+              {items.map((candidate) => {
+                const runtime = runtimes.find(item => item.id === candidate.id);
+                const disabled = runtime && isItemDisabled ? isItemDisabled(runtime) : false;
                 return (
                   <Select.Item
                     key={candidate.id}
@@ -86,14 +91,14 @@ export function RuntimePickerMenu({
                       <strong>{candidate.name}</strong>
                       <small>{candidate.subtitle}</small>
                     </span>
-                    <span className={`support-chip support-${candidate.support}`}>
-                      {supportStatusLabel(candidate)}
-                    </span>
+                    {!choices && runtime ? <span className={`support-chip support-${runtime.support}`}>
+                      {supportStatusLabel(runtime)}
+                    </span> : null}
                   </Select.Item>
                 );
               })}
             </Select.List>
-            {runtimes.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
+            {items.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
             {blockedHint ? <p className="runtime-picker-hint">{blockedHint}</p> : null}
           </Select.Popup>
         </Select.Positioner>

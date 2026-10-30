@@ -11,6 +11,7 @@ import argparse
 import importlib.util
 import json
 import os
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -990,7 +991,66 @@ def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: 
     return [*prefix, "stop", "--job", job_id, *(["--only-if-ready-from", only_if_ready_from] if only_if_ready_from is not None else [])], None
 
 
-def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None, status_capture=None):
+NATIVE_WORKSPACE_COMMANDS = {"start_conversation", "conversation_send", "send_message", "select_runtime", "select_attempt", "resume_native_session", "handoff", "reassign", "continue_in_isolated_workspace"}
+NATIVE_GLOBAL_COMMANDS = {"create_campaign", "create_campaign_with_task", "queue_override", "request_owner_action"}
+NATIVE_FOLDER_SENTENCE = "Codex conversations need an absolute folder path, for example /path/to/project."
+
+
+def native_workspace(value, *, canonical=False):
+    if not isinstance(value, str) or not value or not Path(value).is_absolute():
+        raise ValueError(NATIVE_FOLDER_SENTENCE)
+    root = Path(value).resolve(strict=True)
+    if not root.is_dir() or (canonical and str(root) != value):
+        raise ValueError("The conversation folder could not be confirmed. Nothing was sent.")
+    return str(root)
+
+
+def native_ingress_workspace(request, endpoint, unix_client, timeout):
+    """Closed product table. Returns canonical W root, or None for conservative G."""
+    kind = request["messageType"]
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("The native request has no valid target. Nothing was sent.")
+    wrapper = request.get("nativeTarget")
+    if "nativeTarget" in request and (not isinstance(wrapper, dict) or set(wrapper) != {"campaignId"}
+                                or not isinstance(wrapper["campaignId"], str) or not wrapper["campaignId"]):
+        raise ValueError("Choose the exact conversation before continuing. Nothing was sent.")
+    if wrapper is not None and "campaignId" in payload and payload["campaignId"] != wrapper["campaignId"]:
+        raise ValueError("The conversation target changed. Nothing was sent.")
+    if kind in NATIVE_GLOBAL_COMMANDS:
+        return None
+    if kind == "start_conversation":
+        return native_workspace(payload.get("workspaceRoot"))
+    if kind == "continue_in_isolated_workspace":
+        return native_workspace(payload.get("targetWorkspace"))
+    campaign = payload.get("campaignId") if kind in {"conversation_send", "send_message", "select_runtime", "select_attempt"} else wrapper.get("campaignId") if wrapper else None
+    if not isinstance(campaign, str) or not campaign:
+        raise ValueError("Choose the exact conversation before continuing. Nothing was sent.")
+    lookup = str(uuid.uuid4())
+    reply = unix_client.call(endpoint, "goal_detail", {"campaignId": campaign}, timeout=timeout, request_id=lookup)
+    envelope = reply.get("payload") if isinstance(reply, dict) else None
+    if (not isinstance(reply, dict) or reply.get("protocolVersion") != "goalport.ipc.v2"
+            or reply.get("requestId") != lookup or reply.get("ok") is not True
+            or not isinstance(envelope, dict) or envelope.get("requestId") != lookup or envelope.get("accepted") is not True):
+        raise ValueError("The conversation target could not be confirmed. Nothing was sent.")
+    snapshot = envelope.get("snapshot")
+    if not isinstance(snapshot, dict) or snapshot.get("activeCampaignId") != campaign:
+        raise ValueError("The conversation target changed. Nothing was sent.")
+    project, task, attempt = snapshot.get("project"), snapshot.get("activeTask"), snapshot.get("attempt")
+    if not isinstance(project, dict) or not isinstance(task, dict) or not isinstance(task.get("id"), str) or not task["id"]:
+        raise ValueError("The conversation folder or task could not be confirmed. Nothing was sent.")
+    if "taskId" in payload and payload["taskId"] != task["id"]:
+        raise ValueError("The conversation task changed. Nothing was sent.")
+    attempt_key = "oldAttemptId" if kind in {"handoff", "reassign"} else "attemptId"
+    required = kind not in {"select_runtime", "select_attempt"}
+    if required or attempt_key in payload:
+        explicit = payload.get(attempt_key)
+        if not isinstance(explicit, str) or not explicit or not isinstance(attempt, dict) or attempt.get("id") != explicit:
+            raise ValueError("Only the current conversation attempt can continue here. Nothing was sent.")
+    return native_workspace(project.get("workspaceRoot"), canonical=True)
+
+
+def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordination_data: Path | None = None, continue_runner=None, core_binary: str | None = None, database: str | None = None, status_capture=None, native_capture=None):
     def status_argv(job_id):
         if coordination_data is None:
             return None
@@ -999,6 +1059,9 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
 
     status_reads = _status.InFlightStatus(status_argv, coordination_child_env, ROOT,
         lambda job_id: status_base(coordination_data, job_id), **({"capture": status_capture} if status_capture else {}))
+
+    native_reads = _status.NativePreflight(coordination_child_env, ROOT,
+        **({"capture": native_capture} if native_capture else {}))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1211,7 +1274,20 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 return
             payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
             request_id = request.get("requestId") or request.get("request_id")
+            preflighting = message_type in NATIVE_WORKSPACE_COMMANDS | NATIVE_GLOBAL_COMMANDS
             try:
+                if preflighting:
+                    if coordination_data is None:
+                        raise ValueError("Workspace reservations are unavailable. Nothing was sent.")
+                    workspace = native_ingress_workspace({**request, "messageType": message_type}, endpoint, unix_client, timeout)
+                    prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, database=database)
+                    if error:
+                        raise ValueError(error)
+                    argv = [*prefix, "native-preflight", *( ["--workspace", workspace] if workspace is not None else ["--global"] )]
+                    if not native_reads.read(argv, workspace):
+                        raise ValueError("Competing work or workspace reservations could not be checked. Nothing was sent.")
+                preflighting = False
+                # nativeTarget is a workbench lookup key only; never forwarded to Core.
                 response = unix_client.call(
                     endpoint, message_type, payload, timeout=timeout, request_id=request_id
                 )
@@ -1219,7 +1295,7 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                 self._send(502, disconnected_body(str(error)), "application/json")
                 return
             except (OSError, ValueError) as error:
-                self._send(502, disconnected_body(str(error)), "application/json")
+                self._send(200 if preflighting else 502, disconnected_body(str(error)), "application/json")
                 return
             self._send(200, json.dumps(response).encode(), "application/json")
 
