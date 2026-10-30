@@ -4,6 +4,7 @@ import { outcomeLabel, type CoordinationVerdict } from "../coordination/verdict"
 import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
 import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
+import { renderMarkdownBody } from "../lib/markdown";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
@@ -498,7 +499,7 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     {job.workspacePath ? <p title={job.workspacePath}>{job.workspacePath}</p> : null}
     {job.active && !job.revoked ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop check</button> : null}
     {job.progress?.activity && !settled ? <p>{job.progress.activity}</p> : null}
-    {report?.auditText ? <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{report.auditText}</pre> : null}
+    {report?.auditText ? <div className="tl-agent-body" style={{fontSize:14,lineHeight:1.55}}>{renderMarkdownBody(report.auditText, `native-check-${job.jobId}`)}</div> : null}
     {job.outcome?.error ? <p role="status">{job.outcome.error}</p> : null}
     {job.nativeCheckMaterial ? <details><summary>Shared snapshot · {job.nativeCheckMaterial.coverage.limited ? 'Limited' : 'Selected tracked changes'} · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
   </section>;

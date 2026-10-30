@@ -2,6 +2,7 @@
 import {cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
 import {afterEach,expect,it,vi} from 'vitest';
 import {NativeWorkspaceCheck} from './NativeWorkspaceCheck';
+import {BackgroundCoordinationStatus} from './CoordinationStatus';
 import {prepareNativeWorkspaceCheckMaterial,buildNativeWorkspaceCheckCommand,parseNativeCheckMaterial,parseNativeCheckTarget} from '../coordination/nativeWorkspaceCheck';
 import {continuationUnavailable} from '../coordination/savedTargetView';
 const target={campaignId:'campaign',attemptId:'attempt',turnRequestId:'turn'};
@@ -51,4 +52,14 @@ it('return keeps the own dated response when the current Attempt has no complete
 
 it('target change fences a late preview and cannot adopt or repin the other goal',async()=>{
  const calls=server();const props={target,eligible:true,job:null,onJob:vi.fn(),onBusy:vi.fn()};const view=render(<NativeWorkspaceCheck {...props}/>);fireEvent.click(screen.getByRole('button',{name:'Check workspace with Pi'}));await screen.findByRole('checkbox');view.rerender(<NativeWorkspaceCheck {...props} target={{...target,campaignId:'other'}}/>);await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);expect(props.onJob).not.toHaveBeenCalled();
+});
+
+it('renders a returned Pi response as readable safe markdown, not a raw command log',()=>{
+ const text='### Specific findings\n\n- A **concrete** doc issue with `Stop check`.\n\n<script>not executable</script>';
+ render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);
+ expect(screen.getByRole('heading',{name:'Specific findings'})).toBeTruthy();
+ expect(screen.getByText('concrete').tagName).toBe('STRONG');
+ expect(screen.getByRole('list')).toBeTruthy();expect(document.querySelector('script')).toBeNull();
+ expect(screen.getByText('<script>not executable</script>')).toBeTruthy();
+ expect(document.querySelector('.tl-agent-body')?.tagName).toBe('DIV');
 });

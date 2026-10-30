@@ -198,6 +198,29 @@ untouched; there is no second Codex planner, writer or repair round.
    badge, a new coordinated product root or exclusive Codex delta. Newer native
    turns and subsequent workspace edits are not covered by that response.
 
+**Worked example (illustrative, not a recorded Pi run).** To clarify the
+controls, ask Codex: “In `docs/linux-development.md`, explain how Stop check
+differs from ending the Codex conversation. Change documentation only.” Suppose
+the resulting sentence says, “Stop check immediately ends the Pi check; your
+Codex conversation stays open.”
+
+1. Once the turn completes, optionally open **Check workspace with Pi** and
+   choose **Preview shared material**. In that exact shared snapshot, inspect
+   the changed sentence and its surrounding diff, the Native reported reply and
+   command-omission counts, and any crop/omission notices. Confirm the intended hunk is
+   present and every included change is suitable to share: current tracked
+   changes can predate this turn, so unrelated edits may also appear.
+2. Choose **Check this snapshot** only if you want the independent response.
+   A useful critique should point to “immediately ends” in the shared diff:
+   a running readonly turn may finish after Stop check. It should suggest
+   “Stop check requests cancellation of the Pi check; a running readonly turn
+   may still finish. Your Codex conversation stays open.” Ending an idle Codex
+   runtime uses the separate **Close Runtime session** action.
+
+Read the saved response alongside its original shared material. This optional
+check does not verify authorship, test execution or edits made after the
+snapshot; any revision prompted by the critique is outside that check.
+
 This first purpose requires the canonical native workspace to equal Git's
 physical top-level directory. Subdirectory targets refuse before body collection:
 “This check currently needs the repository's top-level folder.” Existing native
@@ -239,8 +262,8 @@ Limited coverage is named; no universal race, secret-free-content or
 test-execution claim is made.
 
 A real Native documentation improvement followed by a concrete Pi critique of
-that actual diff is still a **future acceptance task**, not an example this
-source writer has run. Source tests/build output do not establish provider use,
+that actual diff is the acceptance scenario for this flow, not a claim that
+later edits are checked. Source tests/build output do not establish provider use,
 capacity, Linux workspace qualification or three-width GUI acceptance.
 
 ### Competing-work preflight
