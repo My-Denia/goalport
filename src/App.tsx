@@ -2498,10 +2498,10 @@ function App() {
       }
     }
     setActiveNotice(allow
-      ? { sentence: forSession ? "Allowed. Codex won't ask again for matching actions this session." : "Permission allowed once." }
+      ? { sentence: forSession ? "Allowed. It won't ask again for the same action this session." : "Permission allowed once." }
       : { sentence: "Permission denied. No write action was sent and automatic retry is disabled." });
     if (client.notify) {
-      void client.notify("GoalPort decision", allow ? (forSession ? "Allowed for matching actions this session." : "Permission allowed once.") : "Permission denied.");
+      void client.notify("GoalPort decision", allow ? (forSession ? "Allowed for the same action this session." : "Permission allowed once.") : "Permission denied.");
     }
   }
 

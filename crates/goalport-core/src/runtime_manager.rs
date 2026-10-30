@@ -4907,7 +4907,6 @@ impl CodexExecProcess {
 
 struct ClaudePendingPermission {
     native_request_id: String,
-    #[allow(dead_code)]
     tool_name: String,
     input: Value,
     tool_use_id: Option<String>,
@@ -5188,6 +5187,9 @@ struct ClaudeStreamProcess {
     claude_capabilities: HashSet<String>,
     pending_permissions: HashMap<String, ClaudePendingPermission>,
     answered_permissions: HashSet<String>,
+    /// Actions the user allowed for this session. Kept here, not as a Claude
+    /// permission rule, so each request still passes the Stop and host checks.
+    session_allowed: HashSet<String>,
     mutating_tools: HashMap<String, MutatingToolRecord>,
     /// Bash invocations that have not received `can_use_tool`. The value is the
     /// fingerprint at `tool_use`, or `None` when git status could not be read.
@@ -5290,6 +5292,7 @@ impl ClaudeStreamProcess {
             claude_capabilities: HashSet::new(),
             pending_permissions: HashMap::new(),
             answered_permissions: HashSet::new(),
+            session_allowed: HashSet::new(),
             mutating_tools: HashMap::new(),
             unrequested_bash: HashMap::new(),
             tool_observations: HashMap::new(),
@@ -6477,6 +6480,11 @@ impl ClaudeStreamProcess {
                 }
                 return None;
             }
+            if self.session_allowed.contains(&claude_action_key(&tool_name, &input))
+                && self.allow_without_asking(&native_id, tool_use_id.as_deref(), &input)
+            {
+                return None;
+            }
             let epoch = self
                 .process_binding
                 .as_ref()
@@ -6519,7 +6527,8 @@ impl ClaudeStreamProcess {
                     "request_id": decision_id,
                     "kind": "native-permission",
                     "text": bounded_text(&tool_name),
-                    "tool_kind": bounded_text(&tool_name)
+                    "tool_kind": bounded_text(&tool_name),
+                    "sessionAnswer": claude_tool_takes_session_answer(&tool_name)
                 }),
                 Some(format!("claude-ref:{}", sha256_hex(decision_id.as_bytes()))),
             );
@@ -7056,35 +7065,10 @@ impl ClaudeStreamProcess {
             )
         })?;
         if let Some(tool_use_id) = pending.tool_use_id.as_deref() {
-            let snapshot = snapshot_tool_path(&self.workspace_root, &pending.input);
-            let workspace = self.workspace_root.clone();
-            let premature = {
-                let record = self
-                    .mutating_tools
-                    .entry(tool_use_id.to_owned())
-                    .or_insert_with(|| MutatingToolRecord {
-                        decision: MutatingToolDecision::Pending,
-                        snapshot: snapshot.clone(),
-                        fingerprint: sample_workspace_entries(&workspace),
-                    });
-                if record.snapshot.is_none() {
-                    record.snapshot = snapshot;
-                }
-                let premature =
-                    response.allow && record.snapshot.as_ref().is_some_and(snapshot_delta);
-                record.decision = if response.allow {
-                    MutatingToolDecision::Allowed
-                } else {
-                    MutatingToolDecision::Denied
-                };
-                if response.allow {
-                    self.admit_execution();
-                }
-                premature
-            };
-            if premature {
-                self.note_fail_open(true, "the file changed before the host allowed it");
-            }
+            self.record_host_answer(tool_use_id, &pending.input, response.allow);
+        }
+        if response.allow && response.for_session && claude_tool_takes_session_answer(&pending.tool_name) {
+            self.session_allowed.insert(claude_action_key(&pending.tool_name, &pending.input));
         }
         let native_response = if response.allow {
             json!({
@@ -7117,6 +7101,58 @@ impl ClaudeStreamProcess {
             "cancelled": false
         }));
         Ok(())
+    }
+
+    fn record_host_answer(&mut self, tool_use_id: &str, input: &Value, allow: bool) {
+        let snapshot = snapshot_tool_path(&self.workspace_root, input);
+        let workspace = self.workspace_root.clone();
+        let premature = {
+            let record = self
+                .mutating_tools
+                .entry(tool_use_id.to_owned())
+                .or_insert_with(|| MutatingToolRecord {
+                    decision: MutatingToolDecision::Pending,
+                    snapshot: snapshot.clone(),
+                    fingerprint: sample_workspace_entries(&workspace),
+                });
+            if record.snapshot.is_none() {
+                record.snapshot = snapshot;
+            }
+            let premature = allow && record.snapshot.as_ref().is_some_and(snapshot_delta);
+            record.decision = if allow {
+                MutatingToolDecision::Allowed
+            } else {
+                MutatingToolDecision::Denied
+            };
+            if allow {
+                self.admit_execution();
+            }
+            premature
+        };
+        if premature {
+            self.note_fail_open(true, "the file changed before the host allowed it");
+        }
+    }
+
+    /// Answer a request the user already allowed for this session. If the
+    /// answer can't be written, the request becomes an ordinary card instead.
+    fn allow_without_asking(&mut self, native_id: &str, tool_use_id: Option<&str>, input: &Value) -> bool {
+        let sent = self.send_json(&json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": native_id,
+                "response": { "behavior": "allow", "updatedInput": input }
+            }
+        }));
+        if sent.is_err() {
+            return false;
+        }
+        match tool_use_id {
+            Some(tool_use_id) => self.record_host_answer(tool_use_id, input, true),
+            None => self.admit_execution(),
+        }
+        true
     }
 
     fn no_tool_started(&self) -> bool {
@@ -8237,6 +8273,20 @@ fn explicit_exit_code(block: &Value) -> Option<i64> {
         .get("exitCode")
         .or_else(|| block.get("exit_code"))
         .and_then(Value::as_i64)
+}
+
+/// Questions and plan approvals need an answer each time.
+fn claude_tool_takes_session_answer(name: &str) -> bool {
+    !matches!(name, "AskUserQuestion" | "ExitPlanMode")
+}
+
+/// What "matching action" means: the same tool on the same command or file.
+fn claude_action_key(tool: &str, input: &Value) -> String {
+    let target = ["command", "file_path", "notebook_path", "path", "url"]
+        .iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .unwrap_or_default();
+    format!("{tool}\u{0}{target}")
 }
 
 fn claude_mutating_tool(name: &str) -> bool {
@@ -10224,6 +10274,52 @@ time.sleep(30)
                 .denied_pending_tool_use_ids,
             vec!["tool-late".to_owned()]
         );
+    }
+
+    #[test]
+    fn a_session_answer_covers_the_same_action_and_nothing_else() {
+        let mut process = ClaudeStreamProcess::new(
+            PathBuf::from("claude"),
+            "2.1.288".into(),
+            PathBuf::from("/tmp/goalport-session-answer"),
+        );
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        process.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(Box::new(
+            LatePermissionSink(written.clone()),
+        ))));
+        process.bind_session("session-answer");
+        process.process_binding = Some(RuntimeProcessBinding {
+            process_epoch: "runtime-epoch:session-answer".into(),
+            pid: 1,
+            parent_pid: 0,
+            creation_date: "test".into(),
+            executable_path: "claude.exe".into(),
+            executable_sha256: "a".repeat(64),
+        });
+        let ask = |id: &str, tool_use: &str, command: &str| json!({
+            "type": "control_request",
+            "request_id": id,
+            "request": { "subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": tool_use, "input": { "command": command } }
+        });
+        let card = process.map_frame("attempt", &ask("req-1", "tool-1", "npm test")).expect("first request asks");
+        let decision = card.payload["request_id"].as_str().unwrap().to_owned();
+        assert_eq!(card.payload["sessionAnswer"], true);
+        process.permission_response(PermissionResponse { request_id: decision, allow: true, for_session: true }).unwrap();
+
+        assert!(process.map_frame("attempt", &ask("req-2", "tool-2", "npm test")).is_none(), "the same action is not asked again");
+        assert_eq!(process.mutating_tools["tool-2"].decision, MutatingToolDecision::Allowed);
+        assert!(String::from_utf8_lossy(&written.lock().unwrap()).contains("req-2"));
+
+        assert!(process.map_frame("attempt", &ask("req-3", "tool-3", "rm -rf build")).is_some(), "another command still asks");
+        assert_eq!(process.mutating_tools["tool-3"].decision, MutatingToolDecision::Pending);
+    }
+
+    #[test]
+    fn the_same_action_means_the_same_tool_and_target() {
+        let key = claude_action_key("Bash", &json!({ "command": "npm test" }));
+        assert_eq!(key, claude_action_key("Bash", &json!({ "command": "npm test", "timeout": 5 })));
+        assert_ne!(key, claude_action_key("Edit", &json!({ "command": "npm test" })));
+        assert!(!claude_tool_takes_session_answer("AskUserQuestion"));
     }
 
     struct ClosedPermissionSink;
