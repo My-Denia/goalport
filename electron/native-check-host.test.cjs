@@ -45,7 +45,7 @@ test("the first read offers Pi and consent without collecting or holding any mat
   const reply = await host.prepare({ requestId: "one", ...ids });
   assert.equal(reply.offer.instanceId, "pi");
   assert.equal(reply.backgroundSendConsent, true);
-  assert.equal(path.resolve(reply.workspacePath).toLowerCase(), path.resolve(fs.realpathSync(workspace)).toLowerCase());
+  assert.equal(reply.workspacePath, require("./coordination-job.cjs").workspaceIdentity(workspace));
   assert.equal("nativeCheckMaterial" in reply, false);
   await assert.rejects(host.start({ requestId: "one", ...ids, piCapacity: pair, backgroundConsent: true }), error => error.previewAgain === true);
 });

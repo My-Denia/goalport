@@ -478,7 +478,7 @@ export function PiReview({ text, id }: { text: string; id: string }) {
   </div>;
 }
 
-export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, onLeave }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void; onLeave?: () => void }) {
+export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, onLeave, onAskCodex }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void; onLeave?: () => void; onAskCodex?: (text: string) => void }) {
   const report = job.outcome?.report ?? job.progress?.firstRound;
   // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
   // > live/finished. A stopped job that has settled must say so — the user
@@ -511,15 +511,16 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
     const unfinished = !review && !running && !job.revoked;
     return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>
       <h3>{review ? "Pi's review" : running ? "Pi is reviewing Codex's changes…" : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
-      {running ? <p role="status">You can close this window. The review will be here when you come back.</p> : null}
+      {running ? <p role="status">Keep working or close this window. The review will be here when it's done.</p> : null}
       {unfinished ? <p role="status">Your files weren't changed. You can ask for another review.</p> : null}
       {review ? <PiReview text={review} id={job.jobId} /> : null}
-      <div className="native-check-actions">
-        {running ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop review</button> : null}
-        {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <button type="button" className="button button-small button-outline" onClick={onLeave}>Dismiss</button> : null}
-      </div>
       {job.outcome?.error ? <details><summary>Technical details</summary><p>{job.outcome.error}</p></details> : null}
       {job.nativeCheckMaterial ? <details><summary>What Pi was sent · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
+      <div className="native-check-actions">
+        {running ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop review</button> : null}
+        {review && onAskCodex ? <button type="button" className="button button-small button-outline" onClick={() => onAskCodex(`Pi reviewed your changes and said:\n\n${review}\n\nCheck this and fix anything that needs it.`)}>Ask Codex about this</button> : null}
+        {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <button type="button" className="button button-small button-outline" onClick={onLeave}>Dismiss</button> : null}
+      </div>
     </section>;
   }
   return <section className="background-job" aria-label="Background goal" data-job-id={job.jobId}>

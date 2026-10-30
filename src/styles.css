@@ -587,7 +587,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .native-check-review { font-size: 14px; line-height: 1.55; }
 .native-check-review > details { margin-top: 8px; }
 .native-check-review summary, .native-check-panel > details > summary { color: var(--ink-soft); font-size: 13px; cursor: pointer; }
-.native-check-actions { margin-bottom: 10px; }
+.native-check-actions { display: flex; gap: 8px; margin-top: 10px; }
 .native-check-actions:empty { display: none; }
 .md-table { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 13px; }

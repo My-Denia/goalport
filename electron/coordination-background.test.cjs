@@ -364,13 +364,11 @@ test('POSIX identity retains case-sensitive physical folder comparison', { skip:
   assert.equal(posixHost.outstanding(path.join(posixDirectory, 'goal')), false);
 });
 
-test('only a left read-only check gives its folder back; a left writer keeps it', () => {
-  const { leftReadOnlyCheck } = require('./coordination-background.cjs');
-  const check = { nativeCheckTarget: {}, writeAuthorization: null };
-  assert.equal(leftReadOnlyCheck({ acknowledgedStuckAt: 'now', admission: check }), true);
-  assert.equal(leftReadOnlyCheck({ acknowledgedStuckAt: null, admission: check }), false);
-  assert.equal(leftReadOnlyCheck({ acknowledgedStuckAt: 'now', admission: { writeAuthorization: null } }), false);
-  assert.equal(leftReadOnlyCheck({ acknowledgedStuckAt: 'now', admission: { nativeCheckTarget: {}, writeAuthorization: { maxTurns: 1 } } }), false);
+test('a read-only check never holds back the user; anything that can write still does', () => {
+  const { readOnlyCheck } = require('./coordination-background.cjs');
+  assert.equal(readOnlyCheck({ admission: { nativeCheckTarget: {}, writeAuthorization: null } }), true);
+  assert.equal(readOnlyCheck({ admission: { writeAuthorization: null } }), false);
+  assert.equal(readOnlyCheck({ admission: { nativeCheckTarget: {}, writeAuthorization: { maxTurns: 1 } } }), false);
 });
 
 test('an acknowledged job still holds its folder and reports the acknowledgement after a worker replaces progress from a stale snapshot', async t => {
