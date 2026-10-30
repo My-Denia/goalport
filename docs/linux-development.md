@@ -98,6 +98,52 @@ legacy hashing and behavior; false, null and nonboolean constraints are invalid.
 The same recorded request is not sent again. An ambiguous response keeps the
 draft's stable request for explicit result reconciliation, not automatic replay.
 
+### A refused send is not an unknown send
+
+For `start_conversation` and `conversation_send` only, a workbench refusal
+**before entering the mutating Core call** returns a correlated v2 HTTP200
+failure with `refusalSource:"workbench-native-preflight"`. Both request IDs and
+the method must match; its raw rejection is
+`FAILED / NOT_STARTED / NEW_REQUEST / reservation:null`. The Linux client
+validates this shape before normalization. Text saying “Nothing was sent”,
+HTTP200 alone, malformed/missing metadata and old-server responses are not proof.
+The response makes no connection claim and invents no Core snapshot. Real Core
+connection state still comes from independent snapshot reads.
+
+A first, previously unretained submission then says **Nothing was sent.** with
+one folder, target or workspace-check explanation. The message/folder stay in
+an ordinary editable draft; mode choice and Discard work without sending
+anything. Correcting the draft does not submit it: only a later explicit Send
+uses a fresh request ID. Technical details, when supplied, stay folded and are
+control-clean and at most 2048 UTF-8 bytes; helper output is not a headline.
+
+A later refusal proves only that *this invocation* did not forward. Any earlier
+unknown request or same-request reservation keeps its original identity,
+message, target and reservation, with the existing Check result/Retry behavior.
+Repeated Submit while awaiting a result does not send or classify again. A
+retained `sending` state without an in-flight call moves to same-ID
+reconciliation without a network request. Authoritative Core outcomes retain
+their existing settlement semantics, including clearing an unreserved,
+confirmed-not-started rejection. Other native commands retain their previous
+preflight and Core-refused notice behavior. No automatic retry, permission,
+held-folder release, new session or budget is implied.
+
+This fixes the false unknown state after a first local refusal, not the full
+genuine-unknown escape flow or stricter cross-folder gating. Existing
+conversation drafting-ahead behavior is unchanged. A preliminary `goal_detail`
+lookup can fail before the mutation; after the mutation call is entered, any
+transport error remains the old unknown/error path regardless of its prose.
+
+Real UI acceptance requires a connected, app-server-advertising Core and no
+busy/held/unknown/current-work/capacity blocker. Synthetic tests do not establish
+that eligibility or three-width usability. If the same unchanged Core is merely
+down, its owner may use the existing supported launcher on the same
+DB/socket/profile after checking idle ownership. Normal startup generates fresh
+per-process identity/nonce/READY; never copy an old nonce, reset history, replace
+Core bytes or restart a healthy process for this UI change. If eligibility cannot
+be established safely, actual acceptance remains missing. Testing an invalid
+absolute folder needs no valid native send, provider/title prompt or new goal.
+
 The resulting `/goals/campaign-…` address is a Core conversation, not a
 coordinated result. Its title, folder, permissions, Stop and details belong to
 that goal even when another coordinated job is current. Session details and the

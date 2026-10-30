@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import App from "./App";
 import { getCoreClient, resetCoreClientForTests } from "./ipc";
@@ -7,8 +7,9 @@ import { DEMO_SNAPSHOT, resolveCoreSnapshot, normalizeProductConversation, type 
 import { DraftGoalComposer } from "./conversation/DraftGoalComposer";
 import { SessionDetails } from "./panels/SessionDetails";
 import { isNativeDraftRoute, replaceGoalRoute } from "./lib/goalRoute";
+import * as intentHelpers from "./lib/sendIntent";
 
-afterEach(() => { cleanup(); resetCoreClientForTests(); delete window.__GOALPORT_LINUX_CORE__; delete window.goalportCore; sessionStorage.clear(); vi.unstubAllGlobals(); window.history.replaceState(null, "", "/"); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetCoreClientForTests(); delete window.__GOALPORT_LINUX_CORE__; delete window.goalportCore; sessionStorage.clear(); vi.unstubAllGlobals(); window.history.replaceState(null, "", "/"); });
 const reply = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 const packet = (active = false): CoreSnapshot => ({ ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: active ? "campaign-native" : "", campaigns: active ? [{ ...DEMO_SNAPSHOT.campaigns[0], id:"campaign-native", title:"Native goal" }] : [],
   project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/fixture/native" }, activeTask: { ...DEMO_SNAPSHOT.activeTask, id:"task-native", title:"Native goal" },
@@ -16,7 +17,7 @@ const packet = (active = false): CoreSnapshot => ({ ...DEMO_SNAPSHOT, preview: f
   runtimes: DEMO_SNAPSHOT.runtimes.map(item => ({ ...item, nativeSessionTransport: item.id === "codex" ? "app-server" : "unknown" })),
   productConversation: { ...DEMO_SNAPSHOT.productConversation!, title:"Native goal", items:[], runtime:{ state:"selected", provider:"codex", name:"Codex" }, session:{ state:"attached", nativeIdKnown:true, transport:"app-server" }, turn:{ state:"completed", canSend:true, canStop:false, actions:["close-session"] } }
 });
-function server(options: { unknownStart?: boolean; delayedStart?: Promise<Response>; active?: boolean; results?: CoreSnapshot["turnResults"] } = {}) {
+function server(options: { unknownStart?: boolean; delayedStart?: Promise<Response>; active?: boolean; results?: CoreSnapshot["turnResults"]; sendResponse?: (command: { requestId: string; messageType: string }) => Response | Promise<Response> } = {}) {
   const calls: Array<{messageType:string; payload:Record<string,unknown>; requestId:string; nativeTarget?:unknown}> = [];
   let current = { ...packet(options.active), ...(options.results ? { turnResults: options.results } : {}) };
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
@@ -24,6 +25,7 @@ function server(options: { unknownStart?: boolean; delayedStart?: Promise<Respon
     if (body.messageType === "coordination_latest") return reply({ ok:true, payload:{ record:null, roots:[], profileUnconfirmed:false, leftoverHeld:false, line:null, currentBase:null, globalSlot:{kind:"empty"} } });
     if (body.messageType === "coordination_discover") return reply({ ok:true, payload:{ consentMissing:true, harnesses:[], sentence:"Pi unavailable" } });
     if (body.messageType === "goal_overview") return reply({ ok:true, payload:{ overview:{ revision:"fixture", truncated:false, goals:[], pending:[] } } });
+    if (["start_conversation", "conversation_send"].includes(body.messageType) && options.sendResponse) return options.sendResponse(body);
     if (body.messageType === "start_conversation") {
       if (options.delayedStart) return options.delayedStart;
       if (options.unknownStart) throw Error("synthetic lost reply");
@@ -158,6 +160,207 @@ it("a late native start cannot adopt the client view after explicit navigation",
   }));
   await client.snapshot();
   expect(calls.find(call => call.messageType === "snapshot_if_changed")?.payload).toEqual({campaignId:"campaign-other"});
+});
+
+function refusedSend(command: { requestId: string; messageType: string }): Response {
+  const reason = "The conversation folder could not be confirmed. Choose an existing accessible absolute folder.";
+  return reply({ protocolVersion: "goalport.ipc.v2", requestId: command.requestId, ok: false, error: reason,
+    payload: { requestId: command.requestId, accepted: false, messageType: command.messageType,
+      refusalSource: "workbench-native-preflight", rejection: { code: "native-preflight-refused", message: reason,
+        deliveryState: "FAILED", nativeDispatchState: "NOT_STARTED", retryMode: "NEW_REQUEST", reservation: null },
+      technical: "Synthetic preflight diagnostic" } });
+}
+
+it("first validated refusal stays an editable draft, with one plain reason, folded details and no automatic send", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/#codex/new");
+  const f = server({ sendResponse: refusedSend }); render(<App />);
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  const folder = screen.getByLabelText("Project folder");
+  fireEvent.change(folder, { target: { value: "/fixture/missing" } });
+  fireEvent.change(input, { target: { value: "Keep this draft" } });
+  fireEvent.submit(input.closest("form")!);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Nothing was sent. The conversation folder could not be confirmed.");
+  expect(alert.textContent?.match(/The conversation folder/g)).toHaveLength(1);
+  expect(alert.textContent).not.toMatch(/Core refused|Check result|GoalPort could not complete/);
+  expect(alert.querySelector("details")?.open).toBe(false);
+  expect(screen.queryByRole("button", { name: "Check result" })).toBeNull();
+  expect(input).toHaveProperty("disabled", false); expect(input).toHaveProperty("value", "Keep this draft");
+  expect(folder).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "Discard draft" })).toHaveProperty("disabled", false);
+  input.focus();
+  fireEvent.change(folder, { target: { value: "/fixture/corrected" } });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(document.activeElement).toBe(input);
+  fireEvent.change(input, { target: { value: "Corrected draft" } });
+  fireEvent.compositionStart(input); fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+  expect(f.calls.filter(c => c.messageType === "start_conversation")).toHaveLength(1);
+  fireEvent.compositionEnd(input);
+  // Explicitly submit a later draft: it alone gets a fresh ID and changed payload.
+  fireEvent.submit(input.closest("form")!);
+  await screen.findByRole("alert");
+  const starts = f.calls.filter(c => c.messageType === "start_conversation");
+  expect(starts).toHaveLength(2); expect(starts[1].requestId).not.toBe(starts[0].requestId);
+  expect(starts[1].payload.message).toBe("Corrected draft");
+  expect(starts[1].payload.workspaceRoot).toBe("/fixture/corrected");
+  expect(f.calls.some(c => ["coordination_start", "coordination_continue", "resume_native_session"].includes(c.messageType))).toBe(false);
+});
+
+it("mode change clears the native refusal before opening coordinated work; New goal cannot resurrect its intent", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/#codex/new");
+  const f = server({ sendResponse: refusedSend }); render(<App />);
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/missing" } });
+  fireEvent.change(input, { target: { value: "Still my draft" } }); fireEvent.submit(input.closest("form")!);
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("combobox", { name: "Choose goal mode" }));
+  fireEvent.keyDown(await screen.findByRole("option", { name: /Coordinated work/ }), { key: "Enter" });
+  await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
+  expect(screen.queryByText(/Nothing was sent/)).toBeNull();
+  expect(screen.queryByText("Synthetic preflight diagnostic")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveProperty("value", "Still my draft");
+  fireEvent.click(screen.getByRole("button", { name: "New goal" }));
+  await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
+  expect(screen.queryByRole("button", { name: "Check result" })).toBeNull();
+  await chooseNative();
+  expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveProperty("disabled", false);
+  fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+  expect(f.calls.filter(c => c.messageType === "start_conversation")).toHaveLength(1);
+});
+
+it("later host refusal keeps a prior unknown start's identity, copy, text and locks", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/#codex/new");
+  let first = true;
+  const f = server({ sendResponse: command => { if (first) { first = false; throw Error("synthetic unknown"); } return refusedSend(command); } });
+  render(<App />);
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/native" } });
+  fireEvent.change(input, { target: { value: "Original uncertain request" } }); fireEvent.submit(input.closest("form")!);
+  const check = await screen.findByRole("button", { name: "Check result" });
+  await waitFor(() => expect(check).toHaveProperty("disabled", false)); fireEvent.click(check);
+  await screen.findByText("This attempt was not forwarded, but the earlier send is still not confirmed. Your original request is kept.");
+  expect(input).toHaveProperty("disabled", true); expect(input).toHaveProperty("value", "Original uncertain request");
+  expect(screen.getByLabelText("Project folder")).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "Discard draft" })).toHaveProperty("disabled", true);
+  const calls = f.calls.filter(c => c.messageType === "start_conversation");
+  expect(calls).toHaveLength(2); expect(calls[1]).toEqual(calls[0]);
+});
+
+it.each([false, true])("synchronous guard blocks a second submit while %s native send is awaiting", async active => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", active ? "/goals/campaign-native" : "/#codex/new");
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const f = server({ active, sendResponse: async command => { await pending; return refusedSend(command); } });
+  const classify = vi.spyOn(intentHelpers, "settleNativeSendIntent");
+  render(<App />);
+  if (active) await screen.findByText("Codex app-server · native conversation context");
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  if (!active) fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/missing" } });
+  fireEvent.change(input, { target: { value: "One invocation" } });
+  fireEvent.submit(input.closest("form")!); fireEvent.submit(input.closest("form")!);
+  const method = active ? "conversation_send" : "start_conversation";
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === method)).toHaveLength(1));
+  expect(classify).not.toHaveBeenCalled();
+  release();
+  await screen.findByText(/Nothing was sent\./);
+  expect(f.calls.filter(c => c.messageType === method)).toHaveLength(1);
+  expect(classify).toHaveBeenCalledTimes(1);
+  expect(input).toHaveProperty("disabled", false); expect(input).toHaveProperty("value", "One invocation");
+});
+
+it("a later conversation host refusal retains earlier unknown send and original request", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/goals/campaign-native");
+  let first = true;
+  const f = server({ active: true, sendResponse: command => { if (first) { first = false; throw Error("synthetic unknown"); } return refusedSend(command); } });
+  render(<App />);
+  await screen.findByText("Codex app-server · native conversation context");
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  fireEvent.change(input, { target: { value: "Original follow-up" } }); fireEvent.submit(input.closest("form")!);
+  const check = await screen.findByRole("button", { name: "Check result" });
+  const priorDisabled = (input as HTMLTextAreaElement).disabled;
+  await waitFor(() => expect(check).toHaveProperty("disabled", false)); fireEvent.click(check);
+  await screen.findByText("This attempt was not forwarded, but the earlier send is still not confirmed. Your original request is kept.");
+  // Existing conversation Composer permits drafting ahead; this invocation
+  // must not change that policy or replace the earlier Check result intent.
+  expect(input).toHaveProperty("disabled", priorDisabled);
+  expect(input).toHaveProperty("value", "Original follow-up");
+  expect(screen.getByRole("button", { name: "Check result" })).toBeTruthy();
+  const sends = f.calls.filter(c => c.messageType === "conversation_send");
+  expect(sends).toHaveLength(2); expect(sends[1]).toEqual(sends[0]);
+});
+
+it.each([false, true])("defensive stale sending in %s native composer reconciles locally without another call/classification", async active => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", active ? "/goals/campaign-native" : "/#codex/new");
+  // Fault injection models retained presentation after an interrupted UI callback,
+  // not a different transport/proof or a production test hook.
+  const classify = vi.spyOn(intentHelpers, "settleNativeSendIntent").mockImplementationOnce(intent => ({ ...intent, state: "sending" }));
+  const f = server({ active, sendResponse: () => reply({ ok: false, error: "synthetic interrupted presentation" }) });
+  render(<App />);
+  if (active) await screen.findByText("Codex app-server · native conversation context");
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  if (!active) fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/original" } });
+  fireEvent.change(input, { target: { value: "Keep original identity" } });
+  fireEvent.submit(input.closest("form")!);
+  await waitFor(() => expect(classify).toHaveBeenCalledTimes(1));
+  const original = classify.mock.calls[0][0];
+  fireEvent.submit(input.closest("form")!);
+  await screen.findByText("The earlier send is still not confirmed. Your original request is kept.");
+  expect(screen.getByRole("button", { name: "Check result" })).toBeTruthy();
+  expect(classify).toHaveBeenCalledTimes(1);
+  const calls = f.calls.filter(c => c.messageType === (active ? "conversation_send" : "start_conversation"));
+  expect(calls).toHaveLength(1); expect(calls[0].requestId).toBe(original.requestId);
+  expect(input).toHaveProperty("value", original.message);
+});
+
+it("later host refusal restores the exact same-request reservation captured before cloning", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/#codex/new");
+  let prior!: intentHelpers.SendIntent;
+  const classify = vi.spyOn(intentHelpers, "settleNativeSendIntent").mockImplementationOnce(intent => {
+    prior = Object.freeze({ ...intent, state: "same-request", reservation: {
+      kind: "first-send" as const, requestId: intent.requestId, campaignId: "synthetic-reserved", taskId: "synthetic-task", attemptId: "synthetic-attempt", messageReserved: true
+    } });
+    return prior;
+  });
+  let first = true;
+  const f = server({ sendResponse: command => {
+    if (first) { first = false; return reply({ ok: false, error: "synthetic prior Core reservation" }); }
+    return refusedSend(command);
+  } });
+  render(<App />);
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/original" } });
+  fireEvent.change(input, { target: { value: "Reserved original" } }); fireEvent.submit(input.closest("form")!);
+  const retry = await screen.findByRole("button", { name: "Retry" });
+  await waitFor(() => expect(retry).toHaveProperty("disabled", false)); fireEvent.click(retry);
+  await screen.findByText("This attempt was not forwarded. Your existing conversation request is kept.");
+  expect(classify.mock.calls[1][0]).toEqual({ ...prior, state: "sending" });
+  expect(classify.mock.calls[1][2]).toBe(prior);
+  expect(classify.mock.results[1].value).toBe(prior);
+  expect(prior.state).toBe("same-request");
+  expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Check result" })).toBeNull();
+  const starts = f.calls.filter(c => c.messageType === "start_conversation");
+  expect(starts).toHaveLength(2); expect(starts[1]).toEqual(starts[0]);
+});
+
+it("late host refusal cannot reinsert native error or steal focus after deliberate view navigation", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null, "", "/#codex/new");
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const f = server({ sendResponse: async command => { await pending; return refusedSend(command); } });
+  render(<App />);
+  const input = await screen.findByRole("textbox", { name: "Message composer" });
+  fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/fixture/original" } });
+  fireEvent.change(input, { target: { value: "Old draft" } }); fireEvent.submit(input.closest("form")!);
+  await waitFor(() => expect(f.calls.filter(c => c.messageType === "start_conversation")).toHaveLength(1));
+  window.history.replaceState(null, "", "/#coordinated/new"); fireEvent(window, new PopStateEvent("popstate"));
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Choose goal mode" }).textContent).toContain("Coordinated work"));
+  const coordinated = screen.getByRole("textbox", { name: "Message composer" }); coordinated.focus();
+  await act(async () => { release(); await pending; });
+  await waitFor(() => expect(screen.queryByText(/Nothing was sent\./)).toBeNull());
+  expect(window.location.hash).toBe("#coordinated/new"); expect(document.activeElement).toBe(coordinated);
+  expect(screen.queryByText("Synthetic preflight diagnostic")).toBeNull();
+  expect(f.calls.filter(c => c.messageType === "start_conversation")).toHaveLength(1);
 });
 
 it("native draft route is local intent and cannot be overwritten by passive Core selection", () => {

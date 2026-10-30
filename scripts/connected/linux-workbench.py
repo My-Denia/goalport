@@ -994,6 +994,29 @@ def coordination_stop_command(data_dir: Path | None, repo_root: Path, endpoint: 
 NATIVE_WORKSPACE_COMMANDS = {"start_conversation", "conversation_send", "send_message", "select_runtime", "select_attempt", "resume_native_session", "handoff", "reassign", "continue_in_isolated_workspace"}
 NATIVE_GLOBAL_COMMANDS = {"create_campaign", "create_campaign_with_task", "queue_override", "request_owner_action"}
 NATIVE_FOLDER_SENTENCE = "Codex conversations need an absolute folder path, for example /path/to/project."
+NATIVE_SEND_COMMANDS = {"start_conversation", "conversation_send"}
+NATIVE_PREFLIGHT_REASONS = {
+    "folder": "The conversation folder could not be confirmed. Choose an existing accessible absolute folder.",
+    "target": "The conversation target could not be confirmed. Open its current status before sending again.",
+    "reservations": "Workspace reservations could not be checked. Check current work before sending again.",
+}
+
+
+def native_send_refusal(message_type, request_id, stage):
+    """Invocation-local no-forward result, not an outcome for an earlier send."""
+    if message_type not in NATIVE_SEND_COMMANDS or not _saved_targets.valid_id(request_id):
+        return None
+    reason = NATIVE_PREFLIGHT_REASONS[stage]
+    return json.dumps({
+        "protocolVersion": "goalport.ipc.v2", "requestId": request_id, "ok": False, "error": reason,
+        "payload": {
+            "requestId": request_id, "accepted": False, "messageType": message_type,
+            "refusalSource": "workbench-native-preflight",
+            "rejection": {"code": "native-preflight-refused", "message": reason,
+                          "deliveryState": "FAILED", "nativeDispatchState": "NOT_STARTED",
+                          "retryMode": "NEW_REQUEST", "reservation": None},
+        },
+    }).encode()
 
 
 def native_workspace(value, *, canonical=False):
@@ -1275,11 +1298,14 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
             payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
             request_id = request.get("requestId") or request.get("request_id")
             preflighting = message_type in NATIVE_WORKSPACE_COMMANDS | NATIVE_GLOBAL_COMMANDS
+            preflight_stage = "reservations"
             try:
                 if preflighting:
                     if coordination_data is None:
                         raise ValueError("Workspace reservations are unavailable. Nothing was sent.")
+                    preflight_stage = "folder" if message_type == "start_conversation" else "target"
                     workspace = native_ingress_workspace({**request, "messageType": message_type}, endpoint, unix_client, timeout)
+                    preflight_stage = "reservations"
                     prefix, error = coordination_cli_prefix(coordination_data, ROOT, endpoint, core_binary, database=database)
                     if error:
                         raise ValueError(error)
@@ -1292,10 +1318,12 @@ def make_handler(endpoint: str, dist: Path, unix_client, timeout: float, coordin
                     endpoint, message_type, payload, timeout=timeout, request_id=request_id
                 )
             except unix_client.ClientError as error:
-                self._send(502, disconnected_body(str(error)), "application/json")
+                refusal = native_send_refusal(message_type, request_id, preflight_stage) if preflighting else None
+                self._send(200 if refusal else 502, refusal if refusal else disconnected_body(str(error)), "application/json")
                 return
             except (OSError, ValueError) as error:
-                self._send(200 if preflighting else 502, disconnected_body(str(error)), "application/json")
+                refusal = native_send_refusal(message_type, request_id, preflight_stage) if preflighting else None
+                self._send(200 if preflighting else 502, refusal if refusal else disconnected_body(str(error)), "application/json")
                 return
             self._send(200, json.dumps(response).encode(), "application/json")
 

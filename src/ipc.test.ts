@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { getCoreClient, persistedAttemptId, reusableAttemptId, resetCoreClientForTests, type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, resolveCoreSnapshot } from "./types";
+import { settleNativeSendIntent, settleSendIntent, startConversationIntent } from "./lib/sendIntent";
 
 afterEach(() => {
   resetCoreClientForTests();
@@ -291,6 +292,18 @@ describe("competing-background command rejection envelope", () => {
         reservation: null,
       },
     });
+  });
+
+  it("ignores an unvalidated non-Linux host tag while preserving authoritative Core settlement", async () => {
+    mountElectronBridge(async request => ({ ...guardEnvelope(request), refusalSource: "workbench-native-preflight" }));
+    const client = getCoreClient();
+    await client.snapshot();
+    const after = await client.startConversation!("C:\\work", "codex", "competing goal", "stable-start");
+    expect(after.commandOutcome?.refusalSource).toBeUndefined();
+    const intent = startConversationIntent("stable-start", "C:\\work", "codex", "competing goal");
+    const prior = { ...intent, state: "reconcile" as const };
+    expect(settleNativeSendIntent(intent, after.commandOutcome, prior)).toEqual(settleSendIntent(intent, after.commandOutcome));
+    expect(settleNativeSendIntent(intent, after.commandOutcome, prior)).toBeNull();
   });
 
   it("a guard refusal never marks a connected client disconnected", async () => {

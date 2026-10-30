@@ -63,6 +63,8 @@ import {
   canExplicitlyRetry,
   conversationSendIntent,
   retryLabel,
+  isNativePreflightRefusal,
+  settleNativeSendIntent,
   settleSendIntent,
   startConversationIntent,
   type SendIntent
@@ -97,10 +99,20 @@ const BACKGROUND_JOB_OUTSTANDING_SENTENCE =
  */
 const BACKGROUND_JOB_TERMINAL_STATES = new Set(["completed", "failed", "stopped"]);
 
-function commandFailure(next: CoreSnapshot, messageType: string): ActiveNotice | null {
+function commandFailure(next: CoreSnapshot, messageType: string, priorIntent?: SendIntent): ActiveNotice | null {
   const outcome = next.commandOutcome;
   if (outcome?.messageType === messageType) {
     if (outcome.kind === "accepted") return null;
+    if (isNativePreflightRefusal(outcome)) {
+      return {
+        sentence: priorIntent
+          ? priorIntent.state === "same-request"
+            ? "This attempt was not forwarded. Your existing conversation request is kept."
+            : "This attempt was not forwarded, but the earlier send is still not confirmed. Your original request is kept."
+          : `Nothing was sent. ${outcome.rejection!.message}`,
+        ...(outcome.technical ? { technical: outcome.technical } : {})
+      };
+    }
     // The one known competing-job guard is a definite pre-dispatch refusal:
     // its own human sentence is the message, not a generic Core failure.
     if (outcome.kind === "refused" && outcome.rejection?.code === "background-job-outstanding") {
@@ -573,12 +585,12 @@ function App() {
   }
   function changeNativeDraft(value: GoalDraftValue) {
     if (draftGoalRef.current?.intent?.state === "sending" || draftGoalRef.current?.intent?.state === "reconcile") return;
+    setDraftError(null);
     if (value.provider === "") {
       openCoordinated({ kind: "new" });
       setDraftGoal(current => current ? { ...current, workspace: value.workspace, message: value.message } : current);
       return;
     }
-    setDraftError(null);
     setDraftGoal(current => current ? { ...current, ...value, requestId: current.intent ? freshRequestId() : current.requestId, intent: undefined } : current);
   }
   function openCoordinated(route: CoordinatedRoute, replace = false, fromLocation = false) {
@@ -1110,6 +1122,14 @@ function App() {
       return;
     }
     if (!draftGoal || draftBusy || draftInFlight.current || (client.mode === "linux-core" && (linuxActionBusy || admissionUnsaid.current || admissionIntent.current?.unknown))) return;
+    if (draftGoal.intent?.state === "sending") {
+      const reconciled = { ...draftGoal, intent: { ...draftGoal.intent, state: "reconcile" as const } };
+      draftGoalRef.current = reconciled;
+      if (nativeDraftRef.current) nativeGoalDraftRef.current = reconciled;
+      setDraftGoal(reconciled);
+      setDraftError({ sentence: "The earlier send is still not confirmed. Your original request is kept." });
+      return;
+    }
     const retrying = canExplicitlyRetry(draftGoal.intent);
     if (draftBlocked && !retrying) return;
     const workspace = draftGoal.intent?.workspaceRoot ?? draftGoal.workspace.trim();
@@ -1704,26 +1724,37 @@ function App() {
     const epoch = draftEpoch.current;
     draftInFlight.current = true;
     setDraftBusy(true);
-    const intent = draftGoal.intent
-      ? { ...draftGoal.intent, state: "sending" as const }
+    const priorIntent = draftGoal.intent;
+    const intent = priorIntent
+      ? { ...priorIntent, state: "sending" as const }
       : startConversationIntent(draftGoal.requestId, workspace, provider, message);
-    setDraftGoal((current) => current ? { ...current, intent } : current);
+    const sendingDraft = { ...draftGoal, intent };
+    draftGoalRef.current = sendingDraft;
+    if (nativeDraftRef.current) nativeGoalDraftRef.current = sendingDraft;
+    setDraftGoal(sendingDraft);
     try {
       const next = await client.startConversation(workspace, provider, message, intent.requestId, client.mode === "linux-core" ? true : undefined);
       // New goal replaced this send. Publishing its campaign first would close
       // the replacement draft and put the user on the goal they just left.
-      if (epoch !== draftEpoch.current) return;
-      setSnapshot(next);
-      const failure = client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation");
+      if (epoch !== draftEpoch.current || draftGoalRef.current?.requestId !== intent.requestId) return;
+      const outcome = next.commandOutcome;
+      const matches = !outcome || (outcome.requestId === intent.requestId && outcome.messageType === intent.method);
+      if (matches) setSnapshot(next);
+      const failure = !matches ? { sentence: "The earlier send is still not confirmed. Your original request is kept." }
+        : client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation", priorIntent);
       if (failure) {
         setDraftError(failure);
-        const retained = settleSendIntent(intent, next.commandOutcome);
+        const retained = settleNativeSendIntent(intent, matches ? outcome : undefined, priorIntent);
         setDraftBlocked(false);
-        setDraftGoal((current) => current ? {
+        const current = draftGoalRef.current;
+        const settledDraft = {
           ...current,
           ...(retained ? { requestId: retained.requestId, intent: retained } : { requestId: freshRequestId(), intent: undefined }),
-          baselineCampaignId: next.commandOutcome?.rejection?.reservation?.campaignId ?? current.baselineCampaignId
-        } : current);
+          baselineCampaignId: (matches ? outcome?.rejection?.reservation?.campaignId : undefined) ?? current.baselineCampaignId
+        };
+        draftGoalRef.current = settledDraft;
+        if (nativeDraftRef.current) nativeGoalDraftRef.current = settledDraft;
+        setDraftGoal(settledDraft);
         return;
       }
       closeDraft(false);
@@ -1744,7 +1775,7 @@ function App() {
       // definite ONLY for the known competing-background guard. Every other
       // throw stays ambiguous: the same request identity returns for a
       // non-dispatching reconciliation, and nothing is claimed as delivered.
-      if (epoch !== draftEpoch.current) return;
+      if (epoch !== draftEpoch.current || draftGoalRef.current?.requestId !== intent.requestId) return;
       const coded = error instanceof Error ? (error as { code?: unknown }).code : undefined;
       const detail = error instanceof Error ? error.message : String(error);
       if (coded === "background-job-outstanding") {
@@ -2307,7 +2338,13 @@ function App() {
   // -----------------------------------------------------------------------
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (sendBusy || sendInFlight.current) return;
     const retainedIntent = sendIntents[draftCampaignId];
+    if (retainedIntent?.state === "sending") {
+      setSendIntents(current => ({ ...current, [draftCampaignId]: { ...retainedIntent, state: "reconcile" } }));
+      setActiveNotice({ sentence: "The earlier send is still not confirmed. Your original request is kept." });
+      return;
+    }
     const retrying = canExplicitlyRetry(retainedIntent);
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
       setActiveNotice({ sentence: "Core acknowledged the last action with a capacity-limited view. Reconnect before starting new work." });
@@ -2344,22 +2381,27 @@ function App() {
     const targetKey = commandTargetKey(target.campaignId, target.taskId, target.attemptId);
     sendInFlight.current = true;
     setSendBusy(true);
-    const intent = retainedIntent
-      ? { ...retainedIntent, state: "sending" as const }
+    const priorIntent = retainedIntent;
+    const intent = priorIntent
+      ? { ...priorIntent, state: "sending" as const }
       : conversationSendIntent(freshRequestId(), target.campaignId, target.attemptId, message);
     setSendIntents((current) => ({ ...current, [target.campaignId]: intent }));
     try {
       const next = client.conversationSend
         ? await client.conversationSend(message, target.campaignId, target.attemptId, intent.requestId)
         : await client.sendMessage(message, target.campaignId, target.attemptId, target.taskId);
-      if (target.selection === selectionIntent.current) {
+      const messageType = client.conversationSend ? "conversation_send" : "send_message";
+      const outcome = next.commandOutcome;
+      const matches = !client.conversationSend || !outcome || (outcome.requestId === intent.requestId && outcome.messageType === messageType);
+      if (matches && target.selection === selectionIntent.current) {
         setSnapshot((current) => current.loadedHistory ? mergeSnapshotHistory(current, next) : next);
       }
-      const messageType = client.conversationSend ? "conversation_send" : "send_message";
-      const failure = client.mode === "browser-preview" ? null : commandFailure(next, messageType);
+      const failure = !matches ? { sentence: "The earlier send is still not confirmed. Your original request is kept." }
+        : client.mode === "browser-preview" ? null : commandFailure(next, messageType, priorIntent);
       if (failure) {
-        const retained = settleSendIntent(intent, next.commandOutcome);
+        const retained = settleNativeSendIntent(intent, matches ? outcome : undefined, priorIntent);
         setSendIntents((current) => {
+          if (current[target.campaignId]?.requestId !== intent.requestId) return current;
           const updated = { ...current };
           if (retained) updated[target.campaignId] = retained;
           else delete updated[target.campaignId];
@@ -2374,6 +2416,7 @@ function App() {
         return;
       }
       setSendIntents((current) => {
+        if (current[target.campaignId]?.requestId !== intent.requestId) return current;
         const updated = { ...current };
         delete updated[target.campaignId];
         return updated;

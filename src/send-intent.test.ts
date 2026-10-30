@@ -1,11 +1,62 @@
 import { describe, expect, it } from "vitest";
+import type { CoreCommandOutcome } from "./types";
 import {
   canExplicitlyRetry,
   conversationSendIntent,
   retryLabel,
   settleSendIntent,
-  startConversationIntent
+  settleNativeSendIntent,
+  startConversationIntent,
+  type SendIntent
 } from "./lib/sendIntent";
+
+function hostRefusal(intent: SendIntent): CoreCommandOutcome {
+  return { kind: "refused", requestId: intent.requestId, messageType: intent.method,
+    refusalSource: "workbench-native-preflight", error: "Controlled reason.",
+    rejection: { code: "native-preflight-refused", message: "Controlled reason.", deliveryState: "FAILED",
+      nativeDispatchState: "NOT_STARTED", retryMode: "NEW_REQUEST", reservation: null } };
+}
+
+describe("native invocation-local refusal", () => {
+  const intents = [startConversationIntent("start", "/fixture", "codex", "first"), conversationSendIntent("send", "campaign", "attempt", "follow")];
+  it.each(intents)("clears only the first unretained $method", intent => {
+    expect(settleNativeSendIntent(intent, hostRefusal(intent))).toBeNull();
+    for (const state of ["same-request", "reconcile"] as const) {
+      const prior = Object.freeze({ ...intent, state, reservation: { kind: "first-send" as const, requestId: intent.requestId,
+        campaignId: "reserved", taskId: "task", attemptId: "attempt", messageReserved: true } });
+      const sent = { ...prior, state: "sending" as const };
+      expect(settleNativeSendIntent(sent, hostRefusal(sent), prior)).toBe(prior);
+      expect(prior.state).toBe(state);
+      expect(sent.state).toBe("sending");
+    }
+  });
+  it.each(intents)("safely reconciles defensive sending and malformed/stale $method proof", intent => {
+    expect(settleNativeSendIntent(intent, hostRefusal(intent), intent)).toEqual({ ...intent, state: "reconcile" });
+    for (const change of [{ requestId: "other" }, { messageType: "rename_conversation" }, { rejection: undefined }, { kind: "accepted" as const }]) {
+      expect(settleNativeSendIntent(intent, { ...hostRefusal(intent), ...change })).toEqual({ ...intent, state: "reconcile" });
+      const prior = { ...intent, state: "same-request" as const };
+      expect(settleNativeSendIntent(intent, { ...hostRefusal(intent), ...change }, prior)).toBe(prior);
+    }
+  });
+  it("does not clear a different retained identity from a stale host result", () => {
+    const sent = intents[0];
+    const current = { ...sent, requestId: "newer", workspaceRoot: "/different", state: "reconcile" as const };
+    expect(settleNativeSendIntent(sent, hostRefusal(sent), current)).toBe(current);
+  });
+  it.each(intents)("delegates EVERY untagged $method outcome exactly, regardless of prior history", intent => {
+    const host = hostRefusal(intent);
+    const authoritative = { ...host, refusalSource: undefined };
+    const cases: Array<CoreCommandOutcome | undefined> = [undefined, authoritative,
+      { ...authoritative, kind: "accepted" }, { ...authoritative, rejection: undefined },
+      { ...authoritative, kind: "transport-error", rejection: undefined },
+      { ...authoritative, rejection: { ...authoritative.rejection!, retryMode: "SAME_REQUEST",
+        reservation: { kind: "first-send", requestId: intent.requestId, campaignId: "reserved", taskId: "task", attemptId: "attempt", messageReserved: true } } }];
+    for (const outcome of cases) for (const prior of [undefined, { ...intent, state: "reconcile" as const }, { ...intent, state: "same-request" as const }]) {
+      expect(settleNativeSendIntent(intent, outcome, prior)).toEqual(settleSendIntent(intent, outcome));
+    }
+    expect(settleNativeSendIntent(intent, authoritative, { ...intent, state: "reconcile" })).toBeNull();
+  });
+});
 
 describe("stable send intent", () => {
   it("retains one id through transport ambiguity and explicit reconciliation", () => {

@@ -71,6 +71,30 @@ export function settleSendIntent(intent: SendIntent, outcome: CoreCommandOutcome
   };
 }
 
+/** Only validated Linux metadata can carry this source into an outcome. */
+export function isNativePreflightRefusal(outcome: CoreCommandOutcome | undefined): boolean {
+  const rejection = outcome?.rejection;
+  return Boolean(outcome?.refusalSource === "workbench-native-preflight" && outcome.kind === "refused"
+    && (outcome.messageType === "start_conversation" || outcome.messageType === "conversation_send")
+    && typeof outcome.error === "string" && outcome.error.trim().length > 0
+    && rejection?.code === "native-preflight-refused" && rejection.message === outcome.error
+    && rejection.deliveryState === "FAILED" && rejection.nativeDispatchState === "NOT_STARTED"
+    && rejection.retryMode === "NEW_REQUEST" && rejection.reservation === null);
+}
+
+/** A later local refusal says nothing about an earlier unknown/reserved send. */
+export function settleNativeSendIntent(intent: SendIntent, outcome: CoreCommandOutcome | undefined, priorIntent?: SendIntent): SendIntent | null {
+  // Core-authored and legacy outcomes keep EXACT existing settlement semantics.
+  if (outcome?.refusalSource !== "workbench-native-preflight") return settleSendIntent(intent, outcome);
+  const prior = priorIntent;
+  if (prior && !isSameIntent(prior, intent)) return prior.state === "sending" ? { ...prior, state: "reconcile" } : prior;
+  if (isNativePreflightRefusal(outcome) && outcome.requestId === intent.requestId && outcome.messageType === intent.method) {
+    if (!prior) return null;
+    return prior.state === "sending" ? { ...prior, state: "reconcile" } : prior;
+  }
+  return prior ? (prior.state === "sending" ? { ...prior, state: "reconcile" } : prior) : settleSendIntent(intent, undefined);
+}
+
 export function retryLabel(intent: SendIntent | undefined): string | undefined {
   if (intent?.state === "same-request") return "Retry";
   if (intent?.state === "reconcile") return "Check result";
