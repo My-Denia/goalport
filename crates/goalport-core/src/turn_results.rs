@@ -492,6 +492,13 @@ fn commands_between(records: &[EventRecord], start_seq: i64, end_seq: i64) -> Ve
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .map(|text| bound_chars(text, OUTPUT_CHARS));
+        // Providers report a start and a finish; that is one command.
+        if state != "started" {
+            let trimmed = command.trim();
+            if let Some(index) = commands.iter().position(|fact: &CommandFact| fact.state == "started" && fact.command == trimmed) {
+                commands.remove(index);
+            }
+        }
         commands.push(CommandFact {
             command: command.trim().to_string(),
             cwd: payload.get("cwd").and_then(Value::as_str).filter(|value| !value.is_empty()).map(str::to_owned),

@@ -2068,7 +2068,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
-    expect(await screen.findByText(/Checking which harnesses can work on this goal/)).toBeTruthy();
+    expect(await screen.findByText(/Checking which agents can work on this goal/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
     // Even a programmatic submit cannot reach the legacy unscoped launch.
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
@@ -2090,7 +2090,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), { target: { value: "plan the helper" } });
-    expect(await screen.findByText(/could not load your harness-access choices/)).toBeTruthy();
+    expect(await screen.findByText(/could not load your agent access choices/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByText("Send is not enabled.")).toBeTruthy();
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));

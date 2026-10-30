@@ -4,7 +4,7 @@
 //
 // User intent for the states below:
 //   "I wrote a goal without picking a Runtime and pressed Send: GoalPort is
-//    still checking which harnesses can work — I want Send to wait for MY
+//    still checking which agents can work — I want Send to wait for MY
 //    confirmation, tell me plainly when that check fails, and let me retry;
 //    and when I come back to a job I stopped, I want to be told it actually
 //    stopped and what survived."
@@ -117,9 +117,9 @@ window.__GOALPORT_ELECTRON__ = true;
 const index = readFileSync(resolve(distRoot, "index.html"), "utf8");
 writeFileSync(resolve(distRoot, "shot-panel-gate.html"), index.replace("  </head>", `${pageScript}  </head>`));
 
-const WAIT_SENTENCE = "Checking which harnesses can work on this goal";
+const WAIT_SENTENCE = "Checking which agents can work on this goal";
 const PANEL_LEAD = "Nothing is sent until you press Send.";
-const FAIL_SENTENCE = "could not load your harness-access choices";
+const FAIL_SENTENCE = "could not load your agent access choices";
 const RETRY_LABEL = "Retry harness access";
 const STOP_REASON = "Send is not enabled.";
 const SETTLED_SENTENCE = "This goal was stopped and has settled";

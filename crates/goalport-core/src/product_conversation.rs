@@ -347,11 +347,12 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                     continue;
                 }
                 let status = text_of("status").unwrap_or_default();
-                let body = if status.is_empty() {
-                    tool
-                } else {
-                    format!("{tool} — {status}")
-                };
+                // Records project one at a time, so a start cannot be paired
+                // with its finish here. The finished line is the one that counts.
+                if status == "started" {
+                    continue;
+                }
+                let body = activity_sentence(&text_of("toolName").unwrap_or(tool), &status, payload);
                 items.push(ProductConversationItem {
                     id: record.event.id.clone(),
                     logical_item_id: record.event.id.clone(),
@@ -477,6 +478,56 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
         .into_iter()
         .filter(|item| !item.body.trim().is_empty())
         .collect()
+}
+
+/// One step in the words a person would use. Providers name these after their
+/// own protocol (`commandExecution`, `Bash`), which means nothing on screen.
+fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> String {
+    const COMMAND_LIMIT: usize = 120;
+    let exit_code = payload.and_then(|value| value.get("exitCode")).and_then(Value::as_i64);
+    let failed = status.contains("fail") || status.contains("error") || exit_code.is_some_and(|code| code != 0);
+    if let Some(command) = payload
+        .and_then(|value| value.get("command"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    {
+        let first_line = command.lines().next().unwrap_or(command);
+        let mut shown: String = first_line.chars().take(COMMAND_LIMIT).collect();
+        if shown.len() < command.len() {
+            shown.push('…');
+        }
+        return if failed { format!("Failed: {shown}") } else { format!("Ran {shown}") };
+    }
+    let mut paths: Vec<&str> = payload
+        .and_then(|value| value.get("paths"))
+        .and_then(Value::as_array)
+        .map(|paths| paths.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    paths.extend(payload.and_then(|value| value.get("path")).and_then(Value::as_str));
+    let lower = tool.to_ascii_lowercase();
+    let action = if lower.contains("command") || lower == "bash" || lower.contains("shell") {
+        "Ran a command".to_owned()
+    } else if lower.contains("filechange") || lower.contains("edit") || lower.contains("write") {
+        match paths.as_slice() {
+            [] => "Changed files".to_owned(),
+            [path] => format!("Changed {path}"),
+            [path, rest @ ..] => format!("Changed {path} and {} more", rest.len()),
+        }
+    } else if lower == "read" {
+        paths.first().map_or_else(|| "Read a file".to_owned(), |path| format!("Read {path}"))
+    } else if lower == "grep" || lower == "glob" || lower == "ls" {
+        "Searched the workspace".to_owned()
+    } else if lower.contains("web") {
+        "Looked something up online".to_owned()
+    } else if lower == "task" || lower == "agent" {
+        "Asked a helper agent".to_owned()
+    } else if lower.contains("toolcall") || lower == "native-tool" || lower == "tool_result" {
+        "Used a tool".to_owned()
+    } else {
+        format!("Used {tool}")
+    };
+    if failed { format!("Failed: {action}") } else { action }
 }
 
 fn provider_issue_message(reason_code: &str) -> &'static str {
@@ -1098,4 +1149,29 @@ pub fn campaign_send_authorized(store: &Store, campaign_id: &str) -> Result<bool
         .get_campaign_authorization(campaign_id)
         .map_err(|error| error.to_string())?;
     Ok(auth.provider_authorized && auth.action_authorized)
+}
+
+#[cfg(test)]
+mod activity_sentence_tests {
+    use super::activity_sentence;
+    use serde_json::json;
+
+    #[test]
+    fn steps_read_as_sentences_not_protocol_names() {
+        assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "npm test", "exitCode": 0}))), "Ran npm test");
+        assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "npm test", "exitCode": 1}))), "Failed: npm test");
+        assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["a.md"]}))), "Changed a.md");
+        assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["a.md", "b.md", "c.md"]}))), "Changed a.md and 2 more");
+        assert_eq!(activity_sentence("Read", "completed", None), "Read a file");
+        assert_eq!(activity_sentence("Grep", "failed", None), "Failed: Searched the workspace");
+        assert_eq!(activity_sentence("Edit", "completed", Some(&json!({"path": "a.md"}))), "Changed a.md");
+        assert_eq!(activity_sentence("Read", "completed", Some(&json!({"path": "a.md"}))), "Read a.md");
+        assert_eq!(activity_sentence("tool_result", "completed", None), "Used a tool");
+    }
+
+    #[test]
+    fn long_or_multi_line_commands_are_cut_visibly() {
+        let body = activity_sentence("Bash", "completed", Some(&json!({"command": "first\nsecond"})));
+        assert_eq!(body, "Ran first…");
+    }
 }

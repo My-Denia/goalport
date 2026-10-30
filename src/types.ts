@@ -704,13 +704,13 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
       {
         id: "product-tool-1",
         kind: "activity-summary",
-        body: "read_workspace_files — completed",
+        body: "Read a file",
         timestamp: "2026-09-19T09:41:40Z"
       },
       {
         id: "product-tool-2",
         kind: "activity-summary",
-        body: "search_evidence_claims — completed",
+        body: "Searched the workspace",
         timestamp: "2026-09-19T09:42:05Z"
       },
       {
