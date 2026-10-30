@@ -2729,10 +2729,6 @@ function App() {
     else setActiveNotice(null);
   }
 
-  function handleKeepWaiting() {
-    setActiveNotice({ sentence: "Decision remains pending. No action was sent and the Runtime will stay waiting." });
-  }
-
   async function handleRenameCampaign(campaignId: string, title: string) {
     if (capacityBlocksNewWork("rename this goal")) return;
     if (!client.renameConversation) {
@@ -4046,7 +4042,6 @@ function App() {
               <PendingApprovals
                 snapshot={snapshot}
                 onPermissionDecision={(decisionId, allow) => { void handlePermissionDecision(decisionId, allow); }}
-                onKeepWaiting={handleKeepWaiting}
               />
 
               <div className="timeline-scroll" ref={anchor.ref} onScroll={anchor.handleScroll} tabIndex={-1} aria-label="Conversation timeline">

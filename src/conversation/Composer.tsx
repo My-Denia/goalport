@@ -1,3 +1,4 @@
+import { useElapsed } from "../lib/useElapsed";
 import { useRef, type FormEvent } from "react";
 import type { CoreSnapshot, ProductRuntimeSelection, ProductTurn, RuntimeProfile } from "../types";
 import { runtimeSelectionDisplay } from "../lib/display";
@@ -99,6 +100,7 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
     && !closingSession && !turn.canStop && !pending
     && turn.actions?.includes("resume-session") === true;
   const turnProblem = turnErrorCopy(turn);
+  const elapsed = useElapsed(turn.canStop);
   const ended = !turn.canSend && !turn.canStop && !reconciling && Boolean(turn.reason?.includes("no send is offered"));
 
   // One input layer, one copy: auto-grow, IME-safe Enter and focus-on-goal
@@ -121,6 +123,8 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
     ? "Some tools may still be running. Your draft stays here while the workspace is protected."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
+      : turn.canStop
+      ? `${runtime?.name ?? "The agent"} is working · ${elapsed}`
       : canCarryOn
       ? "Send a message to pick up where you left off."
       : !turn.canSend

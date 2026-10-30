@@ -103,7 +103,7 @@ describe("Linux Core bridge", () => {
     render(<App />);
     const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     expect(screen.getByRole("button", { name: /goal b/i })).toBeTruthy();
-    expect(screen.getByText("Waiting for your approval")).toBeTruthy();
+    expect(screen.getAllByText("Needs your OK")[0]).toBeTruthy();
     fireEvent.change(composer, { target: { value: "Draft stays with A" } });
     fireEvent.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-b"));

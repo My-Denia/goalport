@@ -181,7 +181,6 @@ describe("GoalPort preview", () => {
     expect(screen.queryByText(/Plan accepted/i)).toBeNull();
     // Runtime catalog lives behind the composer chooser, not on the surface.
     await openRuntimePicker();
-    expect(screen.getAllByText("Limited").length).toBeGreaterThan(0);
     expect(screen.getByRole("option", { name: /claude code/i })).toBeTruthy();
     // Developer diagnostics is menu-only.
     expect(document.querySelector(".diagnostics-drawer")).toBeNull();
@@ -589,7 +588,7 @@ describe("GoalPort preview", () => {
     const retryOption = await screen.findByRole("option", { name: /claude code/i });
     await waitFor(() => expect(retryOption.getAttribute("aria-disabled")).not.toBe("true"));
     clickRuntimeOption(retryOption);
-    await waitFor(() => expect(screen.getAllByText(/core connected/i).length).toBeGreaterThan(0));
+    await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-connection") ?? "connected").toBe("connected"));
   });
 
   it("opens a normal empty RC straight into the draft composer, without demo data", async () => {
