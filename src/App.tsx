@@ -1320,8 +1320,8 @@ function App() {
         // A panel-capable build never silently falls back to the legacy
         // unscoped path while harness access is unresolved (P1).
         setDraftError(panelLoad === "failed"
-          ? { sentence: "Your harness-access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
-          : { sentence: "Agent access is still loading, so nothing was sent. Send unlocks once your harness-access choices are ready." });
+          ? { sentence: "Your agent access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
+          : { sentence: "Agent access is still loading, so nothing was sent. Send unlocks once your agent access choices are ready." });
         return;
       }
       if (scopedSend && writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8)) {
@@ -3489,8 +3489,8 @@ function App() {
                     blockedFromSending={draftBlocked || draftHeld || backgroundSlotBlocked || linuxCoordinationLive || linuxActionBusy || sidebarUnconfirmed || workerGone || (client.mode === "linux-core" && !linuxDiscoverChecked) || (client.mode === "linux-core" && linuxDiscoverChecked && linuxSignedIn.length < 2) || Boolean(linuxHarnessSentence) || linuxConsentMissing || (client.mode === "linux-core" && !backgroundConsent) || (Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable) || (backgroundConsent && client.mode !== "linux-core" && appInfo?.coordinationConfigured !== true) || Boolean(snapshot.bounds?.projectionUnavailable && !draftRetryLabel)}
                     waitingOn={panelHoldsSend
                       ? (panelLoad === "failed"
-                        ? "Send is waiting: your harness-access choices could not be loaded."
-                        : "Checking which harnesses can work on this goal… Send unlocks once your harness-access choices are ready.")
+                        ? "Send is waiting: your agent access choices could not be loaded."
+                        : "Checking which agents can work on this goal… Send unlocks once your agent access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
                     error={draftHeld ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
@@ -3996,7 +3996,7 @@ function App() {
                     <div className="dialog-note" role="alert">
                       <span aria-hidden="true">!</span>
                       <span>
-                        GoalPort could not load your harness-access choices, so nothing can be sent from this draft yet.
+                        GoalPort could not load your agent access choices, so nothing can be sent from this draft yet.
                         <button className="button button-small button-outline" type="button" onClick={() => setPanelAttempt((attempt) => attempt + 1)}>Retry harness access</button>
                         {panelFailSentence ? (
                           <details className="technical-details">
@@ -4110,6 +4110,7 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
+                currentStep={product.items.at(-1)?.kind === "activity-summary" ? product.items.at(-1)?.body : undefined}
                 turn={conversationHeldByBackground
                   ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
                   : backgroundSlotBlocked

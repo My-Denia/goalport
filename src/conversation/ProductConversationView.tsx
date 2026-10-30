@@ -92,25 +92,6 @@ function ActionableError({ item, onChooseRuntime, onDiagnose }: { item: ProductC
 }
 
 /** One grouped, collapsed row of REAL tool activity. No invented time/actions. */
-function ActivityGroup({ items }: { items: ProductConversationItem[] }) {
-  return (
-    <details className="activity-group" data-kind="activity-summary">
-      <summary>
-        <span aria-hidden="true">⌁</span>
-        {items.length === 1 ? "1 activity update" : `${items.length} activity updates`}
-      </summary>
-      <ul className="activity-rows">
-        {items.map((item) => (
-          <li key={item.id}>
-            <span className="activity-body">{item.body}</span>
-            <Timestamp value={item.timestamp} />
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
-
 /** Everything an agent said on the way to its answer, folded so the answer stands alone. */
 function WorkingGroup({ items, agentName }: { items: ProductConversationItem[]; agentName: string }) {
   return (
@@ -118,7 +99,7 @@ function WorkingGroup({ items, agentName }: { items: ProductConversationItem[]; 
       <summary><span aria-hidden="true">⌁</span>{items.length === 1 ? "1 step" : `${items.length} steps`}</summary>
       {items.map((item) => item.kind === "assistant-message"
         ? <AssistantMessage key={item.id} agentName={agentName} item={item} />
-        : <ul className="activity-rows" key={item.id}><li><span className="activity-body">{item.body}</span><Timestamp value={item.timestamp} /></li></ul>)}
+        : <p className="activity-step" key={item.id}><span>{item.body}</span><Timestamp value={item.timestamp} /></p>)}
     </details>
   );
 }
@@ -126,7 +107,6 @@ function WorkingGroup({ items, agentName }: { items: ProductConversationItem[]; 
 /** Groups consecutive activity-summary items; everything else renders directly. */
 function renderItems(items: ProductConversationItem[], agentName: string, onChooseRuntime?: () => void, onDiagnose?: () => void) {
   const nodes: React.ReactNode[] = [];
-  let activity: ProductConversationItem[] = [];
   // Within one exchange, every message before the last is working, not the answer.
   const finalAnswers = new Set<string>();
   let last: ProductConversationItem | null = null;
@@ -142,19 +122,12 @@ function renderItems(items: ProductConversationItem[], agentName: string, onChoo
       working = [];
     }
   };
-  const flush = () => {
-    if (activity.length > 0) {
-      nodes.push(<ActivityGroup key={`activity-${activity[0].id}`} items={activity} />);
-      activity = [];
-    }
-  };
   for (const item of items) {
     if (item.kind === "activity-summary" || (item.kind === "assistant-message" && !finalAnswers.has(item.id))) {
       working.push(item);
       continue;
     }
     flushWorking();
-    flush();
     switch (item.kind) {
       case "user-message":
         nodes.push(<UserMessage key={item.id} item={item} />);
@@ -174,7 +147,6 @@ function renderItems(items: ProductConversationItem[], agentName: string, onChoo
     }
   }
   flushWorking();
-  flush();
   return nodes;
 }
 

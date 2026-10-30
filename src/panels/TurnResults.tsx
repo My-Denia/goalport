@@ -29,7 +29,7 @@ export function TurnResults({ results, omittedTurns = 0 }: TurnResultsProps) {
           <article className="turn-result" key={`${result.requestId}-${index}`}>
             {result.replyState === "completed" ? null : <p className={`turn-reply-state reply-${result.replyState}`}>{REPLY_LABEL[result.replyState]}</p>}
             {!result.baselineRecorded || result.comparisonUnavailable ? <p className="muted">Changes for this turn couldn't be compared.</p>
-              : changed.length === 0 ? <p className="muted">No files changed.</p>
+              : changed.length === 0 ? (result.filesTruncated ? null : <p className="muted">No files changed.</p>)
               : <FileList files={changed} />}
             {result.filesTruncated ? <p className="muted">Some file changes are not listed.</p> : null}
             {result.before.length > 0 ? <details><summary>Already changed before this turn · {result.before.length}</summary><FileList files={result.before} /></details> : null}
@@ -82,6 +82,7 @@ function CommandList({ commands, truncated }: { commands: TurnCommandFact[]; tru
           <li key={`${command.command}-${index}`}>
             <code>{command.command}</code>
             <span>{command.state}{command.exitCode === undefined ? "" : ` · exit ${command.exitCode}`}</span>
+            {command.cwd ? <span className="muted">{command.cwd}</span> : null}
             {command.output ? <pre>{command.output}</pre> : null}
           </li>
         ))}

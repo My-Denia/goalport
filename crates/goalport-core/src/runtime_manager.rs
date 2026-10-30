@@ -4928,6 +4928,7 @@ struct MutatingToolRecord {
 
 #[derive(Clone, Debug, Default)]
 struct ToolObservation {
+    name: Option<String>,
     command: Option<String>,
     cwd: Option<String>,
     path: Option<String>,
@@ -6681,8 +6682,9 @@ impl ClaudeStreamProcess {
                 let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                 let input = block.get("input").cloned().unwrap_or(Value::Null);
                 if !id.is_empty() {
-                    self.tool_observations
-                        .insert(id.to_owned(), observation_from_input(&input));
+                    let mut observation = observation_from_input(&input);
+                    observation.name = Some(name.to_owned());
+                    self.tool_observations.insert(id.to_owned(), observation);
                 }
                 if claude_mutating_tool(name) && !id.is_empty() {
                     let workspace = self.workspace_root.clone();
@@ -6995,6 +6997,9 @@ impl ClaudeStreamProcess {
         });
         if let Some(object) = payload.as_object_mut() {
             if let Some(observed) = self.tool_observations.get(tool_use_id) {
+                if let Some(tool_name) = &observed.name {
+                    object.insert("toolName".into(), json!(bounded_text(tool_name)));
+                }
                 if let Some(command) = &observed.command {
                     object.insert("command".into(), json!(command));
                 }
@@ -8162,6 +8167,7 @@ enum UnrequestedBashEffect {
 
 fn observation_from_input(input: &Value) -> ToolObservation {
     ToolObservation {
+        name: None,
         command: command_line(input.get("command")).map(|value| bounded_text(&value)),
         cwd: input
             .get("cwd")

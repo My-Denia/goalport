@@ -63,6 +63,7 @@ interface ComposerProps {
   draft: string;
   snapshot: CoreSnapshot;
   runtime: ProductRuntimeSelection;
+  currentStep?: string;
   turn: ProductTurn;
   busy: boolean;
   closingSession?: boolean;
@@ -85,7 +86,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop, onResume }: ComposerProps) {
+export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, currentStep, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop, onResume }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
@@ -124,7 +125,7 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
       : turn.canStop
-      ? `${runtime?.name ?? "The agent"} is working · ${elapsed}`
+      ? `${runtime?.name ?? "The agent"} is working · ${elapsed}${currentStep ? ` · ${currentStep}` : ""}`
       : canCarryOn
       ? "Send a message to pick up where you left off."
       : !turn.canSend

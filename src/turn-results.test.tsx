@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TurnResults } from "./panels/TurnResults";
 import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import type { TurnResult } from "./types";
@@ -48,15 +48,47 @@ describe("Turn results", () => {
 });
 
 describe("Coming back to a goal", () => {
-  afterEach(() => { try { localStorage.removeItem("goalport.lastSeenAnswers"); } catch { /* no storage */ } });
-  const seen = (count: number) => { try { localStorage.setItem("goalport.lastSeenAnswers", JSON.stringify({ goal: count })); return true; } catch { return false; } };
-  const product = (messages: number, canStop = false) => ({ items: Array.from({ length: messages }, (_, index) => ({ id: String(index), kind: "user-message", body: "x" })), runtime: { name: "Codex" }, turn: { canStop } }) as never;
+  // Node's own partial localStorage can shadow jsdom's, so the store is explicit.
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key)
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  const seen = (requestId: string) => localStorage.setItem("goalport.lastSeenTurn", JSON.stringify({ goal: requestId }));
+  const product = (canStop = false) => ({ items: [], runtime: { name: "Codex" }, turn: { canStop } }) as never;
+  const away = { ...result, during: [{ path: "a.md" }], unattributed: [] } as never;
+
   it("says what happened since the last visit, once, and stays quiet otherwise", () => {
-    if (!seen(1)) return;
-    render(<SinceLastVisit campaignId="goal" product={product(2)} results={[{ ...result, during: [{ path: "a.md" }] } as never]} />);
+    seen("earlier");
+    render(<SinceLastVisit campaignId="goal" product={product()} results={[away]} />);
     expect(screen.getByText("Codex finished while you were away · 1 file changed.")).toBeTruthy();
     cleanup();
-    render(<SinceLastVisit campaignId="goal" product={product(2)} results={[]} />);
+    render(<SinceLastVisit campaignId="goal" product={product()} results={[away]} />);
     expect(screen.queryByText(/while you were away/)).toBeNull();
+  });
+
+  it("does not call a turn finished in front of the user 'away'", () => {
+    seen("earlier");
+    const old = { ...result, requestId: "earlier" };
+    const { rerender } = render(<SinceLastVisit campaignId="goal" product={product()} results={[old]} />);
+    rerender(<SinceLastVisit campaignId="goal" product={product(true)} results={[old]} />);
+    rerender(<SinceLastVisit campaignId="goal" product={product()} results={[old, away]} />);
+    expect(screen.queryByText(/while you were away/)).toBeNull();
+  });
+
+  it("stays quiet when a message never became a turn", () => {
+    seen("earlier");
+    render(<SinceLastVisit campaignId="goal" product={product()} results={[{ ...result, requestId: "earlier" }]} />);
+    expect(screen.queryByText(/while you were away/)).toBeNull();
+  });
+
+  it("says when the turn did not end well", () => {
+    seen("earlier");
+    render(<SinceLastVisit campaignId="goal" product={product()} results={[{ ...result, replyState: "failed", during: [], unattributed: [] }]} />);
+    expect(screen.getByText("Codex ran into a problem while you were away.")).toBeTruthy();
   });
 });
