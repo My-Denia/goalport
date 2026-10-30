@@ -195,7 +195,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByLabelText("Project folder")).toHaveProperty("readOnly", true);
     expect(screen.getByLabelText("Project folder").getAttribute("title")).toBe("/home/you/project");
     expect(screen.queryByText("Workspace")).toBeNull();
-    expect(screen.queryByText("Choose a Runtime before sending.")).toBeNull();
+    expect(screen.queryByText("Choose an agent before sending.")).toBeNull();
     expect(screen.queryByText("Choose a Runtime")).toBeNull();
     expect(screen.queryByRole("button", { name: "Select Runtime" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });

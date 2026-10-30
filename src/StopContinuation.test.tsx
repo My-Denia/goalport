@@ -76,7 +76,7 @@ describe("a pre-revision hold still blocks everything", () => {
     expect(composer.disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: /open details panel/i }));
-    expect((screen.getByRole("button", { name: /handoff/i }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /hand over/i }) as HTMLButtonElement).disabled).toBe(true);
     // Allow: this test's NAME claimed it for two audit rounds while the body never
     // asserted it. DEMO_SNAPSHOT carries a pending permission decision, so the button
     // is rendered and the assertion was always writable -- it was simply missing.

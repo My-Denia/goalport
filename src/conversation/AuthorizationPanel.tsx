@@ -120,21 +120,11 @@ export function AuthorizationPanel({
     <section className="authorization-panel" aria-label="Harness access">
       <p className="authorization-panel-lead">
         {selectedNames.length > 0
-          ? `GoalPort may use ${joinNames(selectedNames)} for plan and check turns. Nothing is sent until you press Send.`
-          : "Choose the harnesses GoalPort may use for plan and check turns. Nothing is sent until you press Send."}
-      </p>
-      <p>
-        If the independent check rejects the plan itself, GoalPort may write one revised plan and
-        have it checked again inside the budgets you choose here, before any file changes.
-      </p>
-      <p>
-        If independent verification then finds unfinished work, GoalPort may organize one further
-        checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
+          ? `${joinNames(selectedNames)} will plan, build and check this goal. Nothing runs until you press Send.`
+          : "Choose which agents can work on this goal. Nothing runs until you press Send."}
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">
-        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes. Choose that next to Send.</p>
         {!backgroundConfigured ? <>
-          <p>Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.</p>
           <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run harness turns on this profile</button>
           {grantError ? <p role="alert">{grantError}</p> : null}
         </> : null}
@@ -191,7 +181,7 @@ export function AuthorizationPanel({
         })}
       </ul>
       <div className="authorization-turns-row">
-        <label className="field-label" htmlFor="authorization-turns">Model turns to allow</label>
+        <label className="field-label" htmlFor="authorization-turns">Turn limit</label>
         <input
           id="authorization-turns"
           type="number"
@@ -204,8 +194,7 @@ export function AuthorizationPanel({
         />
       </div>
       <div className="authorization-write-section" aria-label="Workspace changes">
-        <h3>Workspace changes</h3>
-        <p>File changes are a separate decision. GoalPort may edit files only in the workspace below, through the checked harnesses.</p>
+        <h3>Can they change files?</h3>
         <p className="authorization-workspace">{workspaceRoot || "Choose a project folder before allowing file changes."}</p>
         <ul className="authorization-provider-list">
           {catalog.map((instance) => {
@@ -229,7 +218,7 @@ export function AuthorizationPanel({
           })}
         </ul>
         <div className="authorization-turns-row">
-          <label className="field-label" htmlFor="authorization-write-turns">Write turns to allow</label>
+          <label className="field-label" htmlFor="authorization-write-turns">File-change turn limit</label>
           <input id="authorization-write-turns" type="number" min={1} max={8}
             aria-label="Write turns to allow" value={Number.isNaN(writeTurns) ? "" : writeTurns}
             disabled={writeScope !== null && !changeMode}

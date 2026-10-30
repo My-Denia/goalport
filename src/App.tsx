@@ -1095,6 +1095,20 @@ function App() {
   // The host's profile slot admits no competing send while a background job's
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
+  const announcedDecisions = useRef(new Set<string>());
+  const wasWorking = useRef(false);
+  useEffect(() => {
+    const away = () => document.hidden || !document.hasFocus();
+    const agent = product?.runtime.name?.trim() || "The agent";
+    for (const decision of snapshot.decisions) {
+      if (decision.state !== "pending" || announcedDecisions.current.has(decision.id)) continue;
+      announcedDecisions.current.add(decision.id);
+      if (away()) void client.notify?.(`${agent} needs your OK`, "Open GoalPort to answer.");
+    }
+    const working = Boolean(product?.turn.canStop);
+    if (wasWorking.current && !working && away()) void client.notify?.(`${agent} finished`, title || "Your goal is ready.");
+    wasWorking.current = working;
+  }, [snapshot.decisions, product?.turn.canStop]);
   const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
     || (linuxNativeView && ((linuxCoordinationLive && !currentWork?.nativeCheckTarget) || sidebarUnconfirmed))
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
@@ -1288,7 +1302,7 @@ function App() {
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
-        setDraftError({ sentence: "Choose a Runtime before sending." });
+        setDraftError({ sentence: "Choose an agent before sending." });
         return;
       }
       const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);
@@ -2314,6 +2328,12 @@ function App() {
     openDesktopGoalDraft();
   }
 
+  function startingAgent(): string {
+    const remembered = readGoalDefaults();
+    if (remembered.known) return remembered.provider;
+    return snapshot.runtimes.some(runtime => runtime.id === "codex" && runtime.support !== "unsupported") ? "codex" : "";
+  }
+
   function openDesktopGoalDraft() {
     setBackgroundView(false);
     if (window.innerWidth <= 860) setNavCollapsed(true);
@@ -2325,7 +2345,7 @@ function App() {
       baselineCampaignId: snapshot.activeCampaignId,
       acceptNextCampaign,
       workspace: snapshot.project.workspaceRoot || readGoalDefaults().workspace,
-      provider: readGoalDefaults().provider,
+      provider: startingAgent(),
       message: ""
     });
   }
@@ -2656,7 +2676,7 @@ function App() {
       if (viewIntent === selectionIntent.current) setSnapshot(next);
       const failure = commandFailure(next, "close_session");
       if (failure) setActiveNotice(failure);
-      else setActiveNotice({ sentence: "Runtime session closed. This goal remains available." });
+      else setActiveNotice({ sentence: "Session ended. Send a message to pick up where you left off." });
     } finally {
       setClosingSession(false);
     }
@@ -3465,7 +3485,7 @@ function App() {
             const draftComposer = (
                   <DraftGoalComposer
                     linuxEntry={client.mode === "linux-core" && linuxShowingFreshDraft}
-                    draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || (client.mode === "electron" ? readGoalDefaults().workspace : ""), provider: client.mode === "electron" ? readGoalDefaults().provider : "", message: "" }}
+                    draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || (client.mode === "electron" ? readGoalDefaults().workspace : ""), provider: client.mode === "electron" ? startingAgent() : "", message: "" }}
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}

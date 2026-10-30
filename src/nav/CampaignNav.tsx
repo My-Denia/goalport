@@ -63,7 +63,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
   }, [renamingId]);
 
   // A goal that finished while the user was elsewhere says so until they open it.
-  const lastAttention = useRef(new Map<string, GoalCard["attention"]>());
+  const lastAttention = useRef(new Map<string, GoalCard["attention"]>(readLastAttention()));
   const [finished, setFinished] = useState<ReadonlySet<string>>(new Set());
   const goals = overview?.goals;
   useEffect(() => {
@@ -71,6 +71,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
     const justFinished = goals.filter((goal) => goal.campaignId !== snapshot.activeCampaignId
       && lastAttention.current.get(goal.campaignId) === "running" && goal.attention !== "running").map((goal) => goal.campaignId);
     for (const goal of goals) lastAttention.current.set(goal.campaignId, goal.attention);
+    rememberLastAttention(lastAttention.current);
     setFinished((current) => {
       const next = new Set([...current, ...justFinished]);
       next.delete(snapshot.activeCampaignId);
@@ -339,6 +340,23 @@ function planStateClass(verdict: CoordinationVerdict | null): string {
       const unreachable: never = verdict;
       return unreachable;
     }
+  }
+}
+
+const LAST_ATTENTION_KEY = "goalport.lastAttention";
+function readLastAttention(): [string, GoalCard["attention"]][] {
+  try {
+    const value = JSON.parse(localStorage.getItem(LAST_ATTENTION_KEY) ?? "[]");
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+function rememberLastAttention(attention: Map<string, GoalCard["attention"]>): void {
+  try {
+    localStorage.setItem(LAST_ATTENTION_KEY, JSON.stringify([...attention]));
+  } catch {
+    // Done simply will not survive a restart.
   }
 }
 

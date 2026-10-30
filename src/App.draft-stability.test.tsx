@@ -4,10 +4,12 @@
 // capacity-limited snapshot polls. Only a real transition (Core creating or
 // moving to a conversation) replaces the draft.
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, EMPTY_PREVIEW_SNAPSHOT, type CoreSnapshot } from "./types";
+
+vi.mock("./lib/goalDefaults", () => ({ readGoalDefaults: () => ({ workspace: "", provider: "", known: true }), rememberGoalDefaults: () => {} }));
 
 afterEach(() => {
   cleanup();
@@ -97,7 +99,7 @@ describe("draft composer lifecycle across snapshot polls", () => {
       ],
     });
     // The panel arrives from the late discovery; the draft and its text stay.
-    await waitFor(() => expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy());
     const composer = screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
     expect(composer.value).toBe("typed while discovering");
     expect(document.querySelector(".draft-composer")).not.toBeNull();

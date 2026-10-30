@@ -71,7 +71,7 @@ describe('conversation-first product boundary', () => {
     expect(screen.getByText('Starting')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Open details panel' }));
     const details = screen.getByRole('complementary', { name: 'Session details' });
-    expect(within(details).getByText('Runtime session').parentElement?.textContent).toBe('Runtime sessionStarting');
+    expect(within(details).getByText('Session').parentElement?.textContent).toBe('SessionStarting');
   });
 
   it('replaces Send with Stop only for a live stoppable turn, then keeps Runtime', async () => {
@@ -133,12 +133,12 @@ describe('conversation-first product boundary', () => {
       return next;
     });
     fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Close Runtime session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'End session' }));
     await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
     expect(command.mock.calls[0][0]).toEqual(expect.objectContaining({ messageType: 'close_session', payload: { attemptId: attached.attempt.id } }));
-    expect(await screen.findByText('Runtime session closed. This goal remains available.')).toBeTruthy();
-    expect(screen.getByText('Closed')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Close Runtime session' })).toBeNull();
+    expect(await screen.findByText('Session ended. Send a message to pick up where you left off.')).toBeTruthy();
+    expect(screen.getByText('Ended')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'End session' })).toBeNull();
   });
 
   it('says the session is closing instead of starting while close is in flight', async () => {
@@ -150,7 +150,7 @@ describe('conversation-first product boundary', () => {
     mount(attached, () => pending);
     fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
     expect(screen.getAllByText('Starting').length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Close Runtime session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'End session' }));
     expect(await screen.findAllByText('Closing session…')).not.toHaveLength(0);
     expect(screen.queryByText('Starting')).toBeNull();
     expect(screen.queryByText('The Runtime is starting. Wait for it to confirm this turn.')).toBeNull();
@@ -158,8 +158,8 @@ describe('conversation-first product boundary', () => {
     closed.productConversation!.session = { state: 'closed', nativeIdKnown: true };
     closed.productConversation!.turn = { state: 'completed', canSend: false, canStop: false, actions: [] };
     release(closed);
-    expect(await screen.findByText('Runtime session closed. This goal remains available.')).toBeTruthy();
-    expect(screen.getByText('Closed')).toBeTruthy();
+    expect(await screen.findByText('Session ended. Send a message to pick up where you left off.')).toBeTruthy();
+    expect(screen.getByText('Ended')).toBeTruthy();
   });
 
   it('offers the Core-approved close action for an exited Runtime', async () => {
@@ -169,7 +169,7 @@ describe('conversation-first product boundary', () => {
     exited.productConversation!.turn = { state: 'failed', canSend: false, canStop: false, actions: ['close-session'], reasonCode: 'provider-exited' };
     const command = mount(exited);
     fireEvent.click(await screen.findByRole('button', { name: 'Open details panel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Close Runtime session' }));
+    fireEvent.click(screen.getByRole('button', { name: 'End session' }));
     await waitFor(() => expect(command).toHaveBeenCalledOnce());
     expect(command.mock.calls[0][0].messageType).toBe('close_session');
   });

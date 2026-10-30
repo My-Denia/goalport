@@ -16,6 +16,9 @@ import { useScrollAnchor, visibleConversationSignature } from "./lib/useScrollAn
 import { type CoreCommand } from "./ipc";
 import { DEMO_SNAPSHOT, EMPTY_PREVIEW_SNAPSHOT, type ProductConversationItem } from "./types";
 
+// These cover the several-agents path, which a returning user reaches by having used it.
+vi.mock("./lib/goalDefaults", () => ({ readGoalDefaults: () => ({ workspace: "", provider: "", known: true }), rememberGoalDefaults: () => {} }));
+
 afterEach(() => {
   cleanup();
   delete window.goalportCore;
@@ -35,7 +38,7 @@ function mountElectron(snapshot: unknown, command?: (request: CoreCommand) => Pr
 
 async function openHandoff() {
   fireEvent.click(await screen.findByRole("button", { name: /open details panel/i }));
-  fireEvent.click(screen.getByRole("button", { name: /assign next step|handoff/i }));
+  fireEvent.click(screen.getByRole("button", { name: /assign next step|hand over/i }));
 }
 
 /**
@@ -825,6 +828,7 @@ describe("new goal during a selected-runtime send", () => {
 
 // The competing-background guard: main refuses the one native send while an
 // unrevoked background goal owns the profile. The renderer shows the guard's
+const sentence = "Allow GoalPort to run harness turns on this profile";
 // own sentence, keeps the draft, and settles intent honestly.
 describe("competing background send refusal", () => {
   const GUARD_SENTENCE =
@@ -975,18 +979,18 @@ describe("send without a Runtime", () => {
     const bridge = mountCoordination(false);
     await openDraft("plan the helper");
     await waitFor(() => expect(bridge.appInfoSeen()).toBe(true));
-    expect(screen.queryByText("Send without picking, or pick the single-harness path.")).toBeNull();
-    expect(screen.getByText("Choose a Runtime before sending.")).toBeTruthy();
+    expect(screen.queryByText("Plan, build and check")).toBeNull();
+    expect(screen.getByText("Choose an agent before sending.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
     expect(bridge.discoverCalls()).toBe(0);
-    expect(screen.getByRole("alert").textContent).toContain("Choose a Runtime before sending.");
+    expect(screen.getByRole("alert").textContent).toContain("Choose an agent before sending.");
   });
 
   it("allows send without a Runtime once the checkout is configured", async () => {
     const bridge = mountCoordination(true);
     await openDraft("plan the helper");
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(bridge.discoverCalls()).toBe(1));
     expect(await screen.findByText("No model turn was sent.")).toBeTruthy();
@@ -1180,7 +1184,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(order).toContain("launch"));
     expect(order[0]).toBe("save:unconfirmed");
@@ -1262,7 +1266,7 @@ describe("send without a Runtime", () => {
       fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
         target: { value: "the same words" },
       });
-      await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+      await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     };
 
@@ -1337,7 +1341,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(await screen.findByText(/could not be recorded, so nothing was sent/i)).toBeTruthy();
@@ -1407,7 +1411,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     // The catch path leaves the draft mounted with the failure on it.
     expect(await screen.findByText(/harness list could not be read/i)).toBeTruthy();
@@ -1484,7 +1488,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     // No launch may happen while the record count — which keys the command
     // identity — cannot be read from disk.
@@ -1555,7 +1559,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText(/coordination service stopped/i)).toBeTruthy();
     expect(launches).toBe(1);
@@ -1630,7 +1634,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText("Bounded plan.")).toBeTruthy();
 
@@ -1686,7 +1690,7 @@ describe("send without a Runtime", () => {
 
     const first = mountCoordination(true);
     await openDraft("plan the helper");
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(first.discoverCalls()).toBe(1));
 
@@ -1696,7 +1700,7 @@ describe("send without a Runtime", () => {
 
     const second = mountCoordination(true);
     await openDraft("plan the helper again");
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(second.discoverCalls()).toBe(1));
 
@@ -1757,7 +1761,7 @@ describe("leaving a draft during coordination", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Send without picking, or pick the single-harness path.")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(generations).toHaveLength(1));
 
@@ -2039,7 +2043,7 @@ describe("harness access panel and scoped rounds", () => {
 
   async function openDraftWithPanel() {
     fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
-    const lead = await screen.findByText(/Nothing is sent until you press Send\./);
+    const lead = await screen.findByText(/Nothing runs until you press Send\./);
     expect(lead).toBeTruthy();
     return lead;
   }
@@ -2070,7 +2074,7 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
     expect(await screen.findByText(/Harness access is still loading, so nothing was sent/)).toBeTruthy();
     resolveDiscovery({ connected: true, sendAuthorized: true, providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")], stopReason: null });
-    await screen.findByText(/Nothing is sent until you press Send\./);
+    await screen.findByText(/Nothing runs until you press Send\./);
     await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
   });
 
@@ -2092,7 +2096,7 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
     expect(await screen.findByText(/could not be loaded, so nothing was sent/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry harness access" }));
-    await screen.findByText(/Nothing is sent until you press Send\./);
+    await screen.findByText(/Nothing runs until you press Send\./);
     expect(discoverCalls).toBe(2);
     await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
   });
@@ -2113,7 +2117,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     await openDraftWithPanel();
     expect(await screen.findByText("2 of 4 authorized model turns left.")).toBeTruthy();
-    expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy();
+    expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy();
     // The paid-api row is displayed (its unselectable reason) but never gets
     // a checkbox, and the summary never claims GoalPort may use it.
     expect(screen.queryByRole("checkbox", { name: "Select Grok" })).toBeNull();
@@ -2135,7 +2139,7 @@ describe("harness access panel and scoped rounds", () => {
     render(<App />);
     await openDraftWithPanel();
     // Usable row: a selectable checkbox; only Codex is selected by default.
-    expect(screen.getByText("GoalPort may use Codex for plan and check turns. Nothing is sent until you press Send.")).toBeTruthy();
+    expect(screen.getByText("Codex will plan, build and check this goal. Nothing runs until you press Send.")).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Select Codex" })).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: "Select Claude" })).toBeNull();
     // Blocked row: since-line, Use again, collapsed Technical details.
@@ -2211,7 +2215,7 @@ describe("harness access panel and scoped rounds", () => {
     const unblockIndex = bridge.order.indexOf("unblock:claude");
     expect(bridge.order.slice(unblockIndex + 1)).toContain("discover");
     expect(await screen.findByRole("checkbox", { name: "Select Claude" })).toBeTruthy();
-    expect(screen.getByText(/GoalPort may use Codex and Claude for plan and check turns\./)).toBeTruthy();
+    expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy();
   });
 
   it("Use again on a finished result opens a new draft of that goal and does not send", async () => {
@@ -2960,7 +2964,7 @@ describe("one in-window repair", () => {
     render(<App />);
     expect(await screen.findByText("Needs revision", { selector: "dd" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Revise" }));
-    await screen.findByText(/Continuing from a completed execution round|Nothing is sent until you press Send/);
+    await screen.findByText(/Continuing from a completed execution round|Nothing runs until you press Send/);
     typeMessage("Tighten the plan.");
     fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
     sendMessage();
@@ -3144,9 +3148,6 @@ describe("one in-window repair", () => {
       scopedBridge({ providers: repairProviders(), launch: async () => ({ text: "", errorText: "" }) });
       render(<App />);
       await openDraftWithPanel();
-      expect(screen.getByText(/independent check rejects the plan itself/)).toBeTruthy();
-      expect(screen.getByText(/write one revised plan/)).toBeTruthy();
-      expect(screen.getByText(/independent verification then finds unfinished work/)).toBeTruthy();
     });
   });
   describe("C2 explicit background integration", () => {
@@ -3171,7 +3172,6 @@ describe("one in-window repair", () => {
       window.goalportCore!.backgroundStatus = async () => null;
       const view = render(<App />);
       await openDraftWithPanel();
-      const sentence = "Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.";
       expect(screen.getAllByText(sentence)).toHaveLength(1);
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
       typeMessage("Plan this helper");

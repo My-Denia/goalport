@@ -260,7 +260,7 @@ async function smoke() {
       await until("first draft composer", () => read("Boolean(document.querySelector('#draft-workspace'))"));
     }
     await fill("#draft-workspace", workspace);
-    await pickRuntime("Scenario Runtime", "draft");
+    await pickRuntime("Demo run", "draft");
     await fill("#draft-message", message);
     await until("draft ready to send", () => read("(() => { const button = document.querySelector('.draft-composer-form button[type=\"submit\"]'); return Boolean(button && !button.disabled); })()"));
     await click(".draft-composer-form button[type='submit']");
@@ -549,7 +549,7 @@ async function smoke() {
 
     // --- Invalid workspace refusal preserves the draft and writes nothing. --
     await fill("#draft-workspace", resolve(scratch, "does-not-exist"));
-    await pickRuntime("Scenario Runtime", "draft");
+    await pickRuntime("Demo run", "draft");
     await fill("#draft-message", "Keep this failed draft");
     await click(".draft-composer-form button[type='submit']");
     await until("invalid workspace refusal", () => read("Boolean(document.querySelector('.draft-composer-form .dialog-note[role=\"alert\"]'))"));
@@ -598,7 +598,7 @@ async function smoke() {
 
     // --- Same-binding reselect is idempotent (no second attempt). ----------
     const beforeReselect = counts();
-    await pickRuntime("Scenario Runtime");
+    await pickRuntime("Demo run");
     await until("Scenario selection reused", async () => {
       const state = await snapshot();
       return state.attempt.id === firstAttempt && state.attempt.provider === "scenario" && (await uiAttempt()) === firstAttempt;
@@ -619,7 +619,7 @@ async function smoke() {
     assert.equal((await snapshot()).attempt.id, firstAttempt);
     assert.equal(counts().attempts, beforeReselect.attempts);
     await screen("04-runtime-conflict");
-    await pickRuntime("Scenario Runtime");
+    await pickRuntime("Demo run");
     await until("successful reselect clears refusal", () => read("Boolean(!document.querySelector('.status-banners .banner-notice'))"));
     marker("ui-cdp/provider-conflict-retains-runtime-and-reselect-clears-error", { conflict, attemptId: firstAttempt, attempts: counts().attempts });
 
@@ -686,7 +686,7 @@ async function smoke() {
       assertNoNativeChildren();
       marker("api/select-runtime-native-admission-firewall-on-terminal-attempt", { refusals: firewallRefusals, counts: counts(), nativeChildren: 0, superseded: "old Scenario-only probes against a runtime-less campaign" });
 
-      await pickRuntime("Scenario Runtime");
+      await pickRuntime("Demo run");
       await until("rollover replacement selected", async () => {
         const state = await snapshot();
         return state.attempt.id !== bTerminal && state.attempt.provider === "scenario";

@@ -36,6 +36,9 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
   const choices = linuxEntry ? [
     { id: "", name: "Coordinated work", subtitle: "Plan and work with an independent check" },
     ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no automatic Pi verification" }] : [])
+  ] : coordinationAvailable ? [
+    ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, subtitle: "" })),
+    { id: "", name: "Several agents", subtitle: "Plan, build and check with more than one agent" }
   ] : undefined;
   return (
     <div className="runtime-picker draft-runtime-picker">
@@ -55,10 +58,10 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
               {selected ? selected.name[0] : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Coordinated work") : selected ? selected.name : (runtimeRequiredHint ? "Coordinated goal" : "Choose a Runtime")}</strong>
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Coordinated work") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Coordinated goal" : "Choose an agent")}</strong>
               <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "selected" : coordinationAvailable
-                ? "Send without picking, or pick the single-harness path."
-                : (runtimeRequiredHint ?? "Choose a Runtime before sending.")}</small>
+                ? "Plan, build and check"
+                : (runtimeRequiredHint ?? "Choose an agent before sending.")}</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
