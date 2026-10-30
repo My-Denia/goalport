@@ -170,7 +170,7 @@ export function planRevisionAssertions(id, result, { final = false } = {}) {
       scopeDualCounters: result.finalScope?.remaining === 2 && result.finalScope?.maxTurns === 4 && result.finalScope?.write?.remaining === 1 && result.finalScope?.write?.maxTurns === 1,
       budgetStopWithoutRevision: records.length === 1 && record?.verdict === 'revise' && record?.messageDispatched === true && record?.stopReason?.includes(PLAN_BUDGET_STOP_SNIPPET) && record?.stopReason?.includes('GoalPort did not add turns') && !Object.hasOwn(record, 'planRevisionHistory') && turnCountAfterSettle === scenario.totalTurns,
       fixtureBytesUnchanged: after['src/add.mjs'] === before['src/add.mjs'] && operations.length === 2,
-      noVerifiedClaim: result.screenshots.filter(s => s.state === 'budget-stop').every(s => !s.geometry.text.includes('Changes verified') && s.geometry.text.includes(PLAN_BUDGET_STOP_SNIPPET) && s.geometry.text.includes('2 of 4 authorized model turns left')),
+      noVerifiedClaim: result.screenshots.filter(s => s.state === 'budget-stop').every(s => !s.geometry.text.includes('Changes verified') && s.geometry.text.includes(PLAN_BUDGET_STOP_SNIPPET) && s.geometry.text.includes('2 of 4 turns left')),
       noRevisionTurnsLaunched: !operations.some(o => o.operation === 'revised-plan' || o.operation === 'writer') && turns.length === 2,
       domShowsCritique: result.screenshots.filter(s => s.state === 'budget-stop').every(s => s.geometry.text.includes('Needs revision') && s.geometry.text.includes('VERDICT: revise')),
     };
@@ -238,7 +238,7 @@ export async function runPlanRevisionScenario(id, app, caseRoot, fixture, result
   result.walkthrough.push('Send: one authorization, one Send. The genuinely flawed first plan (Codex) is critiqued by a separate read-only checker process (Claude) that actually read the unchanged pinned tests and named the missing negative-case requirement.');
   if (id === 'pr2') {
     await app.until(`document.body.innerText.includes(${JSON.stringify(PLAN_BUDGET_STOP_SNIPPET)}) && !document.querySelector('.coordination-progress')`, 90000);
-    await app.until("document.body.innerText.includes('2 of 4 authorized model turns left')", 10000);
+    await app.until("document.body.innerText.includes('2 of 4 turns left')", 10000);
     result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
     await shots(app, caseRoot, result, 'budget-stop');
     result.walkthrough.push('The critique revises the plan, but only two of four read turns remain: GoalPort explains the revised chain needs three model turns and one write turn, did not add turns, and launched no third turn. The fixture bytes stay untouched.');
@@ -257,7 +257,7 @@ export async function runPlanRevisionScenario(id, app, caseRoot, fixture, result
     result.walkthrough.push('The completed critique ends VERDICT: revise, so GoalPort writes one revised plan and has it checked again in the same window: the progress line says so, the same scope generation pays for it, and no new authorization happens.');
     if (id === 'pr3') {
       await app.until(`document.body.innerText.includes(${JSON.stringify(PLAN_REVISION_CEILING_SNIPPET)}) && !document.querySelector('.coordination-progress')`, 90000);
-      await app.until("document.body.innerText.includes('1 of 5 authorized model turns left')", 10000);
+      await app.until("document.body.innerText.includes('1 of 5 turns left')", 10000);
       result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
       await shots(app, caseRoot, result, 'second-rejection');
       result.walkthrough.push('The revised plan is checked again and the reviewer still says revise: exactly four read turns ran, no writer launched, and the send stops at its one-revision ceiling with the rejected pass folded under Before plan revision.');
@@ -265,7 +265,7 @@ export async function runPlanRevisionScenario(id, app, caseRoot, fixture, result
       result.settledInvocations = collectArtifacts(caseRoot).invocations;
     } else {
       await app.until("document.body.innerText.includes('Changes verified') && !document.querySelector('.coordination-progress')", 90000);
-      await app.until("document.body.innerText.includes('0 of 5 authorized model turns left')", 10000);
+      await app.until("document.body.innerText.includes('0 of 5 turns left')", 10000);
       result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
       await shots(app, caseRoot, result, 'verified');
       result.walkthrough.push('The revised plan answers the critique, a fresh independent check approves it, only then does the real writer repair the pinned source, and a second separate read-only checker reruns the unchanged tests and verifies. Both budgets reach zero; the record keeps the rejected pass folded under Before plan revision.');

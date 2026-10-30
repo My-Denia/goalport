@@ -244,7 +244,7 @@ check("send button hit-test clickable on draft", !sendButton.missing && sendButt
 await sendMessage(GOAL);
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-failed\"]'))");
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-continued\"]'))");
-await until("Boolean(document.body.innerText.includes('1 of 4 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('1 of 4 turns left.'))");
 
 for (const [w, label] of widths) {
   await viewport(w, 900);
@@ -275,8 +275,8 @@ const coveredClosed = await evaluate(`(${coveredProbe})('.tl-event[data-kind="ro
 const collapseControl = await evaluate("Boolean(document.querySelector('button[aria-label=\"Collapse navigation\"]') || document.querySelector('button[aria-label=\"Expand navigation\"]'))");
 check("860 drawer closable, terminal card uncovered in content state", collapseControl && !coveredClosed.missing && !coveredClosed.covered, JSON.stringify(coveredClosed));
 
-const planner = await evaluate("Array.from(document.querySelectorAll('.coordination-status dt')).find((d) => d.textContent === 'Planning harness')?.nextElementSibling?.textContent");
-const reviewer = await evaluate("Array.from(document.querySelectorAll('.coordination-status dt')).find((d) => d.textContent === 'Review harness')?.nextElementSibling?.textContent");
+const planner = await evaluate("Array.from(document.querySelectorAll('.coordination-status dt')).find((d) => d.textContent === 'Planned by')?.nextElementSibling?.textContent");
+const reviewer = await evaluate("Array.from(document.querySelectorAll('.coordination-status dt')).find((d) => d.textContent === 'Checked by')?.nextElementSibling?.textContent");
 check("takeover terminal planner != reviewer", planner === "Codex" && reviewer === "Grok" && planner !== reviewer, `planner=${planner} reviewer=${reviewer}`);
 check("current round shows budget line", Boolean(await evaluate("document.querySelector('.coordination-budget')?.textContent.includes('1 of 4')")));
 const useAgainTerminal = await evaluate(`(${visibleProbe})('.tl-event[data-kind="environment-blocked"] button[aria-label="Use again Claude"]')`);
@@ -345,7 +345,7 @@ const saveAccess = await evaluate(`(${visibleProbe})('button[aria-label="Save ha
 check("Save harness access hit-test clickable in change mode", !saveAccess.missing && saveAccess.centered, JSON.stringify(saveAccess));
 await fill("#authorization-turns", "6");
 await click('button[aria-label="Save harness access"]');
-await until("Boolean(document.body.innerText.includes('6 of 6 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('6 of 6 turns left.'))");
 check("after Allow more: panel shows the re-authorized budget", true);
 await click('button[aria-label="Discard draft"]');
 await until("!document.querySelector('#draft-message')");
@@ -366,7 +366,7 @@ await goto("verify-rr-history.html", { keepWindowName: true });
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-failed\"]'))");
 const history = await evaluate(`(() => ({
   budgetLine: Boolean(document.querySelector('.coordination-budget')),
-  budgetText: document.body.innerText.includes('authorized model turns left'),
+  budgetText: document.body.innerText.includes('turns left'),
   allowMore: Boolean(document.querySelector('button[aria-label="Allow more turns"]')),
   change: Boolean(document.querySelector('.coordination-access button[aria-label="Change"]')),
   stop: Boolean(document.querySelector('.coordination-access button[aria-label="Stop allowing"]')),
