@@ -25,7 +25,7 @@ test('explicit fresh output refuses overwrite, outside paths and symlink ancesto
   assert.equal(fs.readFileSync(path.join(out, 'previous'), 'utf8'), 'preserve');
   assert.throws(() => claimOutput(ROOT), /inside/);
   assert.throws(() => claimOutput(), /explicit/);
-  fs.symlinkSync(out, path.join(root, 'link'));
+  fs.symlinkSync(out, path.join(root, 'link'), 'junction');
   assert.throws(() => claimOutput(path.join(root, 'link', 'new')), /symlink/);
   assert.throws(() => parseArgs([]), /usage/);
   assert.throws(() => parseArgs(['--out', out, '--unexpected']), /usage/);

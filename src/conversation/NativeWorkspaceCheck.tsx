@@ -11,9 +11,10 @@ import type {ProviderSnapshot} from '../coordination/catalogFromProviders';
 
 class CheckError extends Error {constructor(message:string,readonly previewAgain=false){super(message);}}
 async function ipc(messageType:string,payload:unknown) {
-  const response=await fetch('/goalport/ipc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({messageType,payload})});
-  const body=await response.json();
-  if(!response.ok || body?.ok!==true) throw new CheckError(body?.error || 'Workspace check is unavailable.',body?.previewAgain===true);
+  const desktop=window.goalportCore?.nativeCheck;
+  const response=desktop?null:await fetch('/goalport/ipc',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({messageType,payload})});
+  const body=desktop?await desktop(messageType,payload):await response!.json();
+  if((response && !response.ok) || body?.ok!==true) throw new CheckError(body?.error || 'Workspace check is unavailable.',body?.previewAgain===true);
   return body.payload;
 }
 interface SavedCheck {requestId:string;nativeCheckTarget:NativeCheckTarget;nativeCheckMaterial:NativeCheckMaterial;nativeAssociation:boolean;auditText?:string;savedAt?:string;statusLabel?:string}
@@ -55,7 +56,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     try {
       const reply=await ipc('native_workspace_check_prepare',{requestId:request.current,...frozen,...(withPair && offer?{piCapacity:offer}:{})});
       if(generation!==revision.current || JSON.stringify(current.current)!==JSON.stringify(frozen))return;
-      if(typeof reply?.workspacePath!=='string' || !reply.workspacePath.startsWith('/') || reply.workspacePath.includes('\0'))throw Error('The native goal folder could not be confirmed.');
+      if(typeof reply?.workspacePath!=='string' || !/^(\/|[A-Za-z]:[\\/])/.test(reply.workspacePath) || reply.workspacePath.includes('\0'))throw Error('The native goal folder could not be confirmed.');
       setWorkspace(reply.workspacePath);
       if(!withPair){const provider=reply?.offer as ProviderSnapshot|undefined;const pair=normalizePiCapacity(provider?.piCapacity?.offer);setOffer(pair);setConsent(reply?.backgroundSendConsent===true);setCapacityReason(pair && selectedPiEligible(provider,pair)?null:provider?.piCapacity?.reason || 'Pi’s configured capacity is unavailable for this goal.');}
       else if(reply?.empty){setError(reply.message || 'No tracked changes to check; Pi was not called.');}

@@ -39,6 +39,20 @@ function fixture(child = false) {
     appInfo: async () => ({ version: "test", coordinationConfigured: true }) } as never;
   return { record, terminal, list, start, liveContinue };
 }
+it("a running workspace check stays beside its goal and never takes over the desktop view", async () => {
+  const f = fixture();
+  const target = { campaignId: "campaign-desktop", attemptId: "attempt-desktop", turnRequestId: "turn-desktop" };
+  const snapshot = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: target.campaignId, attempt: { ...DEMO_SNAPSHOT.attempt, id: target.attemptId, provider: "codex", state: "waiting" }, turnResults: [{ requestId: target.turnRequestId, replyState: "completed", baselineRecorded: true, before: [], during: [], unattributed: [], commands: [] }] };
+  const job = { ...f.terminal, jobId: "check-job", requestId: "check-request", recordKind: "native-workspace-check", nativeCheckTarget: target, state: "running", active: true, live: true, outcome: null, followUpMode: undefined, progress: { activity: "Pi is checking" } };
+  const nativeCheck = vi.fn(async () => ({ ok: true, payload: { checks: [] } }));
+  window.goalportCore = { ...window.goalportCore, snapshot: async () => snapshot, startCore: async () => snapshot, backgroundStatus: async () => job, nativeCheck } as never;
+  window.history.replaceState(null, "", "/goals/campaign-desktop");
+  render(<App />);
+  await screen.findByRole("region", { name: "Workspace check" });
+  expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Stop check" })).toBeTruthy();
+});
+
 it.each(["unconfirmed", "running"] as const)("desktop interrupted live-read allowance (%s) can be left without replaying or releasing its held folder", async state => {
   const f = fixture();
   let current: BackgroundStatus = { ...f.terminal, state, active:true, live:false, outcome:null,

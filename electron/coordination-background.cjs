@@ -330,7 +330,7 @@ function withControlAck(facts, ack) {
 async function backgroundStartReply(host, input) {
   // Renderer path has no server-owned Linux material preview. Never silently
   // drop purpose fields and turn this into an ordinary job.
-  if (input && (Object.hasOwn(input, 'nativeCheckTarget') || Object.hasOwn(input, 'nativeCheckMaterial'))) return { backgroundStartRefused: true, code: 'background-invalid-admission', message: 'Workspace check previews are available only through the Linux workbench.' };
+  if (input && (Object.hasOwn(input, 'nativeCheckTarget') || Object.hasOwn(input, 'nativeCheckMaterial'))) return { backgroundStartRefused: true, code: 'background-invalid-admission', message: 'Workspace check previews are available only through the exact preview.' };
   try { return await host.start(input); }
   catch (error) {
     let reportedCode;

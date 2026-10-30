@@ -15,6 +15,7 @@ const { loadWindowState, saveWindowState, STATE_FILE } = require("./window-state
 const { discoverCoordination, launchOne, authorizeCoordination } = require("./coordinate-service.cjs");
 const coordinationScope = require("./coordination-scope.cjs");
 const { createBackgroundHost, backgroundStartReply } = require("./coordination-background.cjs");
+const { createNativeCheckHost } = require("./native-check-host.cjs");
 const { createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecord } = require("./coordination-record.cjs");
@@ -979,6 +980,17 @@ const coreConnection = createCoreConnection({
 });
 // Every request to Core goes through the connection's gate (see createCoreGate).
 const { exchangeVerified, invoke: invokeCore } = coreConnection;
+const nativeCheckHost = createNativeCheckHost({
+  directory: coordinationDirectory,
+  core: { exchangeVerified },
+  snapshot: () => invokeCore({ protocolVersion: "goalport.ipc.v2", requestId: `native-check-${randomUUID()}`, entityVersion: 0, messageType: "snapshot", payload: {} }),
+  discover: (workspace) => discoverCliProviders({ stateDir: coordinationRuntime().stateDir, cwd: workspace, routeAwarePi: true }),
+  engine: () => require(path.join(appRoot, "dist", "coordination-engine.cjs")),
+  consent: () => backgroundSendConsent().read(),
+  grant: () => backgroundSendConsent().act("grant"),
+  start: (input) => backgroundHost.start(input),
+  stop: (jobId) => backgroundHost.revoke(jobId),
+});
 
 function closeAttemptTarget(active, selectedId, held, heldId) {
   return active && selectedId ? selectedId : held ? heldId : selectedId;
@@ -1266,6 +1278,7 @@ app.whenReady().then(() => {
     return backgroundSendConsent().act(action);
   });
   handleTrusted("goalport:background-start", (_, input) => backgroundStartReply(backgroundHost, input));
+  handleTrusted("goalport:native-check", (_, messageType, payload) => nativeCheckHost.handle(messageType, payload));
   handleTrusted("goalport:background-status", (_, jobId) => backgroundHost.status(jobId));
   handleTrusted("goalport:background-held-workspaces", (_, candidate) => {
     if (candidate !== undefined && (typeof candidate !== "string" || candidate.length > 32_768)) {

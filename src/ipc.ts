@@ -343,6 +343,7 @@ declare global {
       }>;
       coordinateCancel?: (generation: string) => Promise<unknown>;
       backgroundSendConsent?: (action: "read" | "grant" | "revoke") => Promise<{ allowed: boolean; grantedAt?: string }>;
+      nativeCheck?: (messageType: string, payload: unknown) => Promise<{ ok: boolean; payload?: any; error?: string; previewAgain?: boolean }>;
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
