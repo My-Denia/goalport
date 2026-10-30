@@ -43,6 +43,7 @@ import type { SavedPlan } from "./coordination/savedPlan";
 import { isValidContinuationDescriptor } from "./coordination/continuation";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
+import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import { BackgroundAttention } from "./panels/BackgroundAttention";
 import { TurnResults } from "./panels/TurnResults";
 import { StatusBanners, type ActiveNotice } from "./panels/StatusBanners";
@@ -1320,7 +1321,7 @@ function App() {
         // unscoped path while harness access is unresolved (P1).
         setDraftError(panelLoad === "failed"
           ? { sentence: "Your harness-access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
-          : { sentence: "Harness access is still loading, so nothing was sent. Send unlocks once your harness-access choices are ready." });
+          : { sentence: "Agent access is still loading, so nothing was sent. Send unlocks once your harness-access choices are ready." });
         return;
       }
       if (scopedSend && writeInstances.length > 0 && (!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8)) {
@@ -4043,6 +4044,7 @@ function App() {
                 {["Ready", "Completed", "Working"].includes(taskState.label) ? null : <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>}
               </div>
 
+              <SinceLastVisit campaignId={snapshot.activeCampaignId} product={product} results={snapshot.turnResults} />
               {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
                 <details className="native-turn-results">
                   <summary>Files changed</summary>

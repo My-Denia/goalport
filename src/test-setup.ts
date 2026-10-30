@@ -14,5 +14,5 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 // The remembered folder and agent must not leak from one test into the next.
 import { afterEach } from "vitest";
 afterEach(() => {
-  try { globalThis.localStorage?.removeItem("goalport.goalDefaults"); globalThis.localStorage?.removeItem("goalport.lastAttention"); } catch { /* no storage here */ }
+  try { globalThis.localStorage?.removeItem("goalport.goalDefaults"); globalThis.localStorage?.removeItem("goalport.lastAttention"); globalThis.localStorage?.removeItem("goalport.lastSeenAnswers"); } catch { /* no storage here */ }
 });
