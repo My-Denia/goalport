@@ -472,7 +472,8 @@ export function PiReview({ text, id }: { text: string; id: string }) {
   const split = body.search(/\n\s*\n/);
   const firstPart = split < 0 ? body : body.slice(0, split);
   const verdict = /^\**(Looks right|Needs attention|Can['’]t tell)\**:\**\s*/i.exec(firstPart);
-  const lead = verdict ? firstPart.slice(verdict[0].length) : firstPart;
+  const opening = verdict ? firstPart.slice(verdict[0].length) : firstPart;
+  const lead = opening.charAt(0).toUpperCase() + opening.slice(1);
   const rest = split < 0 ? '' : body.slice(split).trim();
   const tone = verdict ? (/^looks/i.test(verdict[1]) ? 'good' : /^needs/i.test(verdict[1]) ? 'attention' : 'unclear') : null;
   return <div className="tl-agent-body native-check-review">

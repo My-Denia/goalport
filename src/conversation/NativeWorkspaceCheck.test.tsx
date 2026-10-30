@@ -95,7 +95,7 @@ it('a review can go straight to Codex as an editable draft, with nothing sent',(
 
 it('a verdict shows at a glance and a clean review asks for nothing more',()=>{
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'Looks right: the guide gained the section Codex described.'}}} as never} onStopAllowing={()=>{}} onAskCodex={vi.fn()}/>);
- expect(screen.getByText('Looks right').className).toContain('review-verdict-good');expect(screen.getByText(/the guide gained/).textContent).not.toContain('Looks right');expect(screen.queryByRole('button',{name:'Ask Codex to fix this'})).toBeNull();
+ expect(screen.getByText('Looks right').className).toContain('review-verdict-good');expect(screen.getByText(/The guide gained/).textContent).not.toContain('Looks right');expect(screen.queryByRole('button',{name:'Ask Codex to fix this'})).toBeNull();
 });
 
 it('a running review invites the user to keep working',()=>{
