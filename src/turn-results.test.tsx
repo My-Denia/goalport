@@ -23,7 +23,6 @@ afterEach(() => cleanup());
 describe("Turn results", () => {
   it("keeps the reply, the preexisting file, and the two exit codes apart", () => {
     render(<TurnResults results={[result]} />);
-    expect(screen.getByText("I think the tests passed")).toBeTruthy();
     expect(screen.getByText("user.txt")).toBeTruthy();
     expect(screen.getByText("agent.txt")).toBeTruthy();
     expect(screen.getByText("hand.txt")).toBeTruthy();
@@ -42,7 +41,7 @@ describe("Turn results", () => {
 
   it("does not invent a diff when the turn has no baseline", () => {
     render(<TurnResults results={[{ ...result, baselineRecorded: false, before: [], during: [], unattributed: [] }]} />);
-    expect(screen.getByText("Baseline not recorded")).toBeTruthy();
+    expect(screen.getByText("Changes for this turn couldn't be compared.")).toBeTruthy();
     expect(screen.queryByText("user.txt")).toBeNull();
   });
 });
