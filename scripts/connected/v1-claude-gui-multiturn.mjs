@@ -690,7 +690,7 @@ const result = await withPackagedGui(port, async (session) => {
     attemptId: attemptB,
     label: "B-T1-decline",
     text: `Do not use Bash, the shell, or any command. Use only the Write tool to create notes/should-not-exist.txt whose entire contents are the single word BLOCKED. Do not retry with Bash if Write is denied. After the Write, reply exactly DONE_B1.`,
-    decisionLabel: "Decline permission",
+    decisionLabel: "Decline",
     requirePermission: true,
     screenshotOnPending: "permission-denied.png"
   });

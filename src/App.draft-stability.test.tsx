@@ -99,7 +99,7 @@ describe("draft composer lifecycle across snapshot polls", () => {
       ],
     });
     // The panel arrives from the late discovery; the draft and its text stay.
-    await waitFor(() => expect(screen.getByText(/Codex and Claude will plan, build and check this goal\./)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Codex and Claude will plan and check this goal./)).toBeTruthy());
     const composer = screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
     expect(composer.value).toBe("typed while discovering");
     expect(document.querySelector(".draft-composer")).not.toBeNull();

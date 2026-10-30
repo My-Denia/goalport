@@ -15,7 +15,7 @@ Outbox identifiers prevent duplicate GoalPort decisions, but they cannot make ar
 
 ## Permissions and decisions
 
-Native permission requests become Decisions in the window's Decision Inbox. You answer each one with **Allow once**, **Decline permission** or **Keep waiting**. An unanswered request keeps the work blocked and is not retried automatically. Runtime-specific mappings are listed in [runtime integration](runtimes.md).
+Native permission requests become Decisions in the window's Decision Inbox. You answer each one with **Allow once** or **Decline**. An unanswered request keeps the work blocked and is not retried automatically. Runtime-specific mappings are listed in [runtime integration](runtimes.md).
 
 Commit, push, release and delete have their own explicit request buttons in the window. A Runtime's progress never implies them.
 

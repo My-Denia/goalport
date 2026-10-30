@@ -295,7 +295,7 @@ async function clickDeclineThenDuplicateSameId(session, decisionId) {
         };
       }
       const decline = [...row.querySelectorAll("button")].find(
-        (node) => (node.textContent || "").trim() === "Decline permission"
+        (node) => (node.textContent || "").trim() === "Decline"
       );
       if (!decline || decline.disabled) {
         return {
@@ -312,7 +312,7 @@ async function clickDeclineThenDuplicateSameId(session, decisionId) {
       }
       decline.click();
       const second = [...row.querySelectorAll("button")].find(
-        (node) => (node.textContent || "").trim() === "Decline permission"
+        (node) => (node.textContent || "").trim() === "Decline"
       );
       if (!second) {
         const snapMissing = await window.goalportCore.snapshot();

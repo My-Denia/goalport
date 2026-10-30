@@ -44,7 +44,7 @@ const args = argsFor(argv.filter((arg) => !["--normal", "--fail-before-receipt"]
 const ASSERTION_MAP = [
   { superseded: "no goal means no composer in the DOM at all; empty state owns the start-goal CTA", current: "draft-first composer (#draft-workspace/#draft-message) is present with ZERO durable rows; first Send is the only creation path" },
   { superseded: "#project-folder + #campaign-goal inside .first-run-dialog create form", current: ".draft-composer-form; workspace + inline draft Runtime picker + message; no naming step; title is deterministic from the first prompt" },
-  { superseded: "create campaign first, then select Runtime in permanent details rows (.runtime-row summary / Select X)", current: "Runtime chosen inline in the draft/composer .runtime-picker; Session details keeps a Change Runtime affordance" },
+  { superseded: "create campaign first, then select Runtime in permanent details rows (.runtime-row summary / Select X)", current: "Runtime chosen inline in the draft/composer .runtime-picker; Session details keeps a Switch agent affordance" },
   { superseded: "workspace-selection creates only Campaign and task (commands=0, attempts=0)", current: "first Send (start_conversation) atomically creates one project/campaign/task/attempt/reserved first message + succeeded conversation_request; no automatic second send" },
   { superseded: "\"Message recorded for task\" success banner wait", current: "quiet success: draft cleared, no success banner, exact-once durable message/reply, rendered product conversation" },
   { retained: "UI attempt.state labels remain lowercase", current: "waiting|active|completed|failed from attempt_to_ui; durable attempt states and refusal labels are separate contracts" },
@@ -905,7 +905,7 @@ async function smoke() {
     await screen("11-narrow-window");
     report.narrowLayout = { ...(await viewport()), coverage: "at 1000 CSS px the Session details drawer and composer Runtime picker stay reachable" };
     await openInspector();
-    await until("runtime change affordance reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(Array.from(document.querySelectorAll('.session-details-actions button')).find(e => e.textContent.trim() === 'Change Runtime')))`));
+    await until("runtime change affordance reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(Array.from(document.querySelectorAll('.session-details-actions button')).find(e => e.textContent.trim() === 'Switch agent')))`));
     await until("composer runtime picker reachable at narrow width", () => read(`Boolean((${clickPointFor.toString()})(document.querySelector('.composer-dock .runtime-picker-button')))`));
     await closeInspector();
     await page.cdp("Emulation.setDeviceMetricsOverride", desktopViewport);

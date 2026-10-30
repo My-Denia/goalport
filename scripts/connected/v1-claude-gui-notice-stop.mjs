@@ -350,7 +350,7 @@ async function waitDeclineReady(session, timeoutMs, shotName = null, rejectId = 
       `(() => {
         const rows = [...document.querySelectorAll('.decision-request')];
         const decline = rows.some((row) =>
-          [...row.querySelectorAll('button')].some((node) => (node.textContent || '').trim() === 'Decline permission' && !node.disabled)
+          [...row.querySelectorAll('button')].some((node) => (node.textContent || '').trim() === 'Decline' && !node.disabled)
         );
         return { inbox: rows.length, decline };
       })()`
@@ -369,7 +369,7 @@ async function waitDeclineReady(session, timeoutMs, shotName = null, rejectId = 
 
 async function declineAndWait(session, decisionId, timeoutMs = 60000) {
   const { evaluate } = session;
-  const clicked = await domClickText(evaluate, ".decision-request button", "Decline permission", {
+  const clicked = await domClickText(evaluate, ".decision-request button", "Decline", {
     exact: true
   });
   if (clicked !== "clicked") {
