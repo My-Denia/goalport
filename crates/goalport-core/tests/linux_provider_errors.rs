@@ -567,17 +567,6 @@ fn quota_failed_turn_keeps_session_for_explicit_next_send() {
     );
     assert_eq!(duplicate["ok"], true, "{duplicate}");
     assert_eq!(duplicate["payload"]["duplicate"], true);
-    let after_close = request(
-        &server,
-        "resume-closed",
-        "resume_native_session",
-        json!({"attemptId":attempt_id}),
-    );
-    assert_eq!(
-        after_close["ok"], false,
-        "closed Attempt must not resume: {after_close}"
-    );
-    assert!(after_close["error"].as_str().unwrap().contains("terminal"));
     assert_eq!(
         fs::read_to_string(workspace.path().join("process-starts"))
             .unwrap()

@@ -10,3 +10,9 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   }
   (globalThis as Record<string, unknown>).ResizeObserver = ResizeObserverStub;
 }
+
+// The remembered folder and agent must not leak from one test into the next.
+import { afterEach } from "vitest";
+afterEach(() => {
+  try { globalThis.localStorage?.removeItem("goalport.goalDefaults"); } catch { /* no storage here */ }
+});
