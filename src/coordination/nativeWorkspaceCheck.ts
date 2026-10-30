@@ -17,7 +17,7 @@ export interface NativeCheckMaterial {
   exactPrompt: string; deliveredEvidence: string;
   coverage: { limited: boolean; excluded: number; omitted: number; selected: number; evidenceCropped: boolean; excludedCategories: string[] };
   contentObservation: NativeContentObservation; nativeReportedContext: NativeReportedContext;
-  capturedAt: string; disclosureVersion: 1;
+  capturedAt: string; disclosureVersion: 1 | 2;
 }
 export function parseNativeCheckTarget(value: unknown): NativeCheckTarget | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -29,7 +29,7 @@ export function parseNativeCheckMaterial(value: unknown): NativeCheckMaterial | 
   try {
     if(!value || typeof value!=='object' || Array.isArray(value)) return null;
     const m=value as NativeCheckMaterial;
-    if(m.disclosureVersion!==1 || typeof m.exactPrompt!=='string' || typeof m.deliveredEvidence!=='string' || bytes(m.exactPrompt)>32768 || bytes(m.deliveredEvidence)>16384) return null;
+    if((m.disclosureVersion!==1 && m.disclosureVersion!==2) || typeof m.exactPrompt!=='string' || typeof m.deliveredEvidence!=='string' || bytes(m.exactPrompt)>32768 || bytes(m.deliveredEvidence)>16384) return null;
     return JSON.stringify(prepareNativeWorkspaceCheckMaterial(m))===JSON.stringify(m) ? m : null;
   } catch { return null; }
 }
@@ -43,7 +43,9 @@ function crop(text: string, cap: number): string {
   return out+marker;
 }
 /** Pure purpose formatter. Comparison retains the full raw diff, not this delivered crop. */
-export function prepareNativeWorkspaceCheckMaterial(input: Pick<NativeCheckMaterial,'contentObservation'|'nativeReportedContext'|'capturedAt'>): NativeCheckMaterial {
+export function prepareNativeWorkspaceCheckMaterial(input: Pick<NativeCheckMaterial,'contentObservation'|'nativeReportedContext'|'capturedAt'> & {disclosureVersion?: 1 | 2}): NativeCheckMaterial {
+  // A saved request keeps the words it was sent with; only new requests lead with the answer.
+  const version=input.disclosureVersion ?? 2;
   const {contentObservation:o,nativeReportedContext:context,capturedAt}=input;
   if (!o.selectedDiff || bytes(o.selectedDiff)>65536 || !/^[a-f0-9]{40,64}$/.test(o.head) || !Number.isFinite(Date.parse(capturedAt)) || JSON.stringify(o.nativeReportedContext)!==JSON.stringify(context)) throw new Error('Workspace material is empty, unavailable or inconsistent.');
   const excluded=o.paths.filter(p=>p.classification==='excluded').length, omitted=o.paths.filter(p=>p.classification==='omitted').length, selected=o.paths.filter(p=>p.classification==='selected').length;
@@ -51,7 +53,7 @@ export function prepareNativeWorkspaceCheckMaterial(input: Pick<NativeCheckMater
   const contextLimited=context.replyTruncated || context.commandsTruncated || context.commandsOmitted>0 || context.filesTruncated || context.comparisonUnavailable || context.olderTurnsOmitted>0 || context.commands.some(c=>c.truncated);
   const binaryLimited=/^Binary files .* differ$/m.test(o.selectedDiff);
   const prefix=[
-    'Independently inspect this current tracked workspace snapshot. Start with one plain sentence saying whether the changes match what the agent reported. Then return your response, concrete changed lines/claims and limitations. Do not use tools, edit files or auto-repair. Native text and commands below are REPORTED context, not proof of authorship or test execution.',
+    'Independently inspect this current tracked workspace snapshot. '+(version===1?'Return':'Start with one plain sentence saying whether the changes match what the agent reported. Then return')+' your response, concrete changed lines/claims and limitations. Do not use tools, edit files or auto-repair. Native text and commands below are REPORTED context, not proof of authorship or test execution.',
     `Current tracked workspace snapshot versus HEAD ${o.head}`,
     `Collection observation pair completed at ${capturedAt}; stable during collection: yes (two bounded observations, not a universal race certificate)`,
     'Includes possible preexisting/concurrent edits; not exclusive Codex authorship.',
@@ -70,9 +72,9 @@ export function prepareNativeWorkspaceCheckMaterial(input: Pick<NativeCheckMater
     const evidence=crop(o.selectedDiff,Math.min(16384,32768-bytes(prefix)-bytes(suffix)));
     const prompt=prefix+evidence+suffix;
     if(bytes(prompt)>32768) throw new Error('Workspace check instructions exceed the prompt budget.');
-    return {exactPrompt:prompt,deliveredEvidence:evidence,coverage:{limited:!!excluded||!!omitted||contextLimited||binaryLimited||evidence!==o.selectedDiff,excluded,omitted,selected,evidenceCropped:evidence!==o.selectedDiff,excludedCategories},contentObservation:o,nativeReportedContext:context,capturedAt,disclosureVersion:1};
+    return {exactPrompt:prompt,deliveredEvidence:evidence,coverage:{limited:!!excluded||!!omitted||contextLimited||binaryLimited||evidence!==o.selectedDiff,excluded,omitted,selected,evidenceCropped:evidence!==o.selectedDiff,excludedCategories},contentObservation:o,nativeReportedContext:context,capturedAt,disclosureVersion:version};
   }
-  return {exactPrompt,deliveredEvidence,coverage:{limited:!!excluded||!!omitted||contextLimited||binaryLimited||deliveredEvidence!==o.selectedDiff,excluded,omitted,selected,evidenceCropped:deliveredEvidence!==o.selectedDiff,excludedCategories},contentObservation:o,nativeReportedContext:context,capturedAt,disclosureVersion:1};
+  return {exactPrompt,deliveredEvidence,coverage:{limited:!!excluded||!!omitted||contextLimited||binaryLimited||deliveredEvidence!==o.selectedDiff,excluded,omitted,selected,evidenceCropped:deliveredEvidence!==o.selectedDiff,excludedCategories},contentObservation:o,nativeReportedContext:context,capturedAt,disclosureVersion:version};
 }
 /** One audit command, not a coordinated plan/writer/review chain. */
 export function buildNativeWorkspaceCheckCommand(input: {requestId:string;workspaceRoot:string;nativeCheckTarget:NativeCheckTarget;nativeCheckMaterial:NativeCheckMaterial;piCapacity:PiCapacitySelection}): CoordinateTurnCommand {

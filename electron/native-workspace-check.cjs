@@ -18,7 +18,7 @@ function targetOf(x) {
 }
 function materialOf(x) {
   closed(x, ['exactPrompt','deliveredEvidence','coverage','contentObservation','nativeReportedContext','capturedAt','disclosureVersion']);
-  if (x.disclosureVersion !== 1 || !Number.isFinite(Date.parse(x.capturedAt))) throw Error('Malformed workspace check disclosure.');
+  if ((x.disclosureVersion !== 1 && x.disclosureVersion !== 2) || !Number.isFinite(Date.parse(x.capturedAt))) throw Error('Malformed workspace check disclosure.');
   const o=x.contentObservation,c=x.nativeReportedContext,v=x.coverage;
   closed(o,['head','paths','selectedDiff','selectedStatus','nativeReportedContext']);
   if(!/^[a-f0-9]{40,64}$/.test(o.head) || !Array.isArray(o.paths) || o.paths.length>512) throw Error('Malformed workspace path observation.');
@@ -30,7 +30,7 @@ function materialOf(x) {
   if(JSON.stringify(o.nativeReportedContext)!==JSON.stringify(c))throw Error('Native context does not match the observation.');
   closed(v,['limited','excluded','omitted','selected','evidenceCropped','excludedCategories']);
   if(typeof v.limited!=='boolean'||typeof v.evidenceCropped!=='boolean'||!['excluded','omitted','selected'].every(k=>Number.isInteger(v[k])&&v[k]>=0&&v[k]<=512)||!Array.isArray(v.excludedCategories)||v.excludedCategories.some(k=>!['private-directory','environment','credentials','key-file'].includes(k)))throw Error('Malformed workspace coverage.');
-  const result = {exactPrompt:exact(x.exactPrompt,32768,false),deliveredEvidence:exact(x.deliveredEvidence,16384,false),coverage:x.coverage,contentObservation:x.contentObservation,nativeReportedContext:x.nativeReportedContext,capturedAt:x.capturedAt,disclosureVersion:1};
+  const result = {exactPrompt:exact(x.exactPrompt,32768,false),deliveredEvidence:exact(x.deliveredEvidence,16384,false),coverage:x.coverage,contentObservation:x.contentObservation,nativeReportedContext:x.nativeReportedContext,capturedAt:x.capturedAt,disclosureVersion:x.disclosureVersion};
   // Structured material is JSON-only, bounded and canonicalized without trimming text.
   for (const key of ['coverage','contentObservation','nativeReportedContext']) { if (!plain(x[key])) throw Error('Malformed workspace check observation.'); exact(JSON.stringify(x[key]), key === 'contentObservation' ? 180000 : 20000); }
   if (Buffer.byteLength(JSON.stringify(result)) > 256*1024) throw Error('Workspace check packet is too large.');
@@ -109,7 +109,7 @@ async function resolveTarget(core,selected,target) {
   if(!workspace || !fs.statSync(workspace).isDirectory()) throw Error('Native workspace is unavailable.');
   return {workspace,goal:s.activeTask.title || 'Native workspace check',taskId:s.activeTask.id,target,context:nativeContext(s,turn)};
 }
-async function collectMaterial(resolved,engine,{gitExec=strictGit,capturedAt}={}) {
+async function collectMaterial(resolved,engine,{gitExec=strictGit,capturedAt,disclosureVersion}={}) {
   const {workspace,context}=resolved;
   const before=await metadata(workspace,gitExec);
   const trackedPaths=before.paths.filter(p=>p.classification==='selected').map(p=>p.path);
@@ -123,17 +123,17 @@ async function collectMaterial(resolved,engine,{gitExec=strictGit,capturedAt}={}
   if(JSON.stringify(observation)!==JSON.stringify(endObservation)) throw Error(STALE);
   const uiExclusions=before.paths.filter(p=>p.classification!=='selected');
   if(!observation.selectedDiff) return {empty:true,message:uiExclusions.length?`No shareable tracked changes; ${uiExclusions.length} paths excluded/omitted; Pi was not called.`:'No tracked changes to check; Pi was not called.',uiExclusions};
-  const material=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:observation,nativeReportedContext:context,capturedAt:capturedAt ?? new Date().toISOString()});
+  const material=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:observation,nativeReportedContext:context,capturedAt:capturedAt ?? new Date().toISOString(),disclosureVersion});
   return {nativeCheckMaterial:materialOf(material),uiExclusions};
 }
 function assertRebuilt(material,engine) {
   const canonical=materialOf(material);
-  const rebuilt=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:canonical.contentObservation,nativeReportedContext:canonical.nativeReportedContext,capturedAt:canonical.capturedAt});
+  const rebuilt=engine.prepareNativeWorkspaceCheckMaterial({contentObservation:canonical.contentObservation,nativeReportedContext:canonical.nativeReportedContext,capturedAt:canonical.capturedAt,disclosureVersion:canonical.disclosureVersion});
   if(JSON.stringify(materialOf(rebuilt))!==JSON.stringify(canonical)) throw Error('Workspace check material does not match its exact preview.');
 }
 async function recheckMaterial(resolved,material,engine,options) {
   assertRebuilt(material,engine);
-  const fresh=await collectMaterial(resolved,engine,{...options,capturedAt:material.capturedAt});
+  const fresh=await collectMaterial(resolved,engine,{...options,capturedAt:material.capturedAt,disclosureVersion:material.disclosureVersion});
   if(fresh.empty || JSON.stringify(fresh.nativeCheckMaterial)!==JSON.stringify(material)) throw Error(STALE);
 }
 module.exports={STALE,TOP_LEVEL,targetOf,materialOf,purposeOf,strictGit,classifyMetadata,excludedCategory,resolveTarget,collectMaterial,assertRebuilt,recheckMaterial};

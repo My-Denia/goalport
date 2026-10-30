@@ -73,7 +73,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     if(busy || (!pending && (!target || !offer || !material)))return;
     const frozen=pending?.target??target,frozenPair=pending?.piCapacity??offer,frozenRequest=pending?.requestId??request.current,generation=revision.current;
     if(!frozen || !frozenPair)return;
-    if(!consent && !pending){try{await ipc('coordination_grant',{});setConsent(true);}catch(e){setError(e instanceof Error?e.message:'Workspace check is unavailable.');return;}}
+    if(!consent && !pending){setBusy(true);try{await ipc('coordination_grant',{});setConsent(true);}catch(e){setBusy(false);setError(e instanceof Error?e.message:'Workspace check is unavailable.');return;}if(generation!==revision.current){setBusy(false);return;}}
     const intent={requestId:frozenRequest,target:frozen,piCapacity:frozenPair};retainPending(intent);setPending(intent);
     let holdPending=true;
     setBusy(true);onBusy(true);setError(null);
@@ -93,13 +93,13 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
   // The first start waits on the host for a minute or more; only a reply lost after that is an earlier request.
   const starting=Boolean(pending)&&busy&&!unknown;
   const shared=material?.contentObservation.paths.filter(p=>p.classification==='selected').map(p=>p.path)??[];
-  useEffect(()=>{if(owns&&job&&typeof panel.current?.scrollIntoView==='function')panel.current.scrollIntoView({block:'nearest'});},[owns,job?.requestId,job?.state]);
+  useEffect(()=>{if(owns&&job&&typeof panel.current?.scrollIntoView==='function')panel.current.scrollIntoView({block:'nearest'});},[owns,job?.requestId,job?.active]);
   return <section ref={panel} className="native-workspace-check" style={{minWidth:0,maxWidth:960,marginInline:'auto'}}>
     <GoalLayer variant="dialog" modalCard label="Ask Pi to review" open={open} onOpenChange={changeOpen} trigger={undefined}>
       <h2>Ask Pi to review Codex's changes</h2>
       {pending&&!starting?<p role="status">Your earlier request may still be running. Check on it here; it won't be sent twice.</p>:<p>Pi reads what changed and replies beside this goal. It can't edit your files, and it keeps going if you close the window.</p>}
       {material&&offer?<ul className="check-summary"><li><strong>Changes:</strong> {shared.slice(0,3).join(', ')}{shared.length>3?` and ${shared.length-3} more`:''}</li><li><strong>Also shared:</strong> Codex's last reply</li><li><strong>Sent to:</strong> {offer.provider}/{offer.model}</li>{exclusions.length?<li><strong>Left out:</strong> {exclusions.length} private {exclusions.length===1?'file':'files'}</li>:null}</ul>:null}
-      {material?<p>Check it first if these changes might contain secrets.</p>:null}
+      {material?<p>Check it first if these changes might contain secrets.{consent?'':' Sending also lets future reviews keep going after you close the window.'}</p>:null}
       {material?<details><summary>See exactly what's sent</summary><pre aria-label="Complete Pi payload" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{material.exactPrompt}</pre>{exclusions.length?<ul>{exclusions.map(p=><li key={p}>{p}</li>)}</ul>:null}</details>:null}
       {busy&&!material&&!pending?<p role="status">Reading your changes…</p>:null}
       {capacityReason?<p role="status">{capacityReason}</p>:null}

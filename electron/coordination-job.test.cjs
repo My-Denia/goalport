@@ -86,6 +86,19 @@ function failureProxy(options = {}) {
   });
 }
 
+test("leaving a read-only workspace check gives its folder back so another review can start", t => {
+  const engine = require("../dist/coordination-engine.cjs");
+  const context = { reply: "Reported", replyTruncated: false, commands: [], commandsOmitted: 0, commandsTruncated: false, filesTruncated: false, comparisonUnavailable: false, olderTurnsOmitted: 0 };
+  const nativeCheckMaterial = engine.prepareNativeWorkspaceCheckMaterial({ contentObservation: { head: "a".repeat(40), paths: [], selectedDiff: "diff", selectedStatus: "", nativeReportedContext: context }, nativeReportedContext: context, capturedAt: "2026-10-31T00:00:00Z" });
+  const check = { allowedInstances: ["pi"], maxTurns: 2, piCapacity: { provider: "Fixture", model: "alpha", useExistingCapacity: true }, nativeCheckTarget: { campaignId: "c", attemptId: "a", turnRequestId: "t" }, nativeCheckMaterial };
+  let n = 0;
+  const ids = ["123e4567-e89b-42d3-a456-426614174101", "123e4567-e89b-42d3-a456-426614174102"];
+  const { store } = fixture(t, { idFactory: () => ids[n++] });
+  const first = start(store, { requestId: "check-1", ...check });
+  store.acknowledgeStuck(first.jobId);
+  assert.equal(store.startAdmission(admission({ requestId: "check-2", ...check })).ok, true);
+});
+
 test("profile bootstrap gate refuses every write before durable initialization", (t) => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-bootstrap-"));
   t.after(() => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
