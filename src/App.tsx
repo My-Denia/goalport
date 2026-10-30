@@ -2382,6 +2382,9 @@ function App() {
         const recovered = await recoverSessionForSend();
         if (!recovered || viewIntent !== selectionIntent.current) return;
         live = recovered;
+      } catch (error) {
+        setActiveNotice({ sentence: "Couldn't reconnect to this conversation. Your message is still here; try sending again.", technical: error instanceof Error ? error.message : String(error) });
+        return;
       } finally {
         sendInFlight.current = false;
         setSendBusy(false);
