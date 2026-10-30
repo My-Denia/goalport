@@ -83,6 +83,11 @@ it('a review that stopped running says the files are safe and can be dismissed w
  expect(calls.find(c=>c.messageType==='coordination_acknowledge')?.payload).toEqual({jobId:job.jobId});expect(onJob.mock.calls[0][0].acknowledgedStuckAt).toBeTruthy();expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);
 });
 
+it('a review saved before the prompt changed still reads, and new requests lead with the answer',()=>{
+ const old=prepareNativeWorkspaceCheckMaterial({contentObservation:material.contentObservation,nativeReportedContext:context,capturedAt:material.capturedAt,disclosureVersion:1});
+ expect(old.exactPrompt).not.toContain('Start with one plain sentence');expect(material.exactPrompt).toContain('Start with one plain sentence');expect(parseNativeCheckMaterial(old)).toEqual(old);
+});
+
 it('a returned review leads with its first sentence and folds the rest',()=>{
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'The changes match what Codex reported.\n\n## Detail\n\nLong working.'}}} as never} onStopAllowing={()=>{}}/>);
  const lead=screen.getByText('The changes match what Codex reported.');expect(lead.closest('details')).toBeNull();expect(screen.getByText('Long working.').closest('details')).toBeTruthy();expect(screen.getByRole('heading',{name:"Pi's review"})).toBeTruthy();expect(screen.queryByText(/\/fixture/)).toBeNull();

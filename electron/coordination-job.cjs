@@ -687,7 +687,8 @@ function createCoordinationJobStore(profileDirectory, {
         if (normalized.requestId === incoming.requestId) {
           throw refusal("stuck-acknowledged", "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
         }
-        if (!released) {
+        // A read-only check cannot have changed the folder, so leaving it frees the folder.
+        if (!released && !(normalized.nativeCheckTarget && normalized.writeAuthorization === null)) {
           const held = workspaceIdentity(normalized.workspacePath, platform);
           const candidate = workspaceIdentity(incoming.workspacePath, platform);
           if (held === null || candidate === null || held === candidate) holders.push({ jobId: entry.name, admission });
