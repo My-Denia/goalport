@@ -889,6 +889,28 @@ test("an outcome that lands while acknowledging is not erased by the acknowledge
   assert.equal(store.startAdmission(admission({ requestId: "send-background-2" })).reason, "workspace-held");
 });
 const { workspaceIdentity } = require('./coordination-job.cjs');
+test("POSIX trailing backslashes identify a different folder without releasing the original hold", { skip: process.platform === "win32" }, t => {
+  let next = 0;
+  const { profile, store } = fixture(t, { idFactory: () => next++ === 0 ? FIXED_JOB_ID : "223e4567-e89b-42d3-a456-426614174000" });
+  const held = path.join(profile, "repo"), different = held + "\\";
+  fs.mkdirSync(held); fs.mkdirSync(different);
+  assert.notEqual(fs.statSync(held).ino, fs.statSync(different).ino);
+  assert.notEqual(workspaceIdentity(held, "linux"), workspaceIdentity(different, "linux"));
+  assert.equal(workspaceIdentity(different, "linux"), different);
+  assert.equal(workspaceIdentity(different + "/", "linux"), different);
+  assert.equal(workspaceIdentity(path.join(profile, "missing") + "\\", "linux").endsWith("\\"), true);
+  const first = start(store, { workspacePath: held });
+  const priorState = store.getStatus(first.jobId).state;
+  const admissionFile = pathFor(profile, first.jobId, "admission.json"), before = fs.readFileSync(admissionFile);
+  store.acknowledgeStuck(first.jobId);
+  assert.equal(start(store, { requestId: "same-folder", workspacePath: held }).reason, "workspace-held");
+  const replacement = start(store, { requestId: "different-folder", workspacePath: different });
+  assert.equal(replacement.jobId, "223e4567-e89b-42d3-a456-426614174000");
+  assert.equal(store.getStatus(replacement.jobId).admission.workspacePath, different);
+  assert.equal(store.getStatus(first.jobId).state, priorState);
+  assert.equal(store.getStatus(first.jobId).acknowledgedStuckAt, "2026-10-12T13:14:15.000Z");
+  assert.deepEqual(fs.readFileSync(admissionFile), before);
+});
 const { skipAliasKind } = require('./test-symlink-support.cjs');
 for (const kind of ['junction', 'symlink']) test(`native ${kind} identity and alias/.. retain acknowledged holds`, { skip: skipAliasKind(kind) }, async t => {
   const { profile, store } = fixture(t);

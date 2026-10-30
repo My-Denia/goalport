@@ -114,7 +114,8 @@ function workspaceIdentity(value, platform = process.platform) {
         resolved = resolved.replace(/\//g, "\\").toLowerCase();
       }
       const root = paths.parse(resolved).root;
-      while (resolved.length > root.length && /[\\/]$/.test(resolved)) resolved = resolved.slice(0, -1);
+      const trailingSeparator = platform === "win32" ? /[\\/]$/ : /\/$/;
+      while (resolved.length > root.length && trailingSeparator.test(resolved)) resolved = resolved.slice(0, -1);
       return resolved;
     } catch (error) {
       if (error?.code !== "ENOENT") return null;
