@@ -470,9 +470,13 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 export function PiReview({ text, id }: { text: string; id: string }) {
   const body = text.trim();
   const split = body.search(/\n\s*\n/);
-  const lead = split < 0 ? body : body.slice(0, split);
+  const firstPart = split < 0 ? body : body.slice(0, split);
+  const verdict = /^\**(Looks right|Needs attention|Can['’]t tell)\**:\**\s*/i.exec(firstPart);
+  const lead = verdict ? firstPart.slice(verdict[0].length) : firstPart;
   const rest = split < 0 ? '' : body.slice(split).trim();
+  const tone = verdict ? (/^looks/i.test(verdict[1]) ? 'good' : /^needs/i.test(verdict[1]) ? 'attention' : 'unclear') : null;
   return <div className="tl-agent-body native-check-review">
+    {tone ? <span className={`review-verdict review-verdict-${tone}`}>{verdict![1]}</span> : null}
     {renderMarkdownBody(lead, `pi-review-lead-${id}`)}
     {rest ? <details><summary>Full review</summary>{renderMarkdownBody(rest, `pi-review-${id}`)}</details> : null}
   </div>;
@@ -518,7 +522,7 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
       {job.nativeCheckMaterial ? <details><summary>What Pi was sent · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
       <div className="native-check-actions">
         {running ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop review</button> : null}
-        {review && onAskCodex ? <button type="button" className="button button-small button-outline" onClick={() => onAskCodex(`Pi reviewed your changes and said:\n\n${review}\n\nCheck this and fix anything that needs it.`)}>Ask Codex about this</button> : null}
+        {review && onAskCodex && !/^\**looks right/i.test(review.trim()) ? <button type="button" className="button button-small button-outline" onClick={() => onAskCodex(`Pi flagged this in your changes: ${review.trim().split(/\n\s*\n/)[0]}\n\nCheck it and fix anything that needs it.`)}>Ask Codex to fix this</button> : null}
         {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <button type="button" className="button button-small button-outline" onClick={onLeave}>Dismiss</button> : null}
       </div>
     </section>;

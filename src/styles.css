@@ -589,6 +589,14 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .native-check-review summary, .native-check-panel > details > summary { color: var(--ink-soft); font-size: 13px; cursor: pointer; }
 .native-check-actions { display: flex; gap: 8px; margin-top: 10px; }
 .native-check-actions:empty { display: none; }
+.composer-actions .runtime-picker-button { min-height: 28px; padding: 2px 8px; border-color: transparent; background: transparent; }
+.composer-actions .runtime-picker-button:hover { border-color: var(--line); }
+.composer-actions .runtime-picker-copy small { display: none; }
+.composer-actions .provider-avatar { width: 20px; height: 20px; font-size: 11px; }
+.review-verdict { display: inline-block; margin: 0 0 6px; padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+.review-verdict-good { background: rgba(92, 200, 140, 0.14); color: #7fd8a4; }
+.review-verdict-attention { background: rgba(240, 180, 90, 0.14); color: #f0c078; }
+.review-verdict-unclear { background: rgba(255, 255, 255, 0.07); color: var(--ink-soft); }
 .md-table { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 13px; }
 .md-table th, .md-table td { padding: 5px 9px; border: 1px solid var(--line); text-align: left; vertical-align: top; }

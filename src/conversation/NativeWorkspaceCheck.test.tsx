@@ -85,12 +85,17 @@ it('a review that stopped running says the files are safe and can be dismissed w
 
 it('a review saved before the prompt changed still reads, and new requests lead with the answer',()=>{
  const old=prepareNativeWorkspaceCheckMaterial({contentObservation:material.contentObservation,nativeReportedContext:context,capturedAt:material.capturedAt,disclosureVersion:1});
- expect(old.exactPrompt).not.toContain('Start with one plain sentence');expect(material.exactPrompt).toContain('Start with one plain sentence');expect(parseNativeCheckMaterial(old)).toEqual(old);
+ expect(old.exactPrompt).not.toContain('Start with exactly one of');expect(material.exactPrompt).toContain('Start with exactly one of');expect(parseNativeCheckMaterial(old)).toEqual(old);
 });
 
 it('a review can go straight to Codex as an editable draft, with nothing sent',()=>{
  const onAskCodex=vi.fn();render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'One claim is not shown.'}}} as never} onStopAllowing={()=>{}} onAskCodex={onAskCodex}/>);
- fireEvent.click(screen.getByRole('button',{name:'Ask Codex about this'}));expect(onAskCodex).toHaveBeenCalledTimes(1);expect(onAskCodex.mock.calls[0][0]).toContain('One claim is not shown.');
+ fireEvent.click(screen.getByRole('button',{name:'Ask Codex to fix this'}));expect(onAskCodex).toHaveBeenCalledTimes(1);expect(onAskCodex.mock.calls[0][0]).toContain('One claim is not shown.');
+});
+
+it('a verdict shows at a glance and a clean review asks for nothing more',()=>{
+ render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'Looks right: the guide gained the section Codex described.'}}} as never} onStopAllowing={()=>{}} onAskCodex={vi.fn()}/>);
+ expect(screen.getByText('Looks right').className).toContain('review-verdict-good');expect(screen.getByText(/the guide gained/).textContent).not.toContain('Looks right');expect(screen.queryByRole('button',{name:'Ask Codex to fix this'})).toBeNull();
 });
 
 it('a running review invites the user to keep working',()=>{

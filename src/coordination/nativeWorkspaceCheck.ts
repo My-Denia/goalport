@@ -53,7 +53,7 @@ export function prepareNativeWorkspaceCheckMaterial(input: Pick<NativeCheckMater
   const contextLimited=context.replyTruncated || context.commandsTruncated || context.commandsOmitted>0 || context.filesTruncated || context.comparisonUnavailable || context.olderTurnsOmitted>0 || context.commands.some(c=>c.truncated);
   const binaryLimited=/^Binary files .* differ$/m.test(o.selectedDiff);
   const prefix=[
-    'Independently inspect this current tracked workspace snapshot. '+(version===1?'Return':'Start with one plain sentence saying whether the changes match what the agent reported. Then return')+' your response, concrete changed lines/claims and limitations. Do not use tools, edit files or auto-repair. Native text and commands below are REPORTED context, not proof of authorship or test execution.',
+    'Independently inspect this current tracked workspace snapshot. '+(version===1?'Return':'Start with exactly one of "Looks right:", "Needs attention:" or "Can\'t tell:" followed by one plain sentence saying whether the changes match what the agent reported. Then return')+' your response, concrete changed lines/claims and limitations. Do not use tools, edit files or auto-repair. Native text and commands below are REPORTED context, not proof of authorship or test execution.',
     `Current tracked workspace snapshot versus HEAD ${o.head}`,
     `Collection observation pair completed at ${capturedAt}; stable during collection: yes (two bounded observations, not a universal race certificate)`,
     'Includes possible preexisting/concurrent edits; not exclusive Codex authorship.',

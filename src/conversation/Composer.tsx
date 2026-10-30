@@ -129,15 +129,6 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
 
   return (
     <div className="composer-dock">
-      <RuntimePicker
-        runtimes={snapshot.runtimes}
-        runtime={runtime}
-        blocked={held || controlUnavailable}
-        blockedReason={controlUnavailable ? "Selection is unavailable until Core provides a full control snapshot." : undefined}
-        connected={connected}
-        onSelect={onSelectRuntime}
-        focusSignal={chooserFocusSignal}
-      />
       <form className="composer" aria-label="Message composer" onSubmit={onSubmit}>
         <textarea
           ref={textareaRef}
@@ -152,6 +143,15 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
           disabled={held && !reconciling}
         />
         <div className="composer-actions">
+          <RuntimePicker
+            runtimes={snapshot.runtimes}
+            runtime={runtime}
+            blocked={held || controlUnavailable}
+            blockedReason={controlUnavailable ? "Selection is unavailable until Core provides a full control snapshot." : undefined}
+            connected={connected}
+            onSelect={onSelectRuntime}
+            focusSignal={chooserFocusSignal}
+          />
           <span className="composer-hint">{hint}</span>
           <div className="composer-buttons">
             {closingSession ? (

@@ -60,6 +60,7 @@ import { useCoreSnapshot } from "./lib/useCoreSnapshot";
 import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute, coordinatedRouteFromLocation, setCoordinatedRoute, isNativeDraftRoute, setNativeDraftRoute, type CoordinatedRoute } from "./lib/goalRoute";
 import { admittedIdentity, continuationUnavailable, type SavedTargetPayload, type SavedTargetResult, type SavedTargetSummary, type CoordinatedCurrentJob, type HostCurrentJob, type SavedCurrentBase, type SavedAllowanceView } from "./coordination/savedTargetView";
 import { useConversationDrafts } from "./lib/useConversationDrafts";
+import { readGoalDefaults, rememberGoalDefaults } from "./lib/goalDefaults";
 import {
   canExplicitlyRetry,
   conversationSendIntent,
@@ -1740,6 +1741,7 @@ function App() {
     if (nativeDraftRef.current) nativeGoalDraftRef.current = sendingDraft;
     setDraftGoal(sendingDraft);
     try {
+      if (client.mode === "electron") rememberGoalDefaults({ workspace, provider });
       const next = await client.startConversation(workspace, provider, message, intent.requestId, client.mode === "linux-core" ? true : undefined);
       // New goal replaced this send. Publishing its campaign first would close
       // the replacement draft and put the user on the goal they just left.
@@ -2322,8 +2324,8 @@ function App() {
       requestId: freshRequestId(),
       baselineCampaignId: snapshot.activeCampaignId,
       acceptNextCampaign,
-      workspace: snapshot.project.workspaceRoot || "",
-      provider: "",
+      workspace: snapshot.project.workspaceRoot || readGoalDefaults().workspace,
+      provider: readGoalDefaults().provider,
       message: ""
     });
   }
@@ -3454,7 +3456,7 @@ function App() {
             const draftComposer = (
                   <DraftGoalComposer
                     linuxEntry={client.mode === "linux-core" && linuxShowingFreshDraft}
-                    draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || "", provider: "", message: "" }}
+                    draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || (client.mode === "electron" ? readGoalDefaults().workspace : ""), provider: client.mode === "electron" ? readGoalDefaults().provider : "", message: "" }}
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}
                     busy={draftBusy}
@@ -4013,7 +4015,7 @@ function App() {
                   <h2>{title || snapshot.activeTask.title}</h2>
                   {activeCampaign?.goal && activeCampaign.goal.trim() !== product?.items.find(item => item.kind === "user-message")?.body.trim() ? <p>{activeCampaign.goal}</p> : null}
                 </div>
-                <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
+                {taskState.label === "Ready" || taskState.label === "Completed" ? null : <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>}
               </div>
 
               {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
@@ -4049,7 +4051,7 @@ function App() {
                   eligible={Boolean(snapshot.turnResults?.length) && ['waiting','completed'].includes(snapshot.attempt.state) && product.turn.state === 'completed' && !product.turn.canStop && snapshot.turnResults?.[snapshot.turnResults.length-1]?.replyState === 'completed' && !backgroundSlotBlocked}
                   job={nativeCheckJob?.nativeCheckTarget?.campaignId===snapshot.activeCampaignId ? nativeCheckJob : null}
                   onBusy={setNativeCheckBusy}
-                  onAskCodex={text=>{setCampaignDrafts(current=>({...current,[draftCampaignId]:text}));}}
+                  onAskCodex={text=>{setCampaignDrafts(current=>({...current,[draftCampaignId]:text}));(document.querySelector('textarea[aria-label="Message composer"]') as HTMLTextAreaElement|null)?.focus();}}
                   onJob={job=>{setNativeCheckJob(job);setSelectionRefresh(v=>v+1);}}
                 /> : null}
                 {anchor.unseenCount > 0 ? (
