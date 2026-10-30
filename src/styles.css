@@ -1278,6 +1278,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .background-job > p { font-size: 14px; line-height: 1.5; }
 .background-job .coordination-progress, .background-job .coordination-status { margin-left: 0; margin-right: 0; }
 .background-job .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.native-workspace-check > .button, .native-workspace-check > details, .native-workspace-check > [role="alert"] { margin-inline: 22px; }
 
 /* Quiet load hold above the draft actions: harness access is still
    resolving, so Send waits (progress, not an error). */

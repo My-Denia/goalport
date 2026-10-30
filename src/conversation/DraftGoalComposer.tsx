@@ -1,3 +1,4 @@
+import { PiCapacityControl } from './PiCapacityControl';
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
@@ -34,7 +35,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
   const choices = linuxEntry ? [
     { id: "", name: "Coordinated work", subtitle: "Plan and work with an independent check" },
-    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no independent Pi check" }] : [])
+    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no automatic Pi verification" }] : [])
   ] : undefined;
   return (
     <div className="runtime-picker draft-runtime-picker">
@@ -320,11 +321,7 @@ export function DraftGoalComposer({
           <span>{piCapacityChecked
             ? (discoveredHarnesses.includes("codex") ? `Selected roles: Codex plans${linuxWrite ? " / writes" : ""} · Pi independently checks` : "Codex is needed to plan with this Pi capacity.")
             : piLegacy ? "Legacy harness selection" : "Available choice: Codex + Pi"}</span>
-          {piCapacity ? <>
-            <div title={`${piCapacity.provider}/${piCapacity.model}`}>Requested: {piCapacity.provider}/{piCapacity.model} · Billing not confirmed</div>
-            <label><input type="checkbox" aria-label="Use Pi's configured capacity for this goal" checked={piCapacityChecked} disabled={busy || inputsLocked || !onPiCapacityChange || Boolean(piCapacityReason)} onChange={event => onPiCapacityChange?.(event.target.checked)} /> Use Pi's configured capacity for this goal</label>
-            <details><summary>Technical details</summary>Reasoning settings remain managed by Pi; GoalPort pins the requested pair only. This is not proof of the effective server model, authentication, quota or billing.</details>
-          </> : piLegacy ? <div>Pi route not recorded · Continue is unpinned</div> : null}
+          {piCapacity ? <PiCapacityControl capacity={piCapacity} checked={piCapacityChecked === true} disabled={Boolean(busy || inputsLocked || piCapacityReason)} onChange={onPiCapacityChange} /> : piLegacy ? <div>Pi route not recorded · Continue is unpinned</div> : null}
           {piCapacityReason ? <div role="status">{piCapacityReason}</div> : null}
         </div> : null}
         {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}

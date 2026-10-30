@@ -114,6 +114,10 @@ const USAGE = [
 
 const OPTIONS = {
   goal: { type: "string" },
+  'campaign-id': { type: 'string' },
+  'attempt-id': { type: 'string' },
+  'turn-request-id': { type: 'string' },
+  'material-file': { type: 'string' },
   workspace: { type: "string" },
   global: { type: "boolean" },
   instances: { type: "string" },
@@ -819,12 +823,19 @@ function commandResult(parsed, io, context) {
   const requestId = typeof parsed.values["request-id"] === "string" ? parsed.values["request-id"].trim() : "";
   if (parsed.values["request-id"] !== undefined && !/^[A-Za-z0-9._-]{1,256}$/.test(requestId)) return refuse(io, "Choose an exact saved result before opening it.");
   const targets = savedTargets(context.dataDir);
-  const selected = requestId ? targets.selected(requestId) : targets.selected(records[0]?.requestId);
+  const selected = requestId ? targets.selected(requestId) : targets.selected(records.find(r=>r.recordKind!=='native-workspace-check')?.requestId);
   const record = selected ? normalizeRecord(selected.record) : null;
   if (!record) {
     return refuse(io, requestId
       ? `The saved result ${requestId} is missing, ambiguous, or unreadable on this profile.`
       : "No coordinated-goal record was saved on this profile.");
+  }
+  if(record.recordKind === 'native-workspace-check') {
+    let bound=false;
+    try { const own=require('../../electron/native-check-lookup.cjs').statusForRequest(context.dataDir,record.requestId); bound=!!own && JSON.stringify(own.admission.nativeCheckTarget)===JSON.stringify(require('../../electron/native-workspace-check.cjs').targetOf(record.nativeCheckTarget)) && JSON.stringify(own.admission.nativeCheckMaterial)===JSON.stringify(require('../../electron/native-workspace-check.cjs').materialOf(record.nativeCheckMaterial)) && JSON.stringify(own.admission.piCapacity)===JSON.stringify(record.piCapacity) && own.admission.workspacePath===record.workspacePath; } catch { /* Descriptive damage never repairs or retargets. */ }
+    write(io, `Independent workspace check ${record.verdict==='checked'?'returned':'did not complete'}; native association: ${bound?'own target':'unbound'}`);
+    write(io,JSON.stringify({requestId:record.requestId,workspacePath:record.workspacePath,nativeCheckTarget:record.nativeCheckTarget,nativeCheckMaterial:record.nativeCheckMaterial,auditText:record.auditText,savedAt:record.savedAt}));
+    return 0;
   }
   write(io, `request: ${record.requestId}`);
   write(io, `workspace: ${record.workspacePath}`);
@@ -892,7 +903,82 @@ async function commandNativePreflight(parsed, io, context) {
   }
 }
 
+async function commandNativeCheck(parsed, io, context) {
+  const purpose = require('../../electron/native-workspace-check.cjs');
+  const lookup = require('../../electron/native-check-lookup.cjs');
+  const start = parsed.positionals[0] === 'native-check-start';
+  let absenceConfirmed=false, admissionAttempted=false;
+  try {
+    const allowed = ['campaign-id','attempt-id','turn-request-id','request-id','pi-capacity','material-file','background','data-dir','pipe','core-binary','database'];
+    if (Object.keys(parsed.values).some(k => !allowed.includes(k))) throw Error('Unexpected workspace check option.');
+    const target = purpose.targetOf({campaignId:parsed.values['campaign-id'],attemptId:parsed.values['attempt-id'],turnRequestId:parsed.values['turn-request-id']});
+    const requestId = requestIdFor(parsed.values['request-id']);
+    if (!parsed.values['request-id'] || !requestId) throw Error('A stable workspace check request id is required.');
+    const pair = parsed.values['pi-capacity'] === undefined ? undefined : normalizePiCapacity(JSON.parse(parsed.values['pi-capacity']));
+    if (parsed.values['pi-capacity'] !== undefined && !pair) throw Error('The requested Pi capacity is malformed.');
+    // Resolve a lost final reply BEFORE buffer/capture/auth/preflight/start.
+    if (start) {
+      const prior = (io.statusForRequest ?? lookup.statusForRequest)(context.dataDir,requestId);
+      if (prior) {
+        lookup.requireSameTargetPair(prior,target,pair);
+        write(io, JSON.stringify({ok:true,job:require('../../electron/coordination-background.cjs').projection(prior)}));
+        return 0;
+      }
+      absenceConfirmed=true;
+    }
+    if (start && !parsed.values['material-file']) throw Error(purpose.STALE);
+    const prepared=prepareAdmission(io,context);
+    if (!prepared.ok) throw Error(prepared.message);
+    const core=io.nativeCore ?? require('../../electron/coordination-worker.cjs').workerCore({...prepared,identity:{coreSha256:prepared.coreSha256,database:prepared.database,pipe:prepared.connectPath}});
+    const freshSnapshot=io.snapshot ?? createAdmissionSnapshot({...prepared,identity:{coreSha256:prepared.coreSha256,database:prepared.database,pipe:prepared.connectPath}});
+    const resolved=await purpose.resolveTarget(core,await freshSnapshot(),target);
+    const confirmResolved=async()=>{
+      const current=await purpose.resolveTarget(core,await freshSnapshot(),target);
+      if(current.workspace!==resolved.workspace || current.taskId!==resolved.taskId || current.goal!==resolved.goal || JSON.stringify(current.context)!==JSON.stringify(resolved.context)) throw Error(purpose.STALE);
+    };
+    const discovered=await readDiscovery(io,{...context,workspace:resolved.workspace});
+    if(!discovered.ok) throw Error(discovered.message);
+    const offer=discovered.providers.find(p=>p.instanceId==='pi') ?? null;
+    if(!pair && !start) { write(io,JSON.stringify({ok:true,offer,workspacePath:resolved.workspace,goal:resolved.goal,backgroundSendConsent:consentStoreOf(context).read().allowed===true}));return 0; }
+    if(!pair) throw Error('Select Pi’s exact configured capacity first.');
+    const piContext=piAdmissionContext({allowedInstances:['pi'],workspacePath:resolved.workspace,piCapacity:pair},context.dataDir,{ok:true,providers:discovered.providers});
+    const membership=authorizeMembershipError({ok:true,providers:discovered.providers},['pi'],piContext);
+    if(membership) throw Error(membership);
+    const engine=io.engine ?? require(context.enginePath);
+    if(!start) {
+      const material=await (io.collectNativeMaterial ?? purpose.collectMaterial)(resolved,engine);
+      await confirmResolved();
+      const packet={requestId,nativeCheckTarget:target,workspacePath:resolved.workspace,goal:resolved.goal,taskId:resolved.taskId,piCapacity:pair,...material};
+      if(Buffer.byteLength(JSON.stringify(packet))>256*1024) throw Error('Workspace check packet is too large.');
+      write(io,JSON.stringify({ok:true,...packet}));return 0;
+    }
+    const consent=admissionConsentGate(parsed,io,context);if(consent!==null)return consent;
+    const filename=parsed.values['material-file'];
+    if(!filename || !path.isAbsolute(filename)) throw Error(purpose.STALE);
+    const stat=fs.lstatSync(filename);
+    if(!stat.isFile() || stat.isSymbolicLink() || stat.size>256*1024 || (process.platform==='linux' && (stat.mode & 0o077))) throw Error('Workspace preview transport is unavailable.');
+    const packet=JSON.parse(readFileSync(filename,'utf8'));
+    if(Object.keys(packet).some(k=>!['ok','requestId','nativeCheckTarget','workspacePath','goal','taskId','piCapacity','nativeCheckMaterial','uiExclusions'].includes(k))) throw Error('Malformed workspace check packet.');
+    const material=purpose.materialOf(packet.nativeCheckMaterial);
+    if(packet.requestId!==requestId || JSON.stringify(purpose.targetOf(packet.nativeCheckTarget))!==JSON.stringify(target) || JSON.stringify(normalizePiCapacity(packet.piCapacity))!==JSON.stringify(pair) || packet.workspacePath!==resolved.workspace || packet.goal!==resolved.goal || packet.taskId!==resolved.taskId || Date.now()-Date.parse(material.capturedAt)>300000 || Date.parse(material.capturedAt)>Date.now()) throw Error(purpose.STALE);
+    await (io.recheckNativeMaterial ?? purpose.recheckMaterial)(resolved,material,engine);
+    await confirmResolved();
+    const host=createHost({...context,...prepared,snapshot:freshSnapshot},io);
+    admissionAttempted=true;
+    const job=await host.start({requestId,goal:resolved.goal,workspaceRoot:resolved.workspace,readInstances:['pi'],readMaxTurns:2,backgroundConsent:true,piCapacity:pair,nativeCheckTarget:target,nativeCheckMaterial:material});
+    write(io,JSON.stringify({ok:true,job}));return 0;
+  } catch(error) {
+    // Presentation-only disposition. Never a grant/refund: the exact lookup
+    // proved this request absent, and these paths never created an admission.
+    const knownBeforeAdmission=['background-unavailable','background-consent-required','background-start-in-progress','background-scope-conflict','background-core-refused','background-preflight-failed','background-invalid-admission','background-job-conflict'].includes(error?.code);
+    if(start && absenceConfirmed && (!admissionAttempted || knownBeforeAdmission)) write(io,JSON.stringify({nativeCheckRefused:true,previewAgain:true}));
+    return refuse(io,error.message);
+  }
+}
+
 const HANDLERS = {
+  'native-check-prepare': commandNativeCheck,
+  'native-check-start': commandNativeCheck,
   "native-preflight": commandNativePreflight,
   discover: commandDiscover,
   "grant-access": commandGrant,

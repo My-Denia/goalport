@@ -161,7 +161,110 @@ the stored native handle without replaying a message. A refused or unavailable
 Resume remains blocked, not replaced with a new conversation. Closed Codex is
 not resumable; a cancelled-turn successor is a new Attempt/session. Native Stop
 interrupts the displayed turn; idle Close Runtime session is a separate guarded
-action. A single Codex conversation has no independent Pi-check claim.
+action. A single Codex conversation has no **automatic** independent Pi
+verification. The optional separate check below inspects a current workspace
+snapshot; it does not verify who authored it or certify the native turn.
+
+### Optional current-workspace check with Pi
+
+After the newest Codex turn completes, **Check workspace with Pi** keeps the
+conversation in place. The user can inspect exactly what will be shared before
+allowing one independent readonly response. The native draft and session remain
+untouched; there is no second Codex planner, writer or repair round.
+
+1. Open the secondary check action on the native goal. The configured Pi
+   capacity checkbox starts off. It uses the same exact requested pair and
+   **Billing not confirmed** control as coordinated work; no free-text model or
+   default capacity is substituted. Existing profile Background Send consent is
+   reused, or explicitly granted with the existing action.
+2. Choose **Preview shared material**. The complete external-provider prompt is
+   shown, not a summary of it. It includes current tracked HEAD→worktree changes,
+   the Native **reported** reply, observed command-entry counts and their
+   omission/truncation flags, and every crop/omission notice. Command text,
+   working directory and output are not shared.
+   Preexisting or concurrent edits can be included. Known private paths are
+   excluded before diff bodies are collected; this is not a credential scanner.
+   Allowed content and Native text can still contain sensitive data. To remove
+   it, cancel, change the workspace and explicitly preview again. The renderer
+   cannot edit the prompt or provide files to the server.
+3. **Check this snapshot** admits one Pi-only audit (two-read minimum scope,
+   no writes; one charged audit and unused read revoked). Stop check targets
+   that Node job, never native Interrupt or Close session. A running readonly
+   turn may finish after Stop; unknown delivery is retained without replay or
+   refund. Empty or unavailable material produces no model call or checked
+   result.
+4. Return to the exact Core goal to find its saved independent response and
+   original shared material. It is a dated snapshot, not a persistent verified
+   badge, a new coordinated product root or exclusive Codex delta. Newer native
+   turns and subsequent workspace edits are not covered by that response.
+
+**Worked example (illustrative, not a recorded Pi run).** To clarify the
+controls, ask Codex: “In `docs/linux-development.md`, explain how Stop check
+differs from ending the Codex conversation. Change documentation only.” Suppose
+the resulting sentence says, “Stop check immediately ends the Pi check; your
+Codex conversation stays open.”
+
+1. Once the turn completes, optionally open **Check workspace with Pi** and
+   choose **Preview shared material**. In that exact shared snapshot, inspect
+   the changed sentence and its surrounding diff, the Native reported reply and
+   command-omission counts, and any crop/omission notices. Confirm the intended hunk is
+   present and every included change is suitable to share: current tracked
+   changes can predate this turn, so unrelated edits may also appear.
+2. Choose **Check this snapshot** only if you want the independent response.
+   A useful critique should point to “immediately ends” in the shared diff:
+   a running readonly turn may finish after Stop check. It should suggest
+   “Stop check requests cancellation of the Pi check; a running readonly turn
+   may still finish. Your Codex conversation stays open.” Ending an idle Codex
+   runtime uses the separate **Close Runtime session** action.
+
+Read the saved response alongside its original shared material. This optional
+check does not verify authorship, test execution or edits made after the
+snapshot; any revision prompted by the critique is outside that check.
+
+This first purpose requires the canonical native workspace to equal Git's
+physical top-level directory. Subdirectory targets refuse before body collection:
+“This check currently needs the repository's top-level folder.” Existing native
+and ordinary coordinated subdirectory behavior is unchanged. The target is the
+current Codex Attempt and the **last** turn-result entry in producer order; it
+must itself be completed. An older completed entry is not a fallback after a
+newer failure/cancellation. Ordinary whole-inventory Core guards remain in force,
+including other native work, pending decisions, incomplete views and holds.
+
+The Linux bridge adds `native_workspace_check_prepare` and
+`native_workspace_check_start` message types on the existing guarded
+`POST /goalport/ipc`, through Node `native-check-prepare/start` and the existing
+background host/worker/store. Prepare without a pair only returns its configured
+offer. A single server-owned preview payload expires after five minutes
+(maximum 256 KiB); restart loses it. Final start and worker recheck HEAD, bounded
+path classification, the complete selected raw diff/status and Native context.
+Drift or expiry says **Preview again**, without silently refreshing provider
+input. Repeating an admitted final request resolves that exact job before buffer
+lookup, even after expiry; a different target/pair conflicts. The page retains
+only the submitted caller ID/target/pair across reload, never prompt material,
+consent or budget. An unknown reply keeps that original request. A typed
+pre-admission refusal discards the preview and offers an explicit new preview;
+provider text is not interpreted as permission to retry. Generic Electron
+background-start explicitly refuses renderer check fields: this is not a Windows
+check button or Windows runtime proof.
+
+Known-path exclusions are case-insensitive: `.git`, `.ssh`, `.gnupg`, `.aws` or
+`.azure` components; `.env`/`.env.*`; `auth.json`, `models.json`, `credentials`,
+`credentials.json`, `id_rsa`, `id_ed25519`; `.pem`, `.key`, `.p12`, `.pfx` suffixes.
+Local excluded names are not provider input. Git metadata is NUL-framed and
+strict UTF-8 before body reads; explicit literal tracked pathspecs select at
+most 80 paths (1024 bytes each, 16384 path bytes total), never untracked bodies.
+The complete selected raw diff must fit 65536 UTF-8 bytes for comparison. The
+provider crop is at most 16384 bytes, the whole displayed/admitted/stdin prompt
+at most 32768 bytes. The Native reported reply is at most 4096 bytes. Native
+command details (text, working directory and output) are not shared; only the
+observed-entry count and existing omission/truncation flags are included.
+Limited coverage is named; no universal race, secret-free-content or
+test-execution claim is made.
+
+A real Native documentation improvement followed by a concrete Pi critique of
+that actual diff is the acceptance scenario for this flow, not a claim that
+later edits are checked. Source tests/build output do not establish provider use,
+capacity, Linux workspace qualification or three-width GUI acceptance.
 
 ### Competing-work preflight
 

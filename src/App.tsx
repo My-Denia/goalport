@@ -32,6 +32,7 @@ import { Composer } from "./conversation/Composer";
 import { normalizePiCapacity, samePiPair, selectedPiEligible, type PiCapacitySelection } from "../electron/pi-capacity.mjs";
 import { DraftGoalComposer, GoalStatusHeading, type GoalDraftValue } from "./conversation/DraftGoalComposer";
 import { shortGoalTitle } from "./conversation/shortGoalTitle";
+import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
@@ -250,6 +251,9 @@ function App() {
   const [writeTurns, setWriteTurns] = useState(2);
   const [backgroundConsent, setBackgroundConsent] = useState(false);
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
+  const [nativeCheckJob, setNativeCheckJob] = useState<BackgroundStatus | null>(null);
+  const [nativeCheckBusy, setNativeCheckBusy] = useState(false);
+  const nativeCheckJobRef = useRef(nativeCheckJob); nativeCheckJobRef.current = nativeCheckJob;
   const [backgroundHolds, setBackgroundHolds] = useState<BackgroundHeldWorkspaces>(() => ({
     holds: [], complete: !window.goalportCore?.backgroundHeldWorkspaces,
     globalBlock: Boolean(window.goalportCore?.backgroundHeldWorkspaces),
@@ -659,7 +663,7 @@ function App() {
     if (!list) return;
     let cancelled = false;
     void list().then((records) => {
-      if (!cancelled) { setPlans(records); setPlansUnreadable(false); }
+      if (!cancelled) { setPlans(records.filter(r => r.recordKind !== 'native-workspace-check')); setPlansUnreadable(false); }
     }).catch(() => { if (!cancelled) { setPlansUnreadable(true); setSelectedPlanId(null); } });
     return () => { cancelled = true; };
   }, []);
@@ -731,7 +735,7 @@ function App() {
             void list().then((records) => {
               if (!cancelled && Array.isArray(records)) {
                 plansListedTerminalRef.current = listedJobId;
-                setPlans(records);
+                setPlans(records.filter(r => r.recordKind !== 'native-workspace-check'));
                 setPlansUnreadable(false);
               }
             }).catch(() => { if (!cancelled) { setPlansUnreadable(true); setSelectedPlanId(null); } })
@@ -1089,11 +1093,14 @@ function App() {
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
   const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
+    || nativeCheckBusy || Boolean(nativeCheckJob?.active) || (linuxNativeView && (linuxCoordinationLive || sidebarUnconfirmed))
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
   const backgroundSlotSentence = !candidateChecked || !backgroundHolds.complete
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
+    ? "Pi is checking this workspace. Send when it finishes, or stop the check above."
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
@@ -1481,7 +1488,7 @@ function App() {
             return;
           }
           recordCount = disk.length;
-          setPlans(disk);
+          setPlans(disk.filter(r => r.recordKind !== 'native-workspace-check'));
           setPlansUnreadable(false);
         }
         const sendKey = `send-${recordCount}`;
@@ -2777,6 +2784,7 @@ function App() {
         const base = jobLeft ? null : payload.currentBase ?? null;
         const job: CoordinatedCurrentJob | null = base ? { jobId: base.jobId, requestId: base.admittedRequestId ?? undefined,
           rootRequestId: base.rootRequestId ?? undefined, goal: base.goal ?? undefined, workspacePath: base.workspacePath ?? undefined,
+          ...(base.nativeCheckTarget ? { nativeCheckTarget: base.nativeCheckTarget } : {}),
           followUpMode: base.followUpMode ?? undefined, identityConfirmed: base.identityConfirmed, line: payload.line || "Current work is not confirmed." }
           : live ? { jobId: payload.jobId!, line: payload.line!, identityConfirmed: false } : null;
         const observed = hostObservation.current;
@@ -2793,13 +2801,13 @@ function App() {
           && proposed.admittedRequestId === held.requestId && proposed.goal === held.goal && proposed.workspacePath === held.workspace
           && (held.root === null || held.root === proposed.rootRequestId) ? proposed : null;
         const childIntent = liveIntent.current;
-        const lookupJob = candidate?.jobId ?? (childIntent?.unknown ? childIntent.jobId : base?.jobId);
+        const lookupJob = candidate?.jobId ?? (childIntent?.unknown ? childIntent.jobId : nativeCheckJobRef.current?.active ? nativeCheckJobRef.current.jobId : base?.jobId);
         const cleanActiveBase = base && base.identityConfirmed && base.active === true && base.pending === "none"
           && base.revoked === false && base.workerGone === false && !base.unconfirmed && base.allowanceEnd === null && base.observedAcceptedChildId === null && base.phase !== "unknown"
           && !base.profileUnconfirmed && !base.leftoverHeld && base.globalSlot.kind === "occupied"
           && base.globalSlot.jobId === base.jobId && base.globalSlot.admittedRequestId === base.admittedRequestId
           && !["unknown", "unconfirmed", "revoked", "completed", "failed", "stopped"].includes(base.state);
-        const wantsStatus = !!(candidate || childIntent?.unknown || (route?.kind !== "new" && base?.followUpMode === "live-read-once" && cleanActiveBase));
+        const wantsStatus = !!(candidate || childIntent?.unknown || nativeCheckJobRef.current?.active || (base?.nativeCheckTarget && base.identityConfirmed) || (route?.kind !== "new" && base?.followUpMode === "live-read-once" && cleanActiveBase));
         if (wantsStatus && validJobId(lookupJob)) confirmHost = async () => {
           if (!stillCurrent()) return;
           try {
@@ -2814,6 +2822,8 @@ function App() {
               return;
             }
             const status = reply.job, acknowledged = acknowledgedCurrentJob(reply);
+            const ownNative = nativeCheckJobRef.current;
+            if (status.nativeCheckTarget && ((base?.nativeCheckTarget && JSON.stringify(status.nativeCheckTarget) === JSON.stringify(base.nativeCheckTarget) && status.requestId === base.admittedRequestId && status.jobId === base.jobId) || (ownNative?.jobId === status.jobId && ownNative.requestId === status.requestId && JSON.stringify(ownNative.nativeCheckTarget) === JSON.stringify(status.nativeCheckTarget)))) setNativeCheckJob(status);
             if (base && matchesBase(status, base) && acknowledged) {
               // Only host state changes here; never roots, selected record, options or focus.
               const canShowReady = readyBase(base) && status.active && !status.pendingCommand && !status.revoked;
@@ -2866,7 +2876,7 @@ function App() {
         if (payload.ok === false) { setSavedReadError("Saved results could not be read. Continue is unavailable."); return; }
         if (nativeDraftRef.current || isNativeDraftRoute()) return;
         if (!route && !campaignIdFromLocation() && !admissionUnsaid.current) {
-          const initialId = job?.requestId ?? payload.record?.requestId;
+          const initialId = job?.nativeCheckTarget ? undefined : job?.requestId ?? payload.record?.requestId;
           if (initialId) { openCoordinated({ kind: "result", requestId: initialId }, true); return; }
         }
         if (route?.kind === "new" || (!route && campaignIdFromLocation())) return;
@@ -3330,9 +3340,9 @@ function App() {
               </span>
             </div>
           ) : null}
-          {client.mode === "linux-core" && currentWorkReason && !draftActive ? <div className="current-work-strip" role="status" aria-label="Current work">
+          {client.mode === "linux-core" && currentWorkReason && !draftActive && !(linuxNativeView && nativeCheckJob?.nativeCheckTarget?.campaignId === snapshot.activeCampaignId && currentWork?.jobId === nativeCheckJob.jobId) ? <div className="current-work-strip" role="status" aria-label="Current work">
             <div><strong title={currentWork?.identityConfirmed ? currentWork.goal : undefined}>{currentWork?.identityConfirmed && currentWork.goal ? `Current work — ${shortGoalTitle(currentWork.goal)}` : "Current work — not confirmed"}</strong><p>{currentWorkReason}</p></div>
-            {currentWork?.requestId ? <button type="button" className="button button-small button-outline" onClick={() => openCoordinated({ kind: "result", requestId: currentWork.requestId! })}>Open current work</button> : null}
+            {currentWork?.requestId ? <button type="button" className="button button-small button-outline" onClick={() => { if(currentWork.nativeCheckTarget) void selectCampaign(currentWork.nativeCheckTarget.campaignId); else openCoordinated({ kind: "result", requestId: currentWork.requestId! }); }}>Open current work</button> : null}
           </div> : null}
           {backgroundJob ? <div className="background-return"><button type="button" className="button button-outline" disabled={client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView} onClick={() => { if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView) return; if (!backgroundView && window.innerWidth <= 860) setNavCollapsed(true); setBackgroundView(value => !value); }}>{client.mode === "linux-core" && (linuxActionBusy || linuxGranting) && !backgroundView ? "Wait for this to finish." : backgroundView ? "Leave job view" : "Return to background goal"}</button></div> : null}
           {backgroundView && backgroundJob ? <div className="timeline-scroll" tabIndex={-1} aria-label="Background job progress">
@@ -3418,7 +3428,7 @@ function App() {
               />;
               return <><div className="timeline-scroll" tabIndex={-1} aria-label="New Codex conversation">
                 <GoalStatusHeading {...nativeComposer.props} />
-                <p className="draft-hint">One Codex conversation, without an independent Pi check. Closing this page does not end the Runtime session.</p>
+                <p className="draft-hint">One Codex conversation, without automatic Pi verification. Closing this page does not end the Runtime session.</p>
               </div><div className="composer-dock">{nativeComposer}</div></>;
             }
             const draftComposer = (
@@ -4012,6 +4022,15 @@ function App() {
                   onChooseRuntime={() => setChooserFocusSignal((value) => value + 1)}
                   onDiagnose={() => setDiagnosticsOpen(true)}
                 />
+                {linuxNativeView && snapshot.attempt.provider === 'codex' ? <NativeWorkspaceCheck
+                  key={snapshot.activeCampaignId}
+                  campaignId={snapshot.activeCampaignId}
+                  target={snapshot.turnResults?.length ? {campaignId:snapshot.activeCampaignId,attemptId:snapshot.attempt.id,turnRequestId:snapshot.turnResults[snapshot.turnResults.length-1].requestId} : null}
+                  eligible={Boolean(snapshot.turnResults?.length) && ['waiting','completed'].includes(snapshot.attempt.state) && product.turn.state === 'completed' && !product.turn.canStop && snapshot.turnResults?.[snapshot.turnResults.length-1]?.replyState === 'completed' && !backgroundSlotBlocked}
+                  job={nativeCheckJob?.nativeCheckTarget?.campaignId===snapshot.activeCampaignId ? nativeCheckJob : null}
+                  onBusy={setNativeCheckBusy}
+                  onJob={job=>{setNativeCheckJob(job);setSelectionRefresh(v=>v+1);}}
+                /> : null}
                 {anchor.unseenCount > 0 ? (
                   <button className="jump-latest" type="button" onClick={() => anchor.scrollToBottom()}>
                     {anchor.unseenCount} new {anchor.unseenCount === 1 ? "message" : "messages"} ↓

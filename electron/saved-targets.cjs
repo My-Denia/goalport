@@ -20,11 +20,12 @@ function resolveSavedTargets(raw) {
     if (!idValid(record.requestId)) return invalid("The saved result has no usable identity.");
     if (index.get(record.requestId).length !== 1) return { ...invalid("This saved result cannot be identified uniquely."), relationStatus: "ambiguous" };
     if (typeof record.goal !== "string" || !record.goal.trim() || !workspaceKey(record.workspacePath)) return invalid("The saved goal or folder is unavailable.");
+    if (record.recordKind === 'native-workspace-check') return invalid('Workspace checks belong to a native goal, not a coordinated root.');
     if (!Object.hasOwn(record, "continuation")) return { relationStatus: "legacy-root", rootRequestId: record.requestId, relationUnavailableReason: null };
     const descriptor = record.continuation;
     if (!isValidContinuationDescriptor(descriptor)) return invalid("The saved goal relationship is unavailable.");
     const root = unique(descriptor.rootRequestId);
-    if (!root || Object.hasOwn(root, "continuation") || typeof root.goal !== "string" || !root.goal.trim() || !workspaceKey(root.workspacePath)) return invalid("The original saved goal cannot be identified.");
+    if (!root || root.recordKind === 'native-workspace-check' || Object.hasOwn(root, "continuation") || typeof root.goal !== "string" || !root.goal.trim() || !workspaceKey(root.workspacePath)) return invalid("The original saved goal cannot be identified.");
     const workspace = workspaceKey(record.workspacePath);
     if (descriptor.originalGoal !== root.goal?.trim() || record.goal.trim() !== descriptor.originalGoal || workspaceKey(root.workspacePath) !== workspace) return invalid("The original goal or folder does not match.");
     const visited = new Set();
@@ -34,7 +35,7 @@ function resolveSavedTargets(raw) {
       visited.add(cursor.requestId);
       if (cursor === root) return { relationStatus: "valid", rootRequestId: root.requestId, continuation: { ...descriptor }, relationUnavailableReason: null };
       const d = cursor.continuation;
-      if (!Object.hasOwn(cursor, "continuation") || !isValidContinuationDescriptor(d) || d.rootRequestId !== root.requestId || d.originalGoal !== descriptor.originalGoal || (typeof cursor.goal !== "string" || cursor.goal.trim() !== descriptor.originalGoal) || workspaceKey(cursor.workspacePath) !== workspace) return invalid("An earlier result belongs to a different goal or folder.");
+      if (cursor.recordKind === 'native-workspace-check' || !Object.hasOwn(cursor, "continuation") || !isValidContinuationDescriptor(d) || d.rootRequestId !== root.requestId || d.originalGoal !== descriptor.originalGoal || (typeof cursor.goal !== "string" || cursor.goal.trim() !== descriptor.originalGoal) || workspaceKey(cursor.workspacePath) !== workspace) return invalid("An earlier result belongs to a different goal or folder.");
       cursor = unique(d.parentRequestId);
       if (!cursor) return invalid("An earlier saved result cannot be identified.");
     }

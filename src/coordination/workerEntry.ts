@@ -10,6 +10,7 @@
  * code stay external because the worker runs in Node.
  */
 export { requestCoordination } from "./requestCoordination";
+export { prepareNativeWorkspaceCheckMaterial, buildNativeWorkspaceCheckCommand } from "./nativeWorkspaceCheck";
 import { coordinateGoal } from "./coordinateGoal";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import { backgroundEngineInput, type BackgroundJobStartInput } from "./backgroundJob";

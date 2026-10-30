@@ -59,7 +59,8 @@ function projection(status, live = false) {
     workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
     workerPid: status.startupClaim?.pid ?? null,
     ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}),
-    ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}) };
+    ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}),
+    ...(status.admission.nativeCheckTarget ? { nativeCheckTarget: status.admission.nativeCheckTarget, nativeCheckMaterial: status.admission.nativeCheckMaterial, recordKind: 'native-workspace-check' } : {}) };
 }
 function createBackgroundHost(options) {
   // The host admits and compares folders on ONE platform identity (the host's
@@ -146,6 +147,7 @@ function createBackgroundHost(options) {
     catch { return projection(facts); }
   }
   async function start(input) {
+    if (input?.nativeCheckTarget && ['continuation','executionFeedback','followUpMode','execute'].some(k => Object.hasOwn(input,k))) throw codedRefusal('background-invalid-admission','Workspace checks cannot continue or execute work.');
     let ready;
     try { ready = options.ready(); }
     catch (error) { throw preflightRefusal(error); }
@@ -182,7 +184,9 @@ function createBackgroundHost(options) {
           priorReview: input.priorReview,
           avoidInstances: input.avoidInstances,
           backgroundConsent: input.backgroundConsent,
-          executionFeedback: input.executionFeedback,
+          ...(input.nativeCheckTarget ? {} : { executionFeedback: input.executionFeedback }),
+          ...(Object.hasOwn(input, 'nativeCheckTarget') || Object.hasOwn(input, 'nativeCheckMaterial') ? { nativeCheckTarget: input.nativeCheckTarget, nativeCheckMaterial: input.nativeCheckMaterial } : {}),
+          ...(['followUpMode', 'execute'].some(k => Object.hasOwn(input, k)) ? Object.fromEntries(['followUpMode', 'execute'].filter(k => Object.hasOwn(input, k)).map(k => [k, input[k]])) : {}),
           ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
           ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: input.piCapacity } : {}),
         };
@@ -324,6 +328,9 @@ function withControlAck(facts, ack) {
   };
 }
 async function backgroundStartReply(host, input) {
+  // Renderer path has no server-owned Linux material preview. Never silently
+  // drop purpose fields and turn this into an ordinary job.
+  if (input && (Object.hasOwn(input, 'nativeCheckTarget') || Object.hasOwn(input, 'nativeCheckMaterial'))) return { backgroundStartRefused: true, code: 'background-invalid-admission', message: 'Workspace check previews are available only through the Linux workbench.' };
   try { return await host.start(input); }
   catch (error) {
     let reportedCode;

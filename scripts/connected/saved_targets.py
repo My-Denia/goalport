@@ -51,13 +51,15 @@ class SavedTargets:
             return invalid("This saved result cannot be identified uniquely.", "ambiguous")
         if not isinstance(record.get("goal"), str) or not record["goal"].strip() or not workspace_key(record.get("workspacePath")):
             return invalid("The saved goal or folder is unavailable.")
+        if record.get("recordKind") == "native-workspace-check":
+            return invalid("Workspace checks belong to a native goal, not a coordinated root.")
         if "continuation" not in record:
             return {"relationStatus": "legacy-root", "rootRequestId": key, "relationUnavailableReason": None}
         descriptor = record["continuation"]
         if not valid_descriptor(descriptor):
             return invalid("The saved goal relationship is unavailable.")
         root = self.unique(descriptor["rootRequestId"])
-        if root is None or "continuation" in root or not isinstance(root.get("goal"), str) or not root["goal"].strip() or not workspace_key(root.get("workspacePath")):
+        if root is None or root.get("recordKind") == "native-workspace-check" or "continuation" in root or not isinstance(root.get("goal"), str) or not root["goal"].strip() or not workspace_key(root.get("workspacePath")):
             return invalid("The original saved goal cannot be identified.")
         workspace = workspace_key(record.get("workspacePath"))
         if (descriptor["originalGoal"] != str(root.get("goal", "")).strip() or record["goal"].strip() != descriptor["originalGoal"]
@@ -73,7 +75,7 @@ class SavedTargets:
             if cursor is root:
                 return {"relationStatus": "valid", "rootRequestId": root["requestId"], "continuation": dict(descriptor), "relationUnavailableReason": None}
             d = cursor.get("continuation")
-            if (not valid_descriptor(d) or d["rootRequestId"] != root["requestId"] or d["originalGoal"] != descriptor["originalGoal"]
+            if (cursor.get("recordKind") == "native-workspace-check" or not valid_descriptor(d) or d["rootRequestId"] != root["requestId"] or d["originalGoal"] != descriptor["originalGoal"]
                     or str(cursor.get("goal", "")).strip() != descriptor["originalGoal"] or workspace_key(cursor.get("workspacePath")) != workspace):
                 return invalid("An earlier result belongs to a different goal or folder.")
             cursor = self.unique(d["parentRequestId"])

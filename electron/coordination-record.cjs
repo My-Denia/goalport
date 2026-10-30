@@ -349,6 +349,7 @@ function normalize(input) {
     requestId,
     workspacePath,
     goal,
+    ...(input.recordKind === 'native-workspace-check' ? { recordKind: input.recordKind, nativeCheckTarget: input.nativeCheckTarget, nativeCheckMaterial: input.nativeCheckMaterial } : {}),
     planningHarness,
     reviewHarness,
     planText,
@@ -398,6 +399,11 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
       throw new Error("The continuation descriptor is malformed.");
     }
   }
+  if (input?.recordKind === 'native-workspace-check') {
+    require('./native-workspace-check.cjs').targetOf(input.nativeCheckTarget);
+    require('./native-workspace-check.cjs').materialOf(input.nativeCheckMaterial);
+    if (input.continuation !== undefined || input.planningHarness || input.reviewHarness || input.executionHarness || input.planText || input.reviewText || input.executionText) throw Error('A workspace check is not a planner or execution result.');
+  }
   if (input && Object.hasOwn(input, "piCapacity") && !normalizePiCapacity(input.piCapacity)) throw new Error("The requested Pi capacity is malformed.");
   const record = normalize(input);
   if (!record) {
@@ -409,7 +415,7 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
   const records = [stamped, ...existing];
   const file = recordFile(directory);
   const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`);
+  fs.writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`, records.some(r => r.recordKind === 'native-workspace-check') ? { mode: 0o600, flag: 'wx' } : undefined);
   fs.renameSync(temporary, file);
   return stamped;
 }

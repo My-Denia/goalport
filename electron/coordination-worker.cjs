@@ -58,7 +58,8 @@ async function runWorker(config, deps = {}) {
     priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
     ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true,
     ...(admitted.continuation ? { continuation: admitted.continuation } : {}),
-    ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}) };
+    ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}),
+    ...(admitted.nativeCheckTarget ? { nativeCheckTarget: admitted.nativeCheckTarget, nativeCheckMaterial: admitted.nativeCheckMaterial } : {}) };
   const owner = claim.ownerToken;
   let control, storageFailed = false, heldUnconfirmed = false, liveResult = null;
   const nowMs = deps.nowMs ?? (() => performance.now());
@@ -183,36 +184,7 @@ async function runWorker(config, deps = {}) {
     control = await store.startControlServer({ jobId: config.jobId, endpoint: config.controlEndpoint,
       getLiveReadStatus, onContinue, beforeGuardedRevoke, onRevoke });
     const failures = [];
-    const runRound = async (roundDiscovery, roundPiContext) => engine.requestCoordination({
-      ...engine.backgroundEngineInput(input),
-      ...(roundPiContext?.legacyPiContinuation ? { legacyPiContinuation: true } : {}),
-      // Host capability, not persisted admission/renderer authority. The CLI
-      // independently checks the actual platform and final audit command.
-      ...(process.platform === "linux" ? { auditPromptTransport: "linux-pi-stdin" } : {}),
-      beforePlanRevision: async checkpoint => {
-        await gate();
-        const s = scope.current();
-        if (!s || s.generation !== authorization.generation || !s.write || s.remaining < 3 || s.write.remaining < 1) return false;
-        persist({ phase: "plan-revision", display: { firstRound: checkpoint.firstRound, planRevision: true, activity: "One checked plan revision is being organized…", failures } });
-        return true;
-      },
-      beforeRepair: async checkpoint => {
-        await gate();
-        const s = scope.current();
-        if (!s || s.generation !== authorization.generation || !s.write || s.remaining < 3 || s.write.remaining < 1) return false;
-        persist({ phase: "repair", display: { firstRound: checkpoint.firstRound, repair: true, activity: "One checked repair is being organized…", failures } });
-        return true;
-      },
-      onEvent: event => {
-        // Events are display facts. Failure stops the next admission without
-        // throwing through the engine and erasing an already completed turn.
-        try {
-          if (event.kind === "failed") failures.push(event.sentence);
-          const prior = store.getStatus(config.jobId).progress ?? {};
-          persist({ display: { ...prior, failures: [...failures], activity: event.kind === "started" ? `${event.harness || event.instanceId} is ${event.role === "planning" ? "planning" : event.role === "review" ? "checking" : event.role === "execution" ? "making changes" : "verifying"}…` : event.sentence } });
-        } catch { storageFailed = true; }
-      },
-    }, roundDiscovery, { launch: async command => {
+    const launchCheck = async command => {
       try { await gate(); } catch (error) { return { launched: false, dispatched: false, text: "", errorText: error.message }; }
       try { store.recordPendingCommand(config.jobId, { commandId: command.commandId, role: command.commandId.includes("execute") ? "execution" : command.commandId.includes("audit") ? "audit" : command.commandId.includes("review") ? "review" : "planning" }, owner); } catch (error) {
         if (error?.code === "access-revoked" || error?.code === "stuck-acknowledged") {
@@ -244,7 +216,59 @@ async function runWorker(config, deps = {}) {
         else store.completeCommand(config.jobId, { commandId: command.commandId, facts: result, counters: counters() }, owner);
       } catch { storageFailed = true; }
       return result;
-    } }, () => true);
+    };
+    const runOrdinaryRound = async (roundDiscovery, roundPiContext) => engine.requestCoordination({
+      ...engine.backgroundEngineInput(input),
+      ...(roundPiContext?.legacyPiContinuation ? { legacyPiContinuation: true } : {}),
+      // Host capability, not persisted admission/renderer authority. The CLI
+      // independently checks the actual platform and final audit command.
+      ...(process.platform === "linux" ? { auditPromptTransport: "linux-pi-stdin" } : {}),
+      beforePlanRevision: async checkpoint => {
+        await gate();
+        const s = scope.current();
+        if (!s || s.generation !== authorization.generation || !s.write || s.remaining < 3 || s.write.remaining < 1) return false;
+        persist({ phase: "plan-revision", display: { firstRound: checkpoint.firstRound, planRevision: true, activity: "One checked plan revision is being organized…", failures } });
+        return true;
+      },
+      beforeRepair: async checkpoint => {
+        await gate();
+        const s = scope.current();
+        if (!s || s.generation !== authorization.generation || !s.write || s.remaining < 3 || s.write.remaining < 1) return false;
+        persist({ phase: "repair", display: { firstRound: checkpoint.firstRound, repair: true, activity: "One checked repair is being organized…", failures } });
+        return true;
+      },
+      onEvent: event => {
+        // Events are display facts. Failure stops the next admission without
+        // throwing through the engine and erasing an already completed turn.
+        try {
+          if (event.kind === "failed") failures.push(event.sentence);
+          const prior = store.getStatus(config.jobId).progress ?? {};
+          persist({ display: { ...prior, failures: [...failures], activity: event.kind === "started" ? `${event.harness || event.instanceId} is ${event.role === "planning" ? "planning" : event.role === "review" ? "checking" : event.role === "execution" ? "making changes" : "verifying"}…` : event.sentence } });
+        } catch { storageFailed = true; }
+      },
+    }, roundDiscovery, { launch: launchCheck
+    }, () => true);
+    const runRound = async (roundDiscovery, roundPiContext) => {
+      if (!input.nativeCheckTarget) return runOrdinaryRound(roundDiscovery, roundPiContext);
+      await gate();
+      const purpose = require('./native-workspace-check.cjs');
+      const resolved = await purpose.resolveTarget(core, await core.invoke({ protocolVersion: 'goalport.ipc.v2', requestId: 'native-check-worker-' + randomUUID(), entityVersion: 0, messageType: 'snapshot', payload: {} }), input.nativeCheckTarget);
+      if (resolved.workspace !== admitted.workspacePath) throw Error(purpose.STALE);
+      await (deps.recheckNativeMaterial ?? purpose.recheckMaterial)(resolved, input.nativeCheckMaterial, engine);
+      const latest = await purpose.resolveTarget(core, await core.invoke({ protocolVersion: 'goalport.ipc.v2', requestId: 'native-check-worker-final-' + randomUUID(), entityVersion: 0, messageType: 'snapshot', payload: {} }), input.nativeCheckTarget);
+      if (latest.workspace !== resolved.workspace || latest.taskId !== resolved.taskId || JSON.stringify(latest.context) !== JSON.stringify(resolved.context)) throw Error(purpose.STALE);
+      const command = engine.buildNativeWorkspaceCheckCommand(input);
+      persist({ display: { activity: 'Pi is checking the shared workspace snapshot…', failures } });
+      const result = await launchCheck(command);
+      const returned = result.launched && result.dispatched === true && !result.errorText && !!result.text;
+      return { recordKind: 'native-workspace-check', nativeCheckTarget: input.nativeCheckTarget, nativeCheckMaterial: input.nativeCheckMaterial,
+        planningHarness: null, reviewHarness: null, planText: null, reviewText: null, executionHarness: null, executionText: null,
+        auditHarness: 'Pi', auditText: returned ? result.text : null, result: returned ? result.text : null,
+        verdict: result.dispatched === null ? 'unconfirmed' : returned ? 'checked' : 'stopped',
+        stopReason: returned ? 'Independent workspace check returned. This is a dated workspace snapshot, not native verification.' : result.errorText || 'Pi did not return a workspace check.',
+        planningQuota: null, reviewQuota: null, messageDispatched: result.dispatched, environmentBlocked: false,
+        auditInputEvidenceText: input.nativeCheckMaterial.deliveredEvidence };
+    };
     liveResult = await runRound(discovery, piContext);
     const saveResult = () => (deps.saveRecord ?? saveRecord)(config.directory, {
       ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal,

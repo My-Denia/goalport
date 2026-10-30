@@ -57,8 +57,8 @@ export function normalizeContinuationDescriptor(value: unknown): SavedTargetCont
   };
 }
 
-export function validatedContinuationOf(record: { continuation?: unknown } | null | undefined): SavedTargetContinuation | undefined {
-  if (!record || typeof record !== "object") return undefined;
+export function validatedContinuationOf(record: { continuation?: unknown; recordKind?: unknown } | null | undefined): SavedTargetContinuation | undefined {
+  if (!record || typeof record !== "object" || record.recordKind === 'native-workspace-check') return undefined;
   if (record.continuation === undefined || record.continuation === null) return undefined;
   return normalizeContinuationDescriptor(record.continuation) ?? undefined;
 }

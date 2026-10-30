@@ -8,6 +8,7 @@ import { DraftGoalComposer } from "./conversation/DraftGoalComposer";
 import { SessionDetails } from "./panels/SessionDetails";
 import { isNativeDraftRoute, replaceGoalRoute } from "./lib/goalRoute";
 import * as intentHelpers from "./lib/sendIntent";
+import {prepareNativeWorkspaceCheckMaterial} from './coordination/nativeWorkspaceCheck';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); resetCoreClientForTests(); delete window.__GOALPORT_LINUX_CORE__; delete window.goalportCore; sessionStorage.clear(); vi.unstubAllGlobals(); window.history.replaceState(null, "", "/"); });
 const reply = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
@@ -17,12 +18,14 @@ const packet = (active = false): CoreSnapshot => ({ ...DEMO_SNAPSHOT, preview: f
   runtimes: DEMO_SNAPSHOT.runtimes.map(item => ({ ...item, nativeSessionTransport: item.id === "codex" ? "app-server" : "unknown" })),
   productConversation: { ...DEMO_SNAPSHOT.productConversation!, title:"Native goal", items:[], runtime:{ state:"selected", provider:"codex", name:"Codex" }, session:{ state:"attached", nativeIdKnown:true, transport:"app-server" }, turn:{ state:"completed", canSend:true, canStop:false, actions:["close-session"] } }
 });
-function server(options: { unknownStart?: boolean; delayedStart?: Promise<Response>; active?: boolean; results?: CoreSnapshot["turnResults"]; sendResponse?: (command: { requestId: string; messageType: string }) => Response | Promise<Response> } = {}) {
+function server(options: { latest?: unknown; status?: unknown; completed?: boolean; unknownStart?: boolean; delayedStart?: Promise<Response>; active?: boolean; results?: CoreSnapshot["turnResults"]; sendResponse?: (command: { requestId: string; messageType: string }) => Response | Promise<Response> } = {}) {
   const calls: Array<{messageType:string; payload:Record<string,unknown>; requestId:string; nativeTarget?:unknown}> = [];
   let current = { ...packet(options.active), ...(options.results ? { turnResults: options.results } : {}) };
+  if (options.completed) current = {...current,attempt:{...current.attempt,state:'waiting'}};
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(String(init.body)); calls.push(body);
-    if (body.messageType === "coordination_latest") return reply({ ok:true, payload:{ record:null, roots:[], profileUnconfirmed:false, leftoverHeld:false, line:null, currentBase:null, globalSlot:{kind:"empty"} } });
+    if (body.messageType === "coordination_latest") return reply({ ok:true, payload:options.latest ?? { record:null, roots:[], profileUnconfirmed:false, leftoverHeld:false, line:null, currentBase:null, globalSlot:{kind:"empty"} } });
+    if (body.messageType === 'coordination_status' && options.status) return reply({ok:true,payload:options.status});
     if (body.messageType === "coordination_discover") return reply({ ok:true, payload:{ consentMissing:true, harnesses:[], sentence:"Pi unavailable" } });
     if (body.messageType === "goal_overview") return reply({ ok:true, payload:{ overview:{ revision:"fixture", truncated:false, goals:[], pending:[] } } });
     if (["start_conversation", "conversation_send"].includes(body.messageType) && options.sendResponse) return options.sendResponse(body);
@@ -53,6 +56,25 @@ it("keeps native chat primary by folding saved workspace results without discard
   expect(screen.getByRole("textbox", {name:"Message composer"})).toBeTruthy();
   fireEvent.click(summary); expect(disclosure.open).toBe(true);
   expect(screen.getByText("Saved native turn reply")).toBeTruthy();
+});
+
+it('keeps one native composer, draft node/focus and IME/Enter behavior through the optional check dialog',async()=>{
+ window.__GOALPORT_LINUX_CORE__=true;window.history.replaceState(null,'','/goals/campaign-native');
+ const f=server({active:true,completed:true,results:[{requestId:'turn-check',replyState:'completed',replyText:'Synthetic result',baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}]});
+ render(<App/>);const check=await screen.findByRole('button',{name:'Check workspace with Pi'});const composer=screen.getByRole('textbox',{name:'Message composer'});fireEvent.change(composer,{target:{value:'Retain this native draft'}});composer.focus();
+ await waitFor(()=>expect((check as HTMLButtonElement).disabled).toBe(false));fireEvent.click(check);await screen.findByRole('dialog',{name:'Check workspace with Pi'});expect(document.querySelectorAll('textarea[aria-label="Message composer"]')).toHaveLength(1);expect(document.querySelector('textarea[aria-label="Message composer"]')).toBe(composer);fireEvent.click(screen.getByRole('button',{name:'Cancel'}));await waitFor(()=>expect(screen.queryByRole('dialog')).toBeNull());await waitFor(()=>expect(screen.getByRole('textbox',{name:'Message composer'})).toBe(composer));expect((composer as HTMLTextAreaElement).value).toBe('Retain this native draft');
+ composer.focus();fireEvent.compositionStart(composer);fireEvent.keyDown(composer,{key:'Enter',code:'Enter',isComposing:true});fireEvent.compositionEnd(composer);expect(f.calls.filter(c=>c.messageType==='conversation_send')).toHaveLength(0);expect(window.location.pathname).toBe('/goals/campaign-native');
+});
+
+it('keeps native goal A pinned while the one current-work strip names check B, with no adopted native actions',async()=>{
+ window.__GOALPORT_LINUX_CORE__=true;window.history.replaceState(null,'','/goals/campaign-native');
+ const nativeCheckTarget={campaignId:'campaign-b',attemptId:'attempt-b',turnRequestId:'turn-b'};const piCapacity={provider:'Fixture',model:'alpha',useExistingCapacity:true as const};
+ const context={reply:'reported',replyTruncated:false,commands:[],commandsOmitted:0,commandsTruncated:false,filesTruncated:false,comparisonUnavailable:false,olderTurnsOmitted:0};
+ const nativeCheckMaterial=prepareNativeWorkspaceCheckMaterial({contentObservation:{head:'a'.repeat(40),paths:[],selectedDiff:'diff B',selectedStatus:'',nativeReportedContext:context},nativeReportedContext:context,capturedAt:'2026-01-01T00:00:00Z'});
+ const job={jobId:'00000000-0000-4000-8000-000000000002',requestId:'check-b',goal:'Native B',workspacePath:'/fixture/b',recordKind:'native-workspace-check',nativeCheckTarget,nativeCheckMaterial,piCapacity,state:'running',active:true,live:true,revoked:false,workerPid:123,readMaxTurns:2,writeMaxTurns:null,counters:{readTurnsLeft:1},pendingCommand:null,completedCommands:[],progress:{activity:'Pi is checking B'},outcome:null};
+ const base={kind:'saved-current-base',jobId:job.jobId,admittedRequestId:job.requestId,rootRequestId:null,goal:job.goal,workspacePath:job.workspacePath,identityConfirmed:true,nativeCheckTarget,followUpMode:null,state:'running',phase:'running',pending:'none',revoked:false,workerGone:false,unconfirmed:false,active:true,allowanceEnd:null,observedAcceptedChildId:null,globalSlot:{kind:'occupied',jobId:job.jobId,admittedRequestId:job.requestId},profileUnconfirmed:false,leftoverHeld:false};
+ const f=server({active:true,completed:true,results:[{requestId:'turn-a',replyState:'completed',baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}],latest:{record:null,roots:[],line:'Pi is checking B',jobId:job.jobId,currentBase:base,globalSlot:base.globalSlot},status:{source:'host-status',jobId:job.jobId,job}});
+ render(<App/>);await screen.findByText('Current work — Native B');await waitFor(()=>expect(f.calls.some(c=>c.messageType==='coordination_status')).toBe(true));expect(window.location.pathname).toBe('/goals/campaign-native');expect(screen.getByRole('textbox',{name:'Message composer'})).toBeTruthy();expect(screen.queryByRole('region',{name:'Workspace check'})).toBeNull();expect(screen.getAllByLabelText('Current work')).toHaveLength(1);expect(f.calls.some(c=>['select_campaign','conversation_send','resume_session','close_session'].includes(c.messageType))).toBe(false);
 });
 
 it("normalizes missing/null/unrecognized configured and actual transport to unknown, never guesses from a native id", () => {
