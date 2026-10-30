@@ -31,13 +31,13 @@ function UserMessage({ item }: { item: ProductConversationItem }) {
   );
 }
 
-function AssistantMessage({ item }: { item: ProductConversationItem }) {
+function AssistantMessage({ item, agentName }: { item: ProductConversationItem; agentName: string }) {
   return (
     <article className="tl-event tl-agent" data-kind="assistant-message">
       <div className="tl-avatar" aria-hidden="true">◎</div>
       <div className="tl-event-body">
         <div className="tl-meta">
-          <span className="tl-actor">{item.actor?.trim() || "Agent"}</span>
+          <span className="tl-actor">{item.actor?.trim() || agentName}</span>
           <Timestamp value={item.timestamp} />
         </div>
         <div className="tl-agent-body">{renderMarkdownBody(item.body, item.id)}</div>
@@ -112,7 +112,7 @@ function ActivityGroup({ items }: { items: ProductConversationItem[] }) {
 }
 
 /** Groups consecutive activity-summary items; everything else renders directly. */
-function renderItems(items: ProductConversationItem[], onChooseRuntime?: () => void, onDiagnose?: () => void) {
+function renderItems(items: ProductConversationItem[], agentName: string, onChooseRuntime?: () => void, onDiagnose?: () => void) {
   const nodes: React.ReactNode[] = [];
   let activity: ProductConversationItem[] = [];
   const flush = () => {
@@ -132,7 +132,7 @@ function renderItems(items: ProductConversationItem[], onChooseRuntime?: () => v
         nodes.push(<UserMessage key={item.id} item={item} />);
         break;
       case "assistant-message":
-        nodes.push(<AssistantMessage key={item.id} item={item} />);
+        nodes.push(<AssistantMessage agentName={agentName} key={item.id} item={item} />);
         break;
       case "actionable-error":
         nodes.push(<ActionableError key={item.id} item={item} onChooseRuntime={onChooseRuntime} onDiagnose={onDiagnose} />);
@@ -187,7 +187,7 @@ interface ProductConversationViewProps {
 
 export function ProductConversationView({ product, loadingEarlier = false, onLoadEarlier, onChooseRuntime, onDiagnose }: ProductConversationViewProps) {
   const visibleItems = useMemo(() => coalesceVisibleFragments(product.items), [product.items]);
-  const nodes = useMemo(() => renderItems(visibleItems, onChooseRuntime, onDiagnose), [visibleItems, onChooseRuntime, onDiagnose]);
+  const nodes = useMemo(() => renderItems(visibleItems, product.runtime.name?.trim() || "Agent", onChooseRuntime, onDiagnose), [visibleItems, product.runtime.name, onChooseRuntime, onDiagnose]);
   return (
     <div className="timeline-inner" data-product-conversation="true">
       {product.runtime.provider === "codex" && product.session?.transport === "exec" ? <p className="draft-hint" role="status">Codex can't continue this conversation after this turn.</p> : null}

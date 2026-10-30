@@ -439,7 +439,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 /* Native chat stays primary even when a turn captured long command output. */
 .native-turn-results {
-  width: calc(100% - 44px); max-width: 640px; margin: 0 auto 8px;
+  width: calc(100% - 44px); max-width: calc(var(--content-max) - 44px); margin: 0 auto 8px;
   flex: 0 0 auto; min-height: 0; max-height: min(35dvh, 320px); overflow-y: auto;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
 }
@@ -582,8 +582,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 }
 .tl-agent-body li, .tl-system-body li, .tl-compact-body li { margin: 2px 0; }
 .check-summary { margin: 0 0 12px; padding: 0; list-style: none; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
-.native-check-panel h3 { margin: 0 0 6px; font-size: 15px; }
-.native-check-panel > p { color: var(--ink-soft); }
+.native-check-panel h3 { margin: 0 0 6px; font-size: 14px; }
+.native-check-panel > p { margin: 0 0 10px; color: var(--ink-soft); }
 .native-check-review { font-size: 14px; line-height: 1.55; }
 .native-check-review > details { margin-top: 8px; }
 .native-check-review summary, .native-check-panel > details > summary { color: var(--ink-soft); font-size: 13px; cursor: pointer; }
@@ -791,7 +791,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   font-size: 12.5px; font-weight: 700; white-space: nowrap;
 }
 .send-button:hover:not(:disabled) { filter: brightness(1.08); }
-.send-button:disabled { opacity: 0.45; }
+.send-button:disabled { border-color: var(--line); background: var(--panel); color: var(--ink-muted); }
 .send-arrow { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; background: rgba(255, 255, 255, 0.16); font-size: 12px; }
 
 /* ---------- Inspector drawer ---------- */
@@ -1002,7 +1002,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .connection-neutral { padding: 0 9px; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
-  .timeline-inner, .composer-dock { padding-left: 14px; padding-right: 14px; }
+  .timeline-inner, .composer-dock, .timeline-scroll .native-workspace-check { padding-left: 14px; padding-right: 14px; }
+  .native-turn-results { width: calc(100% - 28px); max-width: calc(var(--content-max) - 28px); }
 }
 
 @media (max-width: 860px) {
@@ -1039,7 +1040,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .conversation-heading p { white-space: normal; }
   .conversation-heading, .stop-responsibility-panel { margin-left: 10px; margin-right: 10px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 20px); }
-  .timeline-inner, .composer-dock { padding-left: 10px; padding-right: 10px; }
+  .timeline-inner, .composer-dock, .timeline-scroll .native-workspace-check { padding-left: 10px; padding-right: 10px; }
+  .native-turn-results { width: calc(100% - 20px); max-width: calc(var(--content-max) - 20px); }
   .composer-actions { flex-direction: column; align-items: stretch; gap: 8px; }
   .composer-buttons { justify-content: flex-end; }
   .composer-secondary .tb-label { display: none; }
@@ -1289,7 +1291,9 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .background-job > p { font-size: 14px; line-height: 1.5; }
 .background-job .coordination-progress, .background-job .coordination-status { margin-left: 0; margin-right: 0; }
 .background-job .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.native-workspace-check > .button, .native-workspace-check > details, .native-workspace-check > [role="alert"] { margin-inline: 22px; }
+.native-workspace-check { display: grid; justify-items: start; gap: 10px; width: 100%; min-width: 0; max-width: var(--content-max); margin: 0 auto; padding: 0 22px 18px; }
+.native-workspace-check > details, .native-workspace-check > [role="alert"] { width: 100%; }
+.background-job.native-check-panel { width: 100%; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 
 /* Quiet load hold above the draft actions: harness access is still
    resolving, so Send waits (progress, not an error). */

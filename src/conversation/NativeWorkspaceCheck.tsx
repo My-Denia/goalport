@@ -94,7 +94,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
   const starting=Boolean(pending)&&busy&&!unknown;
   const shared=material?.contentObservation.paths.filter(p=>p.classification==='selected').map(p=>p.path)??[];
   useEffect(()=>{if(owns&&job&&typeof panel.current?.scrollIntoView==='function')panel.current.scrollIntoView({block:'nearest'});},[owns,job?.requestId,job?.active]);
-  return <section ref={panel} className="native-workspace-check" style={{minWidth:0,maxWidth:960,marginInline:'auto'}}>
+  return <section ref={panel} className="native-workspace-check">
     <GoalLayer variant="dialog" modalCard label="Ask Pi to review" open={open} onOpenChange={changeOpen} trigger={undefined}>
       <h2>Ask Pi to review Codex's changes</h2>
       {pending&&!starting?<p role="status">Your earlier request may still be running. Check on it here; it won't be sent twice.</p>:<p>Pi reads what changed and replies beside this goal. It can't edit your files, and it keeps going if you close the window.</p>}
