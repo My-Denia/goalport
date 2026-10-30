@@ -5735,8 +5735,9 @@ impl UiController {
     /// row stays CLOSED. This does not resume a FAILED attempt and does not
     /// send the old prompt.
     /// Continue a closed Codex conversation in a successor Attempt on the same
-    /// thread. Codex confirms the thread in `thread/resume`, so unlike Claude the
-    /// successor becomes active here, or stays unstarted and can be retried.
+    /// thread. Codex confirms the thread in `thread/resume`, so the successor row
+    /// is written only after that: a failed resume leaves nothing behind and the
+    /// closed session stays the one the user can retry.
     fn resume_closed_codex_session(&mut self, source: &Attempt) -> Result<(), String> {
         let session_id = source
             .provider_session
@@ -5762,40 +5763,15 @@ impl UiController {
             format!("{}-cap-v1", source.provider),
         );
         let successor_id = successor_attempt.id.clone();
-        match self.store.insert_closed_claude_successor(&ClosedClaudeSuccessor {
-            source_attempt_id: source.id.clone(),
-            successor_attempt,
-        }) {
-            Ok(()) => {}
-            Err(StoreError::IdempotencyConflict(_)) => {
-                let existing = self
-                    .store
-                    .get_attempt(&successor_id)
-                    .map_err(store_message)?;
-                if existing.task_id != task.id
-                    || existing.state != AttemptState::Queued
-                    || existing.provider_session.is_some()
-                {
-                    return Err(store_message(StoreError::IdempotencyConflict(successor_id)));
-                }
-            }
-            Err(error) => return Err(store_message(error)),
-        }
-        if self
-            .runtime_manager
-            .registered_binding(&successor_id)
-            .is_none()
-        {
-            self.runtime_manager
-                .select_runtime(
-                    &successor_id,
-                    &source.provider,
-                    None,
-                    runtime_version(&source.provider),
-                    &workspace,
-                )
-                .map_err(|error| format!("Native session resume failed: {error}"))?;
-        }
+        self.runtime_manager
+            .select_runtime(
+                &successor_id,
+                &source.provider,
+                None,
+                runtime_version(&source.provider),
+                &workspace,
+            )
+            .map_err(|error| format!("Native session resume failed: {error}"))?;
         let context = SessionRequest {
             campaign_id: Some(task.campaign_id.clone()),
             task_id: task.id.clone(),
@@ -5803,12 +5779,25 @@ impl UiController {
             workspace_root: workspace,
             resume_session: Some(session_id.clone()),
         };
-        let session = self
+        let verified = match self
             .runtime_manager
             .resume_session_with_context(&successor_id, &context)
-            .map_err(|error| format!("Native session resume failed: {error}"))?;
-        if session.handle.session_id != session_id {
-            return Err("Native session resume returned a different thread id".into());
+        {
+            Ok(session) if session.handle.session_id == session_id => Ok(()),
+            Ok(_) => Err("Native session resume returned a different thread id".to_string()),
+            Err(error) => Err(format!("Native session resume failed: {error}")),
+        }
+        .and_then(|()| {
+            self.store
+                .insert_closed_claude_successor(&ClosedClaudeSuccessor {
+                    source_attempt_id: source.id.clone(),
+                    successor_attempt,
+                })
+                .map_err(store_message)
+        });
+        if let Err(error) = verified {
+            let _ = self.runtime_manager.close_attempt(&successor_id);
+            return Err(error);
         }
         self.store
             .set_attempt_provider_session(&successor_id, &session_id)

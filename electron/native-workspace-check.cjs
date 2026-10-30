@@ -45,7 +45,7 @@ function purposeOf(input) {
   return {nativeCheckTarget:targetOf(input.nativeCheckTarget),nativeCheckMaterial:materialOf(input.nativeCheckMaterial)};
 }
 function strictGit(args,cwd) {
-  return new Promise(resolve => execFile('git',args,{cwd,windowsHide:true,maxBuffer:4*1024*1024,encoding:'buffer'},(error,stdout,stderr)=>{
+  return new Promise(resolve => execFile('git',['--no-optional-locks',...args],{cwd,windowsHide:true,maxBuffer:4*1024*1024,encoding:'buffer'},(error,stdout,stderr)=>{
     try { const decode=b=>new TextDecoder('utf-8',{fatal:true}).decode(b); resolve({code:error ? 1 : 0,stdout:decode(stdout ?? Buffer.alloc(0)),stderr:decode(stderr ?? Buffer.alloc(0))}); }
     catch { resolve({code:1,stdout:'',stderr:'Malformed or non-UTF8 Git metadata/content.'}); }
   }));

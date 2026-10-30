@@ -987,7 +987,10 @@ const nativeCheckHost = createNativeCheckHost({
   discover: (workspace) => discoverCliProviders({ stateDir: coordinationRuntime().stateDir, cwd: workspace, routeAwarePi: true }),
   engine: () => require(path.join(appRoot, "dist", "coordination-engine.cjs")),
   consent: () => backgroundSendConsent().read(),
-  grant: () => backgroundSendConsent().act("grant"),
+  grant: () => {
+    if (profileManager && !profileReady) throw new Error("Profile bootstrap must finish before changing background Send consent.");
+    return backgroundSendConsent().act("grant");
+  },
   start: (input) => backgroundHost.start(input),
   stop: (jobId) => backgroundHost.revoke(jobId),
   leave: async (jobId) => (["completed", "failed", "stopped"].includes((await backgroundHost.status(jobId))?.state) ? backgroundHost.releaseConfirmedTerminal(jobId) : backgroundHost.acknowledge(jobId)),

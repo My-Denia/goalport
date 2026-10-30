@@ -2375,9 +2375,17 @@ function App() {
     let live = snapshot;
     const recoverable = product?.turn.actions?.includes("resume-session") || product?.turn.reasonCode === "provider-exited";
     if (!retrying && !product?.turn.canSend && recoverable && draft.trim()) {
-      const recovered = await recoverSessionForSend();
-      if (!recovered) return;
-      live = recovered;
+      const viewIntent = selectionIntent.current;
+      sendInFlight.current = true;
+      setSendBusy(true);
+      try {
+        const recovered = await recoverSessionForSend();
+        if (!recovered || viewIntent !== selectionIntent.current) return;
+        live = recovered;
+      } finally {
+        sendInFlight.current = false;
+        setSendBusy(false);
+      }
     }
     const turn = live.productConversation?.turn;
     if (!retrying && !turn?.canSend) {
@@ -2699,8 +2707,10 @@ function App() {
     let current = snapshot;
     const turn = current.productConversation?.turn;
     const attemptId = persistedAttemptId(current.attempt.id);
+    const viewIntent = selectionIntent.current;
     if (turn?.reasonCode === "provider-exited" && turn.actions?.includes("close-session") && attemptId && client.closeSession) {
       current = await client.closeSession(attemptId);
+      if (viewIntent !== selectionIntent.current) return null;
       setSnapshot(current);
     }
     return handleResumeSession(current);
@@ -4051,7 +4061,7 @@ function App() {
                   eligible={Boolean(snapshot.turnResults?.length) && ['waiting','completed'].includes(snapshot.attempt.state) && product.turn.state === 'completed' && !product.turn.canStop && snapshot.turnResults?.[snapshot.turnResults.length-1]?.replyState === 'completed' && !backgroundSlotBlocked}
                   job={nativeCheckJob?.nativeCheckTarget?.campaignId===snapshot.activeCampaignId ? nativeCheckJob : null}
                   onBusy={setNativeCheckBusy}
-                  onAskCodex={text=>{setCampaignDrafts(current=>({...current,[draftCampaignId]:text}));(document.querySelector('textarea[aria-label="Message composer"]') as HTMLTextAreaElement|null)?.focus();}}
+                  onAskCodex={text=>{setCampaignDrafts(current=>({...current,[draftCampaignId]:current[draftCampaignId]?.trim()?`${current[draftCampaignId]}\n\n${text}`:text}));(document.querySelector('textarea[aria-label="Message composer"]') as HTMLTextAreaElement|null)?.focus();}}
                   onJob={job=>{setNativeCheckJob(job);setSelectionRefresh(v=>v+1);}}
                 /> : null}
                 {anchor.unseenCount > 0 ? (
