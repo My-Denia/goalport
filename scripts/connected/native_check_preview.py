@@ -105,7 +105,9 @@ def run_check(prefix, payload, runner, buffer, data_dir, start=False):
                 packet = buffer.matching(payload)
                 if packet is not None:
                     # Server-generated path only. mkstemp creates 0600, no renderer bytes.
-                    fd, temp = tempfile.mkstemp(prefix="native-check-", suffix=".json", dir=data_dir)
+                    # Use the OS-private temporary filesystem: a mounted profile may
+                    # not represent POSIX 0600 even when creation requests that mode.
+                    fd, temp = tempfile.mkstemp(prefix="native-check-", suffix=".json")
                     with os.fdopen(fd, "w", encoding="utf-8") as output:
                         json.dump(packet, output, ensure_ascii=False)
                     args.extend(["--material-file", temp])

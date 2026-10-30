@@ -38,6 +38,7 @@ class NativePreviewTest(unittest.TestCase):
                     paths.append(filename)
                     self.assertEqual(json.loads(filename.read_text(encoding='utf-8')), packet)
                     self.assertEqual(filename.stat().st_mode & 0o777, 0o600)
+                    self.assertNotEqual(filename.parent.resolve(), Path(directory).resolve(), 'packet must not inherit a mounted profile filesystem')
                 return 0, json.dumps({'ok': True, 'job': {'jobId': 'own-recorded-job'}}), ''
             preview.run_check(['node', 'fixture'], payload, runner, buffer, directory)
             self.assertEqual(buffer.packet, packet)
