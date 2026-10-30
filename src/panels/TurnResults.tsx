@@ -32,7 +32,7 @@ export function TurnResults({ results, omittedTurns = 0 }: TurnResultsProps) {
               : changed.length === 0 ? (result.filesTruncated ? null : <p className="muted">No files changed.</p>)
               : <FileList files={changed} />}
             {result.filesTruncated ? <p className="muted">Some file changes are not listed.</p> : null}
-            {result.before.length > 0 ? <details><summary>Already changed before this turn · {result.before.length}</summary><FileList files={result.before} /></details> : null}
+            {result.before.length > 0 ? <details><summary>Changed earlier · {result.before.length}</summary><FileList files={result.before} /></details> : null}
             {result.commands.length > 0 ? <details><summary>Commands run · {result.commands.length}</summary><CommandList commands={result.commands} truncated={result.commandsTruncated === true} /></details> : null}
           </article>
         );

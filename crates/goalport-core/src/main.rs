@@ -1283,6 +1283,7 @@ fn scenario_com_02(
         .permission_response(PermissionResponse {
             request_id: "COM-02-permission".into(),
             allow: false,
+            for_session: false,
         })
         .map_err(|error| error.to_string())?;
     let events = adapter.stream_events().map_err(|error| error.to_string())?;

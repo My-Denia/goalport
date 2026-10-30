@@ -203,6 +203,10 @@ pub struct PromptAccepted {
 pub struct PermissionResponse {
     pub request_id: String,
     pub allow: bool,
+    /// Let the runtime stop asking for matching actions in this session.
+    /// Only Codex can honour it; other runtimes answer the one request.
+    #[serde(default)]
+    pub for_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

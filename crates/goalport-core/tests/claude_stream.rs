@@ -337,6 +337,7 @@ fn permission_allow_once_replies_to_same_request_id() {
             PermissionResponse {
                 request_id: request_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("allow should be delivered");
@@ -380,6 +381,7 @@ fn permission_deny_does_not_execute_tool() {
             PermissionResponse {
                 request_id,
                 allow: false,
+                for_session: false,
             },
         )
         .expect("deny should be delivered");
@@ -414,6 +416,7 @@ fn permission_deny_with_tool_result_is_not_fail_open() {
             PermissionResponse {
                 request_id,
                 allow: false,
+                for_session: false,
             },
         )
         .expect("deny should be delivered");
@@ -457,6 +460,7 @@ fn permission_deny_that_still_writes_is_fail_open() {
             PermissionResponse {
                 request_id,
                 allow: false,
+                for_session: false,
             },
         )
         .expect("deny should be delivered");
@@ -518,6 +522,7 @@ fn unknown_path_is_not_safely_denied() {
             PermissionResponse {
                 request_id,
                 allow: false,
+                for_session: false,
             },
         )
         .expect("deny should be delivered");
@@ -558,6 +563,7 @@ fn stale_or_mismatched_permission_response_is_rejected() {
         PermissionResponse {
             request_id: "claude-not-this-request".into(),
             allow: true,
+            for_session: false,
         },
     );
     assert!(mismatched.is_err(), "mismatched id must be rejected");
@@ -574,6 +580,7 @@ fn stale_or_mismatched_permission_response_is_rejected() {
             PermissionResponse {
                 request_id: request_id.clone(),
                 allow: true,
+                for_session: false,
             },
         )
         .expect("matching id should be accepted once");
@@ -582,6 +589,7 @@ fn stale_or_mismatched_permission_response_is_rejected() {
         PermissionResponse {
             request_id,
             allow: true,
+            for_session: false,
         },
     );
     assert!(duplicate.is_err(), "duplicate response must be rejected");

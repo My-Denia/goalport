@@ -2478,7 +2478,7 @@ function App() {
     }
   }
 
-  async function handlePermissionDecision(decisionId: string, allow: boolean) {
+  async function handlePermissionDecision(decisionId: string, allow: boolean, forSession = false) {
     if (allow && snapshot.bounds?.projectionUnavailable) {
       setActiveNotice({ sentence: "Permission Allow requires the full request facts, which are unavailable in this capacity-limited view. Decline remains available." });
       return;
@@ -2488,7 +2488,7 @@ function App() {
       return;
     }
     const viewIntent = selectionIntent.current;
-    const next = client.mode === "browser-preview" ? resolvePermission(snapshot, allow) : await client.resolveDecision(decisionId, allow);
+    const next = client.mode === "browser-preview" ? resolvePermission(snapshot, allow) : await client.resolveDecision(decisionId, allow, forSession);
     if (viewIntent === selectionIntent.current) setSnapshot(next);
     if (client.mode !== "browser-preview") {
       const failure = commandFailure(next, "resolve_decision");
@@ -2498,10 +2498,10 @@ function App() {
       }
     }
     setActiveNotice(allow
-      ? { sentence: "Permission allowed once. Session-wide approval remains disabled." }
+      ? { sentence: forSession ? "Allowed. Codex won't ask again for matching actions this session." : "Permission allowed once." }
       : { sentence: "Permission denied. No write action was sent and automatic retry is disabled." });
     if (client.notify) {
-      void client.notify(allow ? "GoalPort decision" : "GoalPort decision", allow ? "Permission allowed once." : "Permission denied.");
+      void client.notify("GoalPort decision", allow ? (forSession ? "Allowed for matching actions this session." : "Permission allowed once.") : "Permission denied.");
     }
   }
 
@@ -4088,7 +4088,7 @@ function App() {
 
               <PendingApprovals
                 snapshot={snapshot}
-                onPermissionDecision={(decisionId, allow) => { void handlePermissionDecision(decisionId, allow); }}
+                onPermissionDecision={(decisionId, allow, forSession) => { void handlePermissionDecision(decisionId, allow, forSession); }}
               />
               {heldPanel ? (
                 <BlockedWorkPanel
@@ -4113,7 +4113,7 @@ function App() {
                 draft={draft}
                 snapshot={snapshot}
                 runtime={product.runtime}
-                currentStep={product.items.at(-1)?.kind === "activity-summary" ? product.items.at(-1)?.body : undefined}
+                currentStep={product.currentStep ?? (product.items.at(-1)?.kind === "activity-summary" ? product.items.at(-1)?.body : undefined)}
                 turn={conversationHeldByBackground
                   ? { ...product.turn, canSend: false, reason: HELD_CONVERSATION_SENTENCE, reasonCode: undefined }
                   : backgroundSlotBlocked

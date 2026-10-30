@@ -178,6 +178,7 @@ fn permission_round_trip_and_cancel_gap_are_explicit() {
         .permission_response(PermissionResponse {
             request_id: "permission-1".into(),
             allow: false,
+            for_session: false,
         })
         .unwrap();
     let events = adapter.stream_events().unwrap();

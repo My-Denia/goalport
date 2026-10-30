@@ -259,7 +259,7 @@ fn two_permissions_let_text_through_and_a_terminal_clears_the_card() {
         .unwrap()
         .to_owned();
     manager
-        .permission_response(attempt, PermissionResponse { request_id: first_id, allow: true })
+        .permission_response(attempt, PermissionResponse { request_id: first_id, allow: true, for_session: false })
         .unwrap();
     events.extend(drain(&mut manager, attempt, |seen| {
         seen.iter().filter(|event| event.event_type == AgentEventType::PermissionRequest).count() >= 2
@@ -278,7 +278,7 @@ fn two_permissions_let_text_through_and_a_terminal_clears_the_card() {
         .unwrap()
         .to_owned();
     manager
-        .permission_response(attempt, PermissionResponse { request_id: second_id, allow: true })
+        .permission_response(attempt, PermissionResponse { request_id: second_id, allow: true, for_session: false })
         .unwrap();
     events.extend(drain(&mut manager, attempt, |seen| has(seen, AgentEventType::TurnCompleted)));
     assert!(has(&events, AgentEventType::TurnCompleted), "{events:#?}");
@@ -306,10 +306,10 @@ fn permission_write_failure_does_not_send_a_second_response() {
         .unwrap()
         .to_owned();
     assert!(manager
-        .permission_response(attempt, PermissionResponse { request_id: request_id.clone(), allow: true })
+        .permission_response(attempt, PermissionResponse { request_id: request_id.clone(), allow: true, for_session: false })
         .is_err());
     assert!(manager
-        .permission_response(attempt, PermissionResponse { request_id, allow: true })
+        .permission_response(attempt, PermissionResponse { request_id, allow: true, for_session: false })
         .is_err());
     let raw = fs::read_to_string(root.join(".fake-claude-stdin-types.json")).unwrap_or_else(|_| "[]".into());
     let types: Value = serde_json::from_str(&raw).unwrap();
@@ -535,7 +535,7 @@ fn denied_bash_without_a_path_stays_unknown_on_a_clean_git_work_tree() {
     manager
         .permission_response(
             "attempt-deny-bash",
-            PermissionResponse { request_id, allow: false },
+            PermissionResponse { request_id, allow: false, for_session: false },
         )
         .unwrap();
     events.extend(drain(&mut manager, "attempt-deny-bash", |seen| {
@@ -569,7 +569,7 @@ fn denied_bash_that_still_writes_fails_open() {
     manager
         .permission_response(
             "attempt-deny-bash-write",
-            PermissionResponse { request_id, allow: false },
+            PermissionResponse { request_id, allow: false, for_session: false },
         )
         .unwrap();
     events.extend(drain(&mut manager, "attempt-deny-bash-write", |seen| {
@@ -607,7 +607,7 @@ fn an_edit_that_changes_before_allow_fails_open() {
     manager
         .permission_response(
             "attempt-edit-early",
-            PermissionResponse { request_id, allow: true },
+            PermissionResponse { request_id, allow: true, for_session: false },
         )
         .unwrap();
     events.extend(drain(&mut manager, "attempt-edit-early", |seen| {
@@ -640,7 +640,7 @@ fn approved_bash_completes_and_records_only_explicit_fields() {
     manager
         .permission_response(
             "attempt-approved-bash",
-            PermissionResponse { request_id, allow: true },
+            PermissionResponse { request_id, allow: true, for_session: false },
         )
         .unwrap();
     events.extend(drain(&mut manager, "attempt-approved-bash", |seen| {

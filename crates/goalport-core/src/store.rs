@@ -3462,6 +3462,21 @@ impl Store {
         Ok(count.max(0) as usize)
     }
 
+    /// The newest tool event of the running turn, if it has one.
+    pub fn latest_turn_tool_activity(&self, attempt_id: &str) -> Result<Option<Value>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let payload: Option<String> = connection
+            .query_row(
+                "SELECT payload_json FROM events WHERE attempt_id=?1 AND kind='runtime.tool.activity'
+                 AND seq>COALESCE((SELECT MAX(seq) FROM events WHERE attempt_id=?1 AND kind='runtime.turn.started'),0)
+                 ORDER BY seq DESC LIMIT 1",
+                params![attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|text| serde_json::from_str(&text).ok()))
+    }
+
     pub fn latest_event_kind_in(
         &self,
         attempt_id: &str,
@@ -3617,6 +3632,46 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Whether the runtime said it can remember the answer to this request.
+    pub fn permission_takes_session_answer(
+        &self,
+        attempt_id: &str,
+        decision_id: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE attempt_id=?1 AND kind='runtime.permission.request'
+                   AND COALESCE(
+                     json_extract(payload_json,'$.request_id'),
+                     json_extract(payload_json,'$.requestId')
+                   )=?2
+                   AND json_extract(payload_json,'$.sessionAnswer')=1
+                 LIMIT 1",
+                params![attempt_id, decision_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Whether the user let this session stop asking about matching actions.
+    pub fn attempt_answered_for_session(&self, attempt_id: &str) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection
+            .query_row(
+                "SELECT 1 FROM events
+                 WHERE attempt_id=?1 AND kind='permission.response'
+                   AND json_extract(payload_json,'$.forSession')=1
+                 LIMIT 1",
+                params![attempt_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub fn permission_request_text(

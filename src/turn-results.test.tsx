@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TurnResults } from "./panels/TurnResults";
 import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import { coalesceVisibleFragments } from "./conversation/ProductConversationView";
+import { PendingApprovals } from "./panels/PendingApprovals";
 import type { TurnResult } from "./types";
 
 const result: TurnResult = {
@@ -45,6 +46,22 @@ describe("Turn results", () => {
     render(<TurnResults results={[{ ...result, baselineRecorded: false, before: [], during: [], unattributed: [] }]} />);
     expect(screen.getByText("Changes for this turn couldn't be compared.")).toBeTruthy();
     expect(screen.queryByText("user.txt")).toBeNull();
+  });
+});
+
+describe("Answering a permission request", () => {
+  const snapshot = (sessionAnswer: boolean) => ({ attempt: { provider: "codex" }, decisions: [{ id: "d1", state: "pending", title: "codex wants your approval", facts: ["npm test"], sessionAnswer }] }) as never;
+
+  it("lets the user stop being asked when the agent can honour it", () => {
+    const answers: unknown[][] = [];
+    render(<PendingApprovals snapshot={snapshot(true)} onPermissionDecision={(...args) => answers.push(args)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Allow for this session" }));
+    expect(answers).toEqual([["d1", true, true]]);
+  });
+
+  it("doesn't offer what the agent can't do", () => {
+    render(<PendingApprovals snapshot={snapshot(false)} onPermissionDecision={() => undefined} />);
+    expect(screen.queryByRole("button", { name: "Allow for this session" })).toBeNull();
   });
 });
 
