@@ -131,7 +131,7 @@ export function feedbackAssertions(id, result, { final = false } = {}) {
     scopeDualCounters: result.finalScope?.remaining === 1 && result.finalScope?.maxTurns === 4 && result.finalScope?.write?.remaining === 1 && result.finalScope?.write?.maxTurns === 2,
     budgetStopWithoutRepair: records.length === 1 && record?.verdict === 'revise' && record?.messageDispatched === true && record?.stopReason?.includes(BUDGET_STOP_SNIPPET) && record?.stopReason?.includes('GoalPort did not add turns') && !Object.hasOwn(record, 'feedbackHistory') && turnCountAfterSettle === scenario.totalTurns,
     unrepairedIntermediateRetained: after['src/add.mjs'] === INCOMPLETE_SOURCE_HASH && intermediate['src/add.mjs'] === INCOMPLETE_SOURCE_HASH && operations.length === 3,
-    noVerifiedClaim: result.screenshots.filter(s => s.state === 'budget-stop').every(s => !s.geometry.text.includes('Changes verified') && s.geometry.text.includes(BUDGET_STOP_SNIPPET) && s.geometry.text.includes('1 of 4 authorized model turns left')),
+    noVerifiedClaim: result.screenshots.filter(s => s.state === 'budget-stop').every(s => !s.geometry.text.includes('Changes verified') && s.geometry.text.includes(BUDGET_STOP_SNIPPET) && s.geometry.text.includes('1 of 4 turns left')),
     noRepairTurnsLaunched: !operations.some(o => o.operation === 'corrective-plan' || o.operation === 'corrective-writer') && turns.length === 4,
     domShowsCritique: result.screenshots.filter(s => s.state === 'budget-stop').every(s => s.geometry.text.includes('Needs revision') && s.geometry.text.includes('VERDICT: revise')),
   };
@@ -191,13 +191,13 @@ export async function runFeedbackScenario(id, app, caseRoot, fixture, result) {
     await shots(app, caseRoot, result, 'repair-progress');
     result.walkthrough.push('The completed critique ends VERDICT: revise, so GoalPort organizes one checked repair in the same window: the progress line says so, the same scope generation pays for it, and no new authorization happens.');
     await app.until("document.body.innerText.includes('Changes verified') && !document.querySelector('.coordination-progress')", 90000);
-    await app.until("document.body.innerText.includes('0 of 6 authorized model turns left')", 10000);
+    await app.until("document.body.innerText.includes('0 of 6 turns left')", 10000);
     result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
     await shots(app, caseRoot, result, 'verified');
     result.walkthrough.push('The corrective plan is checked again, a corrective writer repairs the pinned source, and a second separate read-only checker reruns the unchanged tests and verifies. Both budgets reach zero; the record keeps the first pass folded under Before automatic repair.');
   } else {
     await app.until(`document.body.innerText.includes(${JSON.stringify(BUDGET_STOP_SNIPPET)}) && !document.querySelector('.coordination-progress')`, 90000);
-    await app.until("document.body.innerText.includes('1 of 4 authorized model turns left')", 10000);
+    await app.until("document.body.innerText.includes('1 of 4 turns left')", 10000);
     result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
     await shots(app, caseRoot, result, 'budget-stop');
     result.walkthrough.push('The critique revises, but only one of four read turns remains: GoalPort explains the repair needs three model turns and one write turn, did not add turns, and launched no fifth turn. The incomplete edit stays on disk for inspection.');

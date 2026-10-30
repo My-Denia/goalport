@@ -297,7 +297,7 @@ await viewport(860, 900);
 await openDraft();
 await waitPanel();
 await setNavCollapsed(true);
-await until("Boolean(document.body.innerText.includes('3 of 6 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('3 of 6 turns left.'))");
 await screenshot(resolve(outDir, "rr-panel-active-scope-860.png"));
 
 // ② — in-flight states via deferred launches: planning…, checking…, and a
@@ -346,7 +346,7 @@ await waitPanel();
 await sendMessage(GOAL);
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-failed\"]'))");
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-continued\"]'))");
-await until("Boolean(document.body.innerText.includes('1 of 4 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('1 of 4 turns left.'))");
 await sweep("terminal-takeover", async (label) => {
   await screenshot(resolve(outDir, `rr-terminal-takeover-${label}.png`));
 });
@@ -356,7 +356,7 @@ await sweep("terminal-takeover", async (label) => {
 await viewport(1020, 900);
 await setNavCollapsed(false);
 await click('button[aria-label^="Plan:"]');
-await until("Boolean(document.body.innerText.includes('1 of 4 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('1 of 4 turns left.'))");
 await viewport(860, 900);
 await setNavCollapsed(true);
 await screenshot(resolve(outDir, "rr-current-round-overlay-860.png"));
@@ -403,7 +403,7 @@ await until("Boolean(document.querySelector('button[aria-label=\"Save harness ac
 await screenshot(resolve(outDir, "rr-change-mode-860.png"));
 await fill("#authorization-turns", "6");
 await click('button[aria-label="Save harness access"]');
-await until("Boolean(document.body.innerText.includes('6 of 6 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('6 of 6 turns left.'))");
 await screenshot(resolve(outDir, "rr-exhausted-after-allow-860.png"));
 // ⑥ — Stop allowing: the finished round stays, its budget state is gone.
 await click('button[aria-label="Discard draft"]');
@@ -449,7 +449,7 @@ await release([PLAN_OK]);
 await until("(document.querySelector('.coordination-progress-activity')?.textContent ?? '').includes('Grok is checking')");
 await release([REVIEW_OK]);
 await until("Boolean(document.querySelector('.tl-event[data-kind=\"round-continued\"]'))");
-await until("Boolean(document.body.innerText.includes('3 of 6 authorized model turns left.'))");
+await until("Boolean(document.body.innerText.includes('3 of 6 turns left.'))");
 await screenshot(resolve(outDir, "walkthrough-5-terminal.png"));
 // Re-select the round in Plans so the mounted send draft closes (see ⑥).
 await viewport(1020, 900);

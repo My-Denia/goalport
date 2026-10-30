@@ -99,7 +99,7 @@ test('pr2 report stops on the default budget without a third turn and without ve
       { operation: 'plan-critique-checker', verdict: 'revise', evidence: { cliTurnCompleted: true, checker: { checkerKind: 'separate-read-only-node-process', pid: 2, noIndependentModelClaim: true }, negativeCasePresent: true, observedRequirement: true, parentPid: 1, testSha256: 'tests' } },
     ],
     finalScope: { remaining: 2, maxTurns: 4, write: { remaining: 1, maxTurns: 1, workspaceRoot: '/tmp/fixture' } },
-    screenshots: ['write-consent', 'critique', 'budget-stop'].flatMap(state => WIDTHS.map(width => ({ state, geometry: { text: state === 'budget-stop' ? 'Needs revision VERDICT: revise not enough access left for one more checked plan revision 2 of 4 authorized model turns left' : state === 'write-consent' ? 'rejects the plan itself write one revised plan finds unfinished work' : 'working', horizontalOverflow: false, drawerOpen: false }, viewport: { width }, pngWidth: width, pngHeight: 900, bytes: 20000 }))),
+    screenshots: ['write-consent', 'critique', 'budget-stop'].flatMap(state => WIDTHS.map(width => ({ state, geometry: { text: state === 'budget-stop' ? 'Needs revision VERDICT: revise not enough access left for one more checked plan revision 2 of 4 turns left' : state === 'write-consent' ? 'rejects the plan itself write one revised plan finds unfinished work' : 'working', horizontalOverflow: false, drawerOpen: false }, viewport: { width }, pngWidth: width, pngHeight: 900, bytes: 20000 }))),
     settledInvocations: Array.from({ length: 2 }, () => ({ invocationType: 'turn' })),
     artifacts: {
       ledger: Object.fromEntries(keys.map(key => [key, { messageDispatched: true }])), claims: keys.map(key => `claim-${key}`), unconsumedGrants: [],

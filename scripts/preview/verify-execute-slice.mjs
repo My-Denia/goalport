@@ -225,7 +225,7 @@ try {
     && verifiedFacts.changes?.includes("Changes — Codex") && verifiedFacts.changes.includes("Updated helper.ts and helper.test.ts")
     && verifiedFacts.verification?.includes("Independent verification — Claude") && verifiedFacts.verification.includes("VERDICT: verified"), JSON.stringify(verifiedFacts).slice(0, 400));
   check("dual counters update independently (read 1 of 4, write 1 of 2)",
-    verifiedFacts.budgets.some((t) => t.includes("1 of 4 authorized model turns left")) && verifiedFacts.budgets.some((t) => t.includes("1 of 2 write turns left")),
+    verifiedFacts.budgets.some((t) => t.includes("1 of 4 turns left")) && verifiedFacts.budgets.some((t) => t.includes("1 of 2 write turns left")),
     JSON.stringify(verifiedFacts.budgets));
   await geometryChecks("verified terminal");
   await closeViaUI("verified");
@@ -238,7 +238,7 @@ try {
   }))()`);
   check("making-changes names the writer and keeps both counters",
     makingFacts.activity?.includes("Codex") && makingFacts.activity?.includes("making changes")
-    && makingFacts.body.includes("2 of 4 authorized model turns left.") && makingFacts.body.includes("2 of 2 write turns left."),
+    && makingFacts.body.includes("2 of 4 turns left.") && makingFacts.body.includes("2 of 2 write turns left."),
     JSON.stringify({ activity: makingFacts.activity, tail: makingFacts.body.slice(-260) }));
   await geometryChecks("making-changes progress");
   await releaseHolds();
@@ -254,7 +254,7 @@ try {
   check("verifying names a DIFFERENT harness than the writer and decrements only the write counter",
     verifyingFacts.activity?.includes("Claude") && verifyingFacts.activity?.includes("verifying")
       && !verifyingFacts.activity?.includes("Codex")
-    && verifyingFacts.body.includes("2 of 4 authorized model turns left.") && verifyingFacts.body.includes("1 of 2 write turns left."),
+    && verifyingFacts.body.includes("2 of 4 turns left.") && verifyingFacts.body.includes("1 of 2 write turns left."),
     JSON.stringify({ activity: verifyingFacts.activity, tail: verifyingFacts.body.slice(-260) }));
   await geometryChecks("verifying progress");
   await releaseHolds();
@@ -294,7 +294,7 @@ try {
     budgets: Array.from(document.querySelectorAll('.coordination-budget')).map((e) => e.textContent),
   }))()`);
   check("no-write stop shows the honest sentence, no changes card, no write budget line",
-    noWriteFacts.sentence && !noWriteFacts.changes && !noWriteFacts.writeLine && noWriteFacts.budgets.some((t) => t.includes("2 of 4 authorized model turns left")),
+    noWriteFacts.sentence && !noWriteFacts.changes && !noWriteFacts.writeLine && noWriteFacts.budgets.some((t) => t.includes("2 of 4 turns left")),
     JSON.stringify(noWriteFacts));
   await geometryChecks("no-write-stop terminal");
   await closeViaUI("no-write-stop");
@@ -318,7 +318,7 @@ try {
   check("read-budget-2 stop sentence is exact",
     budget2Facts.stopReason === "Verification needs one more authorized read turn, so no workspace changes were sent.", JSON.stringify(budget2Facts.stopReason));
   check("read-budget-2: read counter 0 of 2, write budget untouched 2 of 2, no changes card or warning",
-    budget2Facts.budgets.some((t) => t.includes("0 of 2 authorized model turns left")) && budget2Facts.budgets.some((t) => t.includes("2 of 2 write turns left"))
+    budget2Facts.budgets.some((t) => t.includes("0 of 2 turns left")) && budget2Facts.budgets.some((t) => t.includes("2 of 2 write turns left"))
     && !budget2Facts.changes && !budget2Facts.warning, JSON.stringify(budget2Facts));
   await geometryChecks("read-budget2-stop terminal");
   await closeViaUI("read-budget2-stop");

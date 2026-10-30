@@ -118,7 +118,7 @@ export async function runExecutionScenario(id, app, caseRoot, fixture, result) {
     result.walkthrough.push('Send: plan Codex, independent review Claude, actual writer Codex making changes, different read-only Claude auditor verifying; progress screenshots show the real in-flight launches, with fixed offline reply delays only.');
   }
   await app.until(`document.body.innerText.includes(${JSON.stringify(scenario.terminal)}) && !document.querySelector('.coordination-progress')`, 60000);
-  await app.until(`document.body.innerText.includes('${id === 'b1' ? '3' : '4'} of 6 authorized model turns left')`, 10000);
+  await app.until(`document.body.innerText.includes('${id === 'b1' ? '3' : '4'} of 6 turns left')`, 10000);
   result.finalScope = await app.evaluate('window.goalportCore.coordinationScope()', true);
   await shots(app, caseRoot, result, id === 'b1' ? 'verified' : id === 'b2' ? 'no-write' : 'partial-failure');
   result.after = snapshotFixture(fixture, caseRoot, 'after');

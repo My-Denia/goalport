@@ -30,7 +30,7 @@ export function validateScenario(config) {
 const readJson = filename => JSON.parse(fs.readFileSync(filename, 'utf8'));
 const fileEvidence = filename => ({ path: filename, bytes: fs.statSync(filename).size, sha256: crypto.createHash('sha256').update(fs.readFileSync(filename)).digest('hex') });
 
-// ---- R2 (independent execution audit r1): the Harness access panel renders
+// ---- R2 (independent execution audit r1): the Agent access panel renders
 // the workspace-changes decision as a SECOND list. Two discovered harnesses now
 // produce four checkboxes (two read members plus two default-OFF write members)
 // and one harness produces two rows. Track A may only count and select READ
@@ -175,7 +175,7 @@ export async function runA1(app, caseRoot, result) {
   check('progressScopeHasNoWriteDimension', !!result.progressScope && result.progressScope.write === undefined);
   result.walkthrough.push('Send: Codex produced the plan; Claude is visibly checking it while the bounded offline delay holds its reply. The live scope carries read turns only — no write dimension was authorized.');
   await app.until("document.body.innerText.includes('Can be carried out')", 20000);
-  await app.until("document.body.innerText.includes('2 of 4 authorized model turns left')");
+  await app.until("document.body.innerText.includes('2 of 4 turns left')");
   result.scopeBeforeRevoke = await app.evaluate('window.goalportCore.coordinationScope()', true);
   check('scopeBudgetTwoOfFour', result.scopeBeforeRevoke?.remaining === 2 && result.scopeBeforeRevoke?.maxTurns === 4);
   check('authorizedScopeHasNoWriteDimension', !!result.scopeBeforeRevoke && result.scopeBeforeRevoke.write === undefined);

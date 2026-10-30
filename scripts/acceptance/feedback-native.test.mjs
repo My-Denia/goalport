@@ -73,7 +73,7 @@ test('c2 report stops on budget without a fifth turn and without verified claims
   const r = {
     fixtureRoot: '/tmp/fixture', before: { files: [] }, intermediate: { files: [] }, after: { files: [] },
     operations: [], finalScope: { remaining: 1, maxTurns: 4, write: { remaining: 1, maxTurns: 2, workspaceRoot: '/tmp/fixture' } },
-    screenshots: ['write-consent', 'making-changes', 'budget-stop'].flatMap(state => WIDTHS.map(width => ({ state, geometry: { text: state === 'budget-stop' ? 'Needs revision VERDICT: revise not enough access left for one more checked repair 1 of 4 authorized model turns left' : 'working', horizontalOverflow: false, drawerOpen: false }, viewport: { width }, pngWidth: width, pngHeight: 900, bytes: 20000 }))),
+    screenshots: ['write-consent', 'making-changes', 'budget-stop'].flatMap(state => WIDTHS.map(width => ({ state, geometry: { text: state === 'budget-stop' ? 'Needs revision VERDICT: revise not enough access left for one more checked repair 1 of 4 turns left' : 'working', horizontalOverflow: false, drawerOpen: false }, viewport: { width }, pngWidth: width, pngHeight: 900, bytes: 20000 }))),
     settledInvocations: Array.from({ length: 4 }, (_, n) => ({ invocationType: 'turn' })),
     artifacts: {
       ledger: Object.fromEntries(c2Keys.map(key => [key, { messageDispatched: true }])), claims: c2Keys.map(key => `claim-${key}`), unconsumedGrants: [],
