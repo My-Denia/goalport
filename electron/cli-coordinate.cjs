@@ -480,8 +480,8 @@ function instanceOf(command) {
 function promptDeliveryProblem(command, platform = process.platform) {
   if (!command || !("promptDelivery" in Object(command))) return null;
   if (command.promptDelivery !== "stdin" || roleOfCommandId(command.commandId) !== "audit" ||
-      instanceOf(command) !== "pi" || platform !== "linux" || command.sandboxPolicy?.type !== "readOnly") {
-    return "This prompt transport is only available for a read-only Pi audit on Linux, so nothing was sent.";
+      instanceOf(command) !== "pi" || !["linux", "win32"].includes(platform) || command.sandboxPolicy?.type !== "readOnly") {
+    return "This prompt transport is only available for a read-only Pi audit on Linux or Windows, so nothing was sent.";
   }
   return null;
 }
@@ -539,7 +539,8 @@ function turnSpec(command, env = process.env, platform = process.platform) {
       return {
         file: launch.file,
         cwd: worktree,
-        args: [...launch.prefixArgs, "-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", prompt],
+        args: [...launch.prefixArgs, "-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...(stdinBody ? [] : [prompt])],
+        ...(stdinBody ? { stdinBody } : {}),
       };
     }
     return {
