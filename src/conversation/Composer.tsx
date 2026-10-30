@@ -72,6 +72,7 @@ interface ComposerProps {
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSelectRuntime: (provider: string) => void;
   onStop: () => void;
+  onNewGoal?: () => void;
   onResume?: () => void;
 }
 
@@ -83,7 +84,7 @@ interface ComposerProps {
  * The textarea stays editable while a turn runs (drafting ahead is always
  * possible; concurrent sends are not).
  */
-export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop, onResume }: ComposerProps) {
+export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, busy, closingSession = false, retryLabel, chooserFocusSignal, onChange, onSubmit, onSelectRuntime, onStop, onResume }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const held = snapshot.stopResponsibility?.writeResponsibility === "held";
@@ -97,6 +98,7 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
     && !closingSession && !turn.canStop && !pending
     && turn.actions?.includes("resume-session") === true;
   const turnProblem = turnErrorCopy(turn);
+  const ended = !turn.canSend && !turn.canStop && !reconciling && Boolean(turn.reason?.includes("no send is offered"));
 
   // One input layer, one copy: auto-grow, IME-safe Enter and focus-on-goal
   // switch live in useComposerInput, shared with the draft composer.
@@ -183,7 +185,9 @@ export function Composer({ focusKey, draft, snapshot, runtime, turn, busy, closi
                 <span aria-hidden="true">◌</span> {turn.state === "stopping" ? "Stopping…" : "Starting…"}
               </button>
             ) : (
-              <button className="send-button" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
+              ended && onNewGoal ? (
+              <button className="send-button" type="button" onClick={onNewGoal}><span>New goal</span></button>
+            ) : <button className="send-button" type="submit" aria-label={retryLabel ?? "Send message"} disabled={!canSubmit}>
                 <span>{busy ? "Sending…" : (retryLabel ?? "Send")}</span>
                 <span className="send-arrow" aria-hidden="true">↗</span>
               </button>

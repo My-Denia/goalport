@@ -52,7 +52,8 @@ it("a running workspace check stays beside its goal and never takes over the des
   expect(screen.queryByRole("region", { name: "Background goal" })).toBeNull();
   expect(screen.getByRole("button", { name: "Stop review" })).toBeTruthy();
   // A long command log must not squeeze the conversation and this button out of view.
-  expect(screen.getByText("Workspace results").closest("details")?.open).toBe(false);
+  expect(screen.getByText("Files changed").closest("details")?.open).toBe(false);
+  expect(document.querySelector(".composer-hint")?.textContent).not.toMatch(/background goal|when it finishes/);
 });
 
 it.each(["unconfirmed", "running"] as const)("desktop interrupted live-read allowance (%s) can be left without replaying or releasing its held folder", async state => {

@@ -176,7 +176,7 @@ describe("GoalPort preview", () => {
     // The conversation is the product conversation: user message + grouped
     // activity + runtime reply. No raw lifecycle events.
     expect(screen.getByText("Summarize the workspace and list the open risks.")).toBeTruthy();
-    expect(screen.getByText(/activity updates/i)).toBeTruthy();
+    expect(screen.getByText(/\d+ steps?$/i)).toBeTruthy();
     expect(screen.queryByText(/Attempt updated/i)).toBeNull();
     expect(screen.queryByText(/Plan accepted/i)).toBeNull();
     // Runtime catalog lives behind the composer chooser, not on the surface.

@@ -31,7 +31,7 @@ function CheckMessage({text,pending}:{text:string;pending:boolean}) {
   return <div role="alert"><p>{plain?text:pending?"We couldn't confirm Pi got this. Check on it and it won't be sent twice.":"Pi can't review this right now. Your conversation is safe."}</p>{!plain?<details><summary>Technical details</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:160,overflow:'auto'}}>{text}</pre></details>:null}</div>;
 }
 /** User sees every shared byte before choosing one separate readonly check. */
-export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBusy}:{campaignId?:string;target:NativeCheckTarget|null;eligible:boolean;job:BackgroundStatus|null;onJob:(job:BackgroundStatus)=>void;onBusy:(busy:boolean)=>void}) {
+export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBusy,onAskCodex}:{campaignId?:string;target:NativeCheckTarget|null;eligible:boolean;job:BackgroundStatus|null;onJob:(job:BackgroundStatus)=>void;onBusy:(busy:boolean)=>void;onAskCodex?:(text:string)=>void}) {
   const campaign=target?.campaignId ?? campaignId ?? '';
   const [pending,setPending]=useState<PendingCheck|null>(pendingCheck);
   const [workspace,setWorkspace]=useState<string|null>(null);
@@ -107,7 +107,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
       {starting?<p role="status">Sending to Pi. This can take a minute.</p>:null}
       <div className="dialog-actions"><button type="button" className="button button-outline" disabled={busy||unknown} onClick={()=>changeOpen(false)}>Cancel</button><button type="button" className="button button-primary" disabled={busy||(!pending&&!material)} onClick={()=>{void start();}}>{starting?'Sending…':unknown?'Check on it':'Send to Pi'}</button></div>
     </GoalLayer>
-    {owns && job?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}}/>:null}
+    {owns && job?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}} onAskCodex={onAskCodex}/>:null}
     {owns&&holding?null:<button type="button" className="button button-small button-outline" disabled={busy||(!pending&&(!target||!eligible||holding))} onClick={()=>{setOpen(true);if(!pending){request.current='native-check-'+crypto.randomUUID();void prepare();}}}>{starting?'Sending to Pi…':pending?'Check on your earlier request':'Ask Pi to review'}</button>}
     {!open && error?<CheckMessage text={error} pending={Boolean(pending)}/>:null}
     {saved.filter(s=>s.requestId!==job?.requestId).map(s=><details key={s.requestId}><summary>Pi's review · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · earlier turn':''}</summary><PiReview text={s.auditText ?? ''} id={s.requestId}/><details><summary>What Pi was sent</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}

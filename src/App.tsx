@@ -1095,20 +1095,12 @@ function App() {
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
   const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
-    || nativeCheckBusy || Boolean(nativeCheckJob?.active && !nativeCheckJob.acknowledgedStuckAt) || (linuxNativeView && (linuxCoordinationLive || sidebarUnconfirmed))
+    || (linuxNativeView && ((linuxCoordinationLive && !currentWork?.nativeCheckTarget) || sidebarUnconfirmed))
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
   const backgroundSlotSentence = !candidateChecked || !backgroundHolds.complete
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
-    : nativeCheckBusy
-    ? "Sending to Pi. You can send when the review finishes."
-    : nativeCheckJob?.active && !nativeCheckJob.live && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? "Pi's review stopped. Dismiss it above to keep going."
-    : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
-    ? nativeCheckJob.revoked ? "Stopping the review. You can send when it has finished." : "Pi is reviewing. You can send when it finishes."
-    : client.mode === "electron" && nativeCheckJob?.active
-    ? `Pi is reviewing ${nativeCheckJob.goal}. You can send when it finishes.`
     : "A background goal is still active. Return to it and stop it before starting another send; nothing was sent.";
   // Usable harness ids from the last discovery in this window, so an
   // environment failure can honestly say whether a round without that
@@ -3999,14 +3991,14 @@ function App() {
               <div className="conversation-heading">
                 <div className="conversation-heading-main">
                   <h2>{title || snapshot.activeTask.title}</h2>
-                  <p>{activeCampaign?.goal ?? ""}</p>
+                  {activeCampaign?.goal && activeCampaign.goal.trim() !== product?.items.find(item => item.kind === "user-message")?.body.trim() ? <p>{activeCampaign.goal}</p> : null}
                 </div>
                 <span className={`task-state task-state-${taskState.tone}`}>{taskState.label}</span>
               </div>
 
               {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
                 <details className="native-turn-results">
-                  <summary>Workspace results</summary>
+                  <summary>Files changed</summary>
                   <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
                 </details>
               ) : null) : <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />}
@@ -4037,6 +4029,7 @@ function App() {
                   eligible={Boolean(snapshot.turnResults?.length) && ['waiting','completed'].includes(snapshot.attempt.state) && product.turn.state === 'completed' && !product.turn.canStop && snapshot.turnResults?.[snapshot.turnResults.length-1]?.replyState === 'completed' && !backgroundSlotBlocked}
                   job={nativeCheckJob?.nativeCheckTarget?.campaignId===snapshot.activeCampaignId ? nativeCheckJob : null}
                   onBusy={setNativeCheckBusy}
+                  onAskCodex={text=>{setCampaignDrafts(current=>({...current,[draftCampaignId]:text}));}}
                   onJob={job=>{setNativeCheckJob(job);setSelectionRefresh(v=>v+1);}}
                 /> : null}
                 {anchor.unseenCount > 0 ? (
@@ -4082,6 +4075,7 @@ function App() {
                 chooserFocusSignal={chooserFocusSignal}
                 onChange={updateVisibleCampaignDraft}
                 onSubmit={handleSend}
+                onNewGoal={() => { void handleNewGoal(); }}
                 onSelectRuntime={(provider) => { void selectRuntime(provider); }}
                 onStop={() => { void handleStop(); }}
                 onResume={(conversationHeldByBackground || backgroundSlotBlocked)

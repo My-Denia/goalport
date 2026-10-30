@@ -49,7 +49,7 @@ it("keeps native chat primary by folding saved workspace results without discard
   window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/goals/campaign-native");
   server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}]});
   render(<App />);
-  const summary = await screen.findByText("Workspace results");
+  const summary = await screen.findByText("Files changed");
   const disclosure = summary.closest("details")!;
   expect(disclosure.open).toBe(false);
   expect(disclosure.querySelector('[aria-label="Results"]')).not.toBeNull();

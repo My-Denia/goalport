@@ -88,6 +88,15 @@ it('a review saved before the prompt changed still reads, and new requests lead 
  expect(old.exactPrompt).not.toContain('Start with one plain sentence');expect(material.exactPrompt).toContain('Start with one plain sentence');expect(parseNativeCheckMaterial(old)).toEqual(old);
 });
 
+it('a review can go straight to Codex as an editable draft, with nothing sent',()=>{
+ const onAskCodex=vi.fn();render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'One claim is not shown.'}}} as never} onStopAllowing={()=>{}} onAskCodex={onAskCodex}/>);
+ fireEvent.click(screen.getByRole('button',{name:'Ask Codex about this'}));expect(onAskCodex).toHaveBeenCalledTimes(1);expect(onAskCodex.mock.calls[0][0]).toContain('One claim is not shown.');
+});
+
+it('a running review invites the user to keep working',()=>{
+ render(<BackgroundCoordinationStatus job={{...job,requestId:'r'} as never} onStopAllowing={()=>{}}/>);expect(screen.getByText(/Keep working or close this window/)).toBeTruthy();
+});
+
 it('a returned review leads with its first sentence and folds the rest',()=>{
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'The changes match what Codex reported.\n\n## Detail\n\nLong working.'}}} as never} onStopAllowing={()=>{}}/>);
  const lead=screen.getByText('The changes match what Codex reported.');expect(lead.closest('details')).toBeNull();expect(screen.getByText('Long working.').closest('details')).toBeTruthy();expect(screen.getByRole('heading',{name:"Pi's review"})).toBeTruthy();expect(screen.queryByText(/\/fixture/)).toBeNull();

@@ -37,9 +37,9 @@ function pidGone(pid) {
   try { process.kill(pid, 0); return false; }
   catch (error) { return error?.code === "ESRCH"; }
 }
-// Pi has no write path in a workspace check, so an unconfirmed one protects nothing.
-function leftReadOnlyCheck(facts) {
-  return !!facts?.acknowledgedStuckAt && !!facts.admission?.nativeCheckTarget && facts.admission.writeAuthorization === null;
+// Pi has no write path in a workspace check, so it never needs to hold back the user's own work.
+function readOnlyCheck(facts) {
+  return !!facts?.admission?.nativeCheckTarget && facts.admission.writeAuthorization === null;
 }
 function durableTerminal(facts) {
   return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
@@ -74,6 +74,7 @@ function createBackgroundHost(options) {
   const platform = options.platform ?? process.platform;
   const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready(), platform });
   let starting = false;
+  let startingCheck = false;
   let lastJobId = null;
   function jobIds() {
     const root = path.join(options.directory(), "coordination-jobs", "jobs");
@@ -86,14 +87,15 @@ function createBackgroundHost(options) {
   }
   function outstanding(workspaceRoot) {
     const s = store();
-    if (starting || s.getActiveStatus()) return true;
+    const active = s.getActiveStatus();
+    if ((starting && !startingCheck) || (active && !readOnlyCheck(active))) return true;
     // A missing pointer is not proof that an earlier owner/tools stopped.
     // Leaving an unconfirmed job frees the slot pointer only. The same folder
     // stays held. An unknown caller folder fails closed.
     const caller = workspaceIdentity(workspaceRoot, platform);
     for (const id of jobIds()) {
       const facts = s.getStatus(id);
-      if (confirmedTerminal(facts) || leftReadOnlyCheck(facts)) continue;
+      if (confirmedTerminal(facts) || readOnlyCheck(facts)) continue;
       if (!facts.acknowledgedStuckAt) return true;
       const held = workspaceIdentity(facts.admission?.workspacePath, platform);
       if (caller === null || held === null || held === caller) return true;
@@ -105,17 +107,18 @@ function createBackgroundHost(options) {
   function heldWorkspaces(candidate) {
     const holds = [];
     let complete = true;
-    let globalBlock = starting;
+    let globalBlock = starting && !startingCheck;
     try {
       const s = store();
-      if (s.getActiveStatus()) globalBlock = true;
+      const active = s.getActiveStatus();
+      if (active && !readOnlyCheck(active)) globalBlock = true;
       const root = path.join(options.directory(), "coordination-jobs", "jobs");
       const entries = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }) : [];
       for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
         if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) { complete = false; continue; }
         try {
           const facts = s.getStatus(entry.name);
-          if (confirmedTerminal(facts) || leftReadOnlyCheck(facts)) continue;
+          if (confirmedTerminal(facts) || readOnlyCheck(facts)) continue;
           if (!facts.acknowledgedStuckAt) { globalBlock = true; continue; }
           const workspacePath = facts.admission?.workspacePath;
           if (!workspaceIdentity(workspacePath, platform)) { complete = false; continue; }
@@ -161,6 +164,7 @@ function createBackgroundHost(options) {
     if (input?.backgroundConsent !== true) throw codedRefusal("background-consent-required", "Keep working after closing must be explicitly selected.");
     if (starting) throw codedRefusal("background-start-in-progress", "A background start is already in progress. Try again in a moment.");
     starting = true;
+    startingCheck = !!input?.nativeCheckTarget;
     try {
       try {
         if (options.ordinaryScope()) throw codedRefusal("background-scope-conflict", "Stop this window's harness access before starting a goal that keeps working after closing.");
@@ -346,4 +350,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, leftReadOnlyCheck, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };
+module.exports = { createBackgroundHost, readOnlyCheck, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };
