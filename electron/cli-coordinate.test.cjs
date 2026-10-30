@@ -825,6 +825,29 @@ function writeCommand(instanceId, model, commandId = `coordinate-execute-${insta
   };
 }
 
+for (const failedBaseline of [false, true]) test(`cancellation during asynchronous execution baseline (failure=${failedBaseline}) starts no CLI and is not replayed`, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-cancel-baseline-"));
+  const input = writeCommand("codex", "gpt-6.1-sol", `coordinate-execute-cancel-baseline-${failedBaseline}`);
+  writeGrant(directory, input.commandId);
+  let cancelled = false, spawns = 0, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const options = { stateDir: directory, cancelled: () => cancelled,
+    captureBaseline: async () => { entered(); await gate; if (failedBaseline) throw Error("synthetic baseline failure"); return null; },
+    spawnTurn: async () => { spawns++; return {code:0,stdout:'{"type":"agent_message","text":"must not run"}'}; } };
+  try {
+    const pending = runCliTurn(input, options);
+    await started; cancelled = true; release();
+    const result = await pending;
+    assert.equal(spawns, 0);
+    assert.equal(result.ok, false); assert.equal(result.messageDispatched, false);
+    assert.match(result.errorText, /replaced/i);
+    const again = await runCliTurn(input, { ...options, cancelled: () => false });
+    assert.deepEqual(again, result); assert.equal(spawns, 0);
+    assert.equal(fs.existsSync(path.join(directory, "send-authorization")), false);
+  } finally { fs.rmSync(directory, {recursive:true,force:true}); }
+});
+
 test("roleOfCommandId classifies the closed prefix set and nothing else", () => {
   assert.equal(roleOfCommandId("coordinate-plan-abc123"), "plan");
   assert.equal(roleOfCommandId("coordinate-review-abc123"), "review");

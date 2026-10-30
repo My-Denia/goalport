@@ -961,6 +961,13 @@ async function runCliTurn(command, options = {}) {
       baseline = null;
     }
   }
+  // Baseline capture yields before any child is registered. Cancellation during
+  // that await must use the same proven-unsent path as cancellation before it.
+  if (options.cancelled?.()) {
+    const replaced = { ok: false, text: "", errorText: REPLACED, messageDispatched: false };
+    finishTurn(stateDir, commandId, replaced);
+    return replaced;
+  }
   const spawnTurn = options.spawnTurn ?? defaultSpawn;
   let spawned;
   try {
