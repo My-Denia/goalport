@@ -581,6 +581,9 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   margin: 0 0 8px; padding-left: 20px;
 }
 .tl-agent-body li, .tl-system-body li, .tl-compact-body li { margin: 2px 0; }
+.md-table { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
+.md-table table { border-collapse: collapse; font-size: 13px; }
+.md-table th, .md-table td { padding: 5px 9px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
 
 .md-code-block {
   margin: 6px 0; border: 1px solid var(--line); border-radius: 8px;

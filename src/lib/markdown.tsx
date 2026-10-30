@@ -11,6 +11,11 @@ import { useState, type ReactNode } from "react";
 
 const FENCE = /^```/;
 const HEADING = /^(#{1,3})\s+(.*)$/;
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
 const LIST_ITEM = /^[-*]\s+(.*)$/;
 const ORDERED_ITEM = /^\d+[.)]\s+(.*)$/;
 const INLINE_TOKEN = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]+\))/g;
@@ -132,6 +137,24 @@ export function renderMarkdownBody(body: string, keyPrefix: string): ReactNode[]
     if (line.trim() === "") {
       flushParagraph();
       flushList();
+      continue;
+    }
+    if (line.includes("|") && TABLE_RULE.test(lines[0] ?? "") && (lines[0] as string).includes("-")) {
+      flushParagraph();
+      flushList();
+      lines.shift();
+      const head = tableCells(line);
+      const rows: string[][] = [];
+      while (lines.length > 0 && (lines[0] as string).includes("|")) rows.push(tableCells(lines.shift() as string));
+      const key = `${keyPrefix}-t${index++}`;
+      blocks.push(
+        <div className="md-table" key={key}>
+          <table>
+            <thead><tr>{head.map((cell, at) => <th key={at}>{renderInline(cell, `${key}-h${at}`)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, at) => <tr key={at}>{head.map((_, column) => <td key={column}>{renderInline(row[column] ?? "", `${key}-${at}-${column}`)}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+      );
       continue;
     }
     const headingMatch = HEADING.exec(line);
