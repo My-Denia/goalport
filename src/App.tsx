@@ -2370,7 +2370,14 @@ function App() {
       setActiveNotice({ sentence: backgroundSlotSentence });
       return;
     }
-    const turn = product?.turn;
+    let live = snapshot;
+    const recoverable = product?.turn.actions?.includes("resume-session") || product?.turn.reasonCode === "provider-exited";
+    if (!retrying && !product?.turn.canSend && recoverable && draft.trim()) {
+      const recovered = await recoverSessionForSend();
+      if (!recovered) return;
+      live = recovered;
+    }
+    const turn = live.productConversation?.turn;
     if (!retrying && !turn?.canSend) {
       setActiveNotice({ sentence: turn?.reason || "Sending is not available for this conversation right now." });
       return;
@@ -2380,9 +2387,9 @@ function App() {
     const message = retainedIntent?.message ?? submittedDraft.trim();
     if (!message) return;
     const target = {
-      campaignId: retainedIntent?.campaignId ?? snapshot.activeCampaignId,
-      taskId: snapshot.activeTask.id,
-      attemptId: retainedIntent?.attemptId ?? persistedAttemptId(snapshot.attempt.id) ?? snapshot.attempt.id,
+      campaignId: retainedIntent?.campaignId ?? live.activeCampaignId,
+      taskId: live.activeTask.id,
+      attemptId: retainedIntent?.attemptId ?? persistedAttemptId(live.attempt.id) ?? live.attempt.id,
       selection: selectionIntent.current
     };
     const targetKey = commandTargetKey(target.campaignId, target.taskId, target.attemptId);
@@ -2642,24 +2649,24 @@ function App() {
     }
   }
 
-  async function handleResumeSession() {
+  async function handleResumeSession(from: CoreSnapshot = snapshot): Promise<CoreSnapshot | null> {
     if (conversationHeldByBackground) {
       setActiveNotice({ sentence: HELD_CONVERSATION_SENTENCE });
-      return;
+      return null;
     }
     if (backgroundSlotBlocked) {
       setActiveNotice({ sentence: backgroundSlotSentence });
-      return;
+      return null;
     }
-    const attemptId = persistedAttemptId(snapshot.attempt.id);
-    if (!client.resumeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
-      || !attemptId || !product?.turn.actions?.includes("resume-session")) {
+    const attemptId = persistedAttemptId(from.attempt.id);
+    if (!client.resumeSession || from.connection !== "connected" || from.stopResponsibility?.writeResponsibility === "held"
+      || !attemptId || !from.productConversation?.turn.actions?.includes("resume-session")) {
       setActiveNotice({ sentence: "This session cannot be resumed right now. Check its status in details." });
-      return;
+      return null;
     }
     const viewIntent = selectionIntent.current;
     const next = await client.resumeSession(attemptId);
-    if (viewIntent !== selectionIntent.current) return;
+    if (viewIntent !== selectionIntent.current) return null;
     setSnapshot(next);
     // Preview has no Core command receipt. A missing receipt there is not a
     // failed resume; the session state below is the result.
@@ -2675,13 +2682,26 @@ function App() {
       const sentence = turn?.reason || "Session is starting again. Send a message to continue. Earlier messages will not be sent again.";
       resumeWatch.current = { attemptId: next.attempt.id, sentence };
       setActiveNotice({ sentence });
-    } else if (next.attempt.id === attemptId && next.productConversation?.session?.state === "attached") {
+    } else if (next.productConversation?.session?.state === "attached") {
       resumeWatch.current = null;
-      setActiveNotice({ sentence: "Runtime session resumed. You can continue this goal." });
+      setActiveNotice(null);
     } else {
       resumeWatch.current = null;
       setActiveNotice({ sentence: turn?.reason || "Session resume was not confirmed. Check its status in details." });
     }
+    return failure ? null : next;
+  }
+
+  // Sending is the one way to carry on: a session that ended comes back on its own.
+  async function recoverSessionForSend(): Promise<CoreSnapshot | null> {
+    let current = snapshot;
+    const turn = current.productConversation?.turn;
+    const attemptId = persistedAttemptId(current.attempt.id);
+    if (turn?.reasonCode === "provider-exited" && turn.actions?.includes("close-session") && attemptId && client.closeSession) {
+      current = await client.closeSession(attemptId);
+      setSnapshot(current);
+    }
+    return handleResumeSession(current);
   }
 
   async function handleReconnect() {

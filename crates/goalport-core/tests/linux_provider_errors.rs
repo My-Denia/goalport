@@ -294,6 +294,18 @@ fn completed_turn_after_core_restart_offers_exact_resume_without_prompt_replay()
     assert_eq!(fs::read_to_string(workspace.path().join("turn-count")).unwrap(), "1");
     assert_eq!(fs::read_to_string(workspace.path().join("turn-starts")).unwrap().lines().count(), 1);
     accepted(&server, "close-resumed", "close_session", json!({"attemptId":attempt_id}));
+
+    // A closed conversation is never a dead end: the same thread carries on.
+    let closed = accepted(&server, "closed-view", "snapshot", json!({}));
+    assert!(closed["productConversation"]["turn"]["actions"].as_array().unwrap().iter().any(|action| action == "resume-session"), "{closed}");
+    let again = request(&server, "resume-closed", "resume_native_session", json!({"attemptId":attempt_id}));
+    assert_eq!(again["ok"], true, "closed Codex must resume: {again}");
+    assert_eq!(fs::read_to_string(workspace.path().join("resume-requested-thread")).unwrap(), "local-thread");
+    let carried_on = accepted(&server, "after-closed-resume", "snapshot", json!({}));
+    assert_ne!(carried_on["attempt"]["id"], attempt_id);
+    assert_eq!(carried_on["productConversation"]["session"]["state"], "attached");
+    assert_eq!(carried_on["productConversation"]["turn"]["canSend"], true);
+    assert_eq!(fs::read_to_string(workspace.path().join("turn-count")).unwrap(), "1");
 }
 
 #[test]

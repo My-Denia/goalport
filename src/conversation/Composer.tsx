@@ -91,8 +91,9 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
   const controlUnavailable = snapshot.bounds?.projectionUnavailable === true;
   const connected = snapshot.connection === "connected";
   const reconciling = Boolean(retryLabel);
+  const canCarryOn = !turn.canStop && ["session-closed", "session-detached", "provider-exited"].includes(turn.reasonCode ?? "");
   const canSubmit = draft.trim().length > 0 && connected && !busy
-    && (reconciling || (!held && turn.canSend));
+    && (reconciling || (!held && (turn.canSend || canCarryOn)));
   const pending = turn.state === "starting" || turn.state === "stopping";
   const canResume = Boolean(onResume) && connected && !held && !controlUnavailable
     && !closingSession && !turn.canStop && !pending
@@ -120,8 +121,8 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
     ? "Some tools may still be running. Your draft stays here while the workspace is protected."
     : !connected
       ? "Reconnect to send. Your draft stays in this window."
-      : canResume
-      ? "Resume continues this session. Earlier messages stay put."
+      : canCarryOn
+      ? "Send a message to pick up where you left off."
       : !turn.canSend
         ? turnProblem || "Sending is not available right now."
         : "Enter to send · Shift+Enter for a new line";
@@ -168,7 +169,7 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, turn, 
               >
                 <span aria-hidden="true">■</span> Stop
               </button>
-            ) : canResume ? (
+            ) : canResume && !draft.trim() ? (
               <button className="send-button" type="button" aria-label="Resume session" onClick={onResume} disabled={busy}>
                 <span>Resume session</span>
               </button>
