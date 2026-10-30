@@ -180,7 +180,7 @@ export async function runA1(app, caseRoot, result) {
   check('scopeBudgetTwoOfFour', result.scopeBeforeRevoke?.remaining === 2 && result.scopeBeforeRevoke?.maxTurns === 4);
   check('authorizedScopeHasNoWriteDimension', !!result.scopeBeforeRevoke && result.scopeBeforeRevoke.write === undefined);
   for (const width of SCENARIOS.a1.widths) result.screenshots.push(await app.screenshot(caseRoot, 'terminal', width));
-  check('allShotsNontrivial', result.screenshots.length === 7 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === s.requested.width));
+  check('allShotsNontrivial', result.screenshots.length === 7 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === Math.round(s.requested.width * (s.viewport?.devicePixelRatio || 1))));
   check('shotMarkers', result.screenshots.every(s => s.geometry.text.includes(s.state === 'authorization' ? 'Nothing is sent until you press Send' : s.state === 'progress' ? 'Claude is checking' : 'Can be carried out')));
   check('drawerClosedAt860', result.screenshots.filter(s => s.requested.width === 860).every(s => !s.geometry.drawerOpen));
   check('nativeLayoutAndControlsFit', result.screenshots.every(s => !s.geometry.horizontalOverflow && s.layout.grid <= s.viewport.width + 1 && s.geometry.newGoal?.inside && s.geometry.newGoal?.hit && (s.state !== 'authorization' || (s.geometry.send?.inside && s.geometry.send?.hit)) && (s.state !== 'terminal' || (s.geometry.stop?.inside && s.geometry.stop?.hit))));
@@ -333,7 +333,7 @@ export async function runA2(app, caseRoot, result) {
   check('useAgainRediscoveredSelectable', after.codexSelectable && after.claudeSelectable && after.noBlockedRows && after.noBlockedText && after.freshRoundNotReplayed);
   result.screenshots.push(await app.screenshot(caseRoot, 'use-again', 1020));
   result.walkthrough.push('Use again: GoalPort forgets the machine-wide block. The finished round stays in Plans as failed; a fresh New goal shows Codex selectable again, with no hidden retry and no replay of the failed round.');
-  check('allShotsNontrivial', result.screenshots.length === 4 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === s.requested.width));
+  check('allShotsNontrivial', result.screenshots.length === 4 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === Math.round(s.requested.width * (s.viewport?.devicePixelRatio || 1))));
 }
 
 // a3: both wrapper names stay shadowed (D-A5); the Claude stub's probe answers
@@ -363,7 +363,7 @@ export async function runA3(app, caseRoot, result) {
   check('nothingAuthorizedOrWritten', result.scopeAfterRefusal === null && Object.keys(result.artifacts.ledger).length === 0 && result.artifacts.claims.length === 0 && result.artifacts.unconsumedGrants.length === 0 && (Array.isArray(result.artifacts.records) ? result.artifacts.records.length === 0 : true) && (result.artifacts.health === null || Object.keys(result.artifacts.health).length === 0));
   // Nothing is written after the refusal, so the final snapshot is the same one.
   result.artifactsFinal = result.artifacts;
-  check('allShotsNontrivial', result.screenshots.length === 1 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === s.requested.width));
+  check('allShotsNontrivial', result.screenshots.length === 1 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === Math.round(s.requested.width * (s.viewport?.devicePixelRatio || 1))));
 }
 
 // a4: Codex plans, Claude's review returns an empty stdout exit 0 → stopCode
@@ -386,7 +386,7 @@ export async function runA4(app, caseRoot, result) {
   result.artifacts = collectArtifacts(caseRoot);
   for (const [id, value] of Object.entries(noTextStopAssertions(result.artifacts))) check(id, value);
   result.artifactsFinal = result.artifacts;
-  check('allShotsNontrivial', result.screenshots.length === 3 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === s.requested.width));
+  check('allShotsNontrivial', result.screenshots.length === 3 && result.screenshots.every(s => s.bytes > 10000 && s.pngWidth === Math.round(s.requested.width * (s.viewport?.devicePixelRatio || 1))));
 }
 
 export function noTextStopAssertions(artifacts) {

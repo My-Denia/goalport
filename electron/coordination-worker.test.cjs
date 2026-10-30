@@ -1,9 +1,13 @@
 const { test } = require("node:test");
+// Keep the additive lifecycle cases in the existing test:coordination entry.
+require("./live-read-once.test.cjs");
+const { randomUUID } = require("node:crypto");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createCoordinationJobStore } = require("./coordination-job.cjs");
+const { launchOne } = require("./coordinate-service.cjs");
 const { runWorker, coreRefusal } = require("./coordination-worker.cjs");
 const { readRecords } = require("./coordination-record.cjs");
 const engine = require("../dist/coordination-engine.cjs");
@@ -12,7 +16,6 @@ const providers = [
   { instanceId: "claude", displayName: "Claude", driver: "claudeAgent", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "subscription" }, models: [{ slug: "claude-opus-5-5", isDefault: true }] },
 ];
 async function scenario(t, options = {}) {
-  if (process.platform !== "linux") t.skip("worker control endpoint binds a real Linux Unix socket");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-test-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   delete require.cache[require.resolve("./coordination-scope.cjs")];
@@ -20,11 +23,17 @@ async function scenario(t, options = {}) {
   let authorizations = 0;
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), backgroundConsent: true });
+  const roster = (options.providers ?? providers).map(provider => options.piCapacity && provider.instanceId === "pi" ? { ...provider, auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: options.piCapacity, catalog: [{ provider: options.piCapacity.provider, model: options.piCapacity.model }], workspacePath: directory } } : provider);
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), ...(options.piCapacity ? { piCapacity: options.piCapacity } : {}), backgroundConsent: true });
+  if (options.storeDecorator) {
+    options.store = options.storeDecorator(options.store ?? store, start);
+  }
   const launches = [];
-  const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers }), prepare: async () => ({}), close() {}, run: async command => {
+  const runtime = { stateDir: path.join(directory, "harness-state"), discover: async () => ({ ok: true, providers: roster }), prepare: async () => ({}), close() {}, run: async command => {
     launches.push(command);
+    if (options.onLaunch) options.onLaunch(command, launches.length);
     if (options.revokeAt === launches.length) store.revoke(start.jobId);
+    if (options.runtimeRun) return options.runtimeRun(command, runtime.stateDir);
     const n = launches.length;
     const role = command.commandId.split("-")[1];
     const text = role === "review" ? (options.reviewAt?.[n] ?? "Execute this plan.\nVERDICT: carry-out") : role === "audit" ? `Tests checked.\nVERDICT: ${options.secondRevise || n === 4 ? "revise" : "verified"}` : role === "execute" ? "Changed fixture." : "A bounded plan.";
@@ -47,17 +56,104 @@ async function scenario(t, options = {}) {
     } };
   }
   let backgroundEngineInputValue;
-  const workerEngine = options.captureExecutionFeedback ? {
+  let requestCoordinationInputValue;
+  const workerEngine = options.captureExecutionFeedback || options.captureRequest ? {
     ...engine,
     backgroundEngineInput: input => { backgroundEngineInputValue = input; return engine.backgroundEngineInput(input); },
+    requestCoordination: (...args) => { requestCoordinationInputValue = args[0]; return engine.requestCoordination(...args); },
   } : engine;
-  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint: path.join(directory, "control.sock") }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, discover: async () => ({ ok: true, providers }), core: {
+  const controlEndpoint = process.platform === "win32" ? String.raw`\\.\pipe\goalport-worker-test-` + randomUUID() : path.join(directory, "control.sock");
+  if (options.consentGranted) fs.writeFileSync(path.join(directory, "background-send-consent.json"), JSON.stringify({ allowed: true, grantedAt: new Date().toISOString() }) + "\n");
+  if (typeof options.sentinel === "string") fs.writeFileSync(path.join(directory, "sentinel.txt"), options.sentinel);
+  const result = await runWorker({ directory, stateDir: runtime.stateDir, jobId: start.jobId, controlEndpoint }, { store: options.store ?? store, engine: workerEngine, scope: scopeAdapter, runtime, core: {
     invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
-  }, env: { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
-  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, backgroundEngineInputValue };
+  }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
+  return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue, requestCoordinationInputValue };
 }
+test("bound Pi own admission reaches engine, actual launch facts and saved requested projection without a provider", async t => {
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const r = await scenario(t, { providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, readOnly: true, captureRequest: true, runtimeRun: async command => ({ ok: true, messageDispatched: true, text: command.commandId.includes("review") ? "VERDICT: carry-out" : "A bounded fixture plan", ...(command.modelSelection.instanceId === "pi" ? { requestedPiCapacity: { provider: "Fixture", model: "alpha" } } : {}) }) });
+  assert.deepEqual(r.requestCoordinationInputValue.piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].piCapacity, piCapacity);
+  assert.deepEqual(r.records[0].requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.status.completedCommands[1].facts.requestedPiCapacity, { provider: "Fixture", model: "alpha" });
+  assert.deepEqual(r.launches[1].modelSelection, { instanceId: "pi", provider: "Fixture", model: "alpha" });
+});
+
+test("Linux worker derives capability after the closed builder; real stdin facts survive completed or pending command", { skip: process.platform !== "linux" }, async t => {
+  const { runCliTurn, defaultSpawn } = require("./cli-coordinate.cjs");
+  const pi = { ...providers[1], instanceId: "pi", displayName: "Pi", driver: "pi" };
+  const piCapacity = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  for (const unknown of [false, true]) {
+    let auditChild;
+    let childClosed;
+    let actualInput;
+    const ran = await scenario(t, {
+      providers: [providers[0], pi], allowedInstances: ["codex", "pi"], piCapacity, captureRequest: true,
+      runtimeRun: async (command, stateDir) => {
+        const role = command.commandId.split("-")[1];
+        if (role !== "audit") return { ok: true, messageDispatched: true, text: role === "review" ? "VERDICT: carry-out" : "Bounded plan and report", ...(role === "execute" ? { executionEvidence: { status: "available", complete: true, changed: true, beforeDiff: "before", afterDiff: "+real captured change\n".repeat(420) } } : {}) };
+        actualInput = command.initialMessage.text;
+        return runCliTurn(command, { stateDir, piCapacity, metadataExec: async () => ({ code: 0, stdout: "provider model context max-out thinking images\nFixture alpha 128K 16K yes yes\n" }), spawnTurn: spec => defaultSpawn({ ...spec, file: process.execPath,
+          args: ["-e", unknown ? "setInterval(()=>{},1000)" : "const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write('Read '+Buffer.concat(b).length+' host bytes.\\nVERDICT: verified'))"],
+          register(child) {
+            auditChild = child;
+            childClosed = new Promise(resolve => child.once("close", resolve));
+            if (unknown) throw Error("registered real child, then setup failed");
+          },
+        }) });
+      },
+    });
+    try {
+      assert.equal(ran.requestCoordinationInputValue.auditPromptTransport, "linux-pi-stdin");
+      assert.equal(Object.hasOwn(ran.backgroundEngineInputValue, "auditPromptTransport"), false);
+      assert.equal(Object.hasOwn(engine.backgroundEngineInput(ran.backgroundEngineInputValue), "auditPromptTransport"), false);
+      assert.equal(ran.launches.length, 4);
+      const inputBytes = Buffer.byteLength(actualInput);
+      assert.ok(inputBytes > 8192 && inputBytes <= 32768);
+      const facts = unknown ? ran.status.progress.partialResult : ran.status.completedCommands.at(-1).facts;
+      assert.deepEqual(facts.auditInputTransport, { instanceId: "pi", promptDelivery: "stdin", inputBytes, inputEnded: !unknown });
+      assert.equal(facts.dispatched, unknown ? null : true);
+      assert.equal(fs.existsSync(path.join(ran.directory, "harness-state", `claim-${ran.launches[3].commandId}`)), true);
+      const grantsFile = path.join(ran.directory, "harness-state", "send-authorization");
+      assert.equal(fs.existsSync(grantsFile) && fs.readFileSync(grantsFile, "utf8").includes(ran.launches[3].commandId), false);
+      assert.equal(ran.status.counters.readTurnsRemaining, 3);
+      if (unknown) {
+        assert.equal(ran.status.pendingCommand.commandId, ran.launches[3].commandId);
+        assert.equal(ran.status.completedCommands.length, 3);
+        assert.throws(() => ran.store.claimWorker(ran.jobId), /no replacement|already|unconfirmed/);
+      } else {
+        assert.equal(ran.status.pendingCommand, null);
+        assert.match(facts.text, new RegExp(`Read ${inputBytes} host bytes`));
+        assert.equal(ran.records[0].auditInputEvidenceCoverage.promptDelivery, "stdin");
+        assert.equal(ran.records[0].auditInputEvidenceCoverage.cropped, false);
+      }
+    } finally {
+      if (auditChild.exitCode === null && auditChild.signalCode === null) auditChild.kill("SIGKILL");
+      await childClosed;
+    }
+  }
+});
+
+test("one confirmed harness with write authorization stops before any workspace write and cannot be replayed", async t => {
+  const ran = await scenario(t, {
+    providers: [providers[0]],
+    allowedInstances: ["codex"],
+    writeInstances: ["codex"],
+    sentinel: "do-not-touch\n",
+  });
+  assert.equal(ran.launches.length, 0);
+  assert.equal(ran.launches.some((command) => command.sandboxPolicy?.type === "workspaceWrite"), false);
+  assert.equal(ran.records[0]?.stopReason, "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  assert.equal(ran.records[0]?.messageDispatched, false);
+  assert.equal(ran.status.pendingCommand, null);
+  assert.equal(fs.readFileSync(path.join(ran.directory, "sentinel.txt"), "utf8"), "do-not-touch\n");
+  assert.throws(() => ran.store.claimWorker(ran.jobId), /no replacement was started/);
+});
+
 test("a revocation before the worker claim settles stopped without contacting anything", async t => {
   // Windows-safe: the settlement path returns before the control endpoint,
   // Core, scopes or harnesses are ever touched, so no Unix socket is needed.
@@ -219,4 +315,91 @@ test("worker reconstruction passes all five historical feedback fields to backgr
   assert.deepEqual(r.backgroundEngineInputValue.executionFeedback, feedback);
   assert.deepEqual(Object.keys(r.backgroundEngineInputValue.executionFeedback), Object.keys(feedback));
   assert.equal(r.launches.some(command => feedback.previousCommandIds.includes(command.commandId)), false);
+});
+
+test("worker passes exact continuation descriptor to backgroundEngineInput and saves it in coordination record", async t => {
+  const continuation = {
+    parentRequestId: "parent-req-001",
+    rootRequestId: "root-req-001",
+    originalGoal: "Root original goal",
+    followUp: "Follow-up coordination text",
+  };
+  const r = await scenario(t, { continuation, captureExecutionFeedback: true });
+  assert.deepEqual(r.backgroundEngineInputValue.continuation, continuation);
+  assert.equal(r.records.length, 1);
+  assert.deepEqual(r.records[0].continuation, continuation);
+});
+
+// The packaged app has no GOALPORT_COORDINATE_SEND override. The worker must
+// use the durable profile consent the user granted; without it, nothing runs.
+test("worker runs with the durable profile consent when the env override is absent", async t => {
+  const r = await scenario(t, { env: {}, consentGranted: true });
+  assert.equal(r.result.status, "completed");
+  assert.equal(r.launches.length, 8);
+});
+test("worker dispatches nothing without durable consent and without the env override", async t => {
+  const r = await scenario(t, { env: {} });
+  assert.equal(r.launches.length, 0);
+  assert.notEqual(r.result.status, "completed");
+  assert.match(String(r.result.error || r.result.report?.stopReason || ""), /not enabled|consent/i);
+});
+test("a launch re-checks consent and refuses after it is revoked", async () => {
+  let ran = 0;
+  const runtime = { discover: async () => ({ ok: true, providers }), prepare: async () => ({}), run: async () => { ran += 1; return { ok: true, text: "plan", messageDispatched: true }; }, close() {} };
+  const command = () => ({ commandId: "coordinate-plan-codex", type: "goalport.coordinateTurn",
+    modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" }, runtimeMode: "approval-required",
+    approvalPolicy: "never", sandboxPolicy: { type: "readOnly" },
+    workspaceStrategy: { type: "existing_worktree", worktreePath: "C:\\work\\goal" }, initialMessage: { text: "Plan only." } });
+  const refused = await launchOne({}, runtime, command(), "generation", undefined, () => ({ allowed: false }));
+  assert.equal(refused.launched, false);
+  assert.equal(ran, 0);
+  assert.match(String(refused.errorText), /not authorized|allowed|consent/i);
+  const allowed = await launchOne({}, runtime, command(), "generation", undefined, () => ({ allowed: true }));
+  assert.equal(allowed.launched, true);
+  assert.equal(ran, 1);
+});
+
+test("a worker encountering stuck-acknowledged between turns settles stopped and releases workspace hold", async (t) => {
+  let ackAt = 2; // acknowledge before the second command (review) is recorded
+  let calls = 0;
+  let acknowledgedCalled = false;
+  const r = await scenario(t, {
+    reads: 4,
+    readOnly: false,
+    storeDecorator: (st, start) => {
+      const orig = st.recordPendingCommand;
+      return {
+        ...st,
+        recordPendingCommand: (jobId, ...args) => {
+          calls++;
+          if (calls === ackAt) {
+            acknowledgedCalled = true;
+            st.acknowledgeStuck(jobId);
+          }
+          return orig.call(st, jobId, ...args);
+        }
+      };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(acknowledgedCalled, true);
+  assert.equal(r.result.status, "stopped");
+  assert.equal(r.result.storageFailed, undefined);
+  assert.equal(r.launches.length, 1);
+
+  // Terminal state persisted
+  assert.equal(r.status.state, "stopped");
+  assert.equal(r.status.outcome?.status, "stopped");
+
+  // Same workspace hold is freed!
+  const nextSameFolder = r.store.startAdmission({
+    requestId: "second-send",
+    goal: "New attempt",
+    workspacePath: r.status.admission.workspacePath,
+    allowedInstances: ["codex"],
+    maxTurns: 2,
+    backgroundConsent: true,
+  });
+  assert.equal(nextSameFolder.ok, true);
+  assert.equal(nextSameFolder.created, true);
 });

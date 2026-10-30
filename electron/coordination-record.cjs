@@ -1,7 +1,9 @@
 "use strict";
 
 const fs = require("node:fs");
+const { normalizePiCapacity, normalizeRequestedPiCapacity } = require("./pi-capacity.mjs");
 const path = require("node:path");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
 const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
@@ -84,6 +86,80 @@ function roundEventsOf(value) {
   });
 }
 
+function executionEvidenceOf(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const status = typeof value.status === "string" ? value.status : "unavailable";
+  const complete = value.complete === true;
+  const changed = value.changed === true ? true : value.changed === false ? false : null;
+  const beforeDiff = typeof value.beforeDiff === "string" ? value.beforeDiff : null;
+  const afterDiff = typeof value.afterDiff === "string" ? value.afterDiff : null;
+  const reason = typeof value.reason === "string" ? value.reason : null;
+  const label = typeof value.label === "string" ? value.label : undefined;
+  const timedOutObservation = value.timedOutObservation === true ? true : undefined;
+  const truncated = value.truncated === true ? true : undefined;
+  const comparisonBaseline = value.comparisonBaseline && typeof value.comparisonBaseline === "object"
+    ? {
+        headCommit: typeof value.comparisonBaseline.headCommit === "string" ? value.comparisonBaseline.headCommit : null,
+        capturedAt: typeof value.comparisonBaseline.capturedAt === "string" ? value.comparisonBaseline.capturedAt : new Date().toISOString(),
+      }
+    : null;
+  const untrackedOf = (candidate) => Array.isArray(candidate)
+    ? candidate.flatMap((item) => {
+        if (!item || typeof item !== "object" || typeof item.path !== "string") return [];
+        return [{
+          path: item.path,
+          ...(typeof item.size === "number" ? { size: item.size } : {}),
+          ...(typeof item.content === "string" ? { content: item.content } : {}),
+          ...(typeof item.binary === "boolean" ? { binary: item.binary } : {}),
+          ...(typeof item.skipped === "string" ? { skipped: item.skipped } : {}),
+          ...(item.truncated === true ? { truncated: true } : {}),
+        }];
+      })
+    : [];
+  const untrackedFiles = untrackedOf(value.untrackedFiles);
+  const beforeUntrackedFiles = Array.isArray(value.beforeUntrackedFiles) ? untrackedOf(value.beforeUntrackedFiles) : undefined;
+
+  return {
+    status,
+    complete,
+    changed,
+    beforeDiff,
+    afterDiff,
+    ...(beforeUntrackedFiles === undefined ? {} : { beforeUntrackedFiles }),
+    untrackedFiles,
+    ...(typeof value.beforeUntrackedFilesOmitted === "number" ? { beforeUntrackedFilesOmitted: value.beforeUntrackedFilesOmitted } : {}),
+    ...(typeof value.untrackedFilesOmitted === "number" ? { untrackedFilesOmitted: value.untrackedFilesOmitted } : {}),
+    comparisonBaseline,
+    ...(reason !== null ? { reason } : {}),
+    ...(label !== undefined ? { label } : {}),
+    ...(timedOutObservation !== undefined ? { timedOutObservation } : {}),
+    ...(truncated !== undefined ? { truncated } : {}),
+  };
+}
+
+function auditCoverageOf(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (typeof value.totalEvidenceBytes !== "number" || typeof value.includedEvidenceBytes !== "number") return undefined;
+  return {
+    totalEvidenceBytes: value.totalEvidenceBytes,
+    includedEvidenceBytes: value.includedEvidenceBytes,
+    cropped: value.cropped === true,
+    promptBytes: typeof value.promptBytes === "number" ? value.promptBytes : 0,
+    ...(typeof value.promptBudgetBytes === "number" ? { promptBudgetBytes: value.promptBudgetBytes } : {}),
+    ...(value.promptDelivery === "stdin" || value.promptDelivery === "argv" ? { promptDelivery: value.promptDelivery } : {}),
+    ...(typeof value.windowsCmdWorstCaseChars === "number" ? { windowsCmdWorstCaseChars: value.windowsCmdWorstCaseChars } : {}),
+    ...(Array.isArray(value.croppedSections) ? { croppedSections: value.croppedSections.filter((item) => typeof item === "string") } : {}),
+  };
+}
+
+// Exact transport material is not trimmed: leading/trailing whitespace and
+// every crop marker are part of the host-delivered subset. Pi's piped-stdin
+// reader trims edge whitespace before constructing its model message.
+function auditInputTextOf(value) {
+  if (value === null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
 function coordinationRoundFactOf(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const planningHarness = nullableText(value.planningHarness);
@@ -133,6 +209,19 @@ function coordinationRoundFactOf(value) {
       return text ? [text] : [];
     }),
   };
+  let executionEvidence;
+  try {
+    executionEvidence = executionEvidenceOf(value.executionEvidence);
+  } catch {
+    executionEvidence = undefined;
+  }
+  let auditInputEvidenceCoverage;
+  try {
+    auditInputEvidenceCoverage = auditCoverageOf(value.auditInputEvidenceCoverage);
+  } catch {
+    auditInputEvidenceCoverage = undefined;
+  }
+  const auditInputEvidenceText = auditInputTextOf(value.auditInputEvidenceText);
   let roundEvents;
   try {
     roundEvents = roundEventsOf(value.roundEvents);
@@ -140,7 +229,14 @@ function coordinationRoundFactOf(value) {
     // Completed-event history is best-effort and never rejects the round fact.
     roundEvents = undefined;
   }
-  return { ...fact, ...(roundEvents === undefined ? {} : { roundEvents }) };
+  return {
+    ...fact,
+    ...(normalizeRequestedPiCapacity(value.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(value.requestedPiCapacity) } : {}),
+    ...(executionEvidence === undefined ? {} : { executionEvidence }),
+    ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
+    ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),
+    ...(roundEvents === undefined ? {} : { roundEvents }),
+  };
 }
 
 function feedbackHistoryOf(value) {
@@ -210,6 +306,19 @@ function normalize(input) {
     // the otherwise valid saved plan.
     roundEvents = undefined;
   }
+  let executionEvidence;
+  try {
+    executionEvidence = executionEvidenceOf(input.executionEvidence);
+  } catch {
+    executionEvidence = undefined;
+  }
+  let auditInputEvidenceCoverage;
+  try {
+    auditInputEvidenceCoverage = auditCoverageOf(input.auditInputEvidenceCoverage);
+  } catch {
+    auditInputEvidenceCoverage = undefined;
+  }
+  const auditInputEvidenceText = auditInputTextOf(input.auditInputEvidenceText);
   let feedbackHistory;
   try {
     feedbackHistory = feedbackHistoryOf(input.feedbackHistory);
@@ -225,6 +334,16 @@ function normalize(input) {
     // Optional plan-revision evidence degrades the same way: dropped, never
     // fatal to the rest of the saved record.
     planRevisionHistory = undefined;
+  }
+  let continuation;
+  if (input.continuation !== undefined) {
+    if (isValidContinuationDescriptor(input.continuation)) {
+      continuation = normalizeContinuationDescriptor(input.continuation);
+    } else {
+      // Malformed existing optional metadata must not be discarded or cause
+      // record rejection; raw field preserved for future read-time relation validator.
+      continuation = input.continuation;
+    }
   }
   return {
     requestId,
@@ -245,9 +364,15 @@ function normalize(input) {
     reviewQuota,
     messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory, planRevisionHistory),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
+    ...(executionEvidence === undefined ? {} : { executionEvidence }),
+    ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
+    ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),
     ...(roundEvents === undefined ? {} : { roundEvents }),
     ...(feedbackHistory === undefined ? {} : { feedbackHistory }),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
+    ...(continuation === undefined ? {} : { continuation }),
+    ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: normalizePiCapacity(input.piCapacity) ?? input.piCapacity } : {}),
+    ...(normalizeRequestedPiCapacity(input.requestedPiCapacity) ? { requestedPiCapacity: normalizeRequestedPiCapacity(input.requestedPiCapacity) } : {}),
     savedAt: savedAtOf(input.savedAt),
   };
 }
@@ -268,6 +393,12 @@ function readRecords(directory) {
 }
 
 function saveRecord(directory, input, clock = () => new Date().toISOString()) {
+  if (input && input.continuation !== undefined) {
+    if (!isValidContinuationDescriptor(input.continuation)) {
+      throw new Error("The continuation descriptor is malformed.");
+    }
+  }
+  if (input && Object.hasOwn(input, "piCapacity") && !normalizePiCapacity(input.piCapacity)) throw new Error("The requested Pi capacity is malformed.");
   const record = normalize(input);
   if (!record) {
     throw new Error("The plan could not be saved.");
@@ -283,4 +414,11 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
   return stamped;
 }
 
-module.exports = { readRecords, saveRecord };
+module.exports = {
+  normalizeRecord: normalize,
+  readRecords,
+  saveRecord,
+  isValidContinuationDescriptor,
+  normalizeContinuationDescriptor,
+  validatedContinuationOf,
+};

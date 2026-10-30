@@ -7,11 +7,11 @@ GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start 
 [![CI](https://github.com/My-Denia/goalport/actions/workflows/ci.yml/badge.svg)](https://github.com/My-Denia/goalport/actions/workflows/ci.yml)
 ![Version](https://img.shields.io/badge/version-1.0.0--rc.1-blue)
 ![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
+![Platform](https://img.shields.io/badge/platform-Windows%20desktop%20%7C%20Linux%20source-lightgrey)
 
-![GoalPort showing separate read and workspace-change consent before Send](docs/assets/screenshots/campaign-conversation.png)
+![GoalPort Linux New goal with Codex conversation explicitly selected](docs/assets/screenshots/linux-native-entry.png)
 
-<sub>Read consent and workspace changes are separate decisions.</sub>
+<sub>Current Linux workbench from source, with Codex conversation explicitly selected before sending. Coordinated work remains the default. The Windows release package is separate; permission and Runtime screenshots below show its desktop path.</sub>
 
 ## Why GoalPort
 
@@ -61,7 +61,7 @@ pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
 
 Data lives in `%APPDATA%\GoalPort\rc` (browser shell state under `%APPDATA%\GoalPort\electron\<profile key>`). The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
 
-Linux developers can run Core and operate it through the [Unix command client](docs/linux-development.md), including native Codex tasks and diagnostics. The browser preview uses synthetic data only.
+Linux developers can run the real local [browser workbench and Unix command client](docs/linux-development.md) from source, including coordinated goals, saved file-change evidence and explicit Continue/Stop. This is separate from the synthetic browser preview and is not a Linux installer.
 
 ## How it works
 
@@ -87,7 +87,7 @@ Details: [runtime integration](docs/runtimes.md).
 
 GoalPort is at **1.0.0-rc.1**, a release candidate.
 
-- The desktop package targets Windows x64 and is built from source, unsigned. Linux Core has a Unix socket development entry.
+- The desktop package targets Windows x64 and is built from source, unsigned. Linux source includes Core's Unix socket entry and a real local browser workbench.
 - Compatible profiles reopen, and supported imports make a backup first ([profile continuity](docs/profile-continuity.md)).
 - Runtime support: Grok admitted; Codex and Claude Code partial.
 - After a Claude Code Stop, conflicting work stays blocked until its processes have exited and the workspace is quiet.

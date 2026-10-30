@@ -1,5 +1,10 @@
+import { normalizePiCapacity, type PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import type { CoordinationWriteAuthorization, ExecutionFeedback } from "./coordinateGoal";
 import type { BackgroundStatus } from "./backgroundStatus";
+import {
+  type SavedTargetContinuation,
+  isValidContinuationDescriptor,
+} from "./continuation";
 
 /**
  * C2 background job contract: the typed admission input for the ONE
@@ -53,6 +58,7 @@ export interface BackgroundJobWriteScope {
  * background consent.
  */
 export interface BackgroundJobStartInput {
+  readonly piCapacity?: PiCapacitySelection;
   /**
    * Caller-stable id. Job identity and the engine send key derive from it —
    * never from history length — so a reattached UI and the running worker
@@ -80,6 +86,12 @@ export interface BackgroundJobStartInput {
    * Absent or null means this send revises nothing that already executed.
    */
   readonly executionFeedback?: ExecutionFeedback | null;
+  /**
+   * Optional continuation descriptor for continuing an existing saved target.
+   * Describes origin (parent, root, original goal, follow-up), never grants,
+   * scope, remaining budget, or native session handles.
+   */
+  readonly continuation?: SavedTargetContinuation;
   /**
    * Literal `true`: the type forces call sites to write the consent out, and
    * the runtime gate re-checks it because IPC data carries no types. This is
@@ -173,6 +185,12 @@ export function backgroundStartRefusal(start: BackgroundJobStartInput): string |
       seen.add(value);
     }
   }
+  if (Object.hasOwn(start, "piCapacity") && (!normalizePiCapacity(start.piCapacity) || !start.readInstances.includes("pi"))) return "The requested Pi capacity is malformed, so nothing was admitted.";
+  if (start.continuation !== undefined) {
+    if (!isValidContinuationDescriptor(start.continuation)) {
+      return "The background continuation descriptor is malformed, so nothing was admitted.";
+    }
+  }
   return null;
 }
 
@@ -192,6 +210,7 @@ export function backgroundJobKey(requestId: string): string {
  * liveness callbacks on top; nothing here carries renderer or draft identity.
  */
 export interface BackgroundEngineInput {
+  readonly piCapacity?: PiCapacitySelection;
   readonly workspacePath: string;
   readonly goal: string;
   readonly sendKey: string;
@@ -202,6 +221,7 @@ export interface BackgroundEngineInput {
   readonly avoidInstances?: readonly string[];
   /** Completed execution context, forwarded to the SAME engine a window Send uses. */
   readonly executionFeedback?: ExecutionFeedback;
+  readonly continuation?: SavedTargetContinuation;
   readonly repairRefusalSentence: string;
   /** Distinct background wording for the one plan-revision refusal. */
   readonly planRevisionRefusalSentence: string;
@@ -216,6 +236,7 @@ export interface BackgroundEngineInput {
  */
 export function backgroundEngineInput(start: BackgroundJobStartInput): BackgroundEngineInput {
   return {
+    ...(start.piCapacity ? { piCapacity: { ...start.piCapacity } } : {}),
     workspacePath: start.workspaceRoot,
     goal: start.goal,
     sendKey: backgroundJobKey(start.requestId),
@@ -242,6 +263,16 @@ export function backgroundEngineInput(start: BackgroundJobStartInput): Backgroun
             previousExecutionReport: start.executionFeedback.previousExecutionReport,
             previousExecutionAudit: start.executionFeedback.previousExecutionAudit,
             previousCommandIds: [...start.executionFeedback.previousCommandIds],
+          },
+        }
+      : {}),
+    ...(start.continuation
+      ? {
+          continuation: {
+            parentRequestId: start.continuation.parentRequestId,
+            rootRequestId: start.continuation.rootRequestId,
+            originalGoal: start.continuation.originalGoal,
+            followUp: start.continuation.followUp,
           },
         }
       : {}),

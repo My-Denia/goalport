@@ -315,7 +315,9 @@ export async function startUiDebug({ cdpPort = null, url = DEFAULT_URL, chrome =
       await sleep(100);
     }
     if (!port) throw new Error("Headless Chromium did not expose CDP");
-    page = await attachGoalPort(port, { requestTimeoutMs });
+    // A restored goal changes document.title before CDP attaches; identify our
+    // isolated page by its exact URL, not a transient branding string.
+    page = await attachGoalPort(port, { requestTimeoutMs, pageUrl: target.href });
     await page.cdp("Page.enable");
     await page.cdp("Runtime.enable");
     const pageReady = await waitUntilShell((expression) => page.evaluate(expression, true), readyTimeoutMs);
@@ -387,8 +389,13 @@ export async function runSelfTest({ log = (line) => console.log(line) } = {}) {
     ready: { ready: true, mode: "connected-app", methods: METHODS },
     onStop: () => { stopped = true; }
   });
-  const send = (request) => new Promise((done) => setImmediate(() => { input.write(`${typeof request === "string" ? request : JSON.stringify(request)}\n`); done(); }));
-  const settle = () => new Promise((done) => setTimeout(done, 10));
+  let requestsSent = 0;
+  const send = (request) => new Promise((done) => setImmediate(() => { requestsSent += 1; input.write(`${typeof request === "string" ? request : JSON.stringify(request)}\n`); done(); }));
+  const settle = async () => {
+    // Wait for the protocol response, not an assumed 10ms scheduler window.
+    const deadline = Date.now() + 1000;
+    while (responses.length < requestsSent && Date.now() < deadline) await sleep(2);
+  };
   const last = () => responses[responses.length - 1];
   const passed = [];
   const check = (name, condition) => {

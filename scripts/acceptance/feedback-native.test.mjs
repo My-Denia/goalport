@@ -110,7 +110,7 @@ test('the continuation fixture keeps the intermediate edit distinguishable from 
   const before = snapshotFixture(fixture, out, 'before');
   const baseline = baselineChecks(fixture, out);
   assert.equal(baseline.exitCode, 1);
-  assert.match(baseline.stdout, /# fail 2/);
+  assert.match(baseline.stdout, /(?:#|ℹ|info) +fail 2(?![0-9])/u);
   // The three fixture states must stay distinct so the archived progression is decidable.
   assert.notEqual(before.files.find(f => f.relative === 'src/add.mjs').sha256, INCOMPLETE_SOURCE_HASH);
   assert.notEqual(INCOMPLETE_SOURCE_HASH, REPAIRED_SOURCE_HASH);

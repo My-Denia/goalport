@@ -1,11 +1,16 @@
+import { normalizeRequestedPiCapacity, type PiPair } from "../../electron/pi-capacity.mjs";
 import {
   coordinateGoal,
+  assertContinuationPrompt,
+  ContinuationPromptLimitError,
   evidenceCommand,
   eligibleInstances,
   replacementCommand,
   type CoordinateGoalInput,
   type CoordinateGoalState,
   type SyntheticCatalogInstance,
+  type ExecutionWorkspaceEvidence,
+  type AuditInputEvidenceCoverage,
 } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
 import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
@@ -24,7 +29,16 @@ export type CoordinationStopCode =
   | "scope-exhausted"
   | "scope-revoked";
 
+export interface AuditInputTransport {
+  readonly instanceId: "pi";
+  readonly promptDelivery: "stdin";
+  /** Host UTF-8 bytes and stream-end confirmation, not model consumption. */
+  readonly inputBytes: number;
+  readonly inputEnded: boolean;
+}
+
 export interface CoordinateLaunchResult {
+  readonly requestedPiCapacity?: PiPair;
   readonly text: string;
   readonly errorText: string;
   readonly prepared?: boolean;
@@ -47,6 +61,8 @@ export interface CoordinateLaunchResult {
   /** Independent WRITE counter from M6; turnsRemaining always means READ. */
   readonly writeTurnsRemaining?: number | null;
   readonly scopeExhausted?: boolean;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputTransport?: AuditInputTransport;
 }
 
 export interface EnvironmentBlockedInfo {
@@ -85,6 +101,7 @@ export interface CoordinateSessionOptions {
 }
 
 export interface CoordinateSessionState extends CoordinateGoalState {
+  readonly requestedPiCapacity?: PiPair;
   readonly planText: string | null;
   readonly reviewText: string | null;
   readonly executionText?: string | null;
@@ -101,6 +118,10 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly authorizedTurnsLeft?: number | null;
   /** True when the authorized scope ran out of model turns. */
   readonly scopeExhausted?: boolean;
+  readonly executionEvidence?: ExecutionWorkspaceEvidence | null;
+  readonly auditInputEvidenceCoverage?: AuditInputEvidenceCoverage | null;
+  /** Exact captured-evidence section delivered to the auditor, after transport crops. */
+  readonly auditInputEvidenceText?: string | null;
 }
 
 function reportFromPlan(
@@ -193,6 +214,7 @@ async function runLegacyRound(
   planning: CoordinateTurnCommand,
   review: CoordinateTurnCommand,
 ): Promise<CoordinateSessionState> {
+  assertContinuationPrompt(input, planning.initialMessage.text);
   const planned = await transport.launch(planning);
   const planError = classifyProviderError(planned.errorText);
   const planEnvironment = environmentFromLaunch(planned, "planning", planning.modelSelection.instanceId, plan.planningHarness);
@@ -227,7 +249,17 @@ async function runLegacyRound(
     );
   }
 
-  const checked = await transport.launch(withPlanText(review, planText));
+  const reviewCommand = withPlanText(review, planText);
+  try {
+    assertContinuationPrompt(input, reviewCommand.initialMessage.text);
+  } catch (error) {
+    if (!(error instanceof ContinuationPromptLimitError)) throw error;
+    return reportFromPlan({ ...plan, commands: [planning] }, {
+      verdict: "stopped", planText, messageDispatched: planned.dispatched ?? null,
+      stopReason: `${error.message} The review was not sent; the earlier planning result is retained.`,
+    });
+  }
+  const checked = await transport.launch(reviewCommand);
   const reviewText = checked.text.trim();
   const reviewEnvironment = environmentFromLaunch(checked, "review", review.modelSelection.instanceId, plan.reviewHarness);
   if (reviewEnvironment !== null || checked.errorText.trim().length > 0) {
@@ -464,11 +496,15 @@ async function runRecoveryRound(
   let executionText: string | null = null;
   let auditText: string | null = null;
   let executionFacts: string | undefined;
+  let executionEvidence: ExecutionWorkspaceEvidence | null = null;
+  let auditInputEvidenceCoverage: AuditInputEvidenceCoverage | null = null;
+  let auditInputEvidenceText: string | null = null;
   let environmentBlocked: EnvironmentBlockedInfo | null = null;
   let lastFailure: Failure | null = null;
   let turnsRemaining: number | null | undefined;
   let writeTurnsRemaining: number | null | undefined = write?.remaining;
   let dispatchState: "unsent" | "sent" | "unknown" = "unsent";
+  let requestedPiCapacity: PiPair | undefined;
 
   const mergeDispatch = (value: boolean | null | undefined) => {
     if (value === true) dispatchState = "sent";
@@ -479,6 +515,8 @@ async function runRecoveryRound(
   const poolFor = (role: CoordinationRole) => eligibleInstances(input.catalog, {
     avoidInstances: input.avoidInstances,
     allowedInstances: role === "execution" ? write?.instances : input.allowedInstances,
+    piCapacity: input.piCapacity,
+    legacyPiContinuation: input.legacyPiContinuation,
     exclude: [...failed],
   }).filter((item) => !used.has(usedKey(role, item.instanceId)));
   const counterpart = (role: CoordinationRole): CoordinationRole | null =>
@@ -516,11 +554,15 @@ async function runRecoveryRound(
       reviewQuota: review ? plan.quotaLabels[review.instanceId] ?? null : null,
       roles: planning && review ? plan.roles : [],
       commands: launched, quotaLabels: plan.quotaLabels, planText, reviewText,
+      ...(requestedPiCapacity ? { requestedPiCapacity } : {}),
       verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
       ...(write ? {
         executionText, auditText,
         executionHarness: assignments.execution ? harnessOf(assignments.execution) : null,
         auditHarness: assignments.audit ? harnessOf(assignments.audit) : null,
+        executionEvidence: executionEvidence ?? null,
+        auditInputEvidenceCoverage: auditInputEvidenceCoverage ?? null,
+        auditInputEvidenceText: auditInputEvidenceText ?? null,
         authorizedWriteTurnsLeft: writeTurnsRemaining ?? null,
       } : {}),
       ...(turnsRemaining === undefined ? {} : { authorizedTurnsLeft: turnsRemaining }),
@@ -560,18 +602,27 @@ async function runRecoveryRound(
         }
         instance = replacement;
         assignments[role] = replacement;
-        command = role === "execution" || role === "audit"
-          ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
-              planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
-            })
-          : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+        try {
+          command = role === "execution" || role === "audit"
+            ? evidenceCommand(role === "execution" ? "execute" : "audit", replacement, input, {
+                planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
+                executionEvidence,
+              })
+            : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+        } catch (error) {
+          if (!(error instanceof ContinuationPromptLimitError)) throw error;
+          return finish({ verdict: "stopped", stopReason: `${error.message} The ${role} was not sent; earlier results and dispatch facts are retained.` });
+        }
         commands[role] = command;
+        if (role === "audit" && "auditInputEvidenceCoverage" in command) {
+          auditInputEvidenceCoverage = (command as { auditInputEvidenceCoverage?: AuditInputEvidenceCoverage }).auditInputEvidenceCoverage ?? null;
+          auditInputEvidenceText = (command as { auditInputEvidenceText?: string }).auditInputEvidenceText ?? null;
+        }
         // Initial lazy execution/audit assignment is not a takeover.
         if (role === "planning" || role === "review" || lastFailure?.role === role) {
           const harness = harnessOf(replacement);
           replacementEvent = { kind: "continued", role, instanceId: replacement.instanceId, harness,
             sentence: `${harness} is ${roleLabel(role)} instead.` };
-          emitEvent?.({ ...replacementEvent });
         }
       }
       if (role === "execution") {
@@ -590,8 +641,15 @@ async function runRecoveryRound(
         }
       }
       const harness = harnessOf(instance);
-      emitEvent?.({ kind: "started", role, instanceId: instance.instanceId, harness });
       const launchCommand = role === "review" && planText !== null ? withPlanText(command, planText) : command;
+      try {
+        assertContinuationPrompt(input, launchCommand.initialMessage.text);
+      } catch (error) {
+        if (!(error instanceof ContinuationPromptLimitError)) throw error;
+        return finish({ verdict: "stopped", stopReason: `${error.message} The ${role} was not sent; earlier results and dispatch facts are retained.` });
+      }
+      if (replacementEvent) emitEvent?.({ ...replacementEvent });
+      emitEvent?.({ kind: "started", role, instanceId: instance.instanceId, harness });
       launched.push(launchCommand);
       let result: CoordinateLaunchResult;
       if (write) {
@@ -608,17 +666,24 @@ async function runRecoveryRound(
       } else {
         result = await transport.launch(launchCommand);
       }
+      const requested = normalizeRequestedPiCapacity(result.requestedPiCapacity);
+      if (requested && instance.instanceId === "pi") requestedPiCapacity = requested;
       mergeDispatch(result.dispatched);
       turnsRemaining = result.turnsRemaining ?? null;
       if (write) writeTurnsRemaining = result.writeTurnsRemaining ?? null;
       // Partial execution/audit text is retained even on scope terminal stops.
       if (role === "execution" || role === "audit") saveText(role, result.text.trim());
-      if (role === "execution") executionFacts = JSON.stringify({
-        commandId: launchCommand.commandId, instanceId: instance.instanceId,
-        workspace: input.workspacePath, sandbox: launchCommand.sandboxPolicy.type,
-        dispatched: result.dispatched ?? null, stopCode: result.stopCode ?? null,
-        turnsRemaining: result.turnsRemaining ?? null, writeTurnsRemaining: result.writeTurnsRemaining ?? null,
-      });
+      if (role === "execution") {
+        if (result.executionEvidence) {
+          executionEvidence = result.executionEvidence;
+        }
+        executionFacts = JSON.stringify({
+          commandId: launchCommand.commandId, instanceId: instance.instanceId,
+          workspace: input.workspacePath, sandbox: launchCommand.sandboxPolicy.type,
+          dispatched: result.dispatched ?? null, stopCode: result.stopCode ?? null,
+          turnsRemaining: result.turnsRemaining ?? null, writeTurnsRemaining: result.writeTurnsRemaining ?? null,
+        });
+      }
       if (result.scopeExhausted === true || result.stopCode === "scope-exhausted") {
         return finish({ stopReason: role === "execution"
           ? "All authorized workspace-change turns were used, so this stopped. Inspect any partial changes before sending again."

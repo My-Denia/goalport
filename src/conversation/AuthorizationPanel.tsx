@@ -132,9 +132,7 @@ export function AuthorizationPanel({
         checked repair inside the budgets you choose here{backgroundConsent ? "." : " — keep this window open for it."}
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">
-        <label><input type="checkbox" aria-label="Keep working after closing" checked={backgroundConsent}
-          onChange={event => onBackgroundConsentChange(event.target.checked)} /> Keep working after closing</label>
-        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes.</p>
+        <p>Only this goal and the access below may continue after you close GoalPort. This does not allow file changes. Choose that next to Send.</p>
         {!backgroundConfigured ? <>
           <p>Allow GoalPort to run harness turns for goals on this profile, in this window or after closing.</p>
           <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run harness turns on this profile</button>
@@ -160,6 +158,7 @@ export function AuthorizationPanel({
                     onChange={(event) => onToggle(instance.instanceId, event.target.checked)}
                   />
                   <span>{instance.name}</span>
+                  {instance.billing === "unknown" ? <span className="authorization-row-reason">Sign-in type is not a confirmed subscription.</span> : null}
                 </label>
               ) : (
                 <div className="authorization-row-static">
@@ -216,12 +215,14 @@ export function AuthorizationPanel({
                 <label className="authorization-row-select">
                   <input type="checkbox" aria-label={`Allow changes through ${instance.name}`}
                     checked={writeSelected.includes(instance.instanceId)}
-                    disabled={state !== "selectable" || !workspaceRoot || (writeScope !== null && !changeMode)}
+                    disabled={state !== "selectable" || instance.billing === "unknown" || instance.instanceId === "pi" || !workspaceRoot || (writeScope !== null && !changeMode)}
                     onChange={(event) => onWriteToggle(instance.instanceId, event.target.checked)} />
                   <span>{instance.name}</span>
                 </label>
-                {state !== "selectable" ? <span className="authorization-row-reason">
-                  {state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
+                {state !== "selectable" || instance.billing === "unknown" || instance.instanceId === "pi" ? <span className="authorization-row-reason">
+                  {instance.instanceId === "pi" || instance.billing === "unknown"
+                    ? "Unavailable for file changes; this harness has no write sandbox."
+                    : state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
                 </span> : null}
               </li>
             );

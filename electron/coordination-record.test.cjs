@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readRecords, saveRecord } = require("./coordination-record.cjs");
+const { readRecords, saveRecord, validatedContinuationOf } = require("./coordination-record.cjs");
 
 function record(overrides = {}) {
   return {
@@ -582,6 +582,202 @@ test("plan-revision history restores evidence only, never budgets, scope, or per
     assert.equal(Object.hasOwn(saved.planRevisionHistory[0], "authorizedTurnsLeft"), false);
     assert.equal(Object.hasOwn(saved.planRevisionHistory[0], "writeAuthorization"), false);
     assert.deepEqual(saved.planRevisionHistory, [planRejectedFact()]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("full capture, exact delivered audit subset and coverage round-trip while legacy records remain valid", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-evidence-record-"));
+  try {
+    const evidence = {
+      status: "available",
+      complete: true,
+      changed: true,
+      beforeDiff: "--- a/pre.txt\n+++ b/pre.txt\n@@ -1 +1 @@\n-a\n+b\n",
+      afterDiff: "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n",
+      beforeUntrackedFiles: [{ path: "before.txt", size: 7, content: "before\n", binary: false }],
+      untrackedFiles: [{ path: "test.txt", size: 12, content: "actual new text", binary: false }],
+      beforeUntrackedFilesOmitted: 1,
+      untrackedFilesOmitted: 2,
+      comparisonBaseline: { headCommit: "2dbea545040c2bb3bdc66b95602975adc951d5a0", capturedAt: "2026-10-28T00:00:00.000Z" },
+      reason: "Changes observed",
+      label: "Workspace observation",
+    };
+    const coverage = {
+      totalEvidenceBytes: 5000,
+      includedEvidenceBytes: 4000,
+      cropped: true,
+      promptBytes: 8000,
+      promptBudgetBytes: 8192,
+      windowsCmdWorstCaseChars: 12000,
+      croppedSections: ["Workspace AFTER tracked diff"],
+    };
+    const auditInputEvidenceText = "  exact delivered subset  \n[cropped]\n";
+    const saved = saveRecord(directory, record({
+      requestId: "evidence-roundtrip",
+      executionEvidence: evidence,
+      auditInputEvidenceCoverage: coverage,
+      auditInputEvidenceText,
+    }));
+    assert.deepEqual(saved.executionEvidence, evidence);
+    assert.deepEqual(saved.auditInputEvidenceCoverage, coverage);
+    assert.equal(saved.auditInputEvidenceText, auditInputEvidenceText);
+
+    const reloaded = readRecords(directory).find((r) => r.requestId === "evidence-roundtrip");
+    assert.deepEqual(reloaded.executionEvidence, evidence);
+    assert.deepEqual(reloaded.auditInputEvidenceCoverage, coverage);
+    assert.equal(reloaded.auditInputEvidenceText, auditInputEvidenceText);
+
+    // Verify record without evidence stays valid
+    const legacy = saveRecord(directory, record({ requestId: "legacy-no-evidence" }));
+    assert.equal(legacy.executionEvidence, undefined);
+    assert.equal(legacy.auditInputEvidenceCoverage, undefined);
+    assert.equal(legacy.auditInputEvidenceText, undefined);
+    const reloadedLegacy = readRecords(directory).find((r) => r.requestId === "legacy-no-evidence");
+    assert.equal(reloadedLegacy.executionEvidence, undefined);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("optional audit transport round-trips top-level and both histories; old and invalid fields stay absent", t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-transport-record-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const base = { totalEvidenceBytes: 12000, includedEvidenceBytes: 12000, cropped: false, promptBytes: 15000, promptBudgetBytes: 32768, croppedSections: [] };
+  for (const promptDelivery of [undefined, "stdin", "argv", null, "unknown"]) {
+    const coverage = { ...base, ...(promptDelivery === undefined ? {} : { promptDelivery }) };
+    const expected = { ...base, ...(["stdin", "argv"].includes(promptDelivery) ? { promptDelivery } : {}) };
+    const id = `transport-${String(promptDelivery)}`;
+    const fact = firstRoundFact({ auditInputEvidenceCoverage: coverage });
+    saveRecord(directory, record({ requestId: id, auditInputEvidenceCoverage: coverage, feedbackHistory: [fact], planRevisionHistory: [fact] }));
+    const loaded = readRecords(directory).find(item => item.requestId === id);
+    for (const actual of [loaded.auditInputEvidenceCoverage, loaded.feedbackHistory[0].auditInputEvidenceCoverage, loaded.planRevisionHistory[0].auditInputEvidenceCoverage]) {
+      assert.deepEqual(actual, expected);
+      assert.equal(Object.hasOwn(actual, "promptDelivery"), ["stdin", "argv"].includes(promptDelivery));
+      assert.equal(Object.hasOwn(actual, "windowsCmdWorstCaseChars"), false);
+    }
+  }
+});
+
+test("valid new continuation descriptor round-trips with CJK, emoji, and empty follow-up", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-continuation-roundtrip-"));
+  try {
+    const continuationWithContent = {
+      parentRequestId: "req-parent-1",
+      rootRequestId: "req-root-1",
+      originalGoal: "初始目标：完成协调服务 🎯",
+      followUp: "当前追加要求：测试 Emoji 🌟 与中文",
+    };
+    const saved = saveRecord(directory, record({
+      requestId: "req-child-cjk",
+      goal: "初始目标：完成协调服务 🎯",
+      continuation: continuationWithContent,
+    }));
+    assert.deepEqual(saved.continuation, continuationWithContent);
+    assert.deepEqual(validatedContinuationOf(saved), continuationWithContent);
+
+    const reloaded = readRecords(directory).find((r) => r.requestId === "req-child-cjk");
+    assert.deepEqual(reloaded.continuation, continuationWithContent);
+    assert.deepEqual(validatedContinuationOf(reloaded), continuationWithContent);
+
+    const continuationWithEmpty = {
+      parentRequestId: "req-parent-2",
+      rootRequestId: "req-root-1",
+      originalGoal: "Initial goal.",
+      followUp: "",
+    };
+    const savedEmpty = saveRecord(directory, record({
+      requestId: "req-child-empty",
+      goal: "Initial goal.",
+      continuation: continuationWithEmpty,
+    }));
+    assert.deepEqual(savedEmpty.continuation, continuationWithEmpty);
+
+    const reloadedEmpty = readRecords(directory).find((r) => r.requestId === "req-child-empty");
+    assert.deepEqual(reloadedEmpty.continuation, continuationWithEmpty);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("legacy records preserve exact shape with no continuation key and absence remains absent", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-legacy-shape-"));
+  try {
+    const saved = saveRecord(directory, record({ requestId: "legacy-standalone" }));
+    assert.equal(Object.hasOwn(saved, "continuation"), false);
+    assert.equal(validatedContinuationOf(saved), undefined);
+
+    const file = path.join(directory, "coordination-records.json");
+    const rawContent = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(Object.hasOwn(rawContent[0], "continuation"), false);
+
+    const reloaded = readRecords(directory).find((r) => r.requestId === "legacy-standalone");
+    assert.equal(Object.hasOwn(reloaded, "continuation"), false);
+    assert.equal(validatedContinuationOf(reloaded), undefined);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("malformed existing continuation on disk is preserved raw without dropping record, and new malformed write throws", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-continuation-malformed-"));
+  try {
+    // 1. Manually write a record with a malformed continuation to disk
+    const malformedRaw = {
+      requestId: "req-malformed-on-disk",
+      workspacePath: "/work/goal",
+      goal: "Goal with broken metadata",
+      planningHarness: "Codex",
+      reviewHarness: "Claude",
+      planText: "Plan.",
+      reviewText: "Review.\nVERDICT: carry-out",
+      result: "Review.\nVERDICT: carry-out",
+      executionText: null,
+      auditText: null,
+      executionHarness: null,
+      auditHarness: null,
+      verdict: "checked",
+      stopReason: "Done.",
+      planningQuota: "available",
+      reviewQuota: "available",
+      messageDispatched: true,
+      environmentBlocked: null,
+      continuation: {
+        parentRequestId: 12345, // invalid type
+        extraField: "bad",
+      },
+      savedAt: "2026-10-28T10:00:00.000Z",
+    };
+    const file = path.join(directory, "coordination-records.json");
+    fs.writeFileSync(file, `${JSON.stringify([malformedRaw], null, 2)}\n`);
+
+    // 2. readRecords must NOT discard the record, and preserves the raw field
+    const records = readRecords(directory);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].requestId, "req-malformed-on-disk");
+    assert.deepEqual(records[0].continuation, { parentRequestId: 12345, extraField: "bad" });
+    // But typed projection refuses to promote it to a valid descriptor
+    assert.equal(validatedContinuationOf(records[0]), undefined);
+
+    // 3. Saving another record must preserve the raw malformed continuation in existing records
+    const validNew = saveRecord(directory, record({ requestId: "req-valid-new" }));
+    const reloadedAfterSave = readRecords(directory);
+    assert.equal(reloadedAfterSave.length, 2);
+    const existingStillMalformed = reloadedAfterSave.find((r) => r.requestId === "req-malformed-on-disk");
+    assert.deepEqual(existingStillMalformed.continuation, { parentRequestId: 12345, extraField: "bad" });
+
+    // 4. New malformed/null/extra metadata must refuse; old raw metadata stays.
+    const validShape = { parentRequestId: "parent", rootRequestId: "root", originalGoal: "Goal", followUp: "" };
+    for (const continuation of [null, { ...validShape, unrelated: true }]) {
+      assert.throws(() => saveRecord(directory, record({ continuation })), /malformed/i);
+    }
+    assert.throws(() => {
+      saveRecord(directory, record({
+        requestId: "req-invalid-write",
+        continuation: { parentRequestId: "not a complete descriptor" },
+      }));
+    }, /malformed/i);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }

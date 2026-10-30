@@ -1,4 +1,5 @@
 import { Menu } from "@base-ui/react/menu";
+import { shortGoalTitle } from "../conversation/shortGoalTitle";
 import type { AppInfo } from "../ipc";
 import { connectionLabel } from "../lib/display";
 import type { CoreSnapshot } from "../types";
@@ -8,15 +9,25 @@ interface TitleBarProps {
   browserPreview?: boolean;
   snapshot: CoreSnapshot;
   campaignTitle: string | null;
+  campaignTitleTooltip?: string | null;
+  /** Folder name shown when a background job owns the window and Core has no project. */
+  workspaceLabel?: string | null;
+  workspaceTitle?: string | null;
   appInfo: AppInfo | null;
   navCollapsed: boolean;
   onToggleNav: () => void;
   detailsOpen: boolean;
   onToggleDetails: () => void;
+  detailsDisabled?: boolean;
   onOpenDiagnostics: () => void;
   onNewGoal: () => void;
+  newGoalDisabled?: boolean;
+  newGoalDisabledReason?: string | null;
   onOpenAbout: () => void;
   onReconnect: () => void;
+  connectionOverride?: string;
+  hideNeutralConnectionPill?: boolean;
+  hideReconnect?: boolean;
   onCloseWindow: () => void;
 }
 
@@ -32,9 +43,10 @@ interface TitleBarProps {
  * The bar stacks above every drawer so its menu popover is never trapped.
  */
 export function TitleBar({
-  browserPreview = false, snapshot, campaignTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, onOpenDiagnostics, onNewGoal, onOpenAbout, onReconnect, onCloseWindow
+  browserPreview = false, snapshot, campaignTitle, campaignTitleTooltip, workspaceLabel, workspaceTitle, appInfo, navCollapsed, onToggleNav, detailsOpen, onToggleDetails, detailsDisabled = false, onOpenDiagnostics, onNewGoal, newGoalDisabled = false, newGoalDisabledReason = null, onOpenAbout, onReconnect, connectionOverride, hideNeutralConnectionPill = false, hideReconnect = false, onCloseWindow
 }: TitleBarProps) {
   const connected = snapshot.connection === "connected";
+  const showConnectionPill = !hideNeutralConnectionPill || (snapshot.connection !== "connected" && !browserPreview);
 
   return (
     <header className="titlebar" role="banner">
@@ -53,38 +65,41 @@ export function TitleBar({
           <div className="titlebar-identity">
             <span className="titlebar-app" title={appInfo ? `GoalPort ${appInfo.version}` : "GoalPort"}>GoalPort</span>
             <span className="titlebar-sep" aria-hidden="true">/</span>
-            <span className="titlebar-workspace" title={snapshot.project.workspaceRoot || snapshot.project.name}>
-              {snapshot.project.name || "No workspace"}
+            <span className="titlebar-workspace" title={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name} aria-label={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name || "No workspace"}>
+              {workspaceLabel || snapshot.project.name || "No workspace"}
             </span>
             {campaignTitle ? (
-              <>
+              <span className="titlebar-campaign-wrap">
                 <span className="titlebar-sep" aria-hidden="true">/</span>
-                <span className="titlebar-campaign">{campaignTitle}</span>
-              </>
+                <span className="titlebar-campaign" title={campaignTitleTooltip || campaignTitle}>{shortGoalTitle(campaignTitle)}</span>
+              </span>
             ) : null}
           </div>
         </div>
 
         <div className="titlebar-right">
-          <span className={`connection-pill connection-${browserPreview ? "preview" : snapshot.connection}`} title={browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}>
-            <span className="status-dot" aria-hidden="true" />
-            <span className="connection-text">{browserPreview ? "Browser preview" : connectionLabel(snapshot)}</span>
-          </span>
-          {connected ? null : (
+          {showConnectionPill ? (
+            <span className={`connection-pill ${connectionOverride ? "connection-neutral" : `connection-${browserPreview ? "preview" : snapshot.connection}`}`} role="status" title={connectionOverride || (browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot))} aria-label={connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}>
+              <span className="status-dot" aria-hidden="true" />
+              <span className="connection-text">{connectionOverride || (browserPreview ? "Browser preview" : connectionLabel(snapshot))}</span>
+            </span>
+          ) : null}
+          {connected || hideReconnect ? null : (
             <button className="tb-button" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>
               Reconnect
             </button>
           )}
-          <button className="tb-button" type="button" aria-label="New goal" onClick={onNewGoal}>
-            <span aria-hidden="true">＋</span> New goal
+          <button className="tb-button" type="button" aria-label={newGoalDisabled && newGoalDisabledReason ? `New goal. ${newGoalDisabledReason}` : "New goal"} title={newGoalDisabled && newGoalDisabledReason ? newGoalDisabledReason : undefined} onClick={onNewGoal} disabled={newGoalDisabled}>
+            <span aria-hidden="true">＋</span> <span className="tb-keep-label">New goal</span>
           </button>
           <button
             className="tb-button tb-icon"
             type="button"
-            aria-label={detailsOpen ? "Close details panel" : "Open details panel"}
+            aria-label={detailsDisabled ? "Details are not this goal." : detailsOpen ? "Close details panel" : "Open details panel"}
             aria-expanded={detailsOpen}
-            title={detailsOpen ? "Close details panel" : "Open details panel"}
-            onClick={onToggleDetails}
+            title={detailsDisabled ? "Details are not this goal." : detailsOpen ? "Close details panel" : "Open details panel"}
+            disabled={detailsDisabled}
+            onClick={() => { if (!detailsDisabled) onToggleDetails(); }}
           >
             <span aria-hidden="true">ⓘ</span>
           </button>
@@ -106,10 +121,10 @@ export function TitleBar({
               <Menu.CheckboxItem
                 render={<button type="button" className="app-menu-item" />}
                 checked={detailsOpen}
-                onCheckedChange={() => { onToggleDetails(); }}
+                onCheckedChange={() => { if (!detailsDisabled) onToggleDetails(); }}
                 closeOnClick
               >
-                {detailsOpen ? "✓ " : ""}Details (Ctrl+I)
+                {detailsDisabled ? "Details are not this goal." : detailsOpen ? "✓ Details (Ctrl+I)" : "Details (Ctrl+I)"}
               </Menu.CheckboxItem>
               <Menu.Item render={<button type="button" className="app-menu-item" />} onClick={() => { onOpenDiagnostics(); }}>
                 Developer diagnostics

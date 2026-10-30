@@ -21,11 +21,12 @@ use crate::{
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, UiCommandRequest},
     product_conversation::{
         ProductConversation, ProductConversationContext, ProductRuntimeSelection, ProductSession,
-        ProductTurn,
+        ProductTurn, ProductSessionTransport,
         product_conversation,
     },
     provider_failure::ProviderFailure,
     runtime_manager::{
+        CodexTransportKind, RuntimeBinding, configured_codex_transport,
         RegistrationWithdrawal, RuntimeManager, StartupControl, TransportClosure, TransportState,
     },
     store::{
@@ -53,7 +54,7 @@ const UNASSIGNED_ATTEMPT_ID: &str = "attempt-unassigned";
 #[derive(Debug, Clone)]
 pub(crate) struct NativeWorkerPlan {
     attempt_ids: Vec<String>,
-    startup_target: Option<String>,
+    pub(crate) startup_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +144,8 @@ pub struct UiRuntime {
     pub subtitle: String,
     pub reasons: Vec<String>,
     pub capabilities: UiRuntimeCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_transport: Option<CodexTransportKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -834,6 +837,30 @@ impl UiController {
             .map(|control| (attempt_id.to_owned(), control))
     }
 
+    #[cfg(windows)]
+    pub(crate) fn startup_control_for_attempt(&self, attempt_id: &str) -> Option<Arc<StartupControl>> {
+        self.runtime_manager.startup_control(attempt_id)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn record_startup_timeout(&mut self, attempt_id: &str, confirmed: bool, detail: &str) -> Result<(), String> {
+        let attempt = self.store.get_attempt(attempt_id).map_err(store_message)?;
+        // Timeout is never a synthetic user Stop. Only the same proven unsent
+        // boundary permits terminal settlement; otherwise retain uncertainty.
+        let settled = confirmed && attempt.state == AttemptState::Queued;
+        if settled {
+            self.persist_event(attempt_id, "attempt.cancelled", json!({
+                "confirmed": true, "requested": false, "nativePromptSent": false,
+                "reason": detail, "cause": "startup-timeout",
+            }), Some(AttemptState::Cancelled))?;
+        }
+        self.persist_event(attempt_id, "attempt.start.timeout", json!({
+            "confirmed": settled,
+            "nativePromptSent": if settled { json!(false) } else { Value::Null },
+            "detail": detail,
+        }), None)
+    }
+
     pub(crate) fn record_startup_cancel(
         &mut self,
         request: &UiCommandRequest,
@@ -851,11 +878,18 @@ impl UiController {
             if attempt.state != AttemptState::Queued {
                 return Err("Startup completion raced with Cancel; no unsent claim was recorded.".into());
             }
+            // Reuse the existing durable cancellation event so explicit next
+            // Send uses the existing confirmed-stop successor transaction.
+            self.persist_event(attempt_id, "attempt.cancelled", json!({
+                "confirmed":true,"nativePromptSent":false,
+                "reason":detail.unwrap_or("user cancelled startup"),
+                "requestId":request.request_id,
+            }), Some(AttemptState::Cancelled))?;
             self.persist_event(
                 attempt_id,
                 "attempt.start.cancelled",
-                json!({"confirmed":true,"nativePromptSent":false,"reason":"user cancelled startup"}),
-                Some(AttemptState::Cancelled),
+                json!({"confirmed":true,"nativePromptSent":false,"reason":detail.unwrap_or("user cancelled startup")}),
+                None,
             )?;
         } else if !confirmed && !duplicate {
             self.persist_event(
@@ -865,17 +899,84 @@ impl UiController {
                 None,
             )?;
         }
+        if confirmed {
+            self.show_confirmed_startup_cancel(attempt_id);
+        }
         Ok(UiCommandResult {
             request_id: request.request_id.clone(),
             duplicate,
             accepted: true,
             snapshot: self.snapshot(None)?,
             receipt: Some(json!({
+                "attemptId": attempt_id,
                 "startupCancel": if confirmed { "confirmed" } else { "pending" },
                 "nativePromptSent": if confirmed { json!(false) } else { Value::Null },
                 "detail": detail,
             })),
         })
+    }
+
+    /// A startup that ended because the user's Stop won the race settles the
+    /// pending cancel here: the worker returning without a dispatch is the
+    /// confirmation the 650ms waits could not wait for. Idempotent against the
+    /// immediate-confirm path in `record_startup_cancel`.
+    fn settle_cancelled_startup(&mut self, attempt_id: &str) {
+        let settled = self
+            .store
+            .latest_event_kind_in(attempt_id, &["attempt.cancelled", "attempt.start.cancelled"])
+            .map(|kind| kind.is_some())
+            .unwrap_or(true);
+        if settled {
+            return;
+        }
+        let Ok(attempt) = self.store.get_attempt(attempt_id) else { return };
+        if attempt.state != AttemptState::Queued {
+            return;
+        }
+        let cancelled = self.persist_event(attempt_id, "attempt.cancelled", json!({
+            "confirmed": true, "nativePromptSent": false,
+            "reason": "user cancelled startup", "settledOn": "startup-completion",
+        }), Some(AttemptState::Cancelled));
+        if cancelled.is_err() {
+            return;
+        }
+        let _ = self.persist_event(attempt_id, "attempt.start.cancelled", json!({
+            "confirmed": true, "nativePromptSent": false,
+            "reason": "user cancelled startup", "settledOn": "startup-completion",
+        }), None);
+        self.show_confirmed_startup_cancel(attempt_id);
+    }
+
+    /// Keep the stopped goal on screen. A confirmed startup Stop is not an
+    /// unselected failure, and the existing continue path needs a provider
+    /// preference so Send stays available.
+    fn show_confirmed_startup_cancel(&mut self, attempt_id: &str) {
+        let Ok(attempt) = self.store.get_attempt(attempt_id) else {
+            return;
+        };
+        let Ok(task) = self.store.get_task(&attempt.task_id) else {
+            return;
+        };
+        // Do not pull the screen back if the user already moved to another goal.
+        let other_campaign = self
+            .selected_campaign_id
+            .as_deref()
+            .is_some_and(|id| id != task.campaign_id);
+        let other_attempt = self.selected_attempt_id.as_deref().is_some_and(|id| {
+            id != attempt_id && id != UNASSIGNED_ATTEMPT_ID
+        });
+        if other_campaign || other_attempt {
+            return;
+        }
+        let _ = self
+            .store
+            .set_conversation_provider(&task.campaign_id, &attempt.provider);
+        if let Ok(Some(project_id)) = self.store.campaign_project(&task.campaign_id) {
+            self.selected_project_id = project_id;
+        }
+        self.selected_campaign_id = Some(task.campaign_id);
+        self.selected_task_id = Some(task.id);
+        self.selected_attempt_id = Some(attempt.id);
     }
 
     pub(crate) fn fork_native_worker(
@@ -1171,6 +1272,7 @@ impl UiController {
                         name: String::new(),
                     },
                     session: ProductSession {
+                        transport: ProductSessionTransport::Unknown,
                         state: "none".into(),
                         native_id_known: false,
                     },
@@ -2887,9 +2989,27 @@ impl UiController {
     }
 
     fn admit_runtime(
-        &mut self,
-        request: &UiCommandRequest,
-        from_explicit_queue: bool,
+        &mut self, request: &UiCommandRequest, from_explicit_queue: bool,
+    ) -> Result<(), String> {
+        let campaign_id = payload_text_default(&request.payload, "campaignId", "");
+        let project_id = if campaign_id.is_empty() {
+            payload_text_default(&request.payload, "projectId", &self.selected_project_id)
+        } else {
+            self.store.campaign_project(&campaign_id).map_err(store_message)?
+                .ok_or_else(|| format!("campaign {campaign_id} has no owning project"))?
+        };
+        let workspace = self.store.get_project(&project_id).map_err(store_message)?.workspace_root;
+        let provider = payload_text_default(&request.payload, "provider", "scenario").to_ascii_lowercase();
+        let binding = RuntimeManager::intended_binding(
+            &provider, payload_text(&request.payload, "executable").ok().map(PathBuf::from),
+            payload_text_default(&request.payload, "version", &runtime_version(&provider)),
+            Path::new(&workspace),
+        ).map_err(|error| error.to_string())?;
+        self.admit_runtime_with_binding(request, from_explicit_queue, binding)
+    }
+
+    fn admit_runtime_with_binding(
+        &mut self, request: &UiCommandRequest, from_explicit_queue: bool, intended: RuntimeBinding,
     ) -> Result<(), String> {
         // A named campaign is the admission target. Its owning project wins
         // over the shared selection, so admitting B does not require the
@@ -2955,27 +3075,10 @@ impl UiController {
             true,
             from_explicit_queue,
         )?;
-        let executable = payload_text(&request.payload, "executable")
-            .ok()
-            .map(PathBuf::from);
-        let workspace = PathBuf::from(
-            self.store
-                .get_project(&project_id)
-                .map_err(store_message)?
-                .workspace_root,
-        );
-        let default_version = runtime_version(&provider);
-        let version = payload_text_default(&request.payload, "version", &default_version);
-        // The admission decision is taken BEFORE the first write. `intended_binding`
-        // refuses an unknown provider (and an invalid Codex approval policy) here,
-        // so no Attempt row is left behind by a request that could never register.
-        let intended = RuntimeManager::intended_binding(
-            &provider,
-            executable.clone(),
-            version.clone(),
-            &workspace,
-        )
-        .map_err(|error| error.to_string())?;
+        let workspace = PathBuf::from(&project.workspace_root);
+        if intended.provider != provider || intended.workspace_root != workspace {
+            return Err("frozen Runtime binding does not match the admission target".into());
+        }
         if let Some(existing) = self.runtime_manager.registered_binding(&attempt_id) {
             // A Runtime is already registered under this attempt id. Either this is
             // the user legitimately re-selecting the same binding, which returns the
@@ -3190,7 +3293,7 @@ impl UiController {
         // Attempt validation inside `insert_attempt` before any row was written.
         let identity = self
             .runtime_manager
-            .select_runtime(&attempt_id, &provider, executable, version, &workspace)
+            .select_runtime_from_binding(&attempt_id, intended)
             .map_err(|error| error.to_string())?;
         // The registration this command just created, by its sequence number: the only
         // registration the failure branch below may withdraw.
@@ -3213,6 +3316,25 @@ impl UiController {
             workspace,
             &identity.provider,
         ) {
+            // A user Stop during startup is not a failed admission, whatever
+            // stage-specific error the cancelled startup surfaced with: the
+            // Claude hold names the cancel; a terminated Codex app-server
+            // surfaces its own EOF instead. The user's cancel landed (a
+            // watchdog timeout carries a detail and settles on the timeout
+            // path instead) and the attempt never reached dispatch (still
+            // Queued), so the cancel is the honest record: settle it, and
+            // answer with the same cancelled-startup wording every provider
+            // already uses, not the raw teardown error.
+            if self.runtime_manager.user_cancelled_startup()
+                && self
+                    .store
+                    .get_attempt(&attempt_id)
+                    .map(|attempt| attempt.state == AttemptState::Queued)
+                    .unwrap_or(false)
+            {
+                self.settle_cancelled_startup(&attempt_id);
+                return Err("native start was cancelled before prompt dispatch".to_string());
+            }
             return Err(self.record_admission_failure(
                 &attempt_id,
                 &provider,
@@ -4071,26 +4193,41 @@ impl UiController {
     /// native_command_id fixed at preparation. A repeated request answers its
     /// recorded outcome and never repeats the native send. An uncertain
     /// delivery is never replayed.
+    fn select_recorded_conversation(&mut self, row: &ConversationRequestRow) -> Result<(), String> {
+        let project_id = self.store.campaign_project(&row.campaign_id).map_err(store_message)?
+            .ok_or_else(|| "recorded conversation has no owning project".to_string())?;
+        self.selected_project_id = project_id;
+        self.selected_campaign_id = Some(row.campaign_id.clone());
+        self.selected_task_id = Some(row.task_id.clone());
+        self.selected_attempt_id = Some(row.attempt_id.clone());
+        Ok(())
+    }
+
     fn start_conversation(&mut self, request: &UiCommandRequest) -> Result<bool, String> {
         let workspace_root_text = payload_text(&request.payload, "workspaceRoot")?;
         let provider = payload_text(&request.payload, "provider")?.to_ascii_lowercase();
         let message = payload_text(&request.payload, "message")?;
+        let require_native = match request.payload.get("requireNativeSession") {
+            None => false,
+            Some(Value::Bool(true)) => true,
+            _ => return Err("requireNativeSession must be literal true when supplied".into()),
+        };
         let canonical = canonical_existing_workspace(&workspace_root_text)?;
-        // Provider validity is checked before any write, exactly as an explicit
-        // select would (unknown providers must not leave rows behind).
-        RuntimeManager::intended_binding(
-            &provider,
-            None,
-            runtime_version(&provider),
-            &PathBuf::from(&canonical),
-        )
-        .map_err(|error| error.to_string())?;
-        self.runtime_manager
-            .ensure_provider_allowed(&provider)
-            .map_err(|error| error.to_string())?;
-
+        let freeze_binding = || -> Result<RuntimeBinding, String> {
+            let binding = RuntimeManager::intended_binding(
+                &provider, None, runtime_version(&provider), Path::new(&canonical),
+            ).map_err(|error| error.to_string())?;
+            if require_native && (binding.provider != "codex" || binding.transport.as_deref() != Some("app-server")) {
+                return Err("Codex conversations require the app-server transport; no conversation was started".into());
+            }
+            Ok(binding)
+        };
         let request_id = request.request_id.clone();
-        let payload_hash = conversation_payload_hash(&canonical, &provider, &message);
+        let legacy_hash = conversation_payload_hash(&canonical, &provider, &message);
+        let payload_hash = if require_native {
+            sha256_hex(format!("{legacy_hash}\nrequire-native-session=true").as_bytes())
+        } else { legacy_hash };
+        let mut frozen_binding = None;
         let native_command_id = format!("ui-send-{}", stable_suffix(&request_id));
         let request_hash = sha256_hex(request_id.as_bytes());
         let campaign_id = format!("campaign-{request_hash}");
@@ -4112,6 +4249,7 @@ impl UiController {
             // conversation (the snapshot this response carries); every other
             // recorded phase is a status-only refusal — nothing is re-executed.
             if row.phase == "succeeded" {
+                self.select_recorded_conversation(&row)?;
                 return Ok(true);
             }
             if !conversation_request_is_predispatch_retryable(&row) {
@@ -4139,6 +4277,8 @@ impl UiController {
                     "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
                 ));
             }
+            self.runtime_manager.ensure_provider_allowed(&provider).map_err(|error| error.to_string())?;
+            frozen_binding = Some(freeze_binding()?);
             self.store
                 .rearm_failed_conversation_request(&request_id, &payload_hash, &claim_token)
                 .map_err(store_message)?;
@@ -4147,6 +4287,9 @@ impl UiController {
 
         let title = deterministic_conversation_title(&message);
         let goal = bounded_core_text(&message, 2048);
+        self.runtime_manager.ensure_provider_allowed(&provider).map_err(|error| error.to_string())?;
+        // Admission creates a native thread: freeze before prepare/rearm/rows.
+        let frozen_binding = match frozen_binding { Some(binding) => binding, None => freeze_binding()? };
         let start = ConversationStart {
             request_id: request_id.clone(),
             payload_hash: payload_hash.clone(),
@@ -4202,6 +4345,7 @@ impl UiController {
                 }
                 Ok(ConversationPrepareOutcome::Existing(row)) => {
                     if row.phase == "succeeded" {
+                        self.select_recorded_conversation(&row)?;
                         return Ok(true);
                     }
                     return Err(conversation_request_status_error(&row));
@@ -4232,7 +4376,7 @@ impl UiController {
         // queued attempt explicitly. A failure here keeps the conversation and
         // its first user message in the snapshot and records a failed outcome;
         // nothing is dispatched automatically afterwards.
-        let admission = self.admit_runtime(
+        let admission = self.admit_runtime_with_binding(
             &UiCommandRequest {
                 protocol_version: CONNECTED_UI_PROTOCOL_VERSION.into(),
                 request_id: format!("{request_id}:admit"),
@@ -4247,6 +4391,7 @@ impl UiController {
                 }),
             },
             false,
+            frozen_binding,
         );
         if let Err(error) = admission {
             let _ = self.store.finish_conversation_request(
@@ -7432,9 +7577,10 @@ fn runtime_profiles() -> Vec<UiRuntime> {
             version: "not observed in this Attempt".into(),
             support: "partial".into(),
             mode: "Executor".into(),
-            subtitle: "Native app-server · subscription path".into(),
+            subtitle: "Configured Codex adapter; authentication and capabilities not verified".into(),
+            native_session_transport: Some(configured_codex_transport()),
             reasons: vec![
-                "Uses installed ChatGPT-authenticated Codex CLI".into(),
+                "Uses the configured installed Codex CLI; sign-in is not checked here".into(),
                 "Permissions and interrupt remain directly observable gates".into(),
             ],
             capabilities: UiRuntimeCapabilities {
@@ -7446,6 +7592,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         },
         UiRuntime {
             id: "claude".into(),
+            native_session_transport: None,
             name: "Claude Code".into(),
             version: "not observed in this Attempt".into(),
             support: "partial".into(),
@@ -7464,6 +7611,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         },
         UiRuntime {
             id: "grok".into(),
+            native_session_transport: None,
             name: "Grok".into(),
             version: "not observed in this Attempt".into(),
             support: "partial".into(),
@@ -7482,6 +7630,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         },
         UiRuntime {
             id: "scenario".into(),
+            native_session_transport: None,
             name: "Scenario Runtime".into(),
             version: "scenario-1".into(),
             support: "supported".into(),
@@ -8166,6 +8315,107 @@ mod title_integration_tests {
             assert_eq!(mapped, variant);
             assert_eq!(mapped.as_str(), variant.as_str());
         }
+    }
+
+    #[test]
+    fn pending_startup_cancel_settles_once_at_startup_completion() {
+        let store = Store::memory().unwrap();
+        let mut ui =
+            UiController::new_seeded_fixture(store.clone(), "synthetic://goalport-fixture")
+                .unwrap();
+        let task_id = ui.snapshot(None).unwrap().active_task.id;
+        let attempt_id = "attempt-pending-startup-cancel";
+        store
+            .insert_attempt(&Attempt::new(attempt_id, &task_id, "claude", "claude-cap-v1"))
+            .unwrap();
+        ui.persist_event(
+            attempt_id,
+            "attempt.start.cancel.requested",
+            json!({"confirmed": false, "nativePromptSent": "not-yet-confirmed"}),
+            None,
+        )
+        .unwrap();
+        // The pending receipt only claims a request; the attempt is still Queued
+        // and nothing has decided whether the start dispatched.
+        assert_eq!(
+            store.get_attempt(attempt_id).unwrap().state,
+            AttemptState::Queued
+        );
+        assert!(
+            store
+                .latest_event_kind_in(attempt_id, &["attempt.cancelled", "attempt.start.cancelled"])
+                .unwrap()
+                .is_none()
+        );
+
+        ui.settle_cancelled_startup(attempt_id);
+
+        assert_eq!(
+            store.get_attempt(attempt_id).unwrap().state,
+            AttemptState::Cancelled
+        );
+        let records = store.list_event_records(attempt_id, 0).unwrap();
+        let cancelled: Vec<&EventRecord> = records
+            .iter()
+            .filter(|record| record.event.kind == "attempt.cancelled")
+            .collect();
+        assert_eq!(
+            cancelled.len(),
+            1,
+            "the settle must persist exactly one cancellation: {records:?}"
+        );
+        let payload = cancelled[0].payload.as_ref().expect("cancellation payload");
+        assert_eq!(payload["confirmed"], json!(true));
+        assert_eq!(payload["nativePromptSent"], json!(false));
+        assert_eq!(payload["settledOn"], json!("startup-completion"));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.event.kind == "attempt.start.cancelled")
+                .count(),
+            1
+        );
+
+        // The immediate-confirm path in `record_startup_cancel` may already have
+        // settled the same start; a second call changes nothing.
+        ui.settle_cancelled_startup(attempt_id);
+        assert_eq!(
+            store.list_event_records(attempt_id, 0).unwrap().len(),
+            records.len(),
+            "a settled pending cancel must not be settled twice"
+        );
+
+        // A start that already passed the unsent boundary is not a cancelled
+        // startup and must be left exactly as it was.
+        let started_id = "attempt-pending-startup-started";
+        store
+            .insert_attempt(&Attempt::new(started_id, &task_id, "claude", "claude-cap-v1"))
+            .unwrap();
+        store
+            .append_event_with_state(
+                &Event {
+                    id: "activate-pending-startup-started".into(),
+                    attempt_id: started_id.into(),
+                    seq: 1,
+                    kind: "attempt.active".into(),
+                    payload_ref: None,
+                },
+                Some(AttemptState::Active),
+                None,
+            )
+            .unwrap();
+        ui.settle_cancelled_startup(started_id);
+        assert_eq!(
+            store.get_attempt(started_id).unwrap().state,
+            AttemptState::Active,
+            "a non-Queued attempt was settled as a cancelled startup"
+        );
+        assert!(
+            store
+                .latest_event_kind_in(started_id, &["attempt.cancelled", "attempt.start.cancelled"])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

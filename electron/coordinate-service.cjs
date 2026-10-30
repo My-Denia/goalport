@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
+const { selectedPiEligible } = require("./pi-capacity.mjs");
 const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
@@ -142,6 +143,10 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
     }
   }
   const text = typeof ran?.text === "string" ? ran.text.trim() : "";
+  const executionEvidence = ran?.executionEvidence ?? null;
+  // Runtime diagnostics only; never use these facts for scope settlement.
+  const auditInputTransport = ran?.auditInputTransport;
+  const inputFacts = { ...(auditInputTransport ? { auditInputTransport } : {}), ...(ran?.requestedPiCapacity ? { requestedPiCapacity: ran.requestedPiCapacity } : {}) };
   if (ran?.ok === true && text.length > 0 && !(typeof ran.errorText === "string" && ran.errorText.trim())) {
     // R1: on the new write chain — a scope with an explicit write dimension,
     // or the new execute/audit roles — a positive reply alone is not proof
@@ -171,6 +176,8 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
           environmentBlocked: false,
           environmentDetail: null,
           ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+          ...(executionEvidence ? { executionEvidence } : {}),
+          ...inputFacts,
           ...metadata(),
         };
       }
@@ -182,6 +189,8 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
       text,
       errorText: "",
       dispatched: true,
+      ...(executionEvidence ? { executionEvidence } : {}),
+      ...inputFacts,
       ...metadata(),
     };
   }
@@ -211,6 +220,8 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
     environmentBlocked,
     environmentDetail: environmentBlocked && typeof ran?.environmentDetail === "string" ? ran.environmentDetail : null,
     ...(typeof ran?.stopCode === "string" ? { stopCode: ran.stopCode } : {}),
+    ...(executionEvidence ? { executionEvidence } : {}),
+    ...inputFacts,
     ...metadata(),
   };
 }
@@ -220,12 +231,20 @@ async function launchOne(env, runtime, command, generation, scopeCtx, consentRea
 // scope (the budget authority would otherwise front a pay-per-call
 // credential). A discovery that fails at all refuses everything (fail-closed).
 // Returns null when the request is admissible, or the human refusal sentence.
-function authorizeMembershipError(discovered, requested) {
+function authorizeMembershipError(discovered, requested, piContext) {
   const providers = discovered?.ok !== false && Array.isArray(discovered?.providers) ? discovered.providers : [];
   const discoveredById = new Map(providers.map((provider) => [provider.instanceId, provider]));
   for (const instance of requested) {
     const provider = typeof instance === "string" ? discoveredById.get(instance) : undefined;
-    if (!provider || provider?.auth?.type === "apiKey") {
+    const type = provider?.auth?.type;
+    if (instance === "pi" && piContext) {
+      if (selectedPiEligible(provider, piContext.piCapacity, piContext.legacyPiContinuation === true)) continue;
+      return "The requested Pi route is unavailable, so nothing was authorized.";
+    }
+    // Unknown is not a confirmed subscription. It may still be an explicitly
+    // named installed harness (Pi). A missing provider or an API-key login
+    // never enters a scope.
+    if (!provider || type === "apiKey" || (type !== "chatgpt" && type !== "subscription" && type !== "unknown")) {
       return "Only harnesses signed in with their own subscription can be authorized.";
     }
   }
@@ -234,7 +253,7 @@ function authorizeMembershipError(discovered, requested) {
 
 // One tested bridge owns request validation and the fresh discovery for BOTH
 // lists. The scope remains the only authority for clamping budgets/minting.
-async function authorizeCoordination(payload, scopeModule, discover) {
+async function authorizeCoordination(payload, scopeModule, discover, piContext) {
   const refusal = (errorText) => ({ ok: false, generation: 0, remaining: 0, errorText });
   const members = (value) => Array.isArray(value) && value.every((id) => typeof id === "string")
     ? [...new Set(value.map((id) => id.trim()).filter(Boolean))] : [];
@@ -252,7 +271,7 @@ async function authorizeCoordination(payload, scopeModule, discover) {
   }
   let discovered = null;
   try { discovered = await discover(); } catch { /* No fresh membership means no authorization. */ }
-  const membership = authorizeMembershipError(discovered, requested) ||
+  const membership = authorizeMembershipError(discovered, requested, piContext) ||
     (write !== undefined ? authorizeMembershipError(discovered, writeMembers) : null);
   if (membership) return refusal(membership);
   return scopeModule.authorize(requested, payload?.maxTurns, write);

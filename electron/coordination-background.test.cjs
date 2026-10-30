@@ -1,17 +1,26 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { createBackgroundHost } = require('./coordination-background.cjs');
-const { createCoordinationJobStore } = require('./coordination-job.cjs');
+const { createCoordinationJobStore, jobControlEndpoint } = require('./coordination-job.cjs');
+const { skipAliasKind } = require('./test-symlink-support.cjs');
 function setup(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  // One stable control endpoint per fixture. Windows cannot bind a Unix-domain
+  // socket at a filesystem path (CI saw EACCES from listen() on job.sock — a
+  // test-harness error, not a Windows product failure), so the alive-owner
+  // hang there uses a private named pipe instead.
+  const controlEndpoint = process.platform === 'win32'
+    ? `\\\\.\\pipe\\goalport-coord-${process.pid}-${Math.random().toString(16).slice(2)}`
+    : path.join(directory, 'job.sock');
   const launches = [];
   const options = { directory: () => directory, ready: () => true, ordinaryScope: () => null,
     env: { GOALPORT_COORDINATE_SEND: '1' }, snapshot: async () => ({ bounds: { projectionUnavailable: false }, attempt: { state: 'completed' } }),
-    endpoint: () => path.join(directory, 'job.sock'), workerPath: '/app/coordination-worker.cjs', config: () => ({ enginePath: '/app/dist/coordination-engine.cjs' }), startTimeoutMs: 0,
+    endpoint: () => controlEndpoint, workerPath: '/app/coordination-worker.cjs', config: () => ({ enginePath: '/app/dist/coordination-engine.cjs' }), startTimeoutMs: 0,
     spawn: (...args) => { launches.push(args); return { on() {}, unref() {} }; }, ...overrides };
   const host = createBackgroundHost(options);
   const input = { requestId: 'one-send', goal: 'Plan this fixture', workspaceRoot: directory, readInstances: ['codex', 'claude'], readMaxTurns: 4, backgroundConsent: true };
@@ -80,6 +89,30 @@ test('Start forwards complete execution feedback into immutable durable admissio
   assert.deepEqual(admission.executionFeedback, executionFeedback);
 });
 
+test('Start forwards valid continuation descriptor into immutable durable admission', async t => {
+  const r = setup(t);
+  const continuation = {
+    parentRequestId: 'parent-req-001',
+    rootRequestId: 'root-req-001',
+    originalGoal: 'Root goal text',
+    followUp: 'Follow-up instruction',
+  };
+  const first = await r.host.start({ ...r.input, continuation });
+  const admission = createCoordinationJobStore(r.directory, { bootstrapReady: true }).getStatus(first.jobId).admission;
+  assert.deepEqual(admission.continuation, continuation);
+  const status = await r.host.status(first.jobId);
+  assert.deepEqual(status.continuation, continuation);
+});
+
+test('Start with malformed continuation descriptor refuses before admission with background-invalid-admission', async t => {
+  const r = setup(t);
+  await assert.rejects(
+    () => r.host.start({ ...r.input, continuation: { parentRequestId: 'bad' } }),
+    error => error.code === 'background-invalid-admission'
+  );
+  assert.equal(r.launches.length, 0);
+});
+
 test('a long accepted goal does not hide the live stop control', { skip: process.platform !== 'linux' }, async t => {
   const r = setup(t);
   const goal = 'g'.repeat(9000);
@@ -87,7 +120,7 @@ test('a long accepted goal does not hide the live stop control', { skip: process
   const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
   const claim = store.claimWorker(started.jobId);
   store.updateProgress(started.jobId, { display: { activity: 'r'.repeat(20_000), failures: [] } }, claim.ownerToken);
-  const server = await store.startControlServer({ jobId: started.jobId, endpoint: r.options.endpoint() });
+  const server = await store.startControlServer({ jobId: started.jobId, endpoint: jobControlEndpoint(r.options.endpoint(), started.jobId) });
   t.after(() => server.close());
   const live = await r.host.status(started.jobId);
   assert.equal(live.live, true);
@@ -171,6 +204,74 @@ test('post-admission spawn failure is an unknown result and retains the durable 
   assert.equal(r.host.outstanding(), true);
 });
 
+function listenSilently(endpoint, t) {
+  const sockets = new Set();
+  const server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.on('error', () => {});
+    socket.on('close', () => sockets.delete(socket));
+  });
+  server.unref();
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint, () => {
+      t.after(() => new Promise(done => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => done());
+      }));
+      resolve(server);
+    });
+  });
+}
+async function leaveAndRefuseSameFolder(t, r, jobId) {
+  const left = await r.host.acknowledge(jobId);
+  assert.equal(left.live, false);
+  assert.notEqual(left.state, 'completed');
+  assert.notEqual(left.state, 'stopped');
+  assert.notEqual(left.state, 'failed');
+  await assert.rejects(() => r.host.start({ ...r.input, requestId: 'next-send' }), error => error.code === 'background-job-conflict' && /unfinished background goal/.test(error.message));
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+  assert.equal(r.host.outstanding(path.resolve('/tmp/goalport-other-folder')), false);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  assert.equal(store.getStatus(jobId).outcome, null);
+}
+test('an alive owner that does not answer status still holds the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordPendingCommand(started.jobId, { commandId: 'coordinate-plan-send-unknown', role: 'planning' }, claim.ownerToken);
+  await listenSilently(jobControlEndpoint(r.options.endpoint(), started.jobId), t);
+  await leaveAndRefuseSameFolder(t, r, started.jobId);
+  assert.equal(store.getStatus(started.jobId).pendingCommand.commandId, 'coordinate-plan-send-unknown');
+});
+test('a dead owner with unknown descendants still holds the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  store.claimWorker(started.jobId);
+  await leaveAndRefuseSameFolder(t, r, started.jobId);
+});
+test('a never-dispatched admission still holds the same folder after it is left', async t => {
+  const r = setup(t, { spawn: () => { throw new Error('spawn failed'); } });
+  await assert.rejects(() => r.host.start(r.input), { code: 'background-admission-unknown' });
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const held = store.getActiveStatus();
+  assert.equal(held.startupClaim, null);
+  await leaveAndRefuseSameFolder(t, r, held.jobId);
+});
+test('a confirmed terminal outcome admits the next send in the same folder', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordOutcome(started.jobId, { status: 'completed', summary: 'finished' }, claim.ownerToken);
+  store.releaseAdmission(started.jobId, claim.ownerToken);
+  const next = await r.host.start({ ...r.input, requestId: 'next-send' });
+  assert.equal(next.requestId, 'next-send');
+  assert.notEqual(next.jobId, started.jobId);
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+});
 test('a long derivable Linux endpoint is bounded in worker config before admission', { skip: process.platform !== 'linux' }, async t => {
   const { controlEndpointFor } = require('./coordination-job.cjs');
   const r = setup(t);
@@ -181,7 +282,245 @@ test('a long derivable Linux endpoint is bounded in worker config before admissi
   const workerConfig = JSON.parse(r.launches[0][1][1]);
   assert.equal(Buffer.byteLength(workerConfig.controlEndpoint, 'utf8') <= 107, true);
   assert.equal(path.dirname(workerConfig.controlEndpoint), r.directory);
-  assert.equal(workerConfig.controlEndpoint, r.options.endpoint());
-  assert.equal(endpointCalls, 2); // One preparation plus this explicit assertion.
+  assert.equal(workerConfig.controlEndpoint, jobControlEndpoint(r.options.endpoint(), started.jobId));
+  assert.notEqual(workerConfig.controlEndpoint, r.options.endpoint());
+  assert.equal(endpointCalls, 3); // One preparation plus the two assertions above.
   assert.equal(started.live, false);
+});
+
+test('a finished job whose pointer was left behind can be released and the next send starts', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordOutcome(started.jobId, { status: 'completed', summary: 'finished' }, claim.ownerToken);
+  assert.equal(store.getStatus(started.jobId).active, true);
+  await assert.rejects(() => r.host.releaseConfirmedTerminal('missing'), { code: 'background-admission-unknown' });
+  const released = await r.host.releaseConfirmedTerminal(started.jobId);
+  assert.equal(released.active, false);
+  assert.equal(released.state, 'completed');
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), false);
+  const next = await r.host.start({ ...r.input, requestId: 'after-finished' });
+  assert.equal(next.requestId, 'after-finished');
+  assert.notEqual(next.state, 'completed');
+});
+
+test('a different folder gets its own control endpoint while the old one is still listening', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  store.claimWorker(started.jobId);
+  const oldEndpoint = jobControlEndpoint(r.options.endpoint(), started.jobId);
+  await listenSilently(oldEndpoint, t);
+  await r.host.acknowledge(started.jobId);
+  const next = await r.host.start({ ...r.input, requestId: 'other-send', workspaceRoot: path.resolve('/tmp/goalport-other-folder') });
+  const workerConfig = JSON.parse(r.launches.at(-1)[1][1]);
+  assert.notEqual(workerConfig.controlEndpoint, oldEndpoint);
+  assert.equal(workerConfig.controlEndpoint, jobControlEndpoint(r.options.endpoint(), next.jobId));
+  assert.equal(next.live, false);
+  assert.notEqual(next.state, 'completed');
+});
+
+test('an acknowledged job holds the same Windows folder across casing on the win32 identity only', { skip: process.platform !== 'win32' }, async t => {
+  // Regression: the folder lookup compared path.resolve results exactly, so a
+  // Windows path arriving with different casing (or a trailing separator, or
+  // forward slashes) did not stay held. The identity function is selected per
+  // platform here; production passes the host platform.
+  const windowsDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
+  t.after(() => fs.rmSync(windowsDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(windowsDirectory, 'Goal')); fs.mkdirSync(path.join(windowsDirectory, 'Other'));
+  const windowsStore = createCoordinationJobStore(windowsDirectory, { bootstrapReady: true, platform: 'win32' });
+  const windowsInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: path.join(windowsDirectory, 'Goal'),
+    allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
+  const admitted = windowsStore.startAdmission(windowsInput);
+  assert.equal(admitted.ok, true);
+  windowsStore.acknowledgeStuck(admitted.jobId);
+  const windowsHost = createBackgroundHost({ directory: () => windowsDirectory, ready: () => true, platform: 'win32' });
+  assert.equal(windowsHost.outstanding(windowsInput.workspacePath.toLowerCase()), true);
+  assert.equal(windowsHost.outstanding(windowsInput.workspacePath.toUpperCase().replaceAll('\\', '/') + '/'), true);
+  assert.equal(windowsHost.outstanding(path.join(windowsDirectory, 'Other')), false);
+  const recased = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: windowsInput.workspacePath.toLowerCase() });
+  assert.equal(recased.ok, false);
+  assert.equal(recased.reason, 'workspace-held');
+  const different = windowsStore.startAdmission({ ...windowsInput, requestId: 'next-send', workspacePath: path.join(windowsDirectory, 'Other') });
+  assert.equal(different.ok, true);
+
+});
+
+test('POSIX identity retains case-sensitive physical folder comparison', { skip: process.platform === 'win32' }, async t => {
+  // The posix identity compares exactly: a case-different path is a different
+  // folder and must not stay held.
+  const posixDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'goalport-host-identity-'));
+  t.after(() => fs.rmSync(posixDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(posixDirectory, 'Goal')); fs.mkdirSync(path.join(posixDirectory, 'goal'));
+  const posixStore = createCoordinationJobStore(posixDirectory, { bootstrapReady: true, platform: 'linux' });
+  const posixInput = { requestId: 'one-send', goal: 'Plan this fixture', workspacePath: path.join(posixDirectory, 'Goal'),
+    allowedInstances: ['codex'], maxTurns: 4, backgroundConsent: true };
+  const posixAdmitted = posixStore.startAdmission(posixInput);
+  assert.equal(posixAdmitted.ok, true);
+  posixStore.acknowledgeStuck(posixAdmitted.jobId);
+  const posixHost = createBackgroundHost({ directory: () => posixDirectory, ready: () => true, platform: 'linux' });
+  assert.equal(posixHost.outstanding(posixInput.workspacePath), true);
+  assert.equal(posixHost.outstanding(path.join(posixDirectory, 'goal')), false);
+});
+
+test('an acknowledged job still holds its folder and reports the acknowledgement after a worker replaces progress from a stale snapshot', async t => {
+  const r = setup(t);
+  const started = await r.host.start(r.input);
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claim = store.claimWorker(started.jobId);
+  store.recordPendingCommand(started.jobId, { commandId: 'coordinate-plan-send-unknown', role: 'planning' }, claim.ownerToken);
+  store.recordOutcome(started.jobId, { status: 'unconfirmed', reason: 'Worker outcome was not observed.' }, claim.ownerToken);
+  const progressPath = path.join(r.directory, 'coordination-jobs', 'jobs', started.jobId, 'progress.json');
+  const stale = fs.readFileSync(progressPath, 'utf8');
+  const left = await r.host.acknowledge(started.jobId);
+  assert.equal(typeof left.acknowledgedStuckAt, 'string');
+  // The live worker's atomic replacement lands from a snapshot taken before
+  // the acknowledgement; the marker must survive it.
+  fs.writeFileSync(progressPath, stale);
+  assert.equal(r.host.outstanding(r.input.workspaceRoot), true);
+  assert.equal(r.host.outstanding(path.resolve('/tmp/goalport-other-folder')), false);
+  const after = await r.host.status(started.jobId);
+  assert.equal(after.acknowledgedStuckAt, left.acknowledgedStuckAt);
+  assert.equal(after.state, 'unconfirmed');
+  assert.equal(after.pendingCommand.commandId, 'coordinate-plan-send-unknown');
+  await assert.rejects(() => r.host.start({ ...r.input, requestId: 'next-send' }), { code: 'background-job-conflict' });
+  assert.equal(r.launches.length, 1);
+});
+
+test('held workspace projection keeps older A and multiple holds when current B finishes; refresh releases only terminal holds', async t => {
+  const r = setup(t);
+  assert.deepEqual(r.host.heldWorkspaces(), { holds: [], complete: true, globalBlock: false });
+  assert.equal(r.host.outstanding(), false); // No inventory must not invent a hold.
+  assert.equal(r.host.heldWorkspaces('relative').candidateBlocked, true);
+  const a = await r.host.start(r.input);
+  const s = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  await r.host.acknowledge(a.jobId);
+  const c = await r.host.start({ ...r.input, requestId: 'c', workspaceRoot: path.join(r.directory, 'c') });
+  await r.host.acknowledge(c.jobId);
+  const b = await r.host.start({ ...r.input, requestId: 'b', workspaceRoot: path.join(r.directory, 'b') });
+  assert.equal(r.host.heldWorkspaces().globalBlock, true);
+  const ownerB = s.claimWorker(b.jobId);
+  s.recordOutcome(b.jobId, { status: 'completed' }, ownerB.ownerToken);
+  s.releaseAdmission(b.jobId, ownerB.ownerToken);
+  const reopened = createBackgroundHost(r.options);
+  assert.deepEqual(reopened.heldWorkspaces(), { holds: [
+    { jobId: a.jobId, workspacePath: r.directory },
+    { jobId: c.jobId, workspacePath: path.join(r.directory, 'c') },
+  ].sort((a,b) => a.jobId.localeCompare(b.jobId)), complete: true, globalBlock: false });
+  // Restore a newer confirmed-terminal retained snapshot, without treating
+  // acknowledgement as worker authority (the old owner cannot write now).
+  const progressPath = path.join(r.directory, 'coordination-jobs', 'jobs', a.jobId, 'progress.json');
+  const retained = JSON.parse(fs.readFileSync(progressPath, 'utf8'));
+  fs.writeFileSync(progressPath, JSON.stringify({ ...retained, state: 'stopped', phase: 'stopped', outcome: { status: 'stopped' } }));
+  assert.deepEqual(reopened.heldWorkspaces().holds, [{ jobId: c.jobId, workspacePath: path.join(r.directory, 'c') }]);
+  assert.equal(r.launches.length, 3);
+});
+test('held workspace projection fails closed for corrupt, incomplete and overflowing job inventories', async t => {
+  for (const problem of ['corrupt', 'incomplete', 'overflow']) {
+    const r = setup(t); const a = await r.host.start(r.input); await r.host.acknowledge(a.jobId);
+    const root = path.join(r.directory, 'coordination-jobs', 'jobs');
+    if (problem === 'corrupt') fs.writeFileSync(path.join(root, a.jobId, 'progress.json'), '{bad');
+    if (problem === 'incomplete') fs.mkdirSync(path.join(root, 'unexpected-job'));
+    if (problem === 'overflow') {
+      // Real, individually valid retained admissions, not merely malformed
+      // directories: the 257th hold must never disappear as complete facts.
+      const s = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+      for (let i = 0; i < 256; i++) {
+        const next = s.startAdmission({ requestId: 'overflow-' + i, goal: 'Retained hold',
+          workspacePath: path.join(r.directory, 'folder-' + i), allowedInstances: ['codex', 'claude'], maxTurns: 4, backgroundConsent: true });
+        assert.equal(next.ok, true);
+        s.acknowledgeStuck(next.jobId);
+      }
+    }
+    const result = r.host.heldWorkspaces();
+    assert.equal(result.complete, false); assert.equal(result.globalBlock, true);
+    assert.ok(result.holds.length <= 256);
+    if (problem === 'overflow') assert.equal(result.holds.length, 256);
+  }
+});
+for (const kind of ['junction', 'symlink']) test(`host ${kind} aliases block both directions and candidate query`, { skip: skipAliasKind(kind) }, async t => {
+  for (const reverse of [false, true]) {
+    const r = setup(t);
+    const held = path.join(r.directory, 'physical', 'held');
+    fs.mkdirSync(path.join(held, 'child'), { recursive: true });
+    const elsewhere = path.join(r.directory, 'elsewhere'); fs.mkdirSync(elsewhere);
+    const alias = path.join(elsewhere, 'alias');
+    try { fs.symlinkSync(path.join(held, 'child'), alias, kind === 'junction' ? 'junction' : 'dir'); }
+    catch (error) { assert.fail(`MISSING COVERAGE: ${kind} creation failed: ${error.code}`); }
+    t.diagnostic(`${kind} actually created on ${process.platform}; reverse=${reverse}`);
+    const traversal = alias + path.sep + '..';
+    const source = reverse ? traversal : held, candidate = reverse ? held : traversal;
+    const first = await r.host.start({ ...r.input, workspaceRoot: source });
+    await r.host.acknowledge(first.jobId);
+    assert.equal(r.host.outstanding(candidate), true);
+    const directAlias = path.join(elsewhere, 'held-alias');
+    fs.symlinkSync(held, directAlias, kind === 'junction' ? 'junction' : 'dir');
+    assert.equal(r.host.outstanding(directAlias), true);
+    assert.equal(r.host.heldWorkspaces(directAlias).candidateBlocked, true);
+    const facts = r.host.heldWorkspaces(candidate);
+    assert.equal(facts.candidate, candidate); assert.equal(facts.candidateBlocked, true);
+    await assert.rejects(() => r.host.start({ ...r.input, requestId: 'replacement', workspaceRoot: candidate }), { code: 'background-job-conflict' });
+    assert.equal(r.launches.length, 1);
+    const stored = createCoordinationJobStore(r.directory, { bootstrapReady: true }).getStatus(first.jobId);
+    assert.equal(stored.admission.workspacePath, source); // Raw alias/.. survives persistence and re-read.
+    assert.equal(r.host.heldWorkspaces(elsewhere).candidateBlocked, false);
+    assert.equal(r.host.heldWorkspaces('relative').candidateBlocked, true);
+    assert.equal(r.host.heldWorkspaces(alias + path.sep + 'new' + path.sep + 'leaf').candidateBlocked, false);
+    const broken = path.join(elsewhere, 'broken'); fs.symlinkSync(path.join(r.directory, 'absent'), broken, kind === 'junction' ? 'junction' : 'dir');
+    assert.equal(r.host.outstanding(broken), true);
+    assert.equal(r.host.heldWorkspaces(broken).candidateBlocked, true);
+    // An unresolved unreleased held identity must also block a known different folder.
+    fs.unlinkSync(alias); fs.symlinkSync(path.join(r.directory, 'absent'), alias, kind === 'junction' ? 'junction' : 'dir');
+    if (reverse) {
+      assert.equal(r.host.outstanding(elsewhere), true);
+      const unknownHeld = r.host.heldWorkspaces(elsewhere);
+      assert.equal(unknownHeld.candidateBlocked, true);
+      assert.equal(unknownHeld.complete, false); assert.equal(unknownHeld.globalBlock, true);
+      await assert.rejects(() => r.host.start({ ...r.input, requestId: 'different', workspaceRoot: elsewhere }), { code: 'background-job-conflict' });
+      assert.equal(r.launches.length, 1);
+    }
+  }
+});
+
+test("a settled stop is not revived by a stale control acknowledgement", () => {
+  const { durableTerminal, withControlAck } = require("./coordination-background.cjs");
+  const facts = { state: "stopped", pendingCommand: null, outcome: { status: "stopped" }, jobId: "job", requestId: "req" };
+  assert.equal(durableTerminal(facts), true);
+  assert.equal(durableTerminal({ ...facts, pendingCommand: { commandId: "still-open" } }), false);
+  const stale = { jobId: "job", requestId: "req", state: "running", active: true, revoked: true, pendingCommandId: "coordinate-plan-old" };
+  const revived = withControlAck(facts, stale);
+  assert.equal(revived.state, "running");
+  assert.equal(durableTerminal(facts) && !durableTerminal(revived), true);
+  const shown = require("./coordination-background.cjs").projection({
+    ...facts,
+    jobId: "job",
+    requestId: "req",
+    admission: { goal: "Name the files", maxTurns: 4 },
+    active: false,
+    revoked: true,
+    progress: { activity: "Access stopped; the current turn may finish, but no further turn was sent." },
+  });
+  assert.equal(shown.progress.activity, "Stopped. No further turn was sent.");
+});
+
+test("a dead worker pid is gone and is not called stopped", () => {
+  const { pidGone } = require("./coordination-background.cjs");
+  assert.equal(pidGone(0), false);
+  assert.equal(pidGone(-1), false);
+  if (process.platform === "win32") {
+    assert.equal(pidGone(4242), false);
+    return;
+  }
+  const original = process.kill;
+  process.kill = () => {
+    const error = new Error("gone");
+    error.code = "ESRCH";
+    throw error;
+  };
+  try {
+    assert.equal(pidGone(4242), true);
+  } finally {
+    process.kill = original;
+  }
 });

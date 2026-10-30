@@ -45,8 +45,9 @@ function validFileEvidence(file) {
 }
 
 function validScreenshot(shot) {
+  const expectedWidth = Math.round((shot.requested?.width ?? 0) * (shot.viewport?.devicePixelRatio || 1));
   return !!shot && typeof shot.path === 'string' && typeof shot.state === 'string' && shot.bytes > 1000
-    && SHA256.test(shot.sha256 ?? '') && shot.pngWidth === shot.requested?.width && shot.pngHeight > 0
+    && SHA256.test(shot.sha256 ?? '') && shot.pngWidth === expectedWidth && shot.pngHeight > 0
     && typeof shot.geometry?.text === 'string' && shot.geometry.text.length > 0
     && (shot.method === 'Browser.setWindowBounds' || typeof shot.method === 'string');
 }

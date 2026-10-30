@@ -95,18 +95,29 @@ describe("review debt frontend contracts", () => {
       }
       return { requestId: request.requestId, accepted: true, duplicate: false, snapshot: reserved };
     });
-    mountElectron(initial, command);
-    await fillFirstSend();
-    fireEvent.click(screen.getByRole("button", { name: /send message/i }));
+    // Hold post-submission polling so background refreshes cannot rewind the shell back to
+    // `initial` under load, nor resolve early to falsely satisfy the assertion. The shell's
+    // `data-campaign-id="campaign-reserved"` must be installed directly by the mutation response.
+    const heldPoll = deferred<CoreSnapshot>();
+    try {
+      mountElectron(initial, command, {
+        snapshot: async () => (requests.length ? heldPoll.promise : initial)
+      });
+      await fillFirstSend();
+      fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
-    expect(await screen.findByRole("heading", { name: /start a goal/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
-    expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-reserved");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(requests).toHaveLength(2));
-    expect(requests.map((request) => request.messageType)).toEqual(["start_conversation", "start_conversation"]);
-    expect(requests[1].requestId).toBe(requests[0].requestId);
-    expect(requests[1].payload).toEqual(requests[0].payload);
+      expect(await screen.findByRole("heading", { name: /start a goal/i })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+      await waitFor(() => expect(document.querySelector(".goalport-shell")?.getAttribute("data-campaign-id")).toBe("campaign-reserved"));
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(requests.map((request) => request.messageType)).toEqual(["start_conversation", "start_conversation"]);
+      expect(requests[1].requestId).toBe(requests[0].requestId);
+      expect(requests[1].payload).toEqual(requests[0].payload);
+    } finally {
+      heldPoll.resolve(reserved);
+    }
+
   });
 
   it("keeps UNKNOWN reconciliation enabled with the same id through a capacity view", async () => {

@@ -2,9 +2,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { createCoordinationJobStore, requestControl, normalizeAdmissionInput } = require("./coordination-job.cjs");
+const { createCoordinationJobStore, requestControl, normalizeAdmissionInput, workspaceIdentity, jobControlEndpoint } = require("./coordination-job.cjs");
 const { coreRefusal } = require("./coordination-core-guard.cjs");
 const { harnessLaunchConfigured } = require("./harness-runtime.cjs");
+const { discoverCliProviders } = require("./cli-coordinate.cjs");
+const { piAdmissionContext } = require("./pi-capacity-admission.cjs");
+const liveRead = require("./live-read-once.cjs");
 
 const HOST_REFUSAL_CODES = new Set([
   "background-unavailable",
@@ -16,6 +19,7 @@ const HOST_REFUSAL_CODES = new Set([
   "background-invalid-admission",
   "background-job-conflict",
   "background-admission-unknown",
+  "background-still-live",
 ]);
 const PREFLIGHT_MESSAGE = "Background Send could not be prepared, so nothing was admitted.";
 const UNKNOWN_MESSAGE = "GoalPort could not confirm this background start.";
@@ -28,18 +32,42 @@ function codedRefusal(code, message, cause) {
 function preflightRefusal(cause) {
   return codedRefusal("background-preflight-failed", PREFLIGHT_MESSAGE, cause);
 }
+function pidGone(pid) {
+  if (process.platform === "win32" || typeof pid !== "number" || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error?.code === "ESRCH"; }
+}
+function durableTerminal(facts) {
+  return ["completed", "failed", "stopped"].includes(facts?.state) && !facts?.pendingCommand && !!facts?.outcome;
+}
 function projection(status, live = false) {
   if (!status) return null;
   const confirmedTerminal = ["completed", "failed", "stopped"].includes(status.state);
+  let progress = status.progress;
+  if (durableTerminal(status) && progress && typeof progress.activity === "string" && progress.activity.includes("may finish")) {
+    progress = { ...progress, activity: "Stopped. No further turn was sent." };
+  }
   return { jobId: status.jobId, requestId: status.requestId, goal: status.admission.goal, active: status.active,
     state: !confirmedTerminal && !live ? "unconfirmed" : status.state, live,
+    ...(status.followUpMode === liveRead.MODE ? { followUpMode: liveRead.MODE } : {}),
+    phase: status.phase ?? null,
+    ...(status.acceptedRequestId ? { acceptedRequestId: status.acceptedRequestId } : {}),
+    ...(live && liveRead.liveStatus(status.liveRead) ? { liveRead: liveRead.liveStatus(status.liveRead) } : {}),
     revoked: status.revoked, pendingCommand: status.pendingCommand, completedCommands: status.completedCommands,
-    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress: status.progress, outcome: status.outcome,
+    counters: status.counters ? { readTurnsLeft: status.counters.readTurnsRemaining, writeTurnsLeft: status.counters.writeTurnsRemaining } : null, progress, outcome: status.outcome,
     readMaxTurns: status.admission.maxTurns, writeMaxTurns: status.admission.writeAuthorization?.maxTurns ?? null,
-    workerPid: status.startupClaim?.pid ?? null };
+    workspacePath: status.admission.workspacePath, acknowledgedStuckAt: status.acknowledgedStuckAt ?? null,
+    workerPid: status.startupClaim?.pid ?? null,
+    ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}),
+    ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}) };
 }
 function createBackgroundHost(options) {
-  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready() });
+  // The host admits and compares folders on ONE platform identity (the host's
+  // own by default; tests may pin another). Never resolves against
+  // process.cwd(): a workspace that is missing or not absolute on this
+  // platform has no identity and stays fail-closed.
+  const platform = options.platform ?? process.platform;
+  const store = (directory = options.directory()) => createCoordinationJobStore(directory, { bootstrapReady: options.ready(), platform });
   let starting = false;
   let lastJobId = null;
   function jobIds() {
@@ -48,13 +76,57 @@ function createBackgroundHost(options) {
     return fs.readdirSync(root).filter(id => /^[0-9a-f-]{36}$/.test(id))
       .sort((a, b) => fs.statSync(path.join(root, b)).mtimeMs - fs.statSync(path.join(root, a)).mtimeMs);
   }
-  function outstanding() {
+  function confirmedTerminal(facts) {
+    return ["completed", "failed", "stopped"].includes(facts.state) && !!facts.outcome && !facts.pendingCommand;
+  }
+  function outstanding(workspaceRoot) {
     const s = store();
     if (starting || s.getActiveStatus()) return true;
     // A missing pointer is not proof that an earlier owner/tools stopped.
-    // Retained nonterminal or pending job facts still block ordinary/native
-    // admission; only confirmed terminal facts permit normal competition.
-    return jobIds().some(id => { const facts = s.getStatus(id); return !["completed", "failed", "stopped"].includes(facts.state) || !!facts.pendingCommand; });
+    // Leaving an unconfirmed job frees the slot pointer only. The same folder
+    // stays held. An unknown caller folder fails closed.
+    const caller = workspaceIdentity(workspaceRoot, platform);
+    for (const id of jobIds()) {
+      const facts = s.getStatus(id);
+      if (confirmedTerminal(facts)) continue;
+      if (!facts.acknowledgedStuckAt) return true;
+      const held = workspaceIdentity(facts.admission?.workspacePath, platform);
+      if (caller === null || held === null || held === caller) return true;
+    }
+    return false;
+  }
+  // Read-only presentation facts from the existing store, not an admission
+  // authority. Never silently drop a malformed entry or truncate a reservation.
+  function heldWorkspaces(candidate) {
+    const holds = [];
+    let complete = true;
+    let globalBlock = starting;
+    try {
+      const s = store();
+      if (s.getActiveStatus()) globalBlock = true;
+      const root = path.join(options.directory(), "coordination-jobs", "jobs");
+      const entries = fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }) : [];
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/.test(entry.name)) { complete = false; continue; }
+        try {
+          const facts = s.getStatus(entry.name);
+          if (confirmedTerminal(facts)) continue;
+          if (!facts.acknowledgedStuckAt) { globalBlock = true; continue; }
+          const workspacePath = facts.admission?.workspacePath;
+          if (!workspaceIdentity(workspacePath, platform)) { complete = false; continue; }
+          if (holds.length === 256) { complete = false; continue; }
+          holds.push({ jobId: facts.jobId, workspacePath });
+        } catch { complete = false; }
+      }
+    } catch { complete = false; }
+    const inventory = { holds, complete, globalBlock: globalBlock || !complete };
+    if (candidate === undefined) return inventory; // Preserve the inventory-only wire shape.
+    const identity = workspaceIdentity(candidate, platform);
+    return { ...inventory, candidate, candidateBlocked: inventory.globalBlock || identity === null
+      || holds.some(hold => {
+        const held = workspaceIdentity(hold.workspacePath, platform);
+        return held === null || held === identity;
+      }) };
   }
   async function status(jobId, controlEndpoint) {
     const s = store();
@@ -67,8 +139,10 @@ function createBackgroundHost(options) {
     }
     if (!facts) return null;
     lastJobId = facts.jobId;
-    if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? options.endpoint(), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
+    const owned = Object.hasOwn(facts, "liveFollowUp") ? s.readOwnedLiveFollowUpContext(facts.jobId) : null;
+    if (owned) facts = { ...facts, acceptedRequestId: owned.requestId };
+    if (!facts.active || durableTerminal(facts)) return projection(facts);
+    try { return projection(withControlAck(facts, await requestControl(controlEndpoint ?? jobControlEndpoint(options.endpoint(), facts.jobId), s.readControlCredential(facts.jobId), "status", { timeoutMs: 800 })), true); }
     catch { return projection(facts); }
   }
   async function start(input) {
@@ -109,8 +183,10 @@ function createBackgroundHost(options) {
           avoidInstances: input.avoidInstances,
           backgroundConsent: input.backgroundConsent,
           executionFeedback: input.executionFeedback,
+          ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
+          ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: input.piCapacity } : {}),
         };
-        try { admissionInput = normalizeAdmissionInput(durableInput); }
+        try { admissionInput = normalizeAdmissionInput(durableInput, platform); }
         catch (error) {
           if (error?.code === "invalid-admission") throw codedRefusal("background-invalid-admission", error.message, error);
           throw error;
@@ -128,54 +204,115 @@ function createBackgroundHost(options) {
         throw preflightRefusal(error);
       }
 
+      if ((platform === "linux" || admissionInput.piCapacity) && admissionInput.allowedInstances.includes("pi")) {
+        try {
+          const discovered = await (options.discover ?? discoverCliProviders)({ cwd: admissionInput.workspacePath, routeAwarePi: true, env: options.env });
+          const context = piAdmissionContext(admissionInput, profileDirectory, discovered, platform);
+          if (context.piCapacity) admissionInput.piCapacity = context.piCapacity;
+        } catch (error) { throw codedRefusal("background-invalid-admission", error.message, error); }
+      }
       let admitted;
-      try { admitted = s.startAdmission(admissionInput); }
+      try { admitted = s.startAdmission(admissionInput, liveRead.eligible(admissionInput) ? { followUpMode: liveRead.MODE } : {}); }
       catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
-      if (!admitted.ok) throw codedRefusal("background-job-conflict", "A background goal is already running. Return to it or stop allowing its access; nothing new was started.");
+      if (!admitted.ok) {
+        const message = admitted.reason === "workspace-held"
+          ? "This folder still has an unfinished background goal, so nothing new was started."
+          : "A background goal is already running. Return to it or stop allowing its access; nothing new was started.";
+        throw codedRefusal("background-job-conflict", message);
+      }
 
       try {
         lastJobId = admitted.jobId;
         if (admitted.created) {
-          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint };
+          const config = { ...workerConfigBase, jobId: admitted.jobId, directory: profileDirectory, controlEndpoint: jobControlEndpoint(controlEndpoint, admitted.jobId) };
           const child = (options.spawn ?? spawn)(process.execPath, [options.workerPath, JSON.stringify(config)], { env: { ...options.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore", windowsHide: true });
           child.on("error", () => {}); // The immutable admission remains unconfirmed; never respawn.
           child.unref();
         }
         const deadline = Date.now() + (options.startTimeoutMs ?? 15000);
         do {
-          const result = await status(admitted.jobId, controlEndpoint);
+          const result = await status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId));
           if (result.live || !result.active) return result;
           await new Promise(resolve => setTimeout(resolve, 50));
         } while (Date.now() < deadline);
-        return status(admitted.jobId, controlEndpoint); // honest unconfirmed projection, not independently running
+        return status(admitted.jobId, jobControlEndpoint(controlEndpoint, admitted.jobId)); // honest unconfirmed projection, not independently running
       } catch (error) {
         throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error);
       }
     } finally { starting = false; }
   }
-  async function revoke(jobId) {
+  async function releaseConfirmedTerminal(jobId) {
+    let current;
+    try { current = await status(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (!current.active) return current;
+    if (current.live) throw codedRefusal("background-still-live", "This goal is still running, so its place was not released.");
+    if (!confirmedTerminal(current)) throw codedRefusal("background-still-live", "This goal is not finished, so its place was not released.");
+    try { store().releaseConfirmedTerminal(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
+  async function acknowledge(jobId) {
+    const current = await status(jobId);
+    if (!current) throw codedRefusal("background-admission-unknown", "That background job is not on this profile.");
+    if (current.live && !pidGone(current.workerPid)) throw codedRefusal("background-still-live", "This goal is still running, so it was not left.");
+    try { store().acknowledgeStuck(jobId); }
+    catch (error) { throw codedRefusal("background-admission-unknown", error?.message || UNKNOWN_MESSAGE, error); }
+    return status(jobId);
+  }
+  async function continueLive(jobId, payload) {
+    const s = store(), facts = s.getStatus(jobId);
+    const accepted = s.readOwnedLiveFollowUpContext(jobId);
+    if (accepted) {
+      if (payload?.requestId !== accepted.requestId || payload?.fromRequestId !== accepted.fromRequestId || typeof payload?.followUp !== "string" || payload.followUp.trim() !== accepted.followUp) throw codedRefusal("live-conflict", "This allowance already accepted a different follow-up.");
+      return { ...await status(jobId), acceptedRequestId: accepted.requestId };
+    }
+    if (!facts.active || facts.followUpMode !== liveRead.MODE) throw codedRefusal("live-unavailable", "This goal has no open live allowance.");
+    const ack = await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "continue", { payload, timeoutMs: 12000 });
+    const latest = s.getStatus(jobId), owned = s.readOwnedLiveFollowUpContext(jobId);
+    return projection({ ...withControlAck(latest, ack), ...(owned ? { acceptedRequestId: owned.requestId } : {}) }, !durableTerminal(latest));
+  }
+  async function revoke(jobId, payload) {
+    const guarded = payload !== undefined;
+    if (guarded) liveRead.controlPayload("revoke", payload);
     const s = store();
     const facts = s.getStatus(jobId);
+    if (guarded && (!facts.active || payload.onlyIfReadyFromRequestId !== facts.requestId)) throw codedRefusal("live-unavailable", "The matching idle allowance is unavailable; nothing was stopped.");
     if (!facts.active) return projection(facts);
-    try { return projection(withControlAck(facts, await requestControl(options.endpoint(), s.readControlCredential(jobId), "revoke")), true); }
-    catch {
+    try { return projection(withControlAck(facts, await requestControl(jobControlEndpoint(options.endpoint(), jobId), s.readControlCredential(jobId), "revoke", { ...(guarded ? { payload } : {}) })), true); }
+    catch (error) {
+      if (guarded) throw error; // Guarded New goal NEVER pre-marks or falls back.
       // Durable revoke denies future admission if the same owner is still
       // alive. Missing control is NOT proof that tools stopped.
       s.revoke(jobId);
       return projection(s.getStatus(jobId));
     }
   }
-  return { start, status, revoke, outstanding };
+  return { start, status, continueLive, revoke, acknowledge, releaseConfirmedTerminal, outstanding, heldWorkspaces };
 }
 function withControlAck(facts, ack) {
+  if (facts.followUpMode === liveRead.MODE && durableTerminal(facts)) return facts;
   if (!ack || ack.jobId !== facts.jobId || ack.requestId !== facts.requestId) {
     throw Object.assign(new Error("The job control acknowledgement does not match this admission."), { code: "control-identity-mismatch" });
+  }
+  if (facts.followUpMode === liveRead.MODE && (!['admitted','running','revoked','completed','failed','stopped','unconfirmed'].includes(ack.state)
+    || !['active','revoked','claimed'].every(key => typeof ack[key] === 'boolean')
+    || !(ack.pendingCommandId === null || liveRead.id(ack.pendingCommandId))
+    || !['readTurnsRemaining','writeTurnsRemaining','workerPid'].every(key => ack[key] === null || (Number.isInteger(ack[key]) && ack[key] >= 0)))) {
+    throw codedRefusal("control-identity-mismatch", "The live status acknowledgement is malformed.");
+  }
+  const live = liveRead.liveStatus(ack.liveRead);
+  if (ack.liveRead !== undefined && (!live || facts.followUpMode !== liveRead.MODE || live.initialRequestId !== facts.requestId
+    || live.rootRequestId !== (facts.admission.continuation?.rootRequestId ?? facts.requestId))) {
+    throw codedRefusal("control-identity-mismatch", "The live acknowledgement does not match this goal.");
   }
   const counters = facts.counters ? { ...facts.counters } : null;
   if (counters && ack.readTurnsRemaining != null) counters.readTurnsRemaining = ack.readTurnsRemaining;
   if (counters && ack.writeTurnsRemaining != null) counters.writeTurnsRemaining = ack.writeTurnsRemaining;
   return {
     ...facts,
+    ...(live ? { liveRead: live } : {}),
     state: ack.state,
     active: ack.active === true,
     revoked: ack.revoked === true,
@@ -198,4 +335,4 @@ async function backgroundStartReply(host, input) {
   }
 }
 
-module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply };
+module.exports = { createBackgroundHost, projection, withControlAck, backgroundStartReply, durableTerminal, pidGone };

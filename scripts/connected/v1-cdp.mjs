@@ -43,16 +43,22 @@ export function createCdpClient(ws, { requestTimeoutMs = 30_000 } = {}) {
     clearTimeout(waiter.timer);
     error ? waiter.reject(error) : waiter.resolve(result);
   };
-  const end = (error) => {
+  const end = (error, { transportClosed = false } = {}) => {
     if (terminalError) return;
     terminalError = error;
+    if (transportClosed) terminalError.transportClosed = true;
     ws.removeEventListener("message", messageReceived);
     ws.removeEventListener("close", closed);
     ws.removeEventListener("error", failed);
-    for (const id of pending.keys()) settle(id, error);
+    for (const [id, waiter] of pending.entries()) {
+      const err = new Error(error.message);
+      if (transportClosed) err.transportClosed = true;
+      if (waiter.sent) err.requestSent = true;
+      settle(id, err);
+    }
     try { ws.close(); } catch {}
   };
-  const closed = () => end(new Error("CDP WebSocket closed"));
+  const closed = () => end(new Error("CDP WebSocket closed"), { transportClosed: true });
   const failed = (event) => end(event.error instanceof Error ? event.error : new Error("CDP WebSocket failed"));
   const messageReceived = (event) => {
     let message;
@@ -64,15 +70,37 @@ export function createCdpClient(ws, { requestTimeoutMs = 30_000 } = {}) {
   ws.addEventListener("close", closed);
   ws.addEventListener("error", failed);
   const cdp = (method, params = {}) => new Promise((resolve, reject) => {
-    if (terminalError || ws.readyState !== 1) { reject(terminalError || new Error("CDP WebSocket is not open")); return; }
+    if (terminalError || ws.readyState !== 1) {
+      const err = terminalError || new Error("CDP WebSocket is not open");
+      err.alreadyClosed = true;
+      err.requestSent = false;
+      reject(err);
+      return;
+    }
     const id = ++nextId;
-    const timer = setTimeout(() => settle(id, new Error(`CDP command timed out: ${method}`)), requestTimeoutMs);
-    pending.set(id, { resolve, reject, timer });
-    try { ws.send(JSON.stringify({ id, method, params })); } catch (error) { settle(id, error); }
+    const timer = setTimeout(() => {
+      const timeoutErr = new Error(`CDP command timed out: ${method}`);
+      timeoutErr.isTimeout = true;
+      timeoutErr.requestSent = true;
+      settle(id, timeoutErr);
+    }, requestTimeoutMs);
+    const waiter = { resolve, reject, timer, sent: false };
+    pending.set(id, waiter);
+    try {
+      ws.send(JSON.stringify({ id, method, params }));
+      waiter.sent = true;
+    } catch (error) {
+      error.sendFailed = true;
+      error.requestSent = false;
+      settle(id, error);
+    }
   }).catch((error) => {
-    // The raw WebSocket error carries no method context; every caller
-    // debugging a rejected CDP command needs to know WHICH command failed.
-    throw new Error(`${method}: ${error.message}`);
+    error.method = method;
+    error.eventType = params?.type ?? null;
+    if (!error.message.startsWith(`${method}:`)) {
+      error.message = `${method}: ${error.message}`;
+    }
+    throw error;
   });
   const evaluate = async (expression, awaitPromise = false) => {
     const result = await cdp("Runtime.evaluate", { expression, awaitPromise, returnByValue: true });
@@ -82,7 +110,7 @@ export function createCdpClient(ws, { requestTimeoutMs = 30_000 } = {}) {
   return { ws, cdp, evaluate, close: () => end(new Error("CDP client closed")) };
 }
 
-export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectTimeoutMs = 10_000 } = {}) {
+export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectTimeoutMs = 10_000, pageUrl = null } = {}) {
   timeoutValue(requestTimeoutMs, "requestTimeoutMs");
   timeoutValue(connectTimeoutMs, "connectTimeoutMs");
   const deadline = Date.now() + 30_000;
@@ -90,7 +118,7 @@ export async function attachGoalPort(port, { requestTimeoutMs = 30_000, connectT
   while (Date.now() < deadline) {
     try {
       const raw = await (await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(1000) })).json();
-      page = (Array.isArray(raw) ? raw : [raw]).find((item) => item.type === "page" && String(item.title || "").includes("GoalPort"));
+      page = (Array.isArray(raw) ? raw : [raw]).find((item) => item.type === "page" && (pageUrl ? item.url === pageUrl : String(item.title || "").includes("GoalPort")));
       if (page?.webSocketDebuggerUrl) break;
     } catch {
       page = null;

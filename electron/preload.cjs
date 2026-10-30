@@ -59,14 +59,20 @@ contextBridge.exposeInMainWorld("goalportCore", {
   confirmCloseChoice: (payload) => ipcRenderer.invoke("goalport:confirm-close-choice", payload),
   dismissCloseChoice: () => ipcRenderer.invoke("goalport:dismiss-close-choice"),
   coordinateDiscover: (generation) => ipcRenderer.invoke("goalport:coordinate-discover", generation),
-  coordinateLaunch: (command, generation, scopeGeneration) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration),
+  // The audited command carries no draft folder; the fourth argument passes
+  // the draft workspace to the acknowledged-job guard.
+  coordinateLaunch: (command, generation, scopeGeneration, workspaceRoot) => ipcRenderer.invoke("goalport:coordinate-launch", command, generation, scopeGeneration, workspaceRoot),
   coordinateCancel: (generation) => ipcRenderer.invoke("goalport:coordinate-cancel", generation),
   // Optional write: { instances: string[], maxTurns: number, workspaceRoot: string }.
   // Forward unchanged; only the trusted main-process scope grants consent.
   backgroundSendConsent: (action) => ipcRenderer.invoke("goalport:background-send-consent", action),
   backgroundStart: (input) => ipcRenderer.invoke("goalport:background-start", input),
   backgroundStatus: (jobId) => ipcRenderer.invoke("goalport:background-status", jobId),
-  backgroundRevoke: (jobId) => ipcRenderer.invoke("goalport:background-revoke", jobId),
+  backgroundHeldWorkspaces: (...args) => ipcRenderer.invoke("goalport:background-held-workspaces", ...args),
+  backgroundRevoke: (jobId, payload) => payload === undefined ? ipcRenderer.invoke("goalport:background-revoke", jobId) : ipcRenderer.invoke("goalport:background-revoke", jobId, payload),
+  backgroundContinue: (jobId, payload) => ipcRenderer.invoke("goalport:background-continue", jobId, payload),
+  backgroundAcknowledge: (jobId) => ipcRenderer.invoke("goalport:background-acknowledge", jobId),
+  backgroundReleaseTerminal: (jobId) => ipcRenderer.invoke("goalport:background-release-terminal", jobId),
   coordinationAuthorize: (scope) => ipcRenderer.invoke("goalport:coordination-authorize", scope),
   coordinationScope: () => ipcRenderer.invoke("goalport:coordination-scope"),
   coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),

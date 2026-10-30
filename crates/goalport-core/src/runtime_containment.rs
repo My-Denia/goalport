@@ -50,6 +50,13 @@ pub(crate) struct ContainedChild {
     job: usize,
 }
 
+#[cfg(windows)]
+impl ContainedChild {
+    pub(crate) fn raw_process_handle(&self) -> *mut std::ffi::c_void {
+        self.process as _
+    }
+}
+
 pub(crate) struct ContainedSpawn {
     pub child: ContainedChild,
     pub stdin: File,

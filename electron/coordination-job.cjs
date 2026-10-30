@@ -5,10 +5,13 @@
 // owned by coordination-scope.cjs in the worker process. Disk counters below
 // are display/recovery facts only.
 const fs = require("node:fs");
+const { normalizePiCapacity } = require("./pi-capacity.mjs");
+const liveRead = require("./live-read-once.cjs");
 const net = require("node:net");
 const path = require("node:path");
-const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
+const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { coreConnectEndpoint, endpointSocketLeafName } = require("./launch-config.cjs");
+const { isValidContinuationDescriptor, normalizeContinuationDescriptor } = require("./coordination-continuation.cjs");
 
 const STORE_DIRECTORY = "coordination-jobs";
 const JOBS_DIRECTORY = "jobs";
@@ -17,18 +20,20 @@ const ADMISSION_FILE = "admission.json";
 const PROGRESS_FILE = "progress.json";
 const CLAIM_FILE = "startup-claim.json";
 const REVOCATION_FILE = "revocation.json";
+const STUCK_ACK_FILE = "stuck-ack.json";
 const TOKEN_FILE = "control-token";
 const ADMISSION_SCHEMA = "goalport.coordination-job-admission.v1";
 const PROGRESS_SCHEMA = "goalport.coordination-job-progress.v1";
 const CLAIM_SCHEMA = "goalport.coordination-job-claim.v1";
 const REVOCATION_SCHEMA = "goalport.coordination-job-revocation.v1";
+const STUCK_ACK_SCHEMA = "goalport.coordination-job-stuck-ack.v1";
 const ACTIVE_SCHEMA = "goalport.coordination-job-active.v1";
 const CONTROL_SCHEMA = "goalport.coordination-job-control.v1";
 const OUTCOME_STATES = new Set(["completed", "failed", "stopped", "unconfirmed"]);
 const RELEASE_STATES = new Set(["completed", "failed", "stopped"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
 const COUNTER_KEYS = new Set(["readTurnsRemaining", "writeTurnsRemaining"]);
-const MAX_CONTROL_BYTES = 8192;
+const MAX_CONTROL_BYTES = liveRead.MAX_CONTROL_BYTES;
 const MAX_PROGRESS_BYTES = 4 * 1024 * 1024;
 
 function refusal(code, message, cause) {
@@ -57,10 +62,75 @@ function optionalText(value, name, maxLength = 100_000) {
   return value;
 }
 
-function absolutePath(value, name) {
+function absolutePath(value, name, platform = process.platform) {
   const text = requiredText(value, name, 32_768);
-  if (!path.isAbsolute(text)) throw refusal("invalid-admission", `${name} must be an absolute path.`);
-  return path.resolve(text);
+  const paths = platform === "win32" ? path.win32 : path;
+  if (!paths.isAbsolute(text) || text.includes("\0")
+    || (platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/])/i.test(text))) {
+    throw refusal("invalid-admission", `${name} must be an absolute path.`);
+  }
+  // Preserve kernel traversal through aliases before any `..` component.
+  return text;
+}
+
+// Same ancestor algorithm as acpCanonicalPathForContainment. Never normalize
+// before native realpath: the kernel follows link/.., not its lexical parent.
+// Only absent suffix components may be appended to a known physical ancestor.
+function workspaceIdentity(value, platform = process.platform) {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  if (!text || text.includes("\0") || !paths.isAbsolute(text)
+    || (platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2}[^\\/])/i.test(text))) return null;
+  // Node's Windows native realpath pre-collapses dot segments even with a
+  // namespaced path. Resolve each preceding component first on that platform,
+  // so alias/.. traverses the physical directory, not the alias's parent.
+  function nativeRealpath(candidate) {
+    if (platform !== "win32" || !candidate.split(/[\\/]/).some(part => part === "." || part === "..")) {
+      return fs.realpathSync.native(candidate);
+    }
+    const root = paths.parse(candidate).root;
+    let current = fs.realpathSync.native(root);
+    for (const component of candidate.slice(root.length).split(/[\\/]/).filter(Boolean)) {
+      if (!fs.statSync(current).isDirectory()) {
+        throw Object.assign(new Error("Workspace ancestor is not a directory."), { code: "ENOTDIR" });
+      }
+      current = fs.realpathSync.native(current + paths.sep + component);
+    }
+    return current;
+  }
+  let candidate = text;
+  const missingSuffix = [];
+  while (true) {
+    try {
+      const canonical = nativeRealpath(candidate);
+      if (!paths.isAbsolute(canonical)) return null; // Never resolve a foreign-platform spelling against cwd.
+      // Windows can report ENOENT rather than ENOTDIR for file/child.
+      // A missing suffix is valid only below a directory ancestor.
+      if (missingSuffix.length && !fs.statSync(canonical).isDirectory()) return null;
+      let resolved = paths.resolve(canonical, ...missingSuffix);
+      if (platform === "win32") {
+        resolved = resolved.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+        resolved = resolved.replace(/\//g, "\\").toLowerCase();
+      }
+      const root = paths.parse(resolved).root;
+      const trailingSeparator = platform === "win32" ? /[\\/]$/ : /\/$/;
+      while (resolved.length > root.length && trailingSeparator.test(resolved)) resolved = resolved.slice(0, -1);
+      return resolved;
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+    }
+    try {
+      fs.lstatSync(candidate);
+      return null; // Existing but unresolvable entry, including a broken link.
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+    }
+    const parent = paths.dirname(candidate);
+    if (parent === candidate) return null;
+    missingSuffix.unshift(paths.basename(candidate));
+    candidate = parent;
+  }
 }
 
 function instancesOf(value, name) {
@@ -103,17 +173,61 @@ function normalizeExecutionFeedback(value) {
   };
 }
 
+function normalizeContinuation(value) {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw refusal("invalid-admission", "continuation must be an object.");
+  const keys = Object.keys(value);
+  if (keys.length !== 4 || !keys.every((key) => ["parentRequestId", "rootRequestId", "originalGoal", "followUp"].includes(key))) {
+    throw refusal("invalid-admission", "continuation must contain exactly parentRequestId, rootRequestId, originalGoal, and followUp.");
+  }
+  const parentRequestId = optionalText(value.parentRequestId, "continuation.parentRequestId");
+  if (!parentRequestId || !/^[A-Za-z0-9._-]+$/.test(parentRequestId) || parentRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.parentRequestId contains invalid characters.");
+  }
+  const rootRequestId = optionalText(value.rootRequestId, "continuation.rootRequestId");
+  if (!rootRequestId || !/^[A-Za-z0-9._-]+$/.test(rootRequestId) || rootRequestId.length > 256) {
+    throw refusal("invalid-admission", "continuation.rootRequestId contains invalid characters.");
+  }
+  if (typeof value.originalGoal !== "string") {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a string.");
+  }
+  const originalGoal = value.originalGoal.trim();
+  if (originalGoal.length === 0) {
+    throw refusal("invalid-admission", "continuation.originalGoal must be a non-empty string.");
+  }
+  if (originalGoal.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.originalGoal exceeds 100,000 characters.");
+  }
+  if (typeof value.followUp !== "string") {
+    throw refusal("invalid-admission", "continuation.followUp must be a string.");
+  }
+  const followUp = value.followUp.trim();
+  if (followUp.length > 100_000) {
+    throw refusal("invalid-admission", "continuation.followUp exceeds 100,000 characters.");
+  }
+  if (originalGoal.length + followUp.length > 100_000) {
+    throw refusal("invalid-admission", "The combined length of originalGoal and followUp exceeds 100,000 characters.");
+  }
+  return {
+    parentRequestId,
+    rootRequestId,
+    originalGoal,
+    followUp,
+  };
+}
+
 // This whitelist is the immutable caller-provided admission. It is not a live
 // scope and is never reconstructed from coordination-records.json or history.
-function normalizeAdmissionInput(input) {
+function normalizeAdmissionInput(input, platform = process.platform) {
   if (!isPlainObject(input)) throw refusal("invalid-admission", "A background job needs an explicit admission object.");
   if (input.backgroundConsent !== true) {
     throw refusal("background-consent-required", "This goal was not explicitly allowed to continue after closing GoalPort.");
   }
+  const paths = platform === "win32" ? path.win32 : path;
   const requestId = requiredText(input.requestId, "requestId", 256);
   if (!/^[A-Za-z0-9._-]+$/.test(requestId)) throw refusal("invalid-admission", "requestId contains invalid characters.");
   const goal = requiredText(input.goal, "goal", 100_000);
-  const workspacePath = absolutePath(input.workspacePath, "workspacePath");
+  const workspacePath = absolutePath(input.workspacePath, "workspacePath", platform);
   const allowedInstances = instancesOf(input.allowedInstances, "allowedInstances");
   const maxTurns = integerCap(input.maxTurns, 2, 32, "maxTurns");
   const avoidInstances = input.avoidInstances === undefined
@@ -129,8 +243,10 @@ function normalizeAdmissionInput(input) {
     const write = input.writeAuthorization;
     if (!isPlainObject(write)) throw refusal("invalid-admission", "Workspace-change consent must be a complete explicit selection.");
     const instances = instancesOf(write.instances, "writeAuthorization.instances");
-    const workspaceRoot = absolutePath(write.workspaceRoot, "writeAuthorization.workspaceRoot");
-    if (path.resolve(workspaceRoot) !== workspacePath) {
+    const workspaceRoot = absolutePath(write.workspaceRoot, "writeAuthorization.workspaceRoot", platform);
+    const writeIdentity = workspaceIdentity(workspaceRoot, platform);
+    const selectedIdentity = workspaceIdentity(workspacePath, platform);
+    if (writeIdentity === null || selectedIdentity === null || writeIdentity !== selectedIdentity) {
       throw refusal("invalid-admission", "Workspace-change consent must be bound to the selected workspace.");
     }
     const writeMaxTurns = integerCap(write.maxTurns, 1, 8, "writeAuthorization.maxTurns");
@@ -150,6 +266,13 @@ function normalizeAdmissionInput(input) {
   };
   const executionFeedback = normalizeExecutionFeedback(input.executionFeedback);
   if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
+  const continuation = normalizeContinuation(input.continuation);
+  if (continuation !== undefined) normalized.continuation = continuation;
+  if (Object.hasOwn(input, "piCapacity")) {
+    const selection = normalizePiCapacity(input.piCapacity);
+    if (!selection || !allowedInstances.includes("pi")) throw refusal("invalid-admission", "The requested Pi capacity is malformed or Pi is not selected.");
+    normalized.piCapacity = selection;
+  }
   return normalized;
 }
 
@@ -206,8 +329,23 @@ function controlEndpointFor(profileEndpoint, { platform = process.platform, env 
   return coreConnectEndpoint(platform, candidate, env);
 }
 
+function jobControlEndpoint(profileControlEndpoint, jobId, { platform = process.platform, env = process.env } = {}) {
+  const base = typeof profileControlEndpoint === "string" ? profileControlEndpoint.trim() : "";
+  if (!base) throw refusal("invalid-endpoint", "The profile control endpoint is unavailable.");
+  if (typeof jobId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId)) return base;
+  const leaf = createHash("sha256").update(jobId).digest("hex").slice(0, 12);
+  if (platform === "win32" || base.startsWith("\\\\.\\pipe\\")) return `${base}-${leaf}`;
+  const candidate = `${base}-${leaf}`;
+  if (path.posix.isAbsolute(candidate) && Buffer.byteLength(candidate, "utf8") > 107) {
+    const parent = path.posix.dirname(base);
+    return coreConnectEndpoint(platform, path.posix.join(parent, endpointSocketLeafName(candidate, parent)), env);
+  }
+  return candidate;
+}
+
 function createCoordinationJobStore(profileDirectory, {
   bootstrapReady = false,
+  platform = process.platform,
   fsApi = fs,
   clock = () => new Date().toISOString(),
   idFactory = randomUUID,
@@ -337,7 +475,7 @@ function createCoordinationJobStore(profileDirectory, {
       throw refusal("malformed-admission", "The job admission is missing or malformed; it cannot authorize a worker.");
     }
     let input;
-    try { input = normalizeAdmissionInput(value.input); } catch {
+    try { input = normalizeAdmissionInput(value.input, platform); } catch {
       throw refusal("malformed-admission", "The job admission is invalid; it cannot authorize a worker.");
     }
     if (stableJson(input) !== stableJson(value.input)) {
@@ -376,6 +514,10 @@ function createCoordinationJobStore(profileDirectory, {
     if (OUTCOME_STATES.has(value.state) && (!isPlainObject(value.outcome) || value.outcome.status !== value.state)) {
       throw refusal("malformed-progress", "The terminal job outcome is malformed; the admission slot remains held.");
     }
+    if (value.acknowledgedStuckAt !== undefined && value.acknowledgedStuckAt !== null
+      && (typeof value.acknowledgedStuckAt !== "string" || Number.isNaN(Date.parse(value.acknowledgedStuckAt)))) {
+      throw refusal("malformed-progress", "The stuck-job acknowledgement is malformed; the admission slot remains held.");
+    }
     try {
       if (value.counters !== null && value.counters !== undefined) checkCounters(value.counters);
       if (value.display !== null && value.display !== undefined) cloneJson(value.display, "Progress display");
@@ -391,17 +533,31 @@ function createCoordinationJobStore(profileDirectory, {
     // process) and no cross-process read-modify-write of this file exists.
     // A terminal outcome the worker recorded always wins over the
     // projection.
-    const marker = readRevocationMarker(jobId);
-    if (marker) {
-      const merged = {
+    const revoked = readRevocationMarker(jobId);
+    let merged = value;
+    if (revoked) {
+      merged = {
         ...value,
         revoked: true,
-        revokeRequestedAt: value.revokeRequestedAt ?? marker.revokedAt,
+        revokeRequestedAt: value.revokeRequestedAt ?? revoked.revokedAt,
       };
-      if (OUTCOME_STATES.has(value.state)) return merged;
-      return { ...merged, state: "revoked", phase: "revoked" };
+      if (!OUTCOME_STATES.has(value.state)) merged = { ...merged, state: "revoked", phase: "revoked" };
     }
-    return value;
+    // The same lost-update guard for leaving an interrupted job: the durable
+    // acknowledgement is its own write-once marker, never a field written
+    // back into worker-owned progress.json. A worker's atomic replacement
+    // from a pre-acknowledge (or pre-outcome) snapshot therefore cannot
+    // erase it, and acknowledging cannot erase a newer outcome. Admission,
+    // status, and outstanding all read through here, so every one of them
+    // sees the marker. A progress field persisted by an older build remains
+    // readable until the marker is created.
+    const acknowledged = readStuckAckMarker(jobId);
+    return {
+      ...merged,
+      acknowledgedStuckAt: acknowledged
+        ? acknowledged.acknowledgedAt
+        : (typeof value.acknowledgedStuckAt === "string" ? value.acknowledgedStuckAt : null),
+    };
   }
 
   function readClaim(jobId) {
@@ -431,6 +587,22 @@ function createCoordinationJobStore(profileDirectory, {
     return marker;
   }
 
+  // The durable "user left this interrupted job" fact. acknowledgeStuck()
+  // creates this file exclusively and NOTHING ever overwrites or deletes it:
+  // progress.json stays worker-owned, so acknowledging can neither erase a
+  // newer outcome nor be erased by a worker replacement from a stale
+  // snapshot. A malformed marker refuses fail-closed rather than reading as
+  // "still holding the same request id/workspace".
+  function readStuckAckMarker(jobId) {
+    const marker = readJson(fileFor(jobId, STUCK_ACK_FILE), "The durable stuck acknowledgement");
+    if (marker === null) return null;
+    if (marker.schema !== STUCK_ACK_SCHEMA || marker.jobId !== jobId
+      || typeof marker.acknowledgedAt !== "string" || Number.isNaN(Date.parse(marker.acknowledgedAt))) {
+      throw refusal("malformed-stuck-ack", "The durable stuck acknowledgement is malformed; the interrupted job stays unreplayed and the slot remains held.");
+    }
+    return marker;
+  }
+
   function assertActive(jobId) {
     const active = readActive();
     if (!active || active.jobId !== jobId) {
@@ -455,6 +627,8 @@ function createCoordinationJobStore(profileDirectory, {
       jobId,
       requestId: admission.input.requestId,
       admission: admission.input,
+      ...(admission.followUpMode === liveRead.MODE && liveRead.eligible(admission.input) ? { followUpMode: liveRead.MODE } : {}),
+      ...(Object.hasOwn(progress, "liveFollowUp") ? { liveFollowUp: progress.liveFollowUp } : {}),
       state: progress.state,
       revoked: progress.revoked,
       revokeRequestedAt: progress.revokeRequestedAt ?? null,
@@ -465,6 +639,7 @@ function createCoordinationJobStore(profileDirectory, {
       detail: progress.detail ?? null,
       progress: progress.display ?? null,
       outcome: progress.outcome ?? null,
+      acknowledgedStuckAt: typeof progress.acknowledgedStuckAt === "string" ? progress.acknowledgedStuckAt : null,
       startupClaim: claim ? { claimedAt: claim.claimedAt, pid: claim.pid ?? null } : null,
       workerState: claim ? "claimed-owner-unconfirmed" : (active?.jobId === jobId ? "awaiting-startup-claim" : "not-active"),
       active: active?.jobId === jobId,
@@ -473,13 +648,18 @@ function createCoordinationJobStore(profileDirectory, {
     };
   }
 
-  function findAdmissionsByRequestId(requestId) {
+  function confirmedTerminal(progress) {
+    return RELEASE_STATES.has(progress.state) && !!progress.outcome && !progress.pendingCommand;
+  }
+
+  function inspectPriorAdmissions(incoming) {
     let entries;
     try { entries = fsApi.readdirSync(jobsRoot, { withFileTypes: true }); } catch (error) {
-      if (error?.code === "ENOENT") return [];
+      if (error?.code === "ENOENT") return { sameRequest: [], holders: [] };
       throw refusal("state-unavailable", "Prior job admissions could not be inspected; no replacement was authorized.");
     }
-    const found = [];
+    const sameRequest = [];
+    const holders = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !isJobId(entry.name)) continue;
       const admission = readJson(fileFor(entry.name, ADMISSION_FILE), "A prior immutable job admission");
@@ -487,7 +667,7 @@ function createCoordinationJobStore(profileDirectory, {
         throw refusal("malformed-admission", "A prior job admission is incomplete or malformed; no replacement was authorized.");
       }
       let normalized;
-      try { normalized = normalizeAdmissionInput(admission.input); } catch {
+      try { normalized = normalizeAdmissionInput(admission.input, platform); } catch {
         throw refusal("malformed-admission", "A prior job admission is invalid; no replacement was authorized.");
       }
       if (stableJson(normalized) !== stableJson(admission.input)) {
@@ -495,19 +675,38 @@ function createCoordinationJobStore(profileDirectory, {
       }
       const progress = readProgress(entry.name);
       readClaim(entry.name);
-      const safelyReleased = RELEASE_STATES.has(progress.state) && !!progress.outcome && !progress.pendingCommand;
-      if (!safelyReleased) {
+      const released = confirmedTerminal(progress);
+      // A user left this job unreplayed. Absence of a worker is not that fact;
+      // the timestamp is. The same request id cannot be admitted again.
+      // Leaving does not free the same folder while the exit is unconfirmed.
+      // "Same" is the platform workspace identity: on Windows the folder may
+      // arrive re-cased, so the comparison folds case there only.
+      if (typeof progress.acknowledgedStuckAt === "string") {
+        if (normalized.requestId === incoming.requestId) {
+          throw refusal("stuck-acknowledged", "The interrupted job stays unreplayed; the same request id cannot be admitted again.");
+        }
+        if (!released) {
+          const held = workspaceIdentity(normalized.workspacePath, platform);
+          const candidate = workspaceIdentity(incoming.workspacePath, platform);
+          if (held === null || candidate === null || held === candidate) holders.push({ jobId: entry.name, admission });
+        }
+        continue;
+      }
+      if (!released) {
         // A missing profile slot cannot be interpreted as a dead worker or a
         // completed job. Stale/incomplete owners block replacement forever.
         throw refusal("stale-job-state", "A prior job has no confirmed terminal outcome; no replacement was authorized.");
       }
-      if (normalized.requestId === requestId) found.push({ jobId: entry.name, admission });
+      if (normalized.requestId === incoming.requestId) sameRequest.push({ jobId: entry.name, admission });
     }
-    return found;
+    return { sameRequest, holders };
   }
 
-  function compareDuplicate(existing, normalized) {
-    if (stableJson(existing.admission.input) !== stableJson(normalized)) {
+  function compareDuplicate(existing, normalized, metadata) {
+    // A legacy request never gets upgraded by a newer host's default emission.
+    const recordedMode = existing.admission.followUpMode;
+    if (stableJson(existing.admission.input) !== stableJson(normalized)
+      || (recordedMode !== undefined && recordedMode !== metadata.followUpMode)) {
       return { ok: false, reason: "request-conflict", existingJobId: existing.jobId };
     }
     const status = statusFor(existing.jobId);
@@ -517,22 +716,30 @@ function createCoordinationJobStore(profileDirectory, {
     return { ok: true, created: false, existing: true, jobId: existing.jobId, status };
   }
 
-  function startAdmission(input) {
+  function startAdmission(input, metadata = {}) {
     requireWritable();
-    const normalized = normalizeAdmissionInput(input);
+    const normalized = normalizeAdmissionInput(input, platform);
+    if (!isPlainObject(metadata) || Object.keys(metadata).some(k => k !== "followUpMode")
+      || (metadata.followUpMode !== undefined && (metadata.followUpMode !== liveRead.MODE || !liveRead.eligible(normalized)))) {
+      throw refusal("invalid-admission", "This follow-up mode is not eligible for the immutable admission.");
+    }
     mkdirStore();
     const active = readActive();
     if (active) {
       const admission = assertActive(active.jobId);
       if (admission.input.requestId === normalized.requestId) {
-        return compareDuplicate({ jobId: active.jobId, admission }, normalized);
+        return compareDuplicate({ jobId: active.jobId, admission }, normalized, metadata);
       }
       return { ok: false, reason: "active-job-exists", existingJobId: active.jobId, status: statusFor(active.jobId) };
     }
 
-    const previous = findAdmissionsByRequestId(normalized.requestId);
-    if (previous.length > 1) throw refusal("duplicate-job-history", "More than one job has this request id; no replacement was authorized.");
-    if (previous.length === 1) return compareDuplicate(previous[0], normalized);
+    const previous = inspectPriorAdmissions(normalized);
+    if (previous.holders.length > 0) {
+      const holder = previous.holders[0];
+      return { ok: false, reason: "workspace-held", existingJobId: holder.jobId, status: statusFor(holder.jobId) };
+    }
+    if (previous.sameRequest.length > 1) throw refusal("duplicate-job-history", "More than one job has this request id; no replacement was authorized.");
+    if (previous.sameRequest.length === 1) return compareDuplicate(previous.sameRequest[0], normalized, metadata);
 
     const jobId = idFactory();
     if (!isJobId(jobId)) throw refusal("invalid-job-id", "The job id generator returned an invalid id.");
@@ -543,7 +750,8 @@ function createCoordinationJobStore(profileDirectory, {
       throw refusal("invalid-control-token", "The local control credential could not be created.");
     }
     fsApi.mkdirSync(jobDir, { recursive: false, mode: 0o700 });
-    const admission = { schema: ADMISSION_SCHEMA, jobId, createdAt, input: normalized };
+    const admission = { schema: ADMISSION_SCHEMA, jobId, createdAt, input: normalized,
+      ...(metadata.followUpMode ? { followUpMode: metadata.followUpMode } : {}) };
     const initialProgress = {
       schema: PROGRESS_SCHEMA,
       jobId,
@@ -577,7 +785,7 @@ function createCoordinationJobStore(profileDirectory, {
         try { fsApi.rmSync(jobDir, { recursive: true, force: true }); } catch { /* orphan remains a refusal fact */ }
         if (occupied) {
           if (occupied.requestId === normalized.requestId) {
-            return compareDuplicate({ jobId: occupied.jobId, admission: readAdmission(occupied.jobId) }, normalized);
+            return compareDuplicate({ jobId: occupied.jobId, admission: readAdmission(occupied.jobId) }, normalized, metadata);
           }
           return { ok: false, reason: "active-job-exists", existingJobId: occupied.jobId, status: statusFor(occupied.jobId) };
         }
@@ -637,10 +845,15 @@ function createCoordinationJobStore(profileDirectory, {
   }
 
   function assertOwner(jobId, ownerToken) {
-    assertActive(jobId);
     const claim = readClaim(jobId);
     if (!claim || !equalSecret(claim.ownerToken, ownerToken)) {
       throw refusal("not-worker-owner", "Only the claimed worker may update job progress.");
+    }
+    try {
+      assertActive(jobId);
+    } catch (error) {
+      if (error?.code !== "admission-not-active") throw error;
+      if (!readStuckAckMarker(jobId)) throw error;
     }
     return claim;
   }
@@ -664,6 +877,45 @@ function createCoordinationJobStore(profileDirectory, {
     return statusFor(jobId);
   }
 
+  function readOwnedLiveFollowUpContext(jobId, records) {
+    const admission = readAdmission(jobId);
+    if (records === undefined) {
+      try { records = JSON.parse(fsApi.readFileSync(path.join(profileRoot, "coordination-records.json"), "utf8")); }
+      catch { return null; }
+    }
+    return liveRead.ownedContext(admission.input, admission.followUpMode, readProgress(jobId).liveFollowUp, records);
+  }
+
+  function recordLiveFollowUpAccepted(jobId, context, ownerToken) {
+    requireWritable();
+    assertOwner(jobId, ownerToken);
+    const admission = readAdmission(jobId), current = readProgress(jobId);
+    if (OUTCOME_STATES.has(current.state) || current.revoked || current.pendingCommand || current.acknowledgedStuckAt) throw refusal("live-unavailable", "The open allowance is no longer idle.");
+    let records;
+    try { records = JSON.parse(fsApi.readFileSync(path.join(profileRoot, "coordination-records.json"), "utf8")); } catch { records = null; }
+    const fresh = liveRead.ownedContext(admission.input, admission.followUpMode, context, records);
+    if (!fresh || fresh.phase !== "accepted") throw refusal("invalid-live-context", "The accepted follow-up context is invalid.");
+    if (Object.hasOwn(current, "liveFollowUp")) {
+      if (stableJson({ ...current.liveFollowUp, phase: "accepted" }) !== stableJson(fresh)) throw refusal("live-conflict", "This allowance already accepted a different follow-up.");
+      return statusFor(jobId);
+    }
+    const targets = require("./saved-targets.cjs").resolveSavedTargets(records);
+    if (targets.head(fresh.rootRequestId) !== admission.input.requestId || records.some(record => record.requestId === fresh.requestId)) {
+      throw refusal("invalid-live-context", "The latest initial result changed; nothing was accepted.");
+    }
+    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...current, liveFollowUp: cloneJson(fresh, "Accepted follow-up"), phase: "followup-accepted", updatedAt: now() });
+    return statusFor(jobId);
+  }
+
+  function updateLiveFollowUpPhase(jobId, phase, ownerToken) {
+    requireWritable();
+    assertOwner(jobId, ownerToken);
+    const current = readProgress(jobId), context = readOwnedLiveFollowUpContext(jobId);
+    if (!context || OUTCOME_STATES.has(current.state) || !["running", "completed", "unconfirmed"].includes(phase)) throw refusal("invalid-live-context", "The follow-up context is unavailable.");
+    writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...current, liveFollowUp: { ...context, phase }, updatedAt: now() });
+    return statusFor(jobId);
+  }
+
   function recordPendingCommand(jobId, { commandId, role = null }, ownerToken) {
     requireWritable();
     assertOwner(jobId, ownerToken);
@@ -672,6 +924,9 @@ function createCoordinationJobStore(profileDirectory, {
     const current = readProgress(jobId);
     if (current.revoked) throw refusal("access-revoked", "Access was stopped; no subsequent command may be admitted.");
     if (OUTCOME_STATES.has(current.state)) throw refusal("job-terminal", "The job is terminal; no command may be admitted.");
+    if (typeof current.acknowledgedStuckAt === "string" || readStuckAckMarker(jobId)) {
+      throw refusal("stuck-acknowledged", "This goal was left unreplayed; no new command may be admitted on it.");
+    }
     if (current.pendingCommand) throw refusal("pending-command", "A previous command is still unconfirmed; no next command may be admitted.");
     if (current.completedCommands.some((item) => item.commandId === commandId)) {
       throw refusal("duplicate-command-id", "This command id already has a durable result; it cannot be replayed.");
@@ -690,7 +945,7 @@ function createCoordinationJobStore(profileDirectory, {
     // must not launch. The caller must not invoke a turn unless this
     // function returns.
     writeAtomic(fileFor(jobId, PROGRESS_FILE), next);
-    if (readRevocationMarker(jobId)) {
+    if (readRevocationMarker(jobId) || readStuckAckMarker(jobId)) {
       const after = readProgress(jobId);
       if (after.pendingCommand?.commandId === commandId) {
         completeCommand(jobId, {
@@ -703,7 +958,10 @@ function createCoordinationJobStore(profileDirectory, {
           },
         }, ownerToken);
       }
-      throw refusal("access-revoked", "Access was stopped; the recorded command was settled as never sent and was not launched.");
+      if (readRevocationMarker(jobId)) {
+        throw refusal("access-revoked", "Access was stopped; the recorded command was settled as never sent and was not launched.");
+      }
+      throw refusal("stuck-acknowledged", "This goal was left unreplayed; no new command may be admitted on it.");
     }
     return statusFor(jobId);
   }
@@ -743,7 +1001,7 @@ function createCoordinationJobStore(profileDirectory, {
     requireWritable();
     const admission = assertActive(jobId);
     const current = readProgress(jobId);
-    if (OUTCOME_STATES.has(current.state)) return statusFor(jobId);
+    if (RELEASE_STATES.has(current.state)) return statusFor(jobId);
     if (current.revoked) return statusFor(jobId);
     const at = now();
     // The stop is ONLY the write-once fact file: the exclusive create
@@ -800,6 +1058,7 @@ function createCoordinationJobStore(profileDirectory, {
     }
     const active = readActive();
     if (!active || active.jobId !== jobId) {
+      if (readStuckAckMarker(jobId)) return statusFor(jobId);
       throw refusal("admission-not-active", "The profile admission slot is missing or stale; it was not replaced.");
     }
     // The outcome was atomically persisted above this step. Removing the one
@@ -807,6 +1066,50 @@ function createCoordinationJobStore(profileDirectory, {
     // startup claim remain as history and are never recycled.
     fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
     syncDirectory(storeRoot);
+    return statusFor(jobId);
+  }
+
+  function releaseConfirmedTerminal(jobId) {
+    requireWritable();
+    const progress = readProgress(jobId);
+    if (!RELEASE_STATES.has(progress.state) || !progress.outcome || progress.pendingCommand) {
+      throw refusal("job-not-terminal", "Only a confirmed finished job can be released without its worker.");
+    }
+    const active = readActive();
+    if (!active || active.jobId !== jobId) return statusFor(jobId);
+    fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
+    syncDirectory(storeRoot);
+    return statusFor(jobId);
+  }
+
+  /**
+   * The user leaves an interrupted job so a different send can be admitted.
+   * The pending command and unconfirmed outcome stay on this job. Nothing is
+   * replayed, and the same request id cannot be admitted again.
+   */
+  function acknowledgeStuck(jobId) {
+    requireWritable();
+    readAdmission(jobId);
+    const progress = readProgress(jobId);
+    if (RELEASE_STATES.has(progress.state) && progress.outcome && !progress.pendingCommand) return statusFor(jobId);
+    // The acknowledgement is ONLY the write-once marker, created before the
+    // active pointer is removed: acknowledgeStuck never writes progress.json,
+    // so a worker's newer outcome can never be rolled back by this
+    // read-modify-write, and this file surviving every worker replacement
+    // means the hold cannot be erased either. A legacy progress-only
+    // acknowledgement seeds the marker with its existing timestamp so it
+    // becomes durable too.
+    const at = typeof progress.acknowledgedStuckAt === "string" ? progress.acknowledgedStuckAt : now();
+    try {
+      writeExclusive(fileFor(jobId, STUCK_ACK_FILE), { schema: STUCK_ACK_SCHEMA, jobId, acknowledgedAt: at });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    const active = readActive();
+    if (active?.jobId === jobId) {
+      fsApi.unlinkSync(path.join(storeRoot, ACTIVE_FILE));
+      syncDirectory(storeRoot);
+    }
     return statusFor(jobId);
   }
 
@@ -832,7 +1135,7 @@ function createCoordinationJobStore(profileDirectory, {
     return controlEndpointFor(profileEndpoint, options);
   }
 
-  function startControlServer({ jobId, endpoint, token } = {}) {
+  function startControlServer({ jobId, endpoint, token, getLiveReadStatus, onContinue, beforeGuardedRevoke, onRevoke } = {}) {
     requireWritable();
     assertActive(jobId);
     if (!readClaim(jobId)) throw refusal("worker-not-claimed", "The job control endpoint belongs to its claimed worker only.");
@@ -854,33 +1157,53 @@ function createCoordinationJobStore(profileDirectory, {
       const reply = (value) => {
         if (replied) return;
         replied = true;
-        try { socket.end(`${JSON.stringify(value)}\n`); } catch { socket.destroy(); }
+        try {
+          const frame = `${JSON.stringify(value)}\n`;
+          socket.end(Buffer.byteLength(frame) <= MAX_CONTROL_BYTES ? frame : '{"ok":false,"error":"invalid-control-response"}\n');
+        } catch { socket.destroy(); }
       };
       socket.setTimeout(5000, () => reply({ ok: false, error: "control-timeout" }));
       socket.on("error", () => { if (!replied) socket.destroy(); });
-      socket.on("data", (chunk) => {
-        if (replied) return;
+      let handling = false;
+      socket.on("data", async (chunk) => {
+        if (replied || handling) return;
         buffer = Buffer.concat([buffer, chunk]);
         if (buffer.length > MAX_CONTROL_BYTES) return reply({ ok: false, error: "invalid-request" });
         const newline = buffer.indexOf(0x0a);
         if (newline < 0) return;
         if (newline !== buffer.length - 1) return reply({ ok: false, error: "invalid-request" });
         let request;
-        try { request = JSON.parse(buffer.subarray(0, newline).toString("utf8")); } catch { return reply({ ok: false, error: "invalid-request" }); }
+        try { request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline))); } catch { return reply({ ok: false, error: "invalid-request" }); }
         const keys = isPlainObject(request) ? Object.keys(request).sort().join(",") : "";
-        if (keys !== "operation,schema,token" || request.schema !== CONTROL_SCHEMA || !equalSecret(request.token, secret)) {
+        if (!["operation,schema,token", "operation,payload,schema,token"].includes(keys) || request.schema !== CONTROL_SCHEMA || !equalSecret(request.token, secret)) {
           return reply({ ok: false, error: "unauthorized" });
         }
-        if (request.operation !== "status" && request.operation !== "revoke") {
-          return reply({ ok: false, error: "unsupported-operation" });
-        }
+        let payload;
+        try { payload = liveRead.controlPayload(request.operation, request.payload); }
+        catch (error) { return reply({ ok: false, error: error.message }); }
+        handling = true;
+        socket.setTimeout(request.operation === "continue" ? 12000 : 5000);
         try {
-          const full = request.operation === "status" ? statusFor(jobId) : revoke(jobId);
-          // Live identity and revocation must fit even when the accepted goal
-          // or retained reports do not. Never put statusFor() on this socket.
-          reply({ ok: true, status: controlAcknowledgement(full) });
-        } catch {
-          reply({ ok: false, error: "state-unavailable" });
+          let full;
+          if (request.operation === "continue") {
+            if (typeof onContinue !== "function") throw refusal("live-unavailable", "Live Continue is unavailable.");
+            await onContinue(payload);
+            full = statusFor(jobId);
+          } else if (request.operation === "revoke") {
+            if (payload) {
+              if (typeof beforeGuardedRevoke !== "function") throw refusal("live-unavailable", "The allowance cannot be ended as idle.");
+              // Synchronous worker check and marker creation are indivisible in
+              // this event loop: never mark a stale Ready view's active child.
+              beforeGuardedRevoke(payload);
+            }
+            try { full = revoke(jobId); }
+            catch (error) { onRevoke?.({ storageError: true }); throw error; }
+            onRevoke?.({ storageError: false });
+          } else full = statusFor(jobId);
+          const live = typeof getLiveReadStatus === "function" ? liveRead.liveStatus(getLiveReadStatus(full)) : null;
+          reply({ ok: true, status: controlAcknowledgement({ ...full, ...(live ? { liveRead: live } : {}) }) });
+        } catch (error) {
+          reply({ ok: false, error: error.code || "state-unavailable" });
         }
       });
     });
@@ -937,11 +1260,17 @@ function createCoordinationJobStore(profileDirectory, {
     getActiveStatus,
     claimWorker,
     updateProgress,
+    recordLiveFollowUpAccepted,
+    updateLiveFollowUpPhase,
+    readOwnedLiveFollowUpContext,
+    assertWorkerOwner: (jobId, ownerToken) => { assertOwner(jobId, ownerToken); return true; },
     recordPendingCommand,
     completeCommand,
     revoke,
     recordOutcome,
     releaseAdmission,
+    releaseConfirmedTerminal,
+    acknowledgeStuck,
     readControlCredential,
     controlEndpointFor: endpointFor,
     startControlServer,
@@ -960,6 +1289,7 @@ function controlAcknowledgement(status) {
     writeTurnsRemaining: status.counters?.writeTurnsRemaining ?? null,
     workerPid: status.startupClaim?.pid ?? null,
     claimed: status.startupClaim !== null,
+    ...(liveRead.liveStatus(status.liveRead) ? { liveRead: liveRead.liveStatus(status.liveRead) } : {}),
   };
   if (Buffer.byteLength(`${JSON.stringify({ ok: true, status: ack })}\n`) > MAX_CONTROL_BYTES) {
     throw refusal("invalid-control-response", "The job control acknowledgement does not fit; no claim was cleared.");
@@ -967,10 +1297,12 @@ function controlAcknowledgement(status) {
   return ack;
 }
 
-function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
+function requestControl(endpoint, token, operation, { timeoutMs = 5000, payload } = {}) {
   if (typeof endpoint !== "string" || !endpoint.trim()) return Promise.reject(refusal("invalid-endpoint", "The profile control endpoint is unavailable."));
   if (typeof token !== "string" || !/^[a-f0-9]{64}$/.test(token)) return Promise.reject(refusal("invalid-control-token", "The local control credential is unavailable."));
-  if (operation !== "status" && operation !== "revoke") return Promise.reject(refusal("unsupported-operation", "Only status and revoke control requests are supported."));
+  let frame;
+  try { frame = liveRead.controlFrame(token, operation, payload); }
+  catch (error) { return Promise.reject(error.code ? error : refusal(error.message, "The control payload was refused; nothing was sent.")); }
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(endpoint);
     let buffer = Buffer.alloc(0);
@@ -992,16 +1324,16 @@ function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
       if (newline < 0) return;
       if (newline !== buffer.length - 1) return finish(refusal("invalid-control-response", "The job control response is malformed."));
       let response;
-      try { response = JSON.parse(buffer.subarray(0, newline).toString("utf8")); } catch {
+      try { response = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, newline))); } catch {
         return finish(refusal("invalid-control-response", "The job control response is malformed."));
       }
       if (!isPlainObject(response) || response.ok !== true || !isPlainObject(response.status)) {
-        return finish(refusal("control-refused", "The job control request was refused; no claim was cleared."));
+        return finish(refusal("control-refused", "The job control request was refused; no claim was cleared.", response?.error));
       }
       finish(null, response.status);
     });
     socket.once("connect", () => {
-      socket.write(`${JSON.stringify({ schema: CONTROL_SCHEMA, token, operation })}\n`);
+      socket.write(frame);
     });
   });
 }
@@ -1009,7 +1341,9 @@ function requestControl(endpoint, token, operation, { timeoutMs = 5000 } = {}) {
 module.exports = {
   createCoordinationJobStore,
   normalizeAdmissionInput,
+  workspaceIdentity,
   controlEndpointFor,
+  jobControlEndpoint,
   requestControl,
   controlAcknowledgement,
   ADMISSION_SCHEMA,
@@ -1017,4 +1351,6 @@ module.exports = {
   CONTROL_SCHEMA,
   REVOCATION_FILE,
   REVOCATION_SCHEMA,
+  STUCK_ACK_FILE,
+  STUCK_ACK_SCHEMA,
 };

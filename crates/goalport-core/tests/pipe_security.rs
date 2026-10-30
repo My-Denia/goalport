@@ -985,12 +985,32 @@ fn t11_concurrent_profiles_each_serve_their_own_verified_pipe() {
 
 #[test]
 fn t12_verify_pipe_peer_waits_for_a_busy_core_within_its_budget() {
+    // Deliberately single-instance fixture, using the production secured
+    // NamedPipeServer. Production Core now accepts concurrently; two idle
+    // clients must no longer make that listener busy. This fixture isolates
+    // the peer verifier's unchanged busy-budget contract instead.
+    fn single_instance(name: &str) -> (mpsc::Sender<()>, mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let name = name.to_owned();
+        let (ready, wait_ready) = mpsc::channel();
+        let (release, wait_release) = mpsc::channel();
+        let (done, wait_done) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // Bind and replace stay on this one thread; never move the server.
+            let mut server = NamedPipeServer::bind(&name).unwrap();
+            ready.send(()).unwrap();
+            if wait_release.recv().is_ok() {
+                server.replace_listening_instance().unwrap();
+                let _ = wait_done.recv();
+            }
+        });
+        wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        (release, done, worker)
+    }
     // Busy until the budget ends.
     let name = unique("t12-busy");
-    let _core = start_in_process_core(&name);
+    let (release_busy, done_busy, core_busy) = single_instance(&name);
     let serving = connect_client(&name);
     thread::sleep(Duration::from_millis(200));
-    let pending = connect_client(&name);
     let started = Instant::now();
     let result = verify_pipe_peer(&name);
     let elapsed = started.elapsed();
@@ -1002,19 +1022,20 @@ fn t12_verify_pipe_peer_waits_for_a_busy_core_within_its_budget() {
         elapsed >= Duration::from_millis(2900) && elapsed <= Duration::from_millis(4500),
         "busy budget elapsed {elapsed:?}"
     );
-    drop(pending);
     drop(serving);
+    drop(release_busy);
+    drop(done_busy);
+    core_busy.join().unwrap();
 
     // Released within the budget.
     let name = unique("t12-released");
-    let _core = start_in_process_core(&name);
+    let (release_instance, done, core) = single_instance(&name);
     let serving = connect_client(&name);
     thread::sleep(Duration::from_millis(200));
-    let pending = connect_client(&name);
     let release = thread::spawn(move || {
         thread::sleep(Duration::from_millis(1000));
         drop(serving);
-        drop(pending);
+        release_instance.send(()).unwrap();
     });
     let started = Instant::now();
     let peer = verify_pipe_peer(&name).expect("peer verification after release");
@@ -1022,4 +1043,6 @@ fn t12_verify_pipe_peer_waits_for_a_busy_core_within_its_budget() {
     release.join().unwrap();
     assert!(elapsed < Duration::from_millis(3000), "elapsed {elapsed:?}");
     assert_eq!(peer.server_pid, std::process::id());
+    drop(done);
+    core.join().unwrap();
 }

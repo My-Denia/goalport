@@ -281,6 +281,52 @@ describe("background job contract", () => {
     });
   });
 
+  describe("continuation descriptor mapping and admission checks", () => {
+    const continuation = {
+      parentRequestId: "req-parent-1",
+      rootRequestId: "req-root-1",
+      originalGoal: "Initial core goal.",
+      followUp: "Follow-up addition.",
+    };
+
+    it("accepts well-formed continuation in start refusal check", () => {
+      expect(backgroundStartRefusal({ ...readOnlyStart, continuation })).toBeNull();
+      expect(backgroundStartRefusal({ ...readOnlyStart, continuation: { ...continuation, followUp: "" } })).toBeNull();
+    });
+
+    it("refuses malformed continuation descriptor", () => {
+      expect(backgroundStartRefusal({
+        ...readOnlyStart,
+        continuation: { ...continuation, parentRequestId: "invalid with spaces" },
+      })).toContain("continuation descriptor is malformed");
+
+      expect(backgroundStartRefusal({
+        ...readOnlyStart,
+        continuation: { ...continuation, originalGoal: "" },
+      })).toContain("continuation descriptor is malformed");
+
+      expect(backgroundStartRefusal({
+        ...readOnlyStart,
+        continuation: { ...continuation, originalGoal: "a".repeat(60_000), followUp: "b".repeat(50_000) },
+      })).toContain("continuation descriptor is malformed");
+    });
+
+    it("forwards continuation into engine input", () => {
+      const engineInput = backgroundEngineInput({ ...readOnlyStart, continuation });
+      expect(engineInput.continuation).toEqual(continuation);
+      // Independent copy
+      expect(engineInput.continuation).not.toBe(continuation);
+    });
+
+    it("keeps absence absent but refuses explicit null or extra fields before mapping", () => {
+      expect("continuation" in backgroundEngineInput(readOnlyStart)).toBe(false);
+      for (const descriptor of [null, { ...continuation, unrelated: true }]) {
+        const input = { ...readOnlyStart, continuation: descriptor } as unknown as Parameters<typeof backgroundStartRefusal>[0];
+        expect(backgroundStartRefusal(input)).toContain("continuation descriptor is malformed");
+      }
+    });
+  });
+
   describe("background start outcome decode", () => {
     const admittedStatus = {
       jobId: "job-1",
