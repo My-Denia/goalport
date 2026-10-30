@@ -621,15 +621,7 @@ fn describe_turn(
             && store
                 .attempts_for_task(&context.attempt.task_id)
                 .map_err(|error| error.to_string())?
-                .iter()
-                .rev()
-                // A Codex resume that failed leaves an unstarted successor; the
-                // closed session is still the one the user can continue.
-                .find(|attempt| {
-                    !(attempt.provider.eq_ignore_ascii_case("codex")
-                        && matches!(attempt.state, AttemptState::Queued)
-                        && attempt.provider_session.is_none())
-                })
+                .last()
                 .is_some_and(|latest| latest.id == context.attempt.id)
         {
             turn.reason_code = Some("session-closed".into());

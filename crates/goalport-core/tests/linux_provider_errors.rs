@@ -298,6 +298,14 @@ fn completed_turn_after_core_restart_offers_exact_resume_without_prompt_replay()
     // A closed conversation is never a dead end: the same thread carries on.
     let closed = accepted(&server, "closed-view", "snapshot", json!({}));
     assert!(closed["productConversation"]["turn"]["actions"].as_array().unwrap().iter().any(|action| action == "resume-session"), "{closed}");
+    // A failed resume leaves no trace, so the same session can simply be tried again.
+    let scenario = fs::read_to_string(workspace.path().join("peer-scenario")).unwrap();
+    fs::write(workspace.path().join("peer-scenario"), "resume-error").unwrap();
+    let attempts = store.list_attempts().unwrap().len();
+    let failed = request(&server, "resume-closed-fails", "resume_native_session", json!({"attemptId":attempt_id}));
+    assert_eq!(failed["ok"], false, "{failed}");
+    assert_eq!(store.list_attempts().unwrap().len(), attempts);
+    fs::write(workspace.path().join("peer-scenario"), scenario).unwrap();
     let again = request(&server, "resume-closed", "resume_native_session", json!({"attemptId":attempt_id}));
     assert_eq!(again["ok"], true, "closed Codex must resume: {again}");
     assert_eq!(fs::read_to_string(workspace.path().join("resume-requested-thread")).unwrap(), "local-thread");
