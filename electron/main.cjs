@@ -990,6 +990,7 @@ const nativeCheckHost = createNativeCheckHost({
   grant: () => backgroundSendConsent().act("grant"),
   start: (input) => backgroundHost.start(input),
   stop: (jobId) => backgroundHost.revoke(jobId),
+  leave: async (jobId) => (["completed", "failed", "stopped"].includes((await backgroundHost.status(jobId))?.state) ? backgroundHost.releaseConfirmedTerminal(jobId) : backgroundHost.acknowledge(jobId)),
 });
 
 function closeAttemptTarget(active, selectedId, held, heldId) {

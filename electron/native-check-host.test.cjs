@@ -105,6 +105,14 @@ test("an unconfirmed admission failure keeps the request instead of offering a s
   assert.deepEqual(reply, { ok: false, error: "worker reply lost", previewAgain: false });
 });
 
+test("leaving a dead check goes only to the host leave path", async t => {
+  const left = [];
+  const { host, started } = fixture(t, { leave: async jobId => { left.push(jobId); return { jobId }; } });
+  assert.deepEqual(await host.handle("coordination_acknowledge", { jobId: "job" }), { ok: true, payload: { job: { jobId: "job" } } });
+  assert.deepEqual(left, ["job"]);
+  assert.equal(started.length, 0);
+});
+
 test("the saved list ignores unbound records and refuses an unusable goal id", async t => {
   const { host, directory } = fixture(t);
   fs.writeFileSync(path.join(directory, "coordination-records.json"), JSON.stringify([{ requestId: "lonely", recordKind: "native-workspace-check", nativeCheckTarget: ids }]));

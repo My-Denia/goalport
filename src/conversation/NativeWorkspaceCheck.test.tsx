@@ -74,6 +74,13 @@ it('on the desktop it talks only to the preload bridge and accepts a Windows fol
  finally{delete window.goalportCore;}
 });
 
+it('a check that stopped running can be left, freeing the goal without sending anything again',async()=>{
+ const calls=server();const dead={...job,requestId:'r',live:false,active:true,state:'unconfirmed'};const onJob=vi.fn();
+ render(<NativeWorkspaceCheck target={target} eligible job={dead as never} onJob={onJob} onBusy={vi.fn()}/>);
+ expect(screen.queryByRole('button',{name:'Stop check'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Leave this check'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
+ expect(calls.find(c=>c.messageType==='coordination_acknowledge')?.payload).toEqual({jobId:job.jobId});expect(onJob.mock.calls[0][0].acknowledgedStuckAt).toBeTruthy();expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);
+});
+
 it('renders a markdown table from Pi as a table, keeping inline code and inert text',()=>{
  const text='Intro\n\n| Claim | Shown |\n|---|---|\n| `git diff` passed | Not shown |\n| <b>x</b> | Yes |\n\nAfter';
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);

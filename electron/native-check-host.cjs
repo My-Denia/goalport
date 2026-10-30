@@ -118,6 +118,7 @@ function createNativeCheckHost(options) {
       if (messageType === "coordination_list") return { ok: true, payload: list(payload?.nativeCampaignId) };
       if (messageType === "coordination_grant") return { ok: true, payload: options.grant() };
       if (messageType === "coordination_stop") return { ok: true, payload: await options.stop(payload?.jobId) };
+      if (messageType === "coordination_acknowledge") return { ok: true, payload: { job: await options.leave(payload?.jobId) } };
       return { ok: false, error: "Workspace check is unavailable." };
     } catch (error) {
       return { ok: false, error: error?.message || "Workspace check is unavailable.", previewAgain: error?.previewAgain === true };

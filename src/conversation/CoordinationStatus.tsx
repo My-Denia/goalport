@@ -466,7 +466,7 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 }
 
 /** The user returns to the SAME live job, not a draft or saved permission. */
-export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void }) {
+export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, onLeave }: { job: BackgroundStatus; onStopAllowing: () => void; onContinue?: () => void; onLeave?: () => void }) {
   const report = job.outcome?.report ?? job.progress?.firstRound;
   // Sentence ladder: unconfirmed > SETTLED TERMINAL > revoked-still-settling
   // > live/finished. A stopped job that has settled must say so — the user
@@ -497,7 +497,8 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue }
     <h3>{settled && job.state === 'completed' ? 'Independent workspace check returned' : 'Independent workspace check'}</h3>
     <p role="status">{job.state === 'unconfirmed' ? 'The check outcome is unconfirmed. Nothing will be replayed.' : job.revoked && !settled ? 'Check access stopped. The current Pi turn may finish; no further turn will start.' : settled ? 'This response covers the shared snapshot only, not later edits or native authorship.' : 'Pi is checking the shared workspace snapshot. You can return to this goal later.'}</p>
     {job.workspacePath ? <p title={job.workspacePath}>{job.workspacePath}</p> : null}
-    {job.active && !job.revoked ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop check</button> : null}
+    {job.active && !job.revoked && job.live ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop check</button> : null}
+    {job.active && !job.live && !job.acknowledgedStuckAt && onLeave ? <><p role="status">This check is no longer running. Leaving it frees this goal; nothing is sent again.</p><button type="button" className="button button-small button-outline" onClick={onLeave}>Leave this check</button></> : null}
     {job.progress?.activity && !settled && !job.progress.activity.startsWith('Pi is checking the shared workspace snapshot') ? <p>{job.progress.activity}</p> : null}
     {report?.auditText ? <div className="tl-agent-body" style={{fontSize:14,lineHeight:1.55}}>{renderMarkdownBody(report.auditText, `native-check-${job.jobId}`)}</div> : null}
     {job.outcome?.error ? <p role="status">{job.outcome.error}</p> : null}
