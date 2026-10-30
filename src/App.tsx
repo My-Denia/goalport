@@ -1095,12 +1095,14 @@ function App() {
   // active pointer exists, in any folder. Present that before Send rather than
   // letting the draft look started and then be refused at admission.
   const backgroundSlotBlocked = !candidateChecked || backgroundHolds.globalBlock || !backgroundHolds.complete
-    || nativeCheckBusy || Boolean(nativeCheckJob?.active) || (linuxNativeView && (linuxCoordinationLive || sidebarUnconfirmed))
+    || nativeCheckBusy || Boolean(nativeCheckJob?.active && !nativeCheckJob.acknowledgedStuckAt) || (linuxNativeView && (linuxCoordinationLive || sidebarUnconfirmed))
     || Boolean(backgroundJob?.active && !backgroundJob.acknowledgedStuckAt);
   const backgroundSlotSentence = !candidateChecked || !backgroundHolds.complete
     ? "Workspace reservations could not be checked. Wait for status to refresh before sending; nothing was sent."
     : backgroundJob?.active && confirmedTerminalJob(backgroundJob)
     ? "This finished goal still holds the profile slot. Open it and choose its new-send control to release it; nothing was sent."
+    : nativeCheckJob?.active && !nativeCheckJob.live && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
+    ? "This check is no longer running. Leave it above to send again."
     : nativeCheckJob?.active && nativeCheckJob.nativeCheckTarget?.campaignId === snapshot.activeCampaignId
     ? nativeCheckJob.revoked ? "The check is stopping. Send when it has finished." : "Pi is checking this workspace. Send when it finishes, or stop the check above."
     : client.mode === "electron" && nativeCheckJob?.active

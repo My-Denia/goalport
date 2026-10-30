@@ -81,7 +81,9 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     finally{setBusy(false);onBusy(holdPending);}
   }
   async function stop(){if(!job)return;setError(null);try{await ipc('coordination_stop',{jobId:job.jobId});onJob({...job,revoked:true});}catch(e){setError(e instanceof Error?e.message:'Stop check is not confirmed.');}}
+  async function leave(){if(!job)return;setError(null);try{const reply=await ipc('coordination_acknowledge',{jobId:job.jobId});onJob(reply?.job?.jobId===job.jobId?reply.job:{...job,acknowledgedStuckAt:new Date().toISOString()});}catch(e){setError(e instanceof Error?e.message:'Leaving the check is not confirmed.');}}
   const owns=job?.nativeCheckTarget?.campaignId===campaign;
+  const holding=Boolean(job?.active&&!job.acknowledgedStuckAt);
   // The first start waits on the host for a minute or more; only a reply lost after that is an earlier request.
   const starting=Boolean(pending)&&busy&&!unknown;
   return <section className="native-workspace-check" style={{minWidth:0,maxWidth:960,marginInline:'auto'}}>
@@ -99,8 +101,8 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
       {starting?<p role="status">Starting the check. This can take a minute or two; Pi receives this snapshot only once.</p>:null}
       <div className="dialog-actions"><button type="button" className="button button-outline" disabled={busy||unknown} onClick={()=>changeOpen(false)}>Cancel</button><button type="button" className="button button-outline" disabled={busy||!offer||!checked||!consent||unknown||Boolean(capacityReason)} onClick={()=>{void prepare(true);}}>Preview shared material</button><button type="button" className="button button-primary" disabled={busy||(!pending&&(!checked||!consent||!material))} onClick={()=>{void start();}}>{starting?'Starting…':unknown?'Check result':'Check this snapshot'}</button></div>
     </GoalLayer>
-    {owns&&job?.active?null:<button type="button" className="button button-small button-outline" disabled={busy||(!pending&&(!target||!eligible||Boolean(job?.active)))} onClick={()=>{setOpen(true);if(!pending){setChecked(false);setMaterial(null);request.current='native-check-'+crypto.randomUUID();void prepare(false);}}}>{starting?'Starting check…':pending?'Check previous request':'Check workspace with Pi'}</button>}
-    {owns && job?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}}/>:null}
+    {owns&&holding?null:<button type="button" className="button button-small button-outline" disabled={busy||(!pending&&(!target||!eligible||holding))} onClick={()=>{setOpen(true);if(!pending){setChecked(false);setMaterial(null);request.current='native-check-'+crypto.randomUUID();void prepare(false);}}}>{starting?'Starting check…':pending?'Check previous request':'Check workspace with Pi'}</button>}
+    {owns && job?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}}/>:null}
     {!open && error?<CheckMessage text={error} pending={Boolean(pending)}/>:null}
     {saved.filter(s=>s.requestId!==job?.requestId).map(s=><details key={s.requestId}><summary>{s.statusLabel || 'Independent workspace check'} · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved snapshot'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · Earlier turn snapshot':''}</summary><p>This is a dated workspace snapshot, not automatic verification of Codex or later edits.</p><div className="tl-agent-body" style={{fontSize:14,lineHeight:1.55}}>{renderMarkdownBody(s.auditText ?? '', `saved-native-check-${s.requestId}`)}</div><details><summary>Shared material · {s.nativeCheckMaterial.coverage.limited?'Limited':'Selected tracked changes'}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}
   </section>;
