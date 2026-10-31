@@ -45,6 +45,22 @@ async function chooseNative() {
   await waitFor(() => expect(window.location.hash).toBe("#codex/new"));
 }
 
+it("offers the Codex conversation choice on a first open, before any goal or New goal click", async () => {
+  window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/");
+  server();
+  render(<App />);
+  await chooseNative();
+});
+
+it("the consent button names agents only when it can name exactly the two that will work", async () => {
+  const base = packet();
+  const props = { draft:{workspace:"/fixture", provider:"", message:""}, runtimes:base.runtimes, connected:true, busy:false, blockedFromSending:false, waitingOn:null, error:null, canBrowse:false, coordinationAvailable:true, consentWarning:"Allow first.", onGrantConsent:() => {}, onBrowse:() => {}, onChange:() => {}, onSubmit:() => {}, onDiscard:() => {} };
+  const view = render(<DraftGoalComposer {...props} discoveredHarnesses={["codex","pi"]} />);
+  expect(screen.getByRole("button", {name:"Allow Codex and Pi to work"})).toBeTruthy();
+  view.rerender(<DraftGoalComposer {...props} discoveredHarnesses={["codex","claude","pi"]} />);
+  expect(screen.getByRole("button", {name:"Allow background work"})).toBeTruthy();
+});
+
 it("keeps native chat primary by folding saved workspace results without discarding them", async () => {
   window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/goals/campaign-native");
   server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,filesTruncated:true,before:[],during:[],unattributed:[],commands:[]}]});

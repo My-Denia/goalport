@@ -243,7 +243,7 @@ export function DraftGoalComposer({
     ? "Allowing agents…"
     : harnessWarning === "Background Send was not allowed." || coordinationResult === "Background Send was not allowed."
       ? "Try again"
-      : discoveredHarnesses && discoveredHarnesses.length >= 2
+      : discoveredHarnesses && discoveredHarnesses.length === 2
         ? `Allow ${discoveredHarnesses.map(capitalize).join(" and ")} to work`
         : discoveredHarnesses && discoveredHarnesses.length === 1
           ? `Allow ${capitalize(discoveredHarnesses[0])} to work`
