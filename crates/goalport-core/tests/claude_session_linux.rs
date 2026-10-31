@@ -492,7 +492,7 @@ fn readonly_bash_without_a_host_decision_completes() {
 }
 
 #[test]
-fn bash_without_a_decision_that_changes_the_workspace_fails_open() {
+fn bash_without_a_decision_that_changes_the_workspace_finishes_and_says_so() {
     let (_lock, _env) = begin();
     let root = workspace("bash-writes", "bash_writes_without_permission");
     git_repo(&root);
@@ -506,11 +506,9 @@ fn bash_without_a_decision_that_changes_the_workspace_fails_open() {
     let events = drain(&mut manager, "attempt-bash-write", |seen| {
         has(seen, AgentEventType::TurnFailed) || has(seen, AgentEventType::TurnCompleted)
     });
-    assert!(fail_open(&events), "{events:#?}");
-    assert!(
-        events.iter().any(|event| event.payload["text"] == "mutating Claude tool ran without a host Decision"),
-        "{events:#?}"
-    );
+    assert!(!fail_open(&events), "{events:#?}");
+    assert!(has(&events, AgentEventType::TurnCompleted), "{events:#?}");
+    assert_eq!(tool_payload(&events, "completed")["changedWithoutAsking"], true);
     assert_eq!(fs::read_to_string(root.join("notes/mutated.txt")).unwrap(), "mutated\n");
 }
 
