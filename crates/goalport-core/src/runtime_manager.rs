@@ -6507,6 +6507,7 @@ impl ClaudeStreamProcess {
                 .take(16)
                 .collect::<String>();
             let decision_id = format!("claude-{hash}-{epoch}-{native_id}");
+            let request_input = input.clone();
             self.pending_permissions.insert(
                 decision_id.clone(),
                 ClaudePendingPermission {
@@ -6519,6 +6520,7 @@ impl ClaudeStreamProcess {
             if self.baseline_window == BaselineWindow::FirstTurn {
                 self.baseline_refresh_due = true;
             }
+            let action = claude_request_text(&tool_name, &request_input);
             self.sequence += 1;
             return self.envelope(
                 attempt_id,
@@ -6526,7 +6528,7 @@ impl ClaudeStreamProcess {
                 json!({
                     "request_id": decision_id,
                     "kind": "native-permission",
-                    "text": bounded_text(&tool_name),
+                    "text": bounded_text(&action),
                     "tool_kind": bounded_text(&tool_name),
                     "sessionAnswer": claude_tool_takes_session_answer(&tool_name)
                 }),
@@ -8278,6 +8280,20 @@ fn explicit_exit_code(block: &Value) -> Option<i64> {
 /// Questions and plan approvals need an answer each time.
 fn claude_tool_takes_session_answer(name: &str) -> bool {
     !matches!(name, "AskUserQuestion" | "ExitPlanMode")
+}
+
+/// The sentence on the permission card: what would run, not only the tool's name.
+fn claude_request_text(tool: &str, input: &Value) -> String {
+    if let Some(command) = input.get("command").and_then(Value::as_str) {
+        return command.to_owned();
+    }
+    match ["file_path", "notebook_path", "path", "url"]
+        .iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+    {
+        Some(target) => format!("{tool} {target}"),
+        None => tool.to_owned(),
+    }
 }
 
 /// What "matching action" means: the same tool on the same command or file.
@@ -10304,6 +10320,7 @@ time.sleep(30)
         let card = process.map_frame("attempt", &ask("req-1", "tool-1", "npm test")).expect("first request asks");
         let decision = card.payload["request_id"].as_str().unwrap().to_owned();
         assert_eq!(card.payload["sessionAnswer"], true);
+        assert_eq!(card.payload["text"], "npm test", "the card says what would run");
         process.permission_response(PermissionResponse { request_id: decision, allow: true, for_session: true }).unwrap();
 
         assert!(process.map_frame("attempt", &ask("req-2", "tool-2", "npm test")).is_none(), "the same action is not asked again");
@@ -10320,6 +10337,8 @@ time.sleep(30)
         assert_eq!(key, claude_action_key("Bash", &json!({ "command": "npm test", "timeout": 5 })));
         assert_ne!(key, claude_action_key("Edit", &json!({ "command": "npm test" })));
         assert!(!claude_tool_takes_session_answer("AskUserQuestion"));
+        assert_eq!(claude_request_text("Edit", &json!({ "file_path": "a.md" })), "Edit a.md");
+        assert_eq!(claude_request_text("Glob", &json!({})), "Glob");
     }
 
     struct ClosedPermissionSink;

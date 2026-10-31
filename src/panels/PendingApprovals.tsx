@@ -21,7 +21,8 @@ export function PendingApprovals({ snapshot, onPermissionDecision }: PendingAppr
     <section className="approvals" role="region" aria-label="Decision Inbox">
       {pending.map((decision) => {
         const agent = decision.title.replace(/ wants your approval$/i, "");
-        const name = agent.charAt(0).toUpperCase() + agent.slice(1);
+        const fromAgent = agent !== decision.title;
+        const name = (fromAgent && snapshot.productConversation?.runtime.name) || agent.charAt(0).toUpperCase() + agent.slice(1);
         return (
           <div className="decision-request" key={decision.id} data-decision-id={decision.id}>
             <h2>{name} wants to do this</h2>
