@@ -173,6 +173,7 @@ allowing one independent readonly response. The native draft and session remain
 untouched; there is no second Codex planner, writer or repair round.
 
 1. Choose **Ask Pi to review** on the native goal. The dialog reads the changes straight away and lists which files go where. **See exactly what's sent** opens the complete prompt. Pressing **Send to Pi** is the consent for this request and for keeping it running after the window closes.
+   **Sent to** starts on Pi's configured model. Choosing another model from Pi's list applies to this review only, refreshes the preview and changes no Pi settings. A goal's own Pi route stays the configured one.
 2. The preview is built from what is on disk at that moment. The complete external-provider prompt is
    shown, not a summary of it. It includes current tracked HEAD→worktree changes,
    the Native **reported** reply, observed command-entry counts and their

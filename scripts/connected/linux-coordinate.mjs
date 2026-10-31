@@ -941,7 +941,7 @@ async function commandNativeCheck(parsed, io, context) {
     const offer=discovered.providers.find(p=>p.instanceId==='pi') ?? null;
     if(!pair && !start) { write(io,JSON.stringify({ok:true,offer,workspacePath:resolved.workspace,goal:resolved.goal,backgroundSendConsent:consentStoreOf(context).read().allowed===true}));return 0; }
     if(!pair) throw Error('Select Pi’s exact configured capacity first.');
-    const piContext=piAdmissionContext({allowedInstances:['pi'],workspacePath:resolved.workspace,piCapacity:pair},context.dataDir,{ok:true,providers:discovered.providers});
+    const piContext=piAdmissionContext({allowedInstances:['pi'],workspacePath:resolved.workspace,piCapacity:pair,nativeCheckTarget:target},context.dataDir,{ok:true,providers:discovered.providers});
     const membership=authorizeMembershipError({ok:true,providers:discovered.providers},['pi'],piContext);
     if(membership) throw Error(membership);
     const engine=io.engine ?? require(context.enginePath);

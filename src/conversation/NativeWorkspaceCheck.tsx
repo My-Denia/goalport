@@ -2,6 +2,7 @@ import {useEffect,useRef,useState} from 'react';
 import {renderMarkdownBody} from '../lib/markdown';
 import {normalizePiCapacity, selectedPiEligible, type PiCapacitySelection} from '../../electron/pi-capacity.mjs';
 import {GoalLayer} from '../ui/GoalLayer';
+import {RuntimePickerMenu} from '../ui/RuntimePickerMenu';
 import {BackgroundCoordinationStatus,PiReview,unfinishedReviewLine} from './CoordinationStatus';
 import {parseAllowanceStatus} from '../coordination/allowanceStatus';
 import {parseNativeCheckMaterial,parseNativeCheckTarget,type NativeCheckMaterial,type NativeCheckTarget} from '../coordination/nativeWorkspaceCheck';
@@ -36,6 +37,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
   const [pending,setPending]=useState<PendingCheck|null>(pendingCheck);
   const [workspace,setWorkspace]=useState<string|null>(null);
   const [capacityReason,setCapacityReason]=useState<string|null>(null);
+  const [catalog,setCatalog]=useState<PiCapacitySelection[]>([]);
   const [open,setOpen]=useState(false),[offer,setOffer]=useState<PiCapacitySelection|null>(pending?.piCapacity??null),[consent,setConsent]=useState(false),[material,setMaterial]=useState<NativeCheckMaterial|null>(null),[exclusions,setExclusions]=useState<string[]>([]),[error,setError]=useState<string|null>(null),[busy,setBusy]=useState(false),[unknown,setUnknown]=useState(Boolean(pending)),[saved,setSaved]=useState<SavedCheck[]>([]);
   const request=useRef(pending?.requestId??'native-check-'+crypto.randomUUID()),revision=useRef(0),current=useRef(target),panel=useRef<HTMLElement|null>(null);current.current=target;
   const targetKey=JSON.stringify(target);
@@ -48,7 +50,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     const checks=Array.isArray(value?.checks)?value.checks:[];
     setSaved(checks.filter((c:SavedCheck)=>c?.nativeAssociation===true && parseNativeCheckTarget(c.nativeCheckTarget)?.campaignId===campaign && parseNativeCheckMaterial(c.nativeCheckMaterial)));
   }).catch(()=>{if(!cancelled)setSaved([]);});return()=>{cancelled=true;};},[campaign,job?.state,job?.requestId]);
-  async function prepare() {
+  async function prepare(picked?:PiCapacitySelection) {
     if(!target)return;
     const generation=++revision.current, frozen=target;
     setBusy(true);setError(null);setMaterial(null);
@@ -56,7 +58,8 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
       const first=await ipc('native_workspace_check_prepare',{requestId:request.current,...frozen});
       if(generation!==revision.current || JSON.stringify(current.current)!==JSON.stringify(frozen))return;
       if(typeof first?.workspacePath!=='string' || !/^(\/|[A-Za-z]:[\\/])/.test(first.workspacePath) || first.workspacePath.includes('\0'))throw Error('The native goal folder could not be confirmed.');
-      const provider=first?.offer as ProviderSnapshot|undefined;const pair=normalizePiCapacity(provider?.piCapacity?.offer);
+      const provider=first?.offer as ProviderSnapshot|undefined;const pair=picked??normalizePiCapacity(provider?.piCapacity?.offer);
+      setCatalog((provider?.piCapacity?.catalog??[]).flatMap(p=>{const entry=normalizePiCapacity({...p,useExistingCapacity:true});return entry?[entry]:[];}));
       setOffer(pair);setConsent(first?.backgroundSendConsent===true);
       if(!pair || !selectedPiEligible(provider,pair)){setCapacityReason(provider?.piCapacity?.reason || 'Pi isn’t set up for this goal yet.');return;}
       setCapacityReason(null);
@@ -100,7 +103,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     <GoalLayer variant="dialog" modalCard label="Ask Pi to review" open={open} onOpenChange={changeOpen} trigger={undefined}>
       <h2>Ask Pi to review Codex's changes</h2>
       {pending&&!starting?<p role="status">Your earlier request may still be running. Check on it here; it won't be sent twice.</p>:<p>Pi reads what changed and replies beside this goal. It can't edit your files, and it keeps going if you close the window.</p>}
-      {material&&offer?<ul className="check-summary"><li><strong>Changes:</strong> {shared.slice(0,3).join(', ')}{shared.length>3?` and ${shared.length-3} more`:''}</li><li><strong>Also shared:</strong> Codex's last reply</li><li><strong>Sent to:</strong> {offer.provider}/{offer.model}</li>{exclusions.length?<li><strong>Left out:</strong> {exclusions.length} private {exclusions.length===1?'file':'files'}</li>:null}</ul>:null}
+      {material&&offer?<ul className="check-summary"><li><strong>Changes:</strong> {shared.slice(0,3).join(', ')}{shared.length>3?` and ${shared.length-3} more`:''}</li><li><strong>Also shared:</strong> Codex's last reply</li><li><strong>Sent to:</strong> {catalog.length>1&&!pending?<RuntimePickerMenu runtimes={[]} choices={catalog.map(p=>({id:`${p.provider}/${p.model}`,name:p.model,subtitle:p.provider}))} selectedId={`${offer.provider}/${offer.model}`} triggerClassName="pi-model-trigger" positionerClassName="pi-model-positioner" triggerAriaLabel="Choose Pi model" emptyText="No models found." triggerContent={<>{offer.provider}/{offer.model} <span aria-hidden="true">⌄</span></>} onSelect={id=>{const next=catalog.find(p=>`${p.provider}/${p.model}`===id);if(next&&!busy&&id!==`${offer.provider}/${offer.model}`)void prepare(next);}}/>:`${offer.provider}/${offer.model}`}</li>{exclusions.length?<li><strong>Left out:</strong> {exclusions.length} private {exclusions.length===1?'file':'files'}</li>:null}</ul>:null}
       {material?<p>Check it first if these changes might contain secrets.{consent?'':' Sending also lets future reviews keep going after you close the window.'}</p>:null}
       {material?<details><summary>See exactly what's sent</summary><pre aria-label="Complete Pi payload" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{material.exactPrompt}</pre>{exclusions.length?<ul>{exclusions.map(p=><li key={p}>{p}</li>)}</ul>:null}</details>:null}
       {busy&&!material&&!pending?<p role="status">Reading your changes…</p>:null}

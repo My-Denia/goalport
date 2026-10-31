@@ -39,8 +39,8 @@ function createNativeCheckHost(options) {
     if (!discovered || discovered.ok === false) throw Error("The signed-in harnesses could not be checked.");
     return Array.isArray(discovered.providers) ? discovered.providers : [];
   }
-  function requirePi(requestId, workspacePath, pair, list) {
-    const context = piAdmissionContext({ requestId, allowedInstances: ["pi"], workspacePath, piCapacity: pair }, options.directory(), { ok: true, providers: list });
+  function requirePi(requestId, workspacePath, pair, list, nativeCheckTarget) {
+    const context = piAdmissionContext({ requestId, allowedInstances: ["pi"], workspacePath, piCapacity: pair, nativeCheckTarget }, options.directory(), { ok: true, providers: list });
     const problem = authorizeMembershipError({ ok: true, providers: list }, ["pi"], context);
     if (problem) throw Error(problem);
   }
@@ -52,7 +52,7 @@ function createNativeCheckHost(options) {
     if (!pair) {
       return { offer: list.find(provider => provider.instanceId === "pi") ?? null, workspacePath: resolved.workspace, goal: resolved.goal, backgroundSendConsent: options.consent().allowed === true };
     }
-    requirePi(requestId, resolved.workspace, pair, list);
+    requirePi(requestId, resolved.workspace, pair, list, target);
     const engine = options.engine();
     const material = await purpose.collectMaterial(resolved, engine);
     if (!sameTarget(await resolve(target), resolved)) throw Error(purpose.STALE);
@@ -78,7 +78,7 @@ function createNativeCheckHost(options) {
       if (now() - captured > TTL_MS || captured > now()) throw Error(purpose.STALE);
       const resolved = await resolve(target);
       if (resolved.workspace !== held.workspacePath || resolved.goal !== held.goal || resolved.taskId !== held.taskId) throw Error(purpose.STALE);
-      requirePi(requestId, resolved.workspace, pair, await providers(resolved.workspace));
+      requirePi(requestId, resolved.workspace, pair, await providers(resolved.workspace), target);
       await purpose.recheckMaterial(resolved, material, options.engine());
       if (!sameTarget(await resolve(target), resolved)) throw Error(purpose.STALE);
       admissionAttempted = true;

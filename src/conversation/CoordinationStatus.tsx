@@ -471,7 +471,7 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 /** The answer first; the working behind it stays one click away. */
 export function unfinishedReviewLine(reason?: string | null): string {
   return reason && classifyProviderError(reason) === "authentication"
-    ? "Pi's sign-in or API key was rejected. Fix it in Pi, then ask for another review. Your files weren't changed."
+    ? "Pi's sign-in or API key was rejected. Ask for another review and choose a different model, or fix it in Pi. Your files weren't changed."
     : "Your files weren't changed. You can ask for another review.";
 }
 
