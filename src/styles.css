@@ -1205,6 +1205,17 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   color: var(--ink-soft); font-size: 13px; line-height: 1.4;
 }
 .draft-runtime-picker { margin-bottom: 2px; }
+/* A fresh goal keeps folder and agent on one line under the message. */
+.draft-composer-form[aria-label="Start a goal"] { grid-template-columns: minmax(0, 1fr) auto; }
+.draft-composer-form[aria-label="Start a goal"] > * { grid-column: 1 / -1; }
+.draft-composer-form[aria-label="Start a goal"] > textarea { order: -3; }
+.draft-composer-form[aria-label="Start a goal"] > .field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.draft-composer-form[aria-label="Start a goal"] > .draft-workspace-row { order: -2; grid-column: 1; margin: 0; }
+.draft-composer-form[aria-label="Start a goal"] > .draft-runtime-picker { order: -2; grid-column: 2; margin: 0; }
+.draft-composer-form[aria-label="Start a goal"] > .draft-runtime-picker small { display: none; }
+@media (max-width: 560px) {
+  .draft-composer-form[aria-label="Start a goal"] > .draft-runtime-picker { grid-column: 1 / -1; }
+}
 .draft-composer-form textarea {
   width: 100%; min-width: 0; resize: none; min-height: 110px;
   padding: 14px 12px; border: 0; border-radius: 8px;
