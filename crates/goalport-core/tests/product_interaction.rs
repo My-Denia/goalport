@@ -203,7 +203,7 @@ fn unknown_provider_or_missing_workspace_leaves_no_rows() {
         "start_conversation",
         start_payload(&root, "bogus-provider", "hello"),
     ));
-    assert!(error.contains("unknown Runtime provider"), "{error}");
+    assert!(error.contains("unknown agent provider"), "{error}");
     let missing = error_of(result(
         &server,
         "start-missing",
@@ -1147,8 +1147,8 @@ fn unconfirmed_or_uncertain_stop_refuses_a_successor_transactionally() {
         }),
     ));
     assert!(
-        error.contains("has current persisted work but no registered Runtime")
-            || error.contains("Runtime has not been selected")
+        error.contains("has current persisted work but no registered agent")
+            || error.contains("Agent has not been selected")
             || error.contains("not selected by Core"),
         "an unconfirmed stop must not create a replacement: {error}"
     );

@@ -35,7 +35,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
   const selected = runtimes.find((candidate) => candidate.id === provider);
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
   const choices = linuxEntry ? [
-    { id: "", name: "Coordinated work", subtitle: "Plan and work with an independent check" },
+    { id: "", name: "Several agents", subtitle: "Plan and work with an independent check" },
     ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no automatic Pi verification" }] : [])
   ] : coordinationAvailable ? [
     ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, subtitle: "" })),
@@ -48,9 +48,9 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
         choices={choices}
         selectedId={provider}
         triggerClassName="runtime-picker-button"
-        triggerAriaLabel={linuxEntry ? "Choose goal mode" : "Select Runtime"}
-        emptyText="No Runtime information from Core yet."
-        blockedHint={!connected ? "Reconnect Core to select." : linuxEntry && !nativeAvailable ? "Codex conversations are unavailable: Core has not confirmed the app-server adapter." : null}
+        triggerAriaLabel={linuxEntry ? "Choose goal mode" : "Select agent"}
+        emptyText="Agents are still loading."
+        blockedHint={!connected ? "Reconnect to select." : linuxEntry && !nativeAvailable ? "Codex conversations are unavailable: Core has not confirmed the app-server adapter." : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}
         onSelect={onSelect}
         triggerContent={(
@@ -59,7 +59,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
               {selected ? selected.name[0] : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Coordinated work") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Coordinated goal" : "Choose an agent")}</strong>
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Several agents") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Several agents" : "Choose an agent")}</strong>
               <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "selected" : coordinationAvailable
                 ? "Plan, build and check"
                 : (runtimeRequiredHint ?? "Choose an agent before sending.")}</small>
@@ -148,7 +148,7 @@ export function GoalStatusHeading({
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
   const admissionUnsaidResult = Boolean(coordinationResult?.startsWith("The send returned without saying the goal was admitted.") || coordinationResult?.startsWith("Continue returned without saying the goal was admitted."));
   const stoppedResult = Boolean(coordinationResult?.toLowerCase().includes("no further turn was sent."));
-  const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription agent before sending." : "Sign in another agent before sending.";
+  const signInFollow = harnessWarning?.startsWith("No signed-in") ? harnessWarning : "Sign in another agent before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
     : !draft.workspace.trim()
@@ -166,7 +166,7 @@ export function GoalStatusHeading({
         <div className="conversation-heading-main">
           {savedResultLabel ? <p className="workspace-evidence-label">{savedResultLabel}</p> : null}
           <h2 title={activeGoalTitle || undefined} aria-label={activeGoalTitle || undefined}>{savedResultLabel ? (activeGoalTitle ? shortGoalTitle(activeGoalTitle) : "Saved goal unavailable") : headingText}</h2>
-          <p>{savedResultLabel ? savedResultOutcome : inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
+          <p>{savedResultLabel ? savedResultOutcome : inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ?? allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
           {!savedResultLabel && activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
             <p className="workspace-evidence-label">Previous saved result; the stop message above describes the current job.</p>
           ) : null}
@@ -297,7 +297,7 @@ export function DraftGoalComposer({
           </div>
         ) : null}
         {folderHint && !isLinuxActiveTarget ? <p id="draft-folder-hint" className="draft-hint">{folderHint}</p> : null}
-        {harnessWarning && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
+        {harnessWarning && harnessWarning !== failureHeadline && (activeGoalTitle || !harnessWarning.startsWith("No signed-in")) ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
         {signedInHint && !harnessWarning ? <p className="draft-hint">{signedInHint}</p> : null}
 
@@ -324,8 +324,8 @@ export function DraftGoalComposer({
           onCompositionEnd={input.onCompositionEnd}
           onKeyDown={input.onKeyDown}
           placeholder={connected
-            ? (inFlightLine ? "Wait for this to finish." : isLinuxActiveTarget ? "Add a follow-up (optional)" : linuxCanStartCoordination && !admissionUnsaidResult && !addressGone ? "What would you like to accomplish?" : coordinationResult === "Allowing Background Send." ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ? signInFollow : allowedFollow) : coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." ? "Wait for this to finish." : coordinationResult === "That goal is no longer available." ? "You can write the next goal." : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : stoppedResult ? (onContinueCoordination ? "This stop is not resumed. Continue as a new send." : "A new send can still start.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle && !blockedFromSending && !consentWarning && !harnessWarning ? "A new send can still start." : "The draft is still here.") : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : leftoverHint ? "You can still write the next goal." : failureHeadline ? (activeGoalTitle && !blockedFromSending && !consentWarning ? "A new send can still start. This goal is not continued." : "The draft is still here.") : consentWarning ? "Allow Background Send before sending." : coordinationResult?.includes("stays unreplayed") ? "A new send can still start." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
-            : "Reconnect Core before sending…"}
+            ? (inFlightLine ? "Wait for this to finish." : isLinuxActiveTarget ? "Add a follow-up (optional)" : linuxCanStartCoordination && !admissionUnsaidResult && !addressGone ? "What would you like to accomplish?" : coordinationResult === "Allowing Background Send." ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ?? allowedFollow) : coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." ? "Wait for this to finish." : coordinationResult === "That goal is no longer available." ? "You can write the next goal." : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : stoppedResult ? (onContinueCoordination ? "This stop is not resumed. Continue as a new send." : "A new send can still start.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle && !blockedFromSending && !consentWarning && !harnessWarning ? "A new send can still start." : "The draft is still here.") : onStopCoordination ? (coordinationResult === "The worker is gone. Its exit is not confirmed, so another goal cannot start yet." ? "The worker is gone. Its exit is not confirmed." : coordinationResult?.startsWith("This goal's exit is not confirmed") ? coordinationResult : /unconfirmed/i.test(coordinationResult || "") ? "Stop is not confirmed." : "This goal is still running.") : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : leftoverHint ? "You can still write the next goal." : failureHeadline ? (activeGoalTitle && !blockedFromSending && !consentWarning ? "A new send can still start. This goal is not continued." : "The draft is still here.") : consentWarning ? "Allow Background Send before sending." : coordinationResult?.includes("stays unreplayed") ? "A new send can still start." : activeGoalTitle ? (onContinueCoordination ? "Add a follow-up, then Continue. The next Send starts a new goal." : "The next Send starts a new goal.") : "Ask GoalPort…")
+            : "Reconnect before sending…"}
           rows={isLinuxActiveTarget ? 2 : 3}
           disabled={busy || inputsLocked}
         />

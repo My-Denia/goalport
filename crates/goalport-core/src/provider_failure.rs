@@ -74,19 +74,19 @@ impl ProviderFailure {
         // The shipped user-facing copy, verbatim; provider_issue_message
         // dispatches through this enum so the text lives in one place.
         match self {
-            Self::Quota => "This Runtime has reached its usage limit. You can continue after the limit resets.",
-            Self::AuthRequired => "Sign in to this Runtime, then try again.",
-            Self::NotInstalled => "This Runtime is not installed. Install it or choose another Runtime.",
-            Self::Version => "This Runtime could not accept the request. Update it or choose another Runtime.",
-            Self::RequestInvalid => "This Runtime rejected the request. Check Technical details before trying again.",
-            Self::Startup => "This Runtime could not start. Check Technical details, then choose it again.",
-            Self::Overloaded => "This Runtime is busy. Try another message later.",
-            Self::Transport => "The Runtime connection failed. Check its session before continuing.",
-            Self::Permission => "The Runtime denied this request. Check Technical details before continuing.",
+            Self::Quota => "This agent has reached its usage limit. You can continue after the limit resets.",
+            Self::AuthRequired => "Sign in to this agent, then try again.",
+            Self::NotInstalled => "This agent is not installed. Install it or choose another agent.",
+            Self::Version => "This agent could not accept the request. Update it or choose another agent.",
+            Self::RequestInvalid => "This agent rejected the request. Check Technical details before trying again.",
+            Self::Startup => "This agent could not start. Check Technical details, then choose it again.",
+            Self::Overloaded => "This agent is busy. Try another message later.",
+            Self::Transport => "The agent connection failed. Check its session before continuing.",
+            Self::Permission => "The agent denied this request. Check Technical details before continuing.",
             Self::DeliveryUnknown => "Message delivery is uncertain. Check the session before sending again.",
             Self::ResumeSpawnFailed | Self::ResumeVerificationFailed => "The last resume failed to start or did not verify the stored session id. Resume to try again; earlier messages will not be sent again.",
-            Self::Exited => "The Runtime process ended. Close this session before starting new work; its history remains here.",
-            Self::ContextFull | Self::Failed => "The Runtime could not finish this response. Check Technical details before continuing.",
+            Self::Exited => "The agent process ended. Close this session before starting new work; its history remains here.",
+            Self::ContextFull | Self::Failed => "The agent could not finish this response. Check Technical details before continuing.",
         }
     }
 }

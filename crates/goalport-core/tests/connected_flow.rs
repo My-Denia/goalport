@@ -392,7 +392,7 @@ fn handoff_does_not_create_attempt_when_native_stop_is_unconfirmed() {
         response["error"]
             .as_str()
             .unwrap()
-            .contains("Runtime has not been selected")
+            .contains("Agent has not been selected")
     );
     assert_eq!(store.counts().unwrap().attempts, before);
 }

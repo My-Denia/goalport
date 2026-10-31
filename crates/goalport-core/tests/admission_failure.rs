@@ -35,9 +35,9 @@ use std::{
 };
 
 const NEVER_ESTABLISHED: &str =
-    "has a registered Runtime but its session was never established";
+    "has a registered agent but its session was never established";
 const NOT_RETRIED: &str = "not retried automatically";
-const DIFFERENT_BINDING: &str = "is already bound to a different Runtime binding";
+const DIFFERENT_BINDING: &str = "is already bound to a different agent binding";
 const FAILED_KIND: &str = "attempt.admission.failed";
 
 /// One mutex for everything process-global this file touches: `GOALPORT_CODEX_TRANSPORT` is read by

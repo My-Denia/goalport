@@ -69,12 +69,12 @@ export function BlockedWorkPanel({ hold, onRecheck, onContinue, busy }: BlockedW
       <p className="blocked-reason">{governs
         ? "GoalPort cannot confirm that all background activity has stopped. New work in this workspace stays blocked."
         : "Background activity in the original workspace is still uncertain. Its hold remains in place."}</p>
-      <p>Your Runtime selection is kept. Re-check the status, or continue in a separate workspace.</p>
+      <p>Your agent selection is kept. Re-check the status, or continue in a separate workspace.</p>
 
       <div className="recheck-state">
         {recheck ? (
           <>
-            <strong className="recheck-verdict">Last check: {recheck.runtimeObservation === "live" ? "Runtime still running" : "Background activity remains unconfirmed"}</strong>
+            <strong className="recheck-verdict">Last check: {recheck.runtimeObservation === "live" ? "Agent still running" : "Background activity remains unconfirmed"}</strong>
             <small>observed at {observedAt} · bound runtime {recheck.runtimeObservation}</small>
             {recheck.verdict === "observation-unavailable" ? (
               <small className="recheck-unavailable">

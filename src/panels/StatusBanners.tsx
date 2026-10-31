@@ -34,7 +34,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
       {browserPreview ? (
         <div className="banner banner-preview" role="status">
           <span className="banner-glyph" aria-hidden="true">◌</span>
-          <div><strong>Browser preview</strong><span>Try the interface with sample data. No Core or Runtime receives work.</span></div>
+          <div><strong>Browser preview</strong><span>Try the interface with sample data. Nothing is sent to an agent.</span></div>
         </div>
       ) : null}
       {capacityLimited && !hideCoreConnection ? (
@@ -77,7 +77,7 @@ export function StatusBanners({ browserPreview = false, snapshot, activeNotice, 
           <div>
             <strong>{browserPreview ? "Browser preview is offline" : "Core is disconnected"}</strong>
             <span>{browserPreview
-              ? "This sample view is paused. Reconnect refreshes local preview state; nothing is sent to a Runtime."
+              ? "This sample view is paused. Reconnect refreshes local preview state; nothing is sent to an agent."
               : "Committed work is safe. Nothing is re-sent automatically; reconnect reads the Core projection."}</span>
           </div>
           <button className="button button-small button-outline" type="button" aria-label={browserPreview ? "Reconnect preview" : "Reconnect Core"} onClick={onReconnect}>

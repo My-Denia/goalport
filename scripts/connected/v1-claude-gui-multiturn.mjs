@@ -569,7 +569,7 @@ const result = await withPackagedGui(port, async (session) => {
     (handoffSnap.timeline || [])
       .filter(
         (item) =>
-          item.actor === "Native Runtime" &&
+          item.actor === "Native agent" &&
           item.kind === "message" &&
           (item.body || "").trim().length > 0
       )

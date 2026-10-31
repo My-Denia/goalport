@@ -182,7 +182,7 @@ pub fn product_conversation(
     describe_turn(store, runtime_manager, context, &runtime, &session, &mut turn)?;
     if turn.can_send && !campaign_send_authorized(store, context.campaign_id)? {
         turn.can_send = false;
-        turn.reason = Some("Sending is blocked because this conversation's permission to use the Runtime or perform actions was revoked.".into());
+        turn.reason = Some("Sending is blocked because this conversation's permission to use the agent or perform actions was revoked.".into());
         turn.reason_code = Some("authorization-revoked".into());
         turn.actions.retain(|action| action != "send");
     }
@@ -393,9 +393,9 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                 } else {
                     match record.event.kind.as_str() {
                     "runtime.send.failed" => "Message delivery could not be completed. Check the connection and Technical details before sending anything again.",
-                    "attempt.admission.failed" => "The selected Runtime could not be started. Review Technical details or choose another Runtime.",
-                    "runtime.transport.closed" => "The Runtime connection closed. Review the session status before continuing.",
-                    _ => "The Runtime could not finish this response. Review Technical details before continuing.",
+                    "attempt.admission.failed" => "The selected agent could not be started. Review Technical details or choose another agent.",
+                    "runtime.transport.closed" => "The agent connection closed. Review the session status before continuing.",
+                    _ => "The agent could not finish this response. Review Technical details before continuing.",
                     }
                 }
                 .to_owned();
@@ -447,7 +447,7 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
                     .and_then(|value| value.get("newAttempt"))
                     .and_then(|value| value.get("provider"))
                     .and_then(Value::as_str)
-                    .unwrap_or("another Runtime");
+                    .unwrap_or("another agent");
                 let logical_item_id = payload
                     .and_then(|value| value.get("handoffId"))
                     .and_then(Value::as_str)
@@ -743,7 +743,7 @@ fn describe_turn(
             && no_unsettled_effect
         {
             turn.reason_code = Some(ProviderFailure::Exited.as_str().into());
-            turn.reason = Some("The Runtime process ended. Close this session before starting new work; its history remains here.".into());
+            turn.reason = Some("The agent process ended. Close this session before starting new work; its history remains here.".into());
             "close-session"
         } else if turn.state == "uncertain" {
             "diagnose"
@@ -964,7 +964,7 @@ fn project_turn(
             state: "stopping".into(),
             can_stop: false,
             can_send: false,
-            reason: Some("Ending this Runtime startup before any message is sent.".into()),
+            reason: Some("Ending this agent startup before any message is sent.".into()),
         });
     }
     // 2. Delivery unknown / send still executing.
@@ -1015,7 +1015,7 @@ fn project_turn(
             actions: Vec::new(),
             state: if facts.is_some_and(|facts| facts.in_flight) { "stopping" } else { "uncertain" }.into(),
             can_stop: false, can_send: false,
-            reason: Some("Stop was requested. Waiting for the Runtime to confirm the result; new messages are blocked.".into()),
+            reason: Some("Stop was requested. Waiting for the agent to confirm the result; new messages are blocked.".into()),
         });
     }
     // 3. A finished native turn remains recoverable across a Core restart. The
@@ -1066,7 +1066,7 @@ fn project_turn(
             can_stop: false,
             can_send: false,
             reason: Some(
-                "The previous Runtime session is no longer connected and its result is uncertain. Sending is blocked until its state is checked."
+                "The previous agent session is no longer connected and its result is uncertain. Sending is blocked until its state is checked."
                     .into(),
             ),
         });
@@ -1080,7 +1080,7 @@ fn project_turn(
                 state: "uncertain".into(),
                 can_stop: false,
                 can_send: false,
-                reason: Some("The Runtime connection is unavailable and this turn's result is uncertain. Check it before continuing.".into()),
+                reason: Some("The agent connection is unavailable and this turn's result is uncertain. Check it before continuing.".into()),
             });
         }
         if pending_permission {
@@ -1161,7 +1161,7 @@ fn project_turn(
         AttemptState::AwaitingReview => Some(("completed", None)),
         AttemptState::Queued => Some((
             "idle",
-            Some("the reserved Runtime has not been admitted yet; select it to start work"),
+            Some("the reserved agent has not been admitted yet; select it to start work"),
         )),
         AttemptState::Active => None,
     };
@@ -1178,7 +1178,7 @@ fn project_turn(
         let reason = fixed_reason.map(str::to_owned).or_else(|| {
             (!send_allowed).then(|| {
                 format!(
-                    "the selected Runtime is not available (state {}); no send is offered",
+                    "the selected agent is not available (state {}); no send is offered",
                     runtime.state
                 )
             })
@@ -1202,7 +1202,7 @@ fn project_turn(
         can_send: send_allowed,
         reason: (!send_allowed).then(|| {
             format!(
-                "the selected Runtime is not available (state {}); no send is offered",
+                "the selected agent is not available (state {}); no send is offered",
                 runtime.state
             )
         }),

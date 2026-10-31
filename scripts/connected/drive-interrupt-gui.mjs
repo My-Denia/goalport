@@ -58,7 +58,7 @@ try {
   }
   const events = (current.timeline || []).filter((event) => event.cursor > beforeCursor);
   const interruptRequested = events.some((event) => event.body === "attempt.interrupt.requested");
-  const unexpectedMarker = events.some((event) => event.actor === "Native Runtime" && String(event.body).includes(marker));
+  const unexpectedMarker = events.some((event) => event.actor === "Native agent" && String(event.body).includes(marker));
   const report = {
     schemaVersion: 1,
     kind: "packaged-native-safe-stop-gui",

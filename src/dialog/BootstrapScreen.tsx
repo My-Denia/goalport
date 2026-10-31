@@ -136,10 +136,10 @@ export function BootstrapScreen({ state }: { state: BootstrapState }) {
         <h2>{state.headline}</h2>
         <p>
           {live
-            ? "Its Core process is still running (for example, background work you chose to continue). GoalPort will not close it, interrupt it, or take its place."
-            : "GoalPort could not confirm whether a previous Core process has finished with this data. It will not guess: taking over could corrupt in-flight work."}
+            ? "Its background process is still running (for example, background work you chose to continue). GoalPort will not close it, interrupt it, or take its place."
+            : "GoalPort could not confirm whether an earlier GoalPort has finished with this data. It will not guess: taking over could corrupt in-flight work."}
         </p>
-        {epoch?.epochId ? <p className="bootstrap-note">Last known owner: Core epoch <code>{epoch.epochId}</code>{typeof epoch.corePid === "number" ? ` (pid ${epoch.corePid})` : ""}.</p> : null}
+        {epoch?.epochId ? <p className="bootstrap-note">Last known process: <code>{typeof epoch.corePid === "number" ? `pid ${epoch.corePid}` : epoch.epochId}</code>.</p> : null}
         <div className="bootstrap-actions">
           <ActionButton kind="retry" autoFocus>Try again</ActionButton>
           <ActionButton kind="open-folder">Show data folder</ActionButton>
@@ -168,7 +168,7 @@ export function BootstrapScreen({ state }: { state: BootstrapState }) {
   return shell(
     <>
       <p>Starting GoalPort…</p>
-      <small>The local Core is restoring its record. This can take a moment.</small>
+      <small>GoalPort is restoring your work. This can take a moment.</small>
       <StatusLine state={state} />
     </>
   );

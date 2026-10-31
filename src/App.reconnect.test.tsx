@@ -30,7 +30,7 @@ describe("GoalPort reconnect evidence", () => {
     render(<App />);
     fireEvent.click((await screen.findAllByRole("button", { name: /reconnect core/i }))[0]);
 
-    expect(await screen.findByText(/Core connection remains unavailable/i)).toBeTruthy();
+    expect(await screen.findByText(/Still can't connect/i)).toBeTruthy();
     expect(screen.queryByText(/Reconnected from the Core projection/i)).toBeNull();
   });
 });

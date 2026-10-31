@@ -208,7 +208,7 @@ fn u2_inconsistent_binding_under_the_same_attempt_id_is_refused() {
     );
     let error = error_of(&refused);
     assert!(
-        error.contains("already bound to a different Runtime binding"),
+        error.contains("already bound to a different agent binding"),
         "expected the explicit binding conflict, got: {error}"
     );
 

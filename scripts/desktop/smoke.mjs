@@ -58,10 +58,10 @@ const SELECTOR_MAP = {
   draftWorkspace: "#draft-workspace",
   draftMessage: "#draft-message",
   draftSubmit: ".draft-composer-form button[type='submit']",
-  draftRuntimePicker: ".draft-runtime-picker button[aria-label='Select Runtime']",
+  draftRuntimePicker: ".draft-runtime-picker button[aria-label='Select agent']",
   conversationComposer: ".composer textarea[aria-label='Message composer']",
   sendButton: ".composer button[aria-label='Send message']",
-  composerRuntimePicker: ".composer-dock .runtime-picker button[aria-label='Select Runtime']",
+  composerRuntimePicker: ".composer-dock .runtime-picker button[aria-label='Select agent']",
   runtimeOption: ".runtime-picker-item",
   noticeBanner: ".status-banners .banner-notice",
   technicalDetails: ".banner-notice .technical-details-pre",
@@ -220,7 +220,7 @@ async function smoke() {
   };
   const pickRuntime = async (name, scope = "composer") => {
     const root = scope === "draft" ? ".draft-runtime-picker" : ".composer-dock .runtime-picker";
-    await click(`${root} button[aria-label='Select Runtime']`);
+    await click(`${root} button[aria-label='Select agent']`);
     // The picker popup is portaled to document.body (Base UI), so options are
     // looked up document-wide under the open list, not under the trigger root.
     const finder = `(${firstVisible.toString()})(Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).filter(e => e.querySelector('strong')?.textContent.trim() === ${JSON.stringify(name)}))`;
@@ -523,7 +523,7 @@ async function smoke() {
     assert.equal(empty.preview, false);
     assert.deepEqual(counts(), zeroCounts());
     assert.equal(empty.attempt.id, "attempt-unassigned");
-    const emptyState = await read("(() => ({ draft: Boolean(document.querySelector('.draft-composer-form')), workspace: Boolean(document.querySelector('#draft-workspace')), message: Boolean(document.querySelector('#draft-message')), picker: Boolean(document.querySelector('.draft-runtime-picker button[aria-label=\"Select Runtime\"]')), sendDisabled: document.querySelector('.draft-composer-form button[type=\"submit\"]')?.disabled ?? null, navEmpty: document.body.innerText.includes('No goals yet') }))()");
+    const emptyState = await read("(() => ({ draft: Boolean(document.querySelector('.draft-composer-form')), workspace: Boolean(document.querySelector('#draft-workspace')), message: Boolean(document.querySelector('#draft-message')), picker: Boolean(document.querySelector('.draft-runtime-picker button[aria-label=\"Select agent\"]')), sendDisabled: document.querySelector('.draft-composer-form button[type=\"submit\"]')?.disabled ?? null, navEmpty: document.body.innerText.includes('No goals yet') }))()");
     assert.equal(emptyState.draft, true, "draft-first composer is present before any goal");
     assert.equal(emptyState.workspace, true, "draft workspace field present");
     assert.equal(emptyState.message, true, "draft message field present");

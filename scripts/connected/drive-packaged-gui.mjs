@@ -94,13 +94,13 @@ try {
       const clicked = await evaluate(`(()=>{const button=[...document.querySelectorAll('button')].find(x=>x.innerText.trim()==='Allow once');if(!button||button.disabled)return false;button.click();return true;})()`);
       if (clicked) approvals.push({ decisionHash: createHash("sha256").update(String(pending[0])).digest("hex"), action: "allow-once", atUtc: new Date().toISOString() });
     }
-    terminal = await evaluate(`(()=>{const cards=[...document.querySelectorAll('.timeline-card')].map(x=>x.innerText);return cards.some(x=>x.includes('Native Runtime')&&x.includes(${JSON.stringify(marker)}))&&cards.some(x=>x.includes('Native Runtime')&&x.includes('Attempt state updated')&&x.includes('COMMITTED'))&&cards.some(x=>x.includes('Tool'));})()`);
+    terminal = await evaluate(`(()=>{const cards=[...document.querySelectorAll('.timeline-card')].map(x=>x.innerText);return cards.some(x=>x.includes('Native agent')&&x.includes(${JSON.stringify(marker)}))&&cards.some(x=>x.includes('Native agent')&&x.includes('Attempt state updated')&&x.includes('COMMITTED'))&&cards.some(x=>x.includes('Tool'));})()`);
     if (terminal) break;
     await sleep(250);
   }
   if (!terminal) throw new Error("GUI did not display native reply, tool activity and terminal state");
   const snapshot = await evaluate(snapshotExpression, true);
-  const dom = await evaluate(`(()=>{const cards=[...document.querySelectorAll('.timeline-card')].map(x=>x.innerText);return {connected:document.body.innerText.includes('Core connected'),toolVisible:cards.some(x=>x.includes('Tool')),replyVisible:cards.some(x=>x.includes('Native Runtime')&&x.includes(${JSON.stringify(marker)})),terminalVisible:cards.some(x=>x.includes('Native Runtime')&&x.includes('Attempt state updated')&&x.includes('COMMITTED')),campaignVisible:document.body.innerText.includes(${JSON.stringify(goal)})};})()`);
+  const dom = await evaluate(`(()=>{const cards=[...document.querySelectorAll('.timeline-card')].map(x=>x.innerText);return {connected:document.body.innerText.includes('Core connected'),toolVisible:cards.some(x=>x.includes('Tool')),replyVisible:cards.some(x=>x.includes('Native agent')&&x.includes(${JSON.stringify(marker)})),terminalVisible:cards.some(x=>x.includes('Native agent')&&x.includes('Attempt state updated')&&x.includes('COMMITTED')),campaignVisible:document.body.innerText.includes(${JSON.stringify(goal)})};})()`);
   step("observe-terminal", `${snapshot.attempt.id}:${snapshot.cursor}`);
   const report = {
     schemaVersion: 1,

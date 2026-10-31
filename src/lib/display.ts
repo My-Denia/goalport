@@ -38,8 +38,8 @@ export function attemptDisplay(snapshot: CoreSnapshot): { label: string; detail:
   const unassigned = !persistedAttemptId(snapshot.attempt.id) || provider.toLowerCase() === "unassigned";
   const mismatched = Boolean(snapshot.activeTask.id && snapshot.attempt.taskId !== snapshot.activeTask.id);
   const uncertain = !unassigned && (snapshot.attempt.state === "uncertain" || mismatched);
-  if (unassigned) return { label: "No Runtime selected", detail: "unassigned", glyph: "–", uncertain: false };
-  if (uncertain) return { label: "Runtime identity uncertain", detail: "send blocked", glyph: "?", uncertain: true };
+  if (unassigned) return { label: "No agent selected", detail: "unassigned", glyph: "–", uncertain: false };
+  if (uncertain) return { label: "Agent identity uncertain", detail: "send blocked", glyph: "?", uncertain: true };
   if (provider.toLowerCase() === "scenario") {
     return { label: "Synthetic Scenario Runtime", detail: `synthetic · ${snapshot.attempt.state}`, glyph: "S", uncertain: false };
   }
@@ -129,7 +129,7 @@ export function headlineState(
       return { label: turn.canSend ? "Ready" : "Completed", tone: "complete" };
     case "idle":
     default:
-      if (product?.runtime.state === "none") return { label: "Waiting for Runtime", tone: "waiting" };
+      if (product?.runtime.state === "none") return { label: "Waiting for agent", tone: "waiting" };
       return turn.canSend
         ? { label: "Ready", tone: "complete" }
         : { label: "Blocked", tone: "blocked" };
@@ -139,7 +139,7 @@ export function headlineState(
 /** Honest chip for the composer's Runtime chooser, from the product selection. */
 export function runtimeSelectionDisplay(runtime: ProductRuntimeSelection): { label: string; detail: string; glyph: string } {
   if (runtime.state === "none" || !runtime.provider) {
-    return { label: "Choose a Runtime", detail: "required before sending", glyph: "–" };
+    return { label: "Choose an agent", detail: "required before sending", glyph: "–" };
   }
   const name = runtime.name || runtime.provider;
   return {

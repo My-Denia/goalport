@@ -707,7 +707,7 @@ impl RuntimeManager {
         let provider = self
             .selected_provider
             .get(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         self.ensure_provider_allowed(provider)
     }
 
@@ -748,7 +748,7 @@ impl RuntimeManager {
             ),
             _ => {
                 return Err(AdapterError::Unsupported(format!(
-                    "unknown Runtime provider {provider}"
+                    "unknown agent provider {provider}"
                 )));
             }
         };
@@ -901,7 +901,7 @@ impl RuntimeManager {
     pub fn return_attempts(&mut self, attempt_ids: &[String], mut worker: Self) -> Result<(), AdapterError> {
         if let Some(missing) = attempt_ids.iter().find(|id| !self.busy_attempts.contains_key(*id)) {
             return Err(AdapterError::InvalidRequest(format!(
-                "attempt {missing} has no lent Runtime"
+                "attempt {missing} has no lent agent"
             )));
         }
         for attempt_id in attempt_ids {
@@ -991,7 +991,7 @@ impl RuntimeManager {
     ) -> Result<RegistrationWithdrawal, AdapterError> {
         let current_seq = self.registration_seq(attempt_id).ok_or_else(|| {
             AdapterError::InvalidRequest(format!(
-                "attempt {attempt_id} has no registered Runtime to withdraw"
+                "attempt {attempt_id} has no registered agent to withdraw"
             ))
         })?;
         if current_seq != seq {
@@ -1273,7 +1273,7 @@ impl RuntimeManager {
         // served by `admit_runtime`'s reuse decision, never by replacement here.
         if self.attempts.contains_key(attempt_id) || self.busy_attempts.contains_key(attempt_id) {
             return Err(AdapterError::RegistrationOccupied(format!(
-                "attempt {attempt_id} already has a registered Runtime; it is kept, not replaced"
+                "attempt {attempt_id} already has a registered agent; it is kept, not replaced"
             )));
         }
         self.ensure_provider_allowed(&provider)?;
@@ -1319,7 +1319,7 @@ impl RuntimeManager {
             ))),
             _ => {
                 return Err(AdapterError::Unsupported(format!(
-                    "unknown Runtime provider {provider}"
+                    "unknown agent provider {provider}"
                 )));
             }
         };
@@ -1360,7 +1360,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => {
                 let handle = adapter.create_session(request)?;
@@ -1419,7 +1419,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Codex(process) => process.create_session_with_options(request, true),
             _ => Err(AdapterError::Unsupported(
@@ -1437,7 +1437,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => {
                 let accepted = adapter.send_prompt(request)?;
@@ -1467,7 +1467,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => adapter.permission_response(response),
             ManagedRuntime::Codex(process) => process.permission_response(response),
@@ -1486,7 +1486,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => adapter.interrupt(),
             ManagedRuntime::Codex(process) => process.interrupt(),
@@ -1541,7 +1541,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => {
                 let handle = adapter.resume_session(session_id)?;
@@ -1772,7 +1772,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime session is not attached".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent session is not attached".into()))?;
         match runtime {
             ManagedRuntime::Scenario(adapter) => adapter.close()?,
             ManagedRuntime::Codex(process) => process.close()?,
@@ -1796,7 +1796,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Codex(process) => process.poll_events(attempt_id),
             ManagedRuntime::Grok(process) => process.poll_events(attempt_id),
@@ -1918,7 +1918,7 @@ impl RuntimeManager {
         let runtime = self
             .attempts
             .get_mut(attempt_id)
-            .ok_or_else(|| AdapterError::Connection("Runtime has not been selected".into()))?;
+            .ok_or_else(|| AdapterError::Connection("Agent has not been selected".into()))?;
         match runtime {
             ManagedRuntime::Codex(process) => process.drop_stdio(),
             ManagedRuntime::Grok(process) => process.drop_stdio(),
@@ -3772,7 +3772,7 @@ impl GrokAcpProcess {
         if std::env::var("GOALPORT_GROK_PERMISSIONS").ok().as_deref() == Some("native") {
             self.native_permission_prompts = "native-default".into();
             debug_runtime(
-                "grok permission prompts left at the Runtime default (GOALPORT_GROK_PERMISSIONS=native)",
+                "grok permission prompts left at the agent default (GOALPORT_GROK_PERMISSIONS=native)",
             );
             return Ok(());
         }
@@ -3806,7 +3806,7 @@ impl GrokAcpProcess {
         if !self.always_approve_advertised {
             self.native_permission_prompts = "native-default".into();
             debug_runtime(
-                "grok always-approve session command was not advertised within the grace window; permission prompts stay at the Runtime default",
+                "grok always-approve session command was not advertised within the grace window; permission prompts stay at the agent default",
             );
             return Ok(());
         }
@@ -4073,7 +4073,7 @@ impl GrokAcpProcess {
                 return self.envelope(
                     attempt_id,
                     AgentEventType::TurnFailed,
-                    json!({ "status": "failed", "text": format!("native Runtime error {code}") }),
+                    json!({ "status": "failed", "text": format!("native agent error {code}") }),
                     reference,
                 );
             }
@@ -4524,7 +4524,7 @@ impl GrokAcpProcess {
                                 "option_id": "",
                                 "allow": false,
                                 "cancelled": true,
-                                "reason": "the native Runtime could not be answered"
+                                "reason": "the native agent could not be answered"
                             }
                         })));
                         break;
@@ -4838,7 +4838,7 @@ impl CodexExecProcess {
         for (index, line) in String::from_utf8_lossy(&output.stdout).lines().enumerate() {
             if line.len() > MAX_NATIVE_LINE_BYTES {
                 return Err(AdapterError::Protocol(
-                    "native Runtime event exceeds bound".into(),
+                    "native agent event exceeds bound".into(),
                 ));
             }
             let value: Value = serde_json::from_str(line)?;
@@ -7398,15 +7398,15 @@ impl ClaudeStreamProcess {
         let stop = self.pending_stop.as_ref()?;
         if stop.turn_epoch != self.turn_epoch {
             return Some(
-                "a newer Claude turn took ownership of this Runtime before the Stop was resolved"
+                "a newer Claude turn took ownership of this agent before the Stop was resolved"
                     .into(),
             );
         }
         if self.attempt_id.as_deref() != Some(stop.attempt_id.as_str()) {
-            return Some("a different Attempt now owns this Claude Runtime".into());
+            return Some("a different Attempt now owns this Claude agent".into());
         }
         if self.session_id != stop.session_id {
-            return Some("a different native session now owns this Claude Runtime".into());
+            return Some("a different native session now owns this Claude agent".into());
         }
         let binding = self.process_binding.as_ref()?;
         if binding.process_epoch != stop.process_epoch
@@ -7858,7 +7858,7 @@ impl ClaudeStreamProcess {
         let descendants = crate::descendants::snapshot_descendants(pid);
         let Some(records) = descendants else {
             return Err(AdapterError::Connection(
-                "Claude session close could not observe the Runtime's process tree; close is not confirmed"
+                "Claude session close could not observe the agent's process tree; close is not confirmed"
                     .into(),
             ));
         };
@@ -7931,7 +7931,7 @@ impl ClaudeStreamProcess {
         let survivors = crate::descendants::terminate_descendants(&records);
         if survivors > 0 {
             return Err(AdapterError::Connection(format!(
-                "Claude session close could not confirm containment: {survivors} descendant(s) of the Runtime are still running"
+                "Claude session close could not confirm containment: {survivors} descendant(s) of the agent are still running"
             )));
         }
         if let Some(pid) = self.close_snapshot_pid {
@@ -8429,7 +8429,7 @@ impl BoundedReadLine for BufReader<ChildStdout> {
         let size = self.read_line(&mut line)?;
         if size > MAX_NATIVE_LINE_BYTES {
             return Err(AdapterError::Protocol(
-                "native Runtime event exceeds bound".into(),
+                "native agent event exceeds bound".into(),
             ));
         }
         Ok(line)
@@ -8660,7 +8660,7 @@ fn normalized_codex_payload(method: &str, value: &Value) -> Option<Value> {
         return Some(payload);
     }
     if lower.contains("error") || value.get("error").is_some() {
-        return Some(json!({ "status": "failed", "error": "native Runtime error" }));
+        return Some(json!({ "status": "failed", "error": "native agent error" }));
     }
     None
 }
@@ -8711,7 +8711,7 @@ fn normalized_cli_payload(method: &str, value: &Value) -> Option<Value> {
         || value.get("isError").and_then(Value::as_bool) == Some(true)
         || lower.contains("error")
     {
-        return Some(json!({ "status": "failed", "error": "native Runtime error" }));
+        return Some(json!({ "status": "failed", "error": "native agent error" }));
     }
     None
 }

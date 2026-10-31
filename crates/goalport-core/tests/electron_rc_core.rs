@@ -95,7 +95,7 @@ fn normal_empty_store_is_connected_and_has_no_synthetic_rows() {
     assert_eq!(view["attempt"]["id"], "attempt-unassigned");
     assert_eq!(view["attempt"]["provider"], "unassigned");
     assert_eq!(view["attempt"]["state"], "waiting");
-    assert_eq!(view["attempt"]["sessionLabel"], "No Runtime selected");
+    assert_eq!(view["attempt"]["sessionLabel"], "No agent selected");
     assert_eq!(view["preview"], false);
     for provider in ["codex", "claude", "grok"] {
         let runtime = view["runtimes"]
@@ -266,7 +266,7 @@ fn terminal_rollover_is_single_and_provider_independent() {
         codex["error"]
             .as_str()
             .unwrap()
-            .contains("already bound to a different Runtime binding"),
+            .contains("already bound to a different agent binding"),
         "the race must reach binding conflict before the synthetic-only guard: {codex}"
     );
     assert_eq!(store.counts().unwrap(), before_binding_refusal, "occupied-binding refusal writes nothing");
@@ -441,7 +441,7 @@ fn delayed_cross_provider_choice_without_attempt_id_conflicts_with_current_bindi
         }),
     );
     assert_eq!(delayed["ok"], false, "{delayed}");
-    assert!(delayed["error"].as_str().unwrap().contains("already bound to a different Runtime binding"));
+    assert!(delayed["error"].as_str().unwrap().contains("already bound to a different agent binding"));
     assert_eq!(store.attempts_for_task(&task).unwrap().len(), before);
     assert_eq!(snapshot(&server, "delayed-after")["attempt"]["id"], first_id);
 }

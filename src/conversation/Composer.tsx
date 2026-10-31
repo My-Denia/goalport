@@ -33,11 +33,11 @@ export function RuntimePicker({ runtimes, runtime, blocked, blockedReason, conne
         runtimes={runtimes}
         selectedId={runtime.provider}
         triggerClassName="runtime-picker-button"
-        triggerAriaLabel="Select Runtime"
-        triggerTitle="Choose the Runtime for your next message"
-        emptyText="No Runtime information from Core yet."
+        triggerAriaLabel="Select agent"
+        triggerTitle="Choose the agent for your next message"
+        emptyText="Agents are still loading."
         blockedHint={selectBlocked
-          ? (!connected ? "Reconnect Core to select." : (blockedReason ?? "Selection is blocked while a hold governs this workspace."))
+          ? (!connected ? "Reconnect to select." : (blockedReason ?? "Selection is blocked while a hold governs this workspace."))
           : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || selectBlocked}
         onSelect={onSelect}
@@ -117,7 +117,7 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, curren
   const placeholder = `Ask ${runtime?.name ?? "the agent"} to continue…`;
 
   const hint = closingSession
-    ? "Closing the Runtime session…"
+    ? "Closing the agent session…"
     : reconciling
     ? "Check whether the previous message was received. It will not be sent again."
     : held
@@ -154,7 +154,7 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, curren
             runtimes={snapshot.runtimes}
             runtime={runtime}
             blocked={held || controlUnavailable}
-            blockedReason={controlUnavailable ? "Selection is unavailable until Core provides a full control snapshot." : undefined}
+            blockedReason={controlUnavailable ? "Selection is unavailable until GoalPort reconnects." : undefined}
             connected={connected}
             onSelect={onSelectRuntime}
             focusSignal={chooserFocusSignal}
@@ -169,8 +169,8 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, curren
               <button
                 className="composer-secondary composer-stop"
                 type="button"
-                aria-label="Stop the running Runtime turn"
-                title="Stop the running Runtime turn"
+                aria-label="Stop the running agent turn"
+                title="Stop the running agent turn"
                 onClick={onStop}
                 disabled={busy}
               >
@@ -186,8 +186,8 @@ export function Composer({ onNewGoal, focusKey, draft, snapshot, runtime, curren
                 type="button"
                 aria-label={turn.state === "stopping" ? "Stopping" : "Starting"}
                 title={turn.state === "stopping"
-                  ? "The Runtime is stopping this turn; nothing new can start until it settles."
-                  : "The Runtime has not confirmed the turn start yet."}
+                  ? "The agent is stopping this turn; nothing new can start until it settles."
+                  : "The agent has not confirmed the turn start yet."}
                 disabled
               >
                 <span aria-hidden="true">◌</span> {turn.state === "stopping" ? "Stopping…" : "Starting…"}

@@ -71,12 +71,12 @@ function ActionableError({ item, onChooseRuntime, onDiagnose }: { item: ProductC
       <div className="tl-avatar" aria-hidden="true">⚠</div>
       <div className="tl-event-body">
         <div className="tl-meta">
-          <span className="tl-kind">Runtime reported a problem</span>
+          <span className="tl-kind">The agent reported a problem</span>
           <Timestamp value={item.timestamp} />
         </div>
         <div className="tl-system-body">{item.body}</div>
         {item.actions?.includes("select-runtime") && onChooseRuntime ? (
-          <button className="button button-small button-outline" type="button" onClick={onChooseRuntime}>Choose Runtime</button>
+          <button className="button button-small button-outline" type="button" onClick={onChooseRuntime}>Choose agent</button>
         ) : item.actions?.includes("diagnose") && onDiagnose ? (
           <button className="button button-small button-outline" type="button" onClick={onDiagnose}>Open details</button>
         ) : null}

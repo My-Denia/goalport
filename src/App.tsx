@@ -130,9 +130,9 @@ function commandFailure(next: CoreSnapshot, messageType: string, priorIntent?: S
     return {
       sentence: outcome.kind === "refused"
         ? (runtimeDidNotStart
-          ? "That Runtime didn't start. Nothing was sent."
+          ? "That agent didn't start. Nothing was sent."
           : "GoalPort could not complete that action.")
-        : "GoalPort could not reach Core for that action.",
+        : "GoalPort could not reach its background service for that action.",
       technical
     };
   }
@@ -881,7 +881,7 @@ function App() {
 
   function capacityBlocksNewWork(action: string): boolean {
     if (!snapshot.bounds?.projectionUnavailable) return false;
-    setActiveNotice({ sentence: `Core returned a capacity-limited control view, so GoalPort cannot ${action} until a full control snapshot is available.` });
+    setActiveNotice({ sentence: `GoalPort can't ${action} until it reconnects.` });
     return true;
   }
 
@@ -1005,7 +1005,7 @@ function App() {
 
   function handleCloseChoice(choice: "continue" | "stop") {
     if (snapshot.bounds?.projectionUnavailable) {
-      setActiveNotice({ sentence: "Core returned a capacity-limited control view, so GoalPort cannot target this Runtime for a close action. Keep the window open and reconnect first." });
+      setActiveNotice({ sentence: "GoalPort can't reach this agent to close it right now. Keep the window open and reconnect first." });
       setCloseChoiceOpen(true);
       return;
     }
@@ -1043,7 +1043,7 @@ function App() {
         setCloseChoiceOpen(true);
         setActiveNotice(choice === "continue"
           ? { sentence: "Continue in background was not recorded. The window stays open." }
-          : { sentence: "Stop was not durably acknowledged by Core. The window stays open." });
+          : { sentence: "GoalPort couldn't confirm the stop. The window stays open." });
         return;
       }
       setCloseChoiceOpen(false);
@@ -1051,7 +1051,7 @@ function App() {
       setCloseChoiceOpen(true);
       setActiveNotice(choice === "continue"
         ? { sentence: "Continue in background failed. The window stays open." }
-        : { sentence: "Stop failed before durable Core acknowledgement. The window stays open." });
+        : { sentence: "The stop didn't go through. The window stays open." });
     }
   }
 
@@ -1163,7 +1163,7 @@ function App() {
     }
     if (!workspace || !message) return;
     if (!retrying && client.mode === "linux-core" && provider && (provider !== "codex" || !snapshot.runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server"))) {
-      setDraftError({ sentence: "Core has not confirmed the Codex app-server adapter. Nothing was sent." });
+      setDraftError({ sentence: "Codex isn't ready yet. Nothing was sent." });
       return;
     }
     if (workspaceHeldByBackground(workspace)) {
@@ -1175,7 +1175,7 @@ function App() {
       return;
     }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
-      setDraftError({ sentence: "Core confirmed the previous state but could not project enough control data to start new work. Retry a pending request or reconnect first." });
+      setDraftError({ sentence: "GoalPort needs to reconnect before starting new work." });
       return;
     }
     if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held"
@@ -1323,7 +1323,7 @@ function App() {
         // A panel-capable build never silently falls back to the legacy
         // unscoped path while harness access is unresolved (P1).
         setDraftError(panelLoad === "failed"
-          ? { sentence: "Your agent access choices could not be loaded, so nothing was sent. Retry the load, or pick a single Runtime.", technical: panelFailSentence ?? undefined }
+          ? { sentence: "Your agent access choices could not be loaded, so nothing was sent. Retry the load, or pick a single agent.", technical: panelFailSentence ?? undefined }
           : { sentence: "Agent access is still loading, so nothing was sent. Send unlocks once your agent access choices are ready." });
         return;
       }
@@ -2379,11 +2379,11 @@ function App() {
     }
     const retrying = canExplicitlyRetry(retainedIntent);
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
-      setActiveNotice({ sentence: "Core acknowledged the last action with a capacity-limited view. Reconnect before starting new work." });
+      setActiveNotice({ sentence: "Your last action was saved, but GoalPort needs to reconnect before starting new work." });
       return;
     }
     if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held") {
-      setActiveNotice({ sentence: "Core refused new work while residual execution is unknown and write responsibility is held." });
+      setActiveNotice({ sentence: "The last turn may still be running, so new work waits until it is checked." });
       return;
     }
     const heldByResidualBackground = conversationHeldByBackground;
@@ -2488,7 +2488,7 @@ function App() {
       return;
     }
     if (allow && snapshot.stopResponsibility?.writeResponsibility === "held") {
-      setActiveNotice({ sentence: "Permission Allow is blocked while Core holds Stop responsibility. Decline remains available." });
+      setActiveNotice({ sentence: "Allow is paused while a stop settles. Decline still works." });
       return;
     }
     const viewIntent = selectionIntent.current;
@@ -2529,7 +2529,7 @@ function App() {
   async function handleOwnerAction(action: string) {
     if (capacityBlocksNewWork(`request owner-only ${action}`)) return;
     if (!client.requestOwnerAction) {
-      setActiveNotice({ sentence: "Owner-only requests require a connected Core." });
+      setActiveNotice({ sentence: "Reconnect GoalPort to do this." });
       return;
     }
     const viewIntent = selectionIntent.current;
@@ -2576,7 +2576,7 @@ function App() {
       : snapshot.relatedHolds.find((candidate) => candidate.attemptId === attemptId);
     const source = hold?.workspaceKey ?? "";
     if (!source) {
-      setActiveNotice({ sentence: "Core did not report which workspace this hold covers, so no continuation target can be proposed." });
+      setActiveNotice({ sentence: "GoalPort doesn't know which folder this work is in, so it can't suggest where to continue." });
       return;
     }
     // A sibling, never a child: a child of the held workspace overlaps it and Core
@@ -2603,11 +2603,11 @@ function App() {
   function openHandoffDialog() {
     if (capacityBlocksNewWork("start a handoff")) return;
     if (snapshot.stopResponsibility?.writeResponsibility === "held") {
-      setActiveNotice({ sentence: "Handoff is blocked while residual execution remains unknown and Core holds write responsibility." });
+      setActiveNotice({ sentence: "Handoff waits because the last turn may still be running." });
       return;
     }
     if (!client.handoff || !snapshot.attempt.id) {
-      setActiveNotice({ sentence: "Core handoff is unavailable until a connected Runtime Attempt is selected." });
+      setActiveNotice({ sentence: "Select a connected agent before handing off." });
       return;
     }
     setHandoffOpen(true);
@@ -2618,12 +2618,12 @@ function App() {
   async function handleHandoffConfirm(provider: string) {
     setHandoffOpen(false);
     if (!client.handoff || !snapshot.attempt.id) {
-      setActiveNotice({ sentence: "Core handoff is unavailable until a connected Runtime Attempt is selected." });
+      setActiveNotice({ sentence: "Select a connected agent before handing off." });
       return;
     }
     const runtime = snapshot.runtimes.find((candidate) => candidate.id === provider);
     if (!runtime || runtime.support === "unsupported") {
-      setActiveNotice({ sentence: "That Runtime has no verified capability path for handoff." });
+      setActiveNotice({ sentence: "That agent can't take over this work." });
       return;
     }
     const viewIntent = selectionIntent.current;
@@ -2642,21 +2642,21 @@ function App() {
   }
 
   async function handleOffline() {
-    if (capacityBlocksNewWork("change the Runtime transport state")) return;
+    if (capacityBlocksNewWork("change the agent transport state")) return;
     const next = client.mode === "browser-preview" ? withConnection(snapshot, "disconnected") : await client.setConnection("disconnected");
     setSnapshot(next);
     setActiveNotice({ sentence: client.mode === "browser-preview"
       ? "Browser preview is offline. Your local draft stays in this page."
-      : "UI is offline. Core keeps committed task state; uncommitted input remains in this window." });
+      : "GoalPort is offline. Saved work is safe, and anything unsent stays in this window." });
   }
 
   // Stop appears only for a proven cancellable live turn (product turn
   // canStop); never for an idle session.
   async function handleStop() {
-    if (capacityBlocksNewWork("target this Runtime with Stop")) return;
+    if (capacityBlocksNewWork("target this agent with Stop")) return;
     const attemptId = persistedAttemptId(snapshot.attempt.id);
     if (!client.interrupt || !attemptId || !product?.turn.canStop) {
-      setActiveNotice({ sentence: "There is no Runtime turn that can be stopped right now." });
+      setActiveNotice({ sentence: "There is no agent turn that can be stopped right now." });
       return;
     }
     const viewIntent = selectionIntent.current;
@@ -2670,7 +2670,7 @@ function App() {
     const attemptId = persistedAttemptId(snapshot.attempt.id);
     if (!client.closeSession || snapshot.connection !== "connected" || snapshot.stopResponsibility?.writeResponsibility === "held"
       || !attemptId || !product?.turn.actions?.includes("close-session")) {
-      setActiveNotice({ sentence: "This Runtime session cannot be closed right now." });
+      setActiveNotice({ sentence: "This agent session cannot be closed right now." });
       return;
     }
     const viewIntent = selectionIntent.current;
@@ -2748,7 +2748,7 @@ function App() {
     setSnapshot(next);
     const failure = client.mode === "browser-preview" || next.connection === "connected"
       ? null
-      : { sentence: "Core connection remains unavailable. Nothing was re-sent.", technical: next.commandOutcome?.error };
+      : { sentence: "Still can't connect. Nothing was re-sent.", technical: next.commandOutcome?.error };
     if (failure) setActiveNotice(failure);
     else setActiveNotice(null);
   }
@@ -3137,9 +3137,9 @@ function App() {
   }
 
   async function selectRuntime(provider: string) {
-    if (capacityBlocksNewWork("select a new Runtime")) return;
+    if (capacityBlocksNewWork("select a new agent")) return;
     if (!client.selectRuntime || !snapshot.activeCampaignId || !snapshot.activeTask.id) {
-      setActiveNotice({ sentence: "Select or start a goal before choosing a Runtime." });
+      setActiveNotice({ sentence: "Select or start a goal before choosing an agent." });
       return;
     }
     const intent = ++selectionIntent.current;
@@ -3251,7 +3251,7 @@ function App() {
       <div className="boot-shell" role="status" aria-label="Starting GoalPort">
         <span className="boot-mark" aria-hidden="true">◎</span>
         <p>Starting GoalPort…</p>
-        <small>The local Core is restoring its record. This can take a moment.</small>
+        <small>GoalPort is restoring your work. This can take a moment.</small>
       </div>
     );
   }
@@ -3483,7 +3483,7 @@ function App() {
               />;
               return <><div className="timeline-scroll" tabIndex={-1} aria-label="New Codex conversation">
                 <GoalStatusHeading {...nativeComposer.props} />
-                <p className="draft-hint">One Codex conversation, without automatic Pi verification. Closing this page does not end the Runtime session.</p>
+                <p className="draft-hint">One Codex conversation, without automatic Pi verification. Closing this page does not end the agent session.</p>
               </div><div className="composer-dock">{nativeComposer}</div></>;
             }
             const draftComposer = (
@@ -4123,7 +4123,7 @@ function App() {
                   : backgroundSlotBlocked
                     ? { ...product.turn, canSend: false, reason: backgroundSlotSentence, reasonCode: undefined }
                     : snapshot.bounds?.projectionUnavailable && !activeRetryLabel
-                      ? { ...product.turn, canSend: false, reason: "Core returned a capacity-limited view. Reconnect before starting new work." }
+                      ? { ...product.turn, canSend: false, reason: "GoalPort needs to reconnect before starting new work." }
                       : product.turn}
                 busy={sendBusy}
                 closingSession={closingSession}

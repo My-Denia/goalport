@@ -12,8 +12,8 @@ function Picker({ onSelect = vi.fn(), disabledId, initialSelected = "" }: { onSe
   return <RuntimePickerMenu
     runtimes={DEMO_SNAPSHOT.runtimes}
     selectedId={selected}
-    triggerContent={selected || "Choose a Runtime"}
-    triggerAriaLabel="Select Runtime"
+    triggerContent={selected || "Choose an agent"}
+    triggerAriaLabel="Select agent"
     emptyText="No Runtimes"
     isItemDisabled={(runtime) => runtime.id === disabledId}
     onSelect={(id) => { setSelected(id); onSelect(id); }}
@@ -23,7 +23,7 @@ function Picker({ onSelect = vi.fn(), disabledId, initialSelected = "" }: { onSe
 describe("shared Runtime picker keyboard contract", () => {
   it("retains selection when Core spells the provider with different case", async () => {
     render(<Picker initialSelected="CODEX" />);
-    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
     const codex = await screen.findByRole("option", { name: /Codex/ });
     expect(codex.getAttribute("aria-selected")).toBe("true");
   });
@@ -31,7 +31,7 @@ describe("shared Runtime picker keyboard contract", () => {
   it("moves with arrows and Home/End, commits with Enter, and returns focus to its trigger", async () => {
     const selected = vi.fn();
     render(<Picker onSelect={selected} />);
-    const trigger = screen.getByRole("combobox", { name: "Select Runtime" });
+    const trigger = screen.getByRole("combobox", { name: "Select agent" });
     fireEvent.click(trigger);
     const listbox = await screen.findByRole("listbox", { name: "Runtimes" });
     const claude = screen.getByRole("option", { name: /Claude Code/ });
@@ -55,7 +55,7 @@ describe("shared Runtime picker keyboard contract", () => {
   it("does not commit a disabled choice and Escape dismisses without selecting", async () => {
     const selected = vi.fn();
     render(<Picker onSelect={selected} disabledId="codex" />);
-    const trigger = screen.getByRole("combobox", { name: "Select Runtime" });
+    const trigger = screen.getByRole("combobox", { name: "Select agent" });
     fireEvent.click(trigger);
     const claude = await screen.findByRole("option", { name: /Claude Code/ });
     const codex = screen.getByRole("option", { name: /Codex/ });

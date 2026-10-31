@@ -354,8 +354,8 @@ describe("empty-state and goal creation (HARD-02/03)", () => {
     // Unassigned Runtime + waiting attempt: draft must already be editable.
     const goalNoRuntime = {
       ...DEMO_SNAPSHOT,
-      productConversation: { ...DEMO_SNAPSHOT.productConversation!, runtime: { state: "none" as const, provider: "", name: "" }, turn: { state: "idle" as const, canStop: false, canSend: false, reason: "Choose a Runtime above before sending." } },
-      attempt: { ...DEMO_SNAPSHOT.attempt, id: "attempt-unassigned", taskId: DEMO_SNAPSHOT.activeTask.id, provider: "unassigned", state: "waiting" as const, sessionLabel: "No Runtime selected", eventCount: 0 }
+      productConversation: { ...DEMO_SNAPSHOT.productConversation!, runtime: { state: "none" as const, provider: "", name: "" }, turn: { state: "idle" as const, canStop: false, canSend: false, reason: "Choose an agent above before sending." } },
+      attempt: { ...DEMO_SNAPSHOT.attempt, id: "attempt-unassigned", taskId: DEMO_SNAPSHOT.activeTask.id, provider: "unassigned", state: "waiting" as const, sessionLabel: "No agent selected", eventCount: 0 }
     };
     mountElectron(goalNoRuntime);
     const composer = await screen.findByRole("textbox", { name: /message composer/i });
@@ -363,7 +363,7 @@ describe("empty-state and goal creation (HARD-02/03)", () => {
     await waitFor(() => expect(document.activeElement).toBe(composer));
     expect((composer as HTMLTextAreaElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: /send message/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/choose a runtime above before sending/i)).toBeTruthy();
+    expect(screen.getByText(/choose an agent above before sending/i)).toBeTruthy();
     // Honest headline state — not "in progress" with nothing running.
     expect(screen.queryByText("Working")).toBeNull();
   });
@@ -750,7 +750,7 @@ describe("new goal during a selected-runtime send", () => {
 
     const message = await screen.findByRole("textbox", { name: "Message composer" });
     fireEvent.change(message, { target: { value: "inspect the helper" } });
-    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
     const claude = await screen.findByRole("option", { name: /Claude Code/ });
     await waitFor(() => expect(document.activeElement).toBe(claude));
     fireEvent.keyDown(claude, { key: "ArrowDown" });
@@ -805,7 +805,7 @@ describe("new goal during a selected-runtime send", () => {
 
     const message = await screen.findByRole("textbox", { name: "Message composer" });
     fireEvent.change(message, { target: { value: "inspect the helper" } });
-    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
     const claude = await screen.findByRole("option", { name: /Claude Code/ });
     await waitFor(() => expect(document.activeElement).toBe(claude));
     fireEvent.keyDown(claude, { key: "ArrowDown" });
@@ -851,7 +851,7 @@ describe("competing background send refusal", () => {
   async function selectRuntimeAndType(message: string) {
     const composer = await screen.findByRole("textbox", { name: "Message composer" });
     fireEvent.change(composer, { target: { value: message } });
-    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
     const claude = await screen.findByRole("option", { name: /Claude Code/ });
     await waitFor(() => expect(document.activeElement).toBe(claude));
     fireEvent.keyDown(claude, { key: "ArrowDown" });
@@ -3257,7 +3257,7 @@ describe("one in-window repair", () => {
       const background = screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement;
       fireEvent.click(background);
       expect(background.checked).toBe(true);
-      fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+      fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
       clickRuntimeOption(await screen.findByRole("option", { name: /Codex/ }));
       await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull());
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();

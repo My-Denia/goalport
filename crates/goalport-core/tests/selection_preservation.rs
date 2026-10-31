@@ -223,7 +223,7 @@ fn r1_repeated_selection_conflict_keeps_selection() {
     );
     let error = error_of(&refused);
     assert!(
-        error.contains("already bound to a different Runtime binding"),
+        error.contains("already bound to a different agent binding"),
         "expected the binding conflict refusal, got: {error}"
     );
 
@@ -797,7 +797,7 @@ fn duplicate_terminal_selects_reuse_the_same_replacement() {
         .into_iter()
         .filter(|attempt| !attempt.state.is_terminal())
         .count();
-    assert_eq!(live, 1, "a second click must not launch another Runtime");
+    assert_eq!(live, 1, "a second click must not launch another agent");
 }
 
 #[test]

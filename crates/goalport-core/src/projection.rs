@@ -1110,7 +1110,7 @@ impl UiController {
 
     fn ensure_native_persistence_ready(&self, attempt_id: &str) -> Result<(), String> {
         if self.has_pending_native_persistence(attempt_id) {
-            return Err("Recent Runtime updates have not been saved yet. Wait for recovery before sending another message; no new message was recorded or sent.".into());
+            return Err("Recent agent updates have not been saved yet. Wait for recovery before sending another message; no new message was recorded or sent.".into());
         }
         Ok(())
     }
@@ -1124,7 +1124,7 @@ impl UiController {
     fn snapshot_notices(&self) -> Vec<String> {
         let mut notices = self.notices.clone();
         if let Some(error) = &self.native_persistence_error {
-            notices.insert(0, format!("Recent Runtime updates have not been saved yet. GoalPort will retry. Details: {error}"));
+            notices.insert(0, format!("Recent agent updates have not been saved yet. GoalPort will retry. Details: {error}"));
         }
         notices
     }
@@ -1486,7 +1486,7 @@ impl UiController {
             // Keep the native turn fact and Stop capability honest. Only further sends
             // wait for local storage; the existing composer renders this reason.
             product_conversation.turn.can_send = false;
-            product_conversation.turn.reason = Some("Recent Runtime updates have not been saved yet. GoalPort will retry; wait before sending another message.".into());
+            product_conversation.turn.reason = Some("Recent agent updates have not been saved yet. GoalPort will retry; wait before sending another message.".into());
             product_conversation.turn.reason_code = Some("native-persistence".into());
         }
         let (turn_results, omitted_turns) = crate::turn_results::project_turn_result_window(&self.store, &active_attempt.id)?;
@@ -1951,7 +1951,7 @@ impl UiController {
             let task = Task {
                 id: campaign.root_task_id.clone(),
                 campaign_id: campaign.id.clone(),
-                title: "Connect a real Core and Runtime".into(),
+                title: "Connect a real Core and agent".into(),
                 acceptance: "Persist ordered reply, tool and waiting events and recover without prompt replay.".into(),
                 state: crate::domain::WorkStatus::InProgress,
             };
@@ -3080,7 +3080,7 @@ impl UiController {
         )?;
         let workspace = PathBuf::from(&project.workspace_root);
         if intended.provider != provider || intended.workspace_root != workspace {
-            return Err("frozen Runtime binding does not match the admission target".into());
+            return Err("frozen agent binding does not match the admission target".into());
         }
         if let Some(existing) = self.runtime_manager.registered_binding(&attempt_id) {
             // A Runtime is already registered under this attempt id. Either this is
@@ -3090,7 +3090,7 @@ impl UiController {
             // the existing Runtime replaced, and nothing below is written.
             if *existing != intended {
                 return Err(format!(
-                    "attempt {attempt_id} is already bound to a different Runtime binding; \
+                    "attempt {attempt_id} is already bound to a different agent binding; \
                      the existing Runtime is kept and the request is refused"
                 ));
             }
@@ -3105,7 +3105,7 @@ impl UiController {
                 AttemptState::Active | AttemptState::AwaitingReview
             ) {
                 return Err(format!(
-                    "attempt {attempt_id} has a registered Runtime but its session was never \
+                    "attempt {attempt_id} has a registered agent but its session was never \
                      established (state {}); it is kept, not replaced, and not retried automatically",
                     attempt_state_label(row.state)
                 ));
@@ -3130,13 +3130,13 @@ impl UiController {
                     .unwrap_or_default();
                 if current.is_empty() || failed_identity.as_deref() == Some(current.as_str()) {
                     return Err(format!(
-                        "attempt {attempt_id} has a registered Runtime whose initialization did not \
+                        "attempt {attempt_id} has a registered agent whose initialization did not \
                          complete (stage {stage}); it is kept, not replaced, and not retried automatically"
                     ));
                 }
                 if !self.registration_established(&attempt_id, &current)? {
                     return Err(format!(
-                        "attempt {attempt_id} has a registered Runtime whose initialization or recovery \
+                        "attempt {attempt_id} has a registered agent whose initialization or recovery \
                          success is not recorded while an earlier registration's initialization failed \
                          (stage {stage}); it is kept, not replaced, and not retried automatically"
                     ));
@@ -3156,13 +3156,13 @@ impl UiController {
                         self.runtime_manager.transport_state(&attempt_id)
                 {
                     return Err(format!(
-                        "attempt {attempt_id} has a registered Runtime whose output stream is \
+                        "attempt {attempt_id} has a registered agent whose output stream is \
                          closed ({reason}) while its process may still be running; it is kept, not \
                          replaced, and not retried automatically"
                     ));
                 }
                 return Err(format!(
-                    "attempt {attempt_id} has a registered Runtime that is no longer live; \
+                    "attempt {attempt_id} has a registered agent that is no longer live; \
                      it is kept, not replaced"
                 ));
             }
@@ -3194,12 +3194,12 @@ impl UiController {
             ) {
                 if existing_row.provider != provider {
                     return Err(format!(
-                        "attempt {attempt_id} already belongs to Runtime provider {}; the conflicting {provider} request is refused",
+                        "attempt {attempt_id} already belongs to agent provider {}; the conflicting {provider} request is refused",
                         existing_row.provider
                     ));
                 }
                 return Err(format!(
-                    "attempt {attempt_id} has current persisted work but no registered Runtime; explicit recovery is required and automatic replacement is refused"
+                    "attempt {attempt_id} has current persisted work but no registered agent; explicit recovery is required and automatic replacement is refused"
                 ));
             }
         }
@@ -3705,7 +3705,7 @@ impl UiController {
         // reattached, and no new Attempt is invented on the user's behalf.
         if attempt.state.is_terminal() {
             return Err(format!(
-                "attempt is terminal ({}); select a Runtime to start a new Attempt",
+                "attempt is terminal ({}); select an agent to start a new Attempt",
                 attempt_state_label(attempt.state)
             ));
         }
@@ -3736,7 +3736,7 @@ impl UiController {
             if !codex_output_closed
                 && self.runtime_manager.registration_live(&attempt_id) != Some(true)
             {
-                return Err("This Runtime session is not ready. Check its status before sending; no message was recorded or replayed.".into());
+                return Err("This agent session is not ready. Check its status before sending; no message was recorded or replayed.".into());
             }
         }
         let auth = self
@@ -4117,7 +4117,7 @@ impl UiController {
                 self.persist_agent_event(&event)?;
             }
             if !sent.accepted {
-                return Err("Runtime did not accept the prompt".into());
+                return Err("Agent did not accept the prompt".into());
             }
             self.persist_recovery(&attempt_id, None)?;
             Ok(())
@@ -4277,7 +4277,7 @@ impl UiController {
                     .is_some()
             {
                 return Err(format!(
-                    "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
+                    "conversation request {request_id} keeps an agent registration; its pre-dispatch retry is refused"
                 ));
             }
             self.runtime_manager.ensure_provider_allowed(&provider).map_err(|error| error.to_string())?;
@@ -4552,7 +4552,7 @@ impl UiController {
             .or_else(|| attempts.last().map(|attempt| attempt.id.clone()))
             .ok_or_else(|| {
                 format!(
-                    "campaign {campaign_id} has no attempt to send to; select a Runtime or start a conversation first"
+                    "campaign {campaign_id} has no attempt to send to; select an agent or start a conversation first"
                 )
             })?;
         let attempt = self.store.get_attempt(&attempt_id).map_err(store_message)?;
@@ -4560,7 +4560,7 @@ impl UiController {
         if attempt.state.is_terminal() {
             if attempt.state != AttemptState::Cancelled {
                 return Err(format!(
-                    "attempt is terminal ({}); select a Runtime to start a new Attempt",
+                    "attempt is terminal ({}); select an agent to start a new Attempt",
                     attempt_state_label(attempt.state)
                 ));
             }
@@ -4575,7 +4575,7 @@ impl UiController {
             && self.selected_attempt_id.as_deref() != Some(attempt_id.as_str())
         {
             return Err(format!(
-                "attempt {attempt_id} is not selected by Core; select the Runtime for this conversation first"
+                "attempt {attempt_id} is not selected by Core; select the agent for this conversation first"
             ));
         }
         if explicit_attempt.is_some()
@@ -4656,7 +4656,7 @@ impl UiController {
                     .is_some()
             {
                 return Err(format!(
-                    "conversation request {request_id} keeps a Runtime registration; its pre-dispatch retry is refused"
+                    "conversation request {request_id} keeps an agent registration; its pre-dispatch retry is refused"
                 ));
             }
             self.ensure_native_persistence_ready(&source.id)?;
@@ -5301,7 +5301,7 @@ impl UiController {
                     json!({ "requested": stopped.requested, "confirmed": false, "reason": stopped.reason }),
                     None,
                 )?;
-                return Err("handoff blocked until old Runtime stop is confirmed".into());
+                return Err("handoff blocked until old agent stop is confirmed".into());
             }
             self.persist_event(
                 &old_attempt_id,
@@ -5585,7 +5585,7 @@ impl UiController {
             Some(hash) => hash,
             None if attempt.provider.eq_ignore_ascii_case("claude") => return Ok(None),
             None => {
-                return Err("native Runtime binding has no provider session".to_string());
+                return Err("native agent binding has no provider session".to_string());
             }
         };
         let core_epoch = self
@@ -5593,7 +5593,7 @@ impl UiController {
             .latest_core_launch_epoch()
             .map_err(store_message)?
             .filter(|epoch| epoch.state == "READY_COMMITTED" || epoch.state == "ACTIVE")
-            .ok_or_else(|| "native Runtime binding has no committed Core epoch".to_string())?;
+            .ok_or_else(|| "native agent binding has no committed Core epoch".to_string())?;
         let binding = RuntimeEpochBinding {
             attempt_id: attempt.id,
             campaign_id: task.campaign_id,
@@ -5651,7 +5651,7 @@ impl UiController {
         // Deny future work immediately, then settle earlier observations before
         // deriving automatic Stop effects from freshly loaded attempt state.
         self.flush_runtime_events().map_err(|error| format!(
-            "Current authorization was revoked, but earlier Runtime updates have not been saved. Automatic stop handling is deferred; use Stop to request it directly. {error}"
+            "Current authorization was revoked, but earlier agent updates have not been saved. Automatic stop handling is deferred; use Stop to request it directly. {error}"
         ))?;
         let tasks = self
             .store
@@ -6451,9 +6451,9 @@ impl UiController {
         let facts = self
             .runtime_manager
             .turn_facts(&attempt_id)
-            .ok_or_else(|| "This Runtime session is not attached; there is nothing to close.".to_string())?;
+            .ok_or_else(|| "This agent session is not attached; there is nothing to close.".to_string())?;
         if facts.in_flight || facts.delivery_unknown {
-            return Err("This Runtime may still be working. Stop its turn or check its result before closing the session.".into());
+            return Err("This agent may still be working. Stop its turn or check its result before closing the session.".into());
         }
         let workspace = self.workspace_for_attempt(&attempt_id)?;
         if self
@@ -6492,9 +6492,9 @@ impl UiController {
             | Some(crate::runtime_manager::ProcessConfirmation::Exited { .. })
             | Some(crate::runtime_manager::ProcessConfirmation::NotApplicable) => {}
             Some(crate::runtime_manager::ProcessConfirmation::Unknown { reason }) => {
-                return Err(format!("The Runtime process could not be confirmed: {reason}"));
+                return Err(format!("The agent process could not be confirmed: {reason}"));
             }
-            None => return Err("This Runtime session is not attached.".into()),
+            None => return Err("This agent session is not attached.".into()),
         }
         self.runtime_manager
             .close_idle_session(&attempt_id)
@@ -6587,7 +6587,7 @@ impl UiController {
             .insert_evidence(&Evidence {
                 id: evidence_id.clone(),
                 attempt_id: attempt_id.clone(),
-                claim: "Runtime output still matches the current workspace".into(),
+                claim: "Agent output still matches the current workspace".into(),
                 snapshot_hash: hash.clone(),
                 verdict: Verdict::Contested,
             })
@@ -7108,17 +7108,17 @@ impl UiController {
             let binding = self
                 .persist_runtime_epoch_binding(&event.attempt_id)?
                 .ok_or_else(|| {
-                    "native Runtime event has no canonical Runtime binding".to_string()
+                    "native agent event has no canonical agent binding".to_string()
                 })?;
             if event.process_epoch_id != binding.process_epoch
                 || event.task_id != binding.task_id
                 || event.campaign_id.as_deref() != Some(binding.campaign_id.as_str())
             {
-                return Err("Runtime event identity does not match canonical binding".into());
+                return Err("Agent event identity does not match canonical binding".into());
             }
             let object = payload
                 .as_object_mut()
-                .ok_or_else(|| "Runtime event payload must be an object".to_string())?;
+                .ok_or_else(|| "Agent event payload must be an object".to_string())?;
             object.insert(
                 "goalportRuntime".into(),
                 runtime_binding_payload(&binding, &event.occurred_at, &event.received_at),
@@ -7268,7 +7268,7 @@ fn unassigned_attempt_ui(task_id: String) -> UiAttempt {
         provider: "unassigned".into(),
         role: "executor".into(),
         state: "waiting".into(),
-        session_label: "No Runtime selected".into(),
+        session_label: "No agent selected".into(),
         session_hash: None,
         event_count: 0,
     }
@@ -7494,7 +7494,7 @@ pub(crate) fn event_to_timeline(record: &EventRecord) -> UiTimelineItem {
         kind: kind.into(),
         event_kind: record.event.kind.clone(),
         actor: if record.event.kind.starts_with("runtime") {
-            "Native Runtime"
+            "Native agent"
         } else {
             "Core"
         }
@@ -7563,7 +7563,7 @@ fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
         .get_attempt(&decision.attempt_id)
         .ok()
         .map(|attempt| attempt.provider)
-        .unwrap_or_else(|| "Runtime".into());
+        .unwrap_or_else(|| "Agent".into());
     let session_answer = store
         .permission_takes_session_answer(&decision.attempt_id, &decision.id)
         .unwrap_or(false);
@@ -7574,7 +7574,7 @@ fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
         title: format!("{provider} wants your approval"),
         kind: decision.kind,
         facts: vec![action.unwrap_or_else(|| {
-            "The Runtime did not provide action details. Keep waiting or decline.".into()
+            "The agent did not provide action details. Keep waiting or decline.".into()
         })],
         recommendation: "Allow only if you understand the requested action.".into(),
         default_behavior: "Keep waiting; no approval is sent.".into(),

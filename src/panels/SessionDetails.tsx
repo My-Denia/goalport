@@ -66,7 +66,7 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
           <div className="detail-facts">
             <div><span>Workspace</span><strong className="detail-workspace">{snapshot.project.workspaceRoot || snapshot.project.name || "—"}</strong></div>
             <div>
-              <span>Runtime</span>
+              <span>Agent</span>
               <strong>
                 {runtime.state === "none"
                   ? "None selected"
