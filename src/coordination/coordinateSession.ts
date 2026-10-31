@@ -232,7 +232,7 @@ async function runLegacyRound(
         planText: planText.length > 0 ? planText : null,
         stopReason:
           planEnvironment !== null
-            ? "The harness could not finish the turn, so this stopped."
+            ? "The agent could not finish the turn, so this stopped."
             : providerErrorSentence(planned.errorText),
         // Tri-state passthrough: a null (the runtime died mid-turn, the turn
         // may have reached the provider) must never read as "nothing was
@@ -271,7 +271,7 @@ async function runLegacyRound(
         reviewText: reviewText.length > 0 ? reviewText : null,
         stopReason:
           reviewEnvironment !== null
-            ? "The harness could not finish the turn, so this stopped."
+            ? "The agent could not finish the turn, so this stopped."
             : providerErrorSentence(checked.errorText),
         // Tri-state passthrough: an absent dispatch state is unknown, never
         // "proven not sent" — the same rule the planning branch applies.
@@ -378,7 +378,7 @@ function failureFromLaunch(
       instanceId: instance.instanceId,
       harness,
       sentence: `${harness} could not run its tools on this machine, so this stopped for it.`,
-      stopReason: "The harness could not finish the turn, so this stopped.",
+      stopReason: "The agent could not finish the turn, so this stopped.",
       detail: boundedDetail(typedEnvironment.detail),
       environment: typedEnvironment,
       continuable: true,
@@ -390,7 +390,7 @@ function failureFromLaunch(
       instanceId: instance.instanceId,
       harness,
       sentence: `${harness} is not installed on this machine, so this stopped for it.`,
-      stopReason: "This harness is not installed, so nothing was sent.",
+      stopReason: "This agent is not installed, so nothing was sent.",
       detail: null,
       environment: null,
       continuable: true,
@@ -402,7 +402,7 @@ function failureFromLaunch(
       instanceId: instance.instanceId,
       harness,
       sentence: `${harness} finished without any text, so this stopped for it.`,
-      stopReason: "The harness finished without any text, so this stopped.",
+      stopReason: "The agent finished without any text, so this stopped.",
       detail: null,
       environment: null,
       continuable: true,
@@ -414,7 +414,7 @@ function failureFromLaunch(
       instanceId: instance.instanceId,
       harness,
       sentence: `${harness} did not finish its turn, so this stopped for it.`,
-      stopReason: "The harness did not finish, so this stopped.",
+      stopReason: "The agent did not finish, so this stopped.",
       detail: null,
       environment: null,
       continuable: true,
@@ -427,7 +427,7 @@ function failureFromLaunch(
       instanceId: instance.instanceId,
       harness,
       sentence: `${harness} could not run its tools on this machine, so this stopped for it.`,
-      stopReason: "The harness could not finish the turn, so this stopped.",
+      stopReason: "The agent could not finish the turn, so this stopped.",
       detail: boundedDetail(environment.detail),
       environment,
       continuable: true,
@@ -595,8 +595,8 @@ async function runRecoveryRound(
         if (!replacement) {
           return finish({
             stopReason: lastFailure?.environment
-              ? `Stopped. ${lastFailure.harness} cannot run on this machine right now, and an independent check needs two harnesses that can run.`
-              : lastFailure?.stopReason ?? "Stopped. An independent verification needs another eligible harness, so no further role was sent.",
+              ? `Stopped. ${lastFailure.harness} cannot run on this machine right now, and an independent check needs two agents that can run.`
+              : lastFailure?.stopReason ?? "Stopped. An independent verification needs another eligible agent, so no further role was sent.",
             verdict: "failed",
           });
         }
@@ -631,7 +631,7 @@ async function runRecoveryRound(
         // >=3 gate: a read budget of 2 still runs the plan and check.
         const executorId = instance.instanceId;
         if (!poolFor("audit").some((reader) => reader.instanceId !== executorId)) {
-          return finish({ verdict: "stopped", stopReason: "An independent verification needs another eligible harness, so no workspace changes were sent." });
+          return finish({ verdict: "stopped", stopReason: "An independent verification needs another eligible agent, so no workspace changes were sent." });
         }
         if (typeof turnsRemaining !== "number" || !Number.isFinite(turnsRemaining) || turnsRemaining < 1) {
           return finish({ verdict: "stopped", stopReason: "Verification needs one more authorized read turn, so no workspace changes were sent." });
@@ -690,7 +690,7 @@ async function runRecoveryRound(
           : "All authorized model turns were used, so this stopped.", verdict: "failed", scopeExhausted: true });
       }
       if (result.stopCode === "scope-revoked") {
-        return finish({ stopReason: result.errorText.trim() || "The authorized harness scope was revoked, so this stopped.", verdict: "failed" });
+        return finish({ stopReason: result.errorText.trim() || "The authorized agent scope was revoked, so this stopped.", verdict: "failed" });
       }
       if (replacementEvent !== null) roundEvents.push(replacementEvent);
       const failure = failureFromLaunch(result, role, instance, write !== undefined);
@@ -728,7 +728,7 @@ async function runRecoveryRound(
   }
   const verdict = verdictFromAudit(auditText ?? "");
   return finish({ verdict, result: auditText,
-    stopReason: verdict === "verified" ? "The independent harness verified the changes, so this stopped."
+    stopReason: verdict === "verified" ? "The independent agent verified the changes, so this stopped."
       : verdict === "revise" ? "The independent verification says the changes need revision, so this stopped."
       : verdict === "stopped" ? "The independent verification says to stop, so this stopped."
       : "The independent verification did not confirm the changes, so this stopped.",
@@ -758,14 +758,14 @@ export async function runCoordinateSession(
       { ...plan, commands: [], roles: [], result: null, planningHarness: null, reviewHarness: null },
       {
         verdict: "stopped",
-        stopReason: "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
+        stopReason: "Stopped. An independent check needs a second logged-in agent, so no second role was assigned.",
       },
     );
   }
   if (!options.sendAuthorized) {
     return reportFromPlan(plan, {
       verdict: "stopped",
-      stopReason: "Planning and review are assigned to two different harnesses. No model turn was sent, because this session is not authorized to spend subscription quota.",
+      stopReason: "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota.",
     });
   }
   if (plannedInput.writeAuthorization !== undefined || options.allowedInstances !== undefined) {

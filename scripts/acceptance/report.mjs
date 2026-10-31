@@ -13,7 +13,7 @@ export const NOT_VERIFIED = Object.freeze([
   'Windows packaged-EXE acceptance: this run is dev-mode Electron with the built dist on the local Linux host; the packaged product run belongs to the owner-run M4 Windows driver.',
   'Native OS mouse/keyboard input: every interaction is CDP DOM reads, prototype property setters and CDP mouse events; the X11 helper only resizes the driver-owned window bounds.',
   'Real CLI behavior: the real codex/claude binaries on this host were never executed, not even for --help or probes; only sentinel-gated offline stubs answered, so wire format, flags, models, quota and login state stay unverified.',
-  'Actual takeover/replacement launch: the audited chain-completeness pre-check stops before any replacement with only two harnesses (plan D-A6), so these scenarios never exercise a takeover; takeover stays covered by the existing synthetic suites.',
+  'Actual takeover/replacement launch: the audited chain-completeness pre-check stops before any replacement with only two agents (plan D-A6), so these scenarios never exercise a takeover; takeover stays covered by the existing synthetic suites.',
   'Real model judgment: stub replies are offline protocol fixtures byte-copied from pinned electron test corpora; no independent model output exists in this run.',
 ]);
 

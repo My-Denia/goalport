@@ -54,6 +54,6 @@ describe("environmentSignature", () => {
 describe("providerErrorSentence for environment", () => {
   it("uses one fixed sentence for the machine failure", () => {
     expect(providerErrorSentence("helper_unknown_error: setup refresh had errors"))
-      .toBe("This harness cannot run its tools on this machine, so this stopped.");
+      .toBe("This agent cannot run its tools on this machine, so this stopped.");
   });
 });

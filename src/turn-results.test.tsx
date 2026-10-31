@@ -5,6 +5,7 @@ import { TurnResults } from "./panels/TurnResults";
 import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import { coalesceVisibleFragments } from "./conversation/ProductConversationView";
 import { PendingApprovals } from "./panels/PendingApprovals";
+import { folderName, readRecentFolders, rememberRecentFolder } from "./lib/recentFolders";
 import type { TurnResult } from "./types";
 
 const result: TurnResult = {
@@ -46,6 +47,28 @@ describe("Turn results", () => {
     render(<TurnResults results={[{ ...result, baselineRecorded: false, before: [], during: [], unattributed: [] }]} />);
     expect(screen.getByText("Changes for this turn couldn't be compared.")).toBeTruthy();
     expect(screen.queryByText("user.txt")).toBeNull();
+  });
+});
+
+describe("Recent folders", () => {
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key)
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("keeps the newest first, once each, and at most five", () => {
+    for (const folder of ["C:\\a", "C:\\b", "C:\\A", "C:\\c", "C:\\d", "C:\\e", "C:\\f"]) rememberRecentFolder(folder);
+    expect(readRecentFolders()).toEqual(["C:\\f", "C:\\e", "C:\\d", "C:\\c", "C:\\A"]);
+  });
+
+  it("names a folder the way people do", () => {
+    expect(folderName("C:\\work\\goalport\\")).toBe("goalport");
+    expect(folderName("/home/me/site")).toBe("site");
   });
 });
 

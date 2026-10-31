@@ -41,7 +41,7 @@ const PLAN_OK = { text: "1. Open the contract the plan relies on and cite its pa
 const REVIEW_OK = { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
 const ENV_BLOCKED = {
   text: "I couldn't read the file because the sandbox failed to initialize.",
-  errorText: "This harness cannot run its tools on this machine, so this stopped.",
+  errorText: "This agent cannot run its tools on this machine, so this stopped.",
   dispatched: true,
   environmentBlocked: true,
   environmentDetail: ENV_DETAIL,
@@ -311,14 +311,14 @@ await setNavCollapsed(true);
 const panelCoveredClosed = await evaluate(`(${coveredProbe})('.authorization-panel')`);
 check("860 drawer closable, panel uncovered in content state", !panelCoveredClosed.missing && !panelCoveredClosed.covered, JSON.stringify(panelCoveredClosed));
 await sendMessage(GOAL);
-const rejection = await evaluate("Boolean(document.body.innerText.includes('An independent check needs two harnesses that can run, so select at least two.'))");
+const rejection = await evaluate("Boolean(document.body.innerText.includes('An independent check needs two agents that can run, so select at least two.'))");
 check("fewer-than-two selection rejected with sentence", rejection);
 // Use again clears the row back to a selectable checkbox (interaction result).
 await click('button[aria-label="Use again Codex"]');
 await until("Boolean(document.querySelector('input[aria-label=\"Select Codex\"]'))");
 check("Use again makes blocked row selectable again", true);
 
-// C — scope exhaustion, Allow more turns, Save harness access, Stop allowing.
+// C — scope exhaustion, Allow more turns, Save agent access, Stop allowing.
 await goto("verify-rr-exhausted.html");
 await viewport(860, 900);
 await openDraft();
@@ -340,11 +340,11 @@ await click('button[aria-label^="Plan:"]');
 await viewport(860, 900);
 await setNavCollapsed(true);
 await click('button[aria-label="Allow more turns"]');
-await until("Boolean(document.querySelector('button[aria-label=\"Save harness access\"]'))");
-const saveAccess = await evaluate(`(${visibleProbe})('button[aria-label="Save harness access"]')`);
-check("Save harness access hit-test clickable in change mode", !saveAccess.missing && saveAccess.centered, JSON.stringify(saveAccess));
+await until("Boolean(document.querySelector('button[aria-label=\"Save agent access\"]'))");
+const saveAccess = await evaluate(`(${visibleProbe})('button[aria-label="Save agent access"]')`);
+check("Save agent access hit-test clickable in change mode", !saveAccess.missing && saveAccess.centered, JSON.stringify(saveAccess));
 await fill("#authorization-turns", "6");
-await click('button[aria-label="Save harness access"]');
+await click('button[aria-label="Save agent access"]');
 await until("Boolean(document.body.innerText.includes('6 of 6 turns left.'))");
 check("after Allow more: panel shows the re-authorized budget", true);
 await click('button[aria-label="Discard draft"]');

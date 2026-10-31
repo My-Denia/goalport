@@ -176,7 +176,7 @@ try {
     readCodex: document.querySelector('input[aria-label=\"Select Codex\"]').checked,
     readClaude: document.querySelector('input[aria-label=\"Select Claude\"]').checked,
     writeTurns: document.querySelector('#authorization-write-turns').value,
-    defaultOffLine: document.body.innerText.includes('No file changes are allowed unless you check a harness here and press Send.'),
+    defaultOffLine: document.body.innerText.includes('No file changes are allowed unless you check an agent here and press Send.'),
   }))()`);
   check("write consent default OFF and enabled once root is set",
     afterRoot.codex.checked === false && afterRoot.claude.checked === false && !afterRoot.codex.disabled && !afterRoot.claude.disabled, JSON.stringify(afterRoot));

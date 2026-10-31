@@ -609,6 +609,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .coordination-facts { margin-top: 8px; }
 .coordination-facts > summary { color: var(--ink-soft); font-size: 13px; cursor: pointer; }
 .since-last-visit { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: calc(100% - 28px); max-width: calc(var(--content-max) - 28px); margin: 0 auto 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 13.5px; }
+.recent-folders { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
+.recent-folders .button { display: block; max-width: 220px; line-height: 30px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .md-table { max-width: 100%; margin: 0 0 10px; overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: 13px; }
 .md-table th, .md-table td { padding: 5px 9px; border: 1px solid var(--line); text-align: left; vertical-align: top; }

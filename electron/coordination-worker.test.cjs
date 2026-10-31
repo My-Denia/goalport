@@ -147,7 +147,7 @@ test("one confirmed harness with write authorization stops before any workspace 
   });
   assert.equal(ran.launches.length, 0);
   assert.equal(ran.launches.some((command) => command.sandboxPolicy?.type === "workspaceWrite"), false);
-  assert.equal(ran.records[0]?.stopReason, "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+  assert.equal(ran.records[0]?.stopReason, "Stopped. An independent check needs a second logged-in agent, so no second role was assigned.");
   assert.equal(ran.records[0]?.messageDispatched, false);
   assert.equal(ran.status.pendingCommand, null);
   assert.equal(fs.readFileSync(path.join(ran.directory, "sentinel.txt"), "utf8"), "do-not-touch\n");
@@ -156,7 +156,7 @@ test("one confirmed harness with write authorization stops before any workspace 
 
 test("a revocation before the worker claim settles stopped without contacting anything", async t => {
   // Windows-safe: the settlement path returns before the control endpoint,
-  // Core, scopes or harnesses are ever touched, so no Unix socket is needed.
+  // Core, scopes or agents are ever touched, so no Unix socket is needed.
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-worker-preclaim-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });

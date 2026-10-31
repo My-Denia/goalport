@@ -46,11 +46,11 @@ const API_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"];
 const UNAUTHORIZED = "No model turn was sent, because this session is not authorized to spend subscription quota.";
 const STARTED = "A model turn was started, so this stopped.";
 const REPLACED = "The coordination request was replaced, so nothing was sent.";
-const NO_TEXT = "The harness finished without any text, so this stopped.";
-const NOT_FINISHED = "The harness did not finish, so this stopped.";
-const NOT_INSTALLED = "This harness is not installed, so nothing was sent.";
+const NO_TEXT = "The agent finished without any text, so this stopped.";
+const NOT_FINISHED = "The agent did not finish, so this stopped.";
+const NOT_INSTALLED = "This agent is not installed, so nothing was sent.";
 const CREDITS = "This model requires extra usage credits. It was not used.";
-const ENVIRONMENT_STOP = "This harness cannot run its tools on this machine, so this stopped.";
+const ENVIRONMENT_STOP = "This agent cannot run its tools on this machine, so this stopped.";
 
 function creditGated(model) {
   return typeof model === "string" && /fable/i.test(model);

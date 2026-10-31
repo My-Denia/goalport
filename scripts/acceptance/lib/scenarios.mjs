@@ -44,7 +44,7 @@ export const AUTHORIZATION = Object.freeze({
   writeControl: '.authorization-panel input[aria-label^="Allow changes through "]',
   readRow: '.authorization-row[data-instance]',
   writeSection: '.authorization-write-section',
-  noWriteSentence: 'No file changes are allowed unless you check a harness here and press Send.',
+  noWriteSentence: 'No file changes are allowed unless you check an agent here and press Send.',
 });
 export const readSelectLabel = name => `Select ${name}`;
 
@@ -69,7 +69,7 @@ export function authorizationFactsExpression() {
 }
 
 // The write dimension is off when every discovered read row has its own
-// unchecked write control. Blocked harnesses are static read rows without a
+// unchecked write control. Blocked agents are static read rows without a
 // Select checkbox, so selectable checkboxes are not the membership boundary.
 export function writeConsentOff(facts) {
   const rows = Array.isArray(facts?.readRows) ? facts.readRows : [];
@@ -210,8 +210,8 @@ export async function runA1(app, caseRoot, result) {
 // claimed here. Both wrapper names are shadowed in every scenario (D-A5);
 // unavailability is expressed through the stub's own probe response only.
 
-const M3_STOP_ENV = 'cannot run on this machine right now, and an independent check needs two harnesses that can run';
-const M3_SEND_REFUSAL = 'An independent check needs two harnesses that can run, so select at least two.';
+const M3_STOP_ENV = 'cannot run on this machine right now, and an independent check needs two agents that can run';
+const M3_SEND_REFUSAL = 'An independent check needs two agents that can run, so select at least two.';
 const M3_BOOTSTRAP = "window.goalportCore && window.goalportCore.bootstrapCurrent().then(s => s.phase === 'done')";
 
 function m3Check(scenarioId, result) {
@@ -251,7 +251,7 @@ async function m3TerminalDom(app) {
     noTextCardSentence: document.body.innerText.includes('finished without any text, so this stopped for it'),
     envCardSentence: document.body.innerText.includes('cannot run its tools on this machine right now, so the plan was not completed'),
     envUseAgain: !!document.querySelector('[data-kind="environment-blocked"] button[aria-label="Use again Codex"]'),
-    oneAlternativeStated: document.body.innerText.includes('Only 1 other usable harness is signed in'),
+    oneAlternativeStated: document.body.innerText.includes('Only 1 other usable agent is signed in'),
     outcomeFailed: Array.from(document.querySelectorAll('.coordination-status dd')).some(e => e.innerText.trim() === 'Failed'),
     roundEvents: Array.from(document.querySelectorAll('.tl-event[data-kind="round-failed"], .tl-event[data-kind="round-continued"]')).map(e => e.dataset.kind),
   })`);

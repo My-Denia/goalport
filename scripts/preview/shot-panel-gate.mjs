@@ -120,7 +120,7 @@ writeFileSync(resolve(distRoot, "shot-panel-gate.html"), index.replace("  </head
 const WAIT_SENTENCE = "Checking which agents can work on this goal";
 const PANEL_LEAD = "Nothing is sent until you press Send.";
 const FAIL_SENTENCE = "could not load your agent access choices";
-const RETRY_LABEL = "Retry harness access";
+const RETRY_LABEL = "Retry agent access";
 const STOP_REASON = "Send is not enabled.";
 const SETTLED_SENTENCE = "This goal was stopped and has settled";
 const INFLIGHT_CLAIM = "The current turn may finish";
@@ -222,8 +222,8 @@ try {
   }
   const discoversBeforeRetry = await evaluate("window.__shot.discovers");
   await evaluate("window.__shot.discover = 'ok'");
-  await until(clickText("/Retry harness access/"));
-  const retryPoint = await evaluate(clickText("/Retry harness access/"));
+  await until(clickText("/Retry agent access/"));
+  const retryPoint = await evaluate(clickText("/Retry agent access/"));
   await page.cdp("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...retryPoint });
   await page.cdp("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...retryPoint });
   await until(`(document.body.innerText || "").includes(${JSON.stringify(PANEL_LEAD)})`);

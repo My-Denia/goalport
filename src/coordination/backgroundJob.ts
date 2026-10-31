@@ -116,15 +116,15 @@ function isWholePositive(value: unknown): value is number {
 /** Shape-only membership check; ranges and grants stay with the scope module. */
 function memberListRefusal(values: readonly unknown[], what: string): string | null {
   if (!Array.isArray(values) || values.length === 0) {
-    return `The background request needs at least one ${what} harness member, so nothing was admitted.`;
+    return `The background request needs at least one ${what} agent member, so nothing was admitted.`;
   }
   const seen = new Set<string>();
   for (const value of values) {
     if (!nonEmptyString(value)) {
-      return `A ${what} harness member is missing or not a harness id, so nothing was admitted.`;
+      return `A ${what} agent member is missing or not an agent id, so nothing was admitted.`;
     }
     if (seen.has(value)) {
-      return `The ${what} harness members contain a duplicate, so nothing was admitted.`;
+      return `The ${what} agent members contain a duplicate, so nothing was admitted.`;
     }
     seen.add(value);
   }
@@ -177,10 +177,10 @@ export function backgroundStartRefusal(start: BackgroundJobStartInput): string |
     const seen = new Set<string>();
     for (const value of start.avoidInstances as readonly unknown[]) {
       if (!nonEmptyString(value)) {
-        return "An avoided harness entry is missing or not a harness id, so nothing was admitted.";
+        return "An avoided agent entry is missing or not an agent id, so nothing was admitted.";
       }
       if (seen.has(value)) {
-        return "The avoided harness entries contain a duplicate, so nothing was admitted.";
+        return "The avoided agent entries contain a duplicate, so nothing was admitted.";
       }
       seen.add(value);
     }

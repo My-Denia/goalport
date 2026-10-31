@@ -822,7 +822,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   if (input.catalog.length === 0) {
     return stopped(
       quotaLabels,
-      "Stopped. No harness catalog is connected, so no role was assigned.",
+      "Stopped. No agent catalog is connected, so no role was assigned.",
     );
   }
   if (usable.length < 2) {
@@ -843,7 +843,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     if (blocked && withinAllowed.length >= 2) {
       return stopped(
         quotaLabels,
-        `Stopped. ${harnessLabel(blocked)} cannot run on this machine right now, and an independent check needs two harnesses that can run.`,
+        `Stopped. ${harnessLabel(blocked)} cannot run on this machine right now, and an independent check needs two agents that can run.`,
       );
     }
     const authorizedPool = allowed === null
@@ -854,10 +854,10 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     return stopped(
       quotaLabels,
       credits
-        ? "Stopped. A model that requires extra usage credits was not selected, and an independent check still needs a second harness with an included model."
+        ? "Stopped. A model that requires extra usage credits was not selected, and an independent check still needs a second agent with an included model."
         : unnamed
-          ? "Stopped. A signed-in harness has no included model GoalPort can name, so an extra-credit model was not selected."
-          : "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
+          ? "Stopped. A signed-in agent has no included model GoalPort can name, so an extra-credit model was not selected."
+          : "Stopped. An independent check needs a second logged-in agent, so no second role was assigned.",
     );
   }
 
@@ -878,7 +878,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
   if (!planner || !reviewer || planner.instanceId === reviewer.instanceId) {
     return stopped(
       quotaLabels,
-      "Stopped. An independent check needs a second logged-in harness, so no second role was assigned.",
+      "Stopped. An independent check needs a second logged-in agent, so no second role was assigned.",
     );
   }
 
@@ -920,7 +920,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     planningHarness: harnessLabel(planner),
     reviewHarness: harnessLabel(reviewer),
     result: null,
-    stopReason: "Two different harnesses are assigned. No model turn has been sent.",
+    stopReason: "Two different agents are assigned. No model turn has been sent.",
     planningQuota: quotaWord(planner.quota),
     reviewQuota: quotaWord(reviewer.quota),
     roles: input.writeAuthorization ? ["planning", "review", "execution", "audit"] : ["planning", "review"],
