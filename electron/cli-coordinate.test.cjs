@@ -363,7 +363,7 @@ test("a clean stop without stderr keeps the generic sentence", async () => {
       stateDir: directory,
       spawnTurn: async () => ({ code: 1, stdout: "" }),
     });
-    assert.equal(result.errorText, "The harness finished without any text, so this stopped.");
+    assert.equal(result.errorText, "The agent finished without any text, so this stopped.");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true, retryDelay: 100 });
   }
@@ -540,7 +540,7 @@ test("an environment-blocked turn fails with the machine sentence, stays dispatc
     assert.equal(first.environmentBlocked, true);
     assert.equal(first.messageDispatched, true);
     assert.match(first.text, /sandbox failed to initialize/);
-    assert.equal(first.errorText, "This harness cannot run its tools on this machine, so this stopped.");
+    assert.equal(first.errorText, "This agent cannot run its tools on this machine, so this stopped.");
     assert.match(first.environmentDetail, /helper_unknown_error/);
     assert.ok(first.environmentDetail.length <= 300);
     // The quota was spent, so the grant is consumed and the claim persists.
@@ -785,7 +785,7 @@ test("failure branches emit their stop codes: no-text, not-finished, not-install
   };
   // Clean exit without any reply text is the only producer of "no-text".
   const noText = await run("codex", "gpt-6.1-sol", async () => ({ code: 0, stdout: "" }));
-  assert.equal(noText.errorText, "The harness finished without any text, so this stopped.");
+  assert.equal(noText.errorText, "The agent finished without any text, so this stopped.");
   assert.equal(noText.stopCode, "no-text");
   // A nonzero exit with text that is not a provider-level failure is "not-finished".
   const notFinished = await run("codex", "gpt-6.1-sol", async () => ({

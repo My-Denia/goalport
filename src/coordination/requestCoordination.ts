@@ -109,7 +109,7 @@ const REPAIR_NEEDED_READ_TURNS = 3;
 const REPAIR_NEEDED_WRITE_TURNS = 1;
 const BUDGET_STOP_SENTENCE = "There is not enough access left for one more checked repair, which needs three model turns and one write turn. GoalPort did not add turns.";
 const REFUSED_REPAIR_SENTENCE = "GoalPort could not confirm this window for the automatic repair, so the repair did not start.";
-const UNSTAFFED_REPAIR_SENTENCE = "The automatic repair could not be staffed with the harnesses you allowed, so it did not start.";
+const UNSTAFFED_REPAIR_SENTENCE = "The automatic repair could not be staffed with the agents you allowed, so it did not start.";
 const REPAIR_CEILING_SENTENCE = "This send already used its one automatic repair.";
 
 // The one pre-write plan revision boundary: the revised chain needs a fresh
@@ -119,7 +119,7 @@ const PLAN_REVISION_NEEDED_READ_TURNS = 3;
 const PLAN_REVISION_NEEDED_WRITE_TURNS = 1;
 const PLAN_REVISION_BUDGET_STOP_SENTENCE = "There is not enough access left for one more checked plan revision, which needs three model turns and one write turn. GoalPort did not add turns.";
 const REFUSED_PLAN_REVISION_SENTENCE = "GoalPort could not confirm this window for the automatic plan revision, so the revision did not start.";
-const UNSTAFFED_PLAN_REVISION_SENTENCE = "The automatic plan revision could not be staffed with the harnesses you allowed, so it did not start.";
+const UNSTAFFED_PLAN_REVISION_SENTENCE = "The automatic plan revision could not be staffed with the agents you allowed, so it did not start.";
 const PLAN_REVISION_CEILING_SENTENCE = "This send already used its one automatic plan revision.";
 
 function unavailable(stopReason: string, verdict: CoordinationVerdict = "stopped"): CoordinationView {
@@ -308,7 +308,7 @@ export async function requestCoordination(
       reviewText: null,
       result: null,
       verdict: "stopped",
-      stopReason: "Planning and review are assigned to two different harnesses. No model turn was sent, because this session is not authorized to spend subscription quota.",
+      stopReason: "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota.",
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
       messageDispatched: false,

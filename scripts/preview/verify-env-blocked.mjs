@@ -47,7 +47,7 @@ const providers = (ids) => ids.map((id) => ({
 
 const environmentBlockedResult = {
   text: "I couldn't read the file because the sandbox failed to initialize.",
-  errorText: "This harness cannot run its tools on this machine, so this stopped.",
+  errorText: "This agent cannot run its tools on this machine, so this stopped.",
   dispatched: true,
   environmentBlocked: true,
   environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
@@ -173,7 +173,7 @@ for (const [w, label] of widths) {
 
 // B — the missing-harness sentence (2 providers), and the avoid draft note
 // after continuing (3 providers).
-const missing = await evaluate("Boolean(document.body.innerText.includes('Only 1 other usable harness is signed in'))");
+const missing = await evaluate("Boolean(document.body.innerText.includes('Only 1 other usable agent is signed in'))");
 check("missing-sentence with one other harness", missing);
 const noButton = await evaluate("!document.querySelector('button[aria-label^=\"Send again without\"]')");
 check("no send-again button when a round is impossible", noButton);

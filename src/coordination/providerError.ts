@@ -42,12 +42,12 @@ export function providerErrorSentence(text: string): string {
     case "usage_limit":
       return text.trim();
     case "authentication":
-      return "This harness is not signed in.";
+      return "This agent is not signed in.";
     case "environment":
-      return "This harness cannot run its tools on this machine, so this stopped.";
+      return "This agent cannot run its tools on this machine, so this stopped.";
     case "provider_error": {
       const trimmed = text.trim();
-      return trimmed.length > 0 ? trimmed : "The harness stopped with a provider error.";
+      return trimmed.length > 0 ? trimmed : "The agent stopped with a provider error.";
     }
     default: {
       const unreachable: never = kind;

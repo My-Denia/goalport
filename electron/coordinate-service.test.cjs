@@ -223,13 +223,13 @@ test("a failed turn keeps the partial text the harness did produce", async () =>
       return held;
     },
     async run() {
-      return { ok: false, text: "Half a plan before the harness died.", errorText: "The harness did not finish, so this stopped." };
+      return { ok: false, text: "Half a plan before the harness died.", errorText: "The agent did not finish, so this stopped." };
     },
   }, command);
   assert.equal(result.launched, false);
   assert.equal(result.prepared, true);
   assert.equal(result.text, "Half a plan before the harness died.");
-  assert.equal(result.errorText, "The harness did not finish, so this stopped.");
+  assert.equal(result.errorText, "The agent did not finish, so this stopped.");
 });
 
 test("a refused launch and a dispatched failure report their dispatched state", async () => {
@@ -253,7 +253,7 @@ test("a refused launch and a dispatched failure report their dispatched state", 
   const dispatched = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime(async () => ({
     ok: false,
     text: "Half a plan.",
-    errorText: "The harness did not finish, so this stopped.",
+    errorText: "The agent did not finish, so this stopped.",
     messageDispatched: true,
   })), command);
   assert.equal(dispatched.dispatched, true);
@@ -262,7 +262,7 @@ test("a refused launch and a dispatched failure report their dispatched state", 
   const unknown = await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime(async () => ({
     ok: false,
     text: "",
-    errorText: "The harness did not finish, so this stopped.",
+    errorText: "The agent did not finish, so this stopped.",
   })), command);
   // Plan R2-2 (intentional correction of the old absence→false flattening):
   // an absent messageDispatched is NOT proven-not-sent. Only a literal false
@@ -338,7 +338,7 @@ test("an environment-blocked turn passes its typed fields through", async () => 
       return {
         ok: false,
         text: "I couldn't read the file because the sandbox failed to initialize.",
-        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        errorText: "This agent cannot run its tools on this machine, so this stopped.",
         messageDispatched: true,
         environmentBlocked: true,
         environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
@@ -360,7 +360,7 @@ test("a normal failure reports no environment fields", async () => {
       return held;
     },
     async run() {
-      return { ok: false, text: "", errorText: "The harness did not finish, so this stopped.", messageDispatched: true };
+      return { ok: false, text: "", errorText: "The agent did not finish, so this stopped.", messageDispatched: true };
     },
   }, command);
   assert.equal(result.environmentBlocked, false);
@@ -444,7 +444,7 @@ test("a launch without a scope keeps today's semantics except the named passthro
       return held;
     },
     async run() {
-      return { ok: false, text: "", errorText: "The harness finished without any text, so this stopped.", messageDispatched: true, stopCode: "no-text" };
+      return { ok: false, text: "", errorText: "The agent finished without any text, so this stopped.", messageDispatched: true, stopCode: "no-text" };
     },
   }, command);
   // stopCode is the named passthrough; the scope fields never appear.
@@ -542,7 +542,7 @@ test("a stale generation is refused as revoked and a late completion never credi
     assert.equal(fs.readFileSync(path.join(directory, "send-authorization"), "utf8"), "coordinate-review-codex\n");
     coordinationScope.authorize(["codex"], 4);
     assert.equal(coordinationScope.current().generation, first.generation + 1);
-    release({ ok: false, text: "", errorText: "The harness did not finish, so this stopped.", messageDispatched: false });
+    release({ ok: false, text: "", errorText: "The agent did not finish, so this stopped.", messageDispatched: false });
     const result = await pending;
     assert.equal(result.dispatched, false);
     assert.equal(coordinationScope.current().remaining, 4);
@@ -559,7 +559,7 @@ test("a claimed command passes free at a zero budget (claim hit before any budge
     const granted = coordinationScope.authorize(["codex"], 2);
     const ctx = { scope: coordinationScope, scopeGeneration: granted.generation };
     const runtime = scopedRuntime(directory, async () => {
-      return { ok: false, text: "", errorText: "The harness did not finish, so this stopped.", messageDispatched: true };
+      return { ok: false, text: "", errorText: "The agent did not finish, so this stopped.", messageDispatched: true };
     });
     await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-plan-a"), "g", ctx);
     await launchOne({ GOALPORT_COORDINATE_SEND: "1" }, runtime, scopedCommand("coordinate-review-b"), "g", ctx);

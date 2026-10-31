@@ -19,7 +19,7 @@ const records = [
     planningHarness: "Codex", reviewHarness: "Claude",
     planText: null, reviewText: null, result: null,
     verdict: "failed",
-    stopReason: "The harness finished without any text, so this stopped. stream error: You are not logged in. Run codex login.",
+    stopReason: "The agent finished without any text, so this stopped. stream error: You are not logged in. Run codex login.",
     planningQuota: "available", reviewQuota: "unknown",
     messageDispatched: false, savedAt: "2026-10-09T09:50:00.000Z",
   },

@@ -354,7 +354,7 @@ export async function runPackagedJourney(options) {
     await session.app.until('!!document.querySelector(".draft-background-consent input")', 10000);
     if (!await session.app.evaluate('document.querySelector(".draft-background-consent input").checked')) await session.app.click('.draft-background-consent input');
     await session.app.until('!!document.querySelector(".authorization-panel")', 15000);
-    if (await session.app.evaluate(`!![...document.querySelectorAll('.authorization-panel button')].find(b=>b.textContent.trim()==='Allow GoalPort to run harness turns on this profile')`)) await clickText('Allow GoalPort to run harness turns on this profile', '.authorization-panel');
+    if (await session.app.evaluate(`!![...document.querySelectorAll('.authorization-panel button')].find(b=>b.textContent.trim()==='Allow GoalPort to run agent turns on this profile')`)) await clickText('Allow GoalPort to run agent turns on this profile', '.authorization-panel');
     await waitFor(() => infoFor(), info => info.coordinationConfigured === true, 'durable profile consent', 10000);
     const discovery = await session.app.evaluate(`window.goalportCore.coordinateDiscover(${JSON.stringify(`journey-discovery-${crypto.randomUUID()}`)})`, true);
     report.lastDiscovery = discovery;

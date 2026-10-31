@@ -828,7 +828,7 @@ describe("new goal during a selected-runtime send", () => {
 
 // The competing-background guard: main refuses the one native send while an
 // unrevoked background goal owns the profile. The renderer shows the guard's
-const sentence = "Allow GoalPort to run harness turns on this profile";
+const sentence = "Allow GoalPort to run agent turns on this profile";
 // own sentence, keeps the draft, and settles intent honestly.
 describe("competing background send refusal", () => {
   const GUARD_SENTENCE =
@@ -1090,7 +1090,7 @@ describe("send without a Runtime", () => {
           reviewText: null,
           result: null,
           verdict: "failed",
-          stopReason: "The harness did not finish, so this stopped.",
+          stopReason: "The agent did not finish, so this stopped.",
           planningQuota: "unknown",
           reviewQuota: "unknown",
         },
@@ -1171,7 +1171,7 @@ describe("send without a Runtime", () => {
         launches += 1;
         order.push("launch");
         if (launches === 1) await gate;
-        return { text: "", errorText: "The harness did not finish, so this stopped." };
+        return { text: "", errorText: "The agent did not finish, so this stopped." };
       },
       coordinationSave: async (record: { verdict: string }) => {
         order.push(`save:${record.verdict}`);
@@ -1773,7 +1773,7 @@ describe("leaving a draft during coordination", () => {
     await waitFor(() => expect(discoverSettled).toBe(true));
     expect(launches).toBe(0);
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
-    expect(screen.queryByText("Two different harnesses are assigned. No model turn has been sent.")).toBeNull();
+    expect(screen.queryByText("Two different agents are assigned. No model turn has been sent.")).toBeNull();
   });
 });
 
@@ -1864,7 +1864,7 @@ describe("environment-blocked harness", () => {
       ],
       launch: async () => ({
         text: "I couldn't read the file because the sandbox failed to initialize.",
-        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        errorText: "This agent cannot run its tools on this machine, so this stopped.",
         dispatched: true,
         environmentBlocked: true,
         environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
@@ -1878,7 +1878,7 @@ describe("environment-blocked harness", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText(/Codex cannot run its tools on this machine right now/)).toBeTruthy();
     expect(screen.getByText(/machine problem, not a plan problem/)).toBeTruthy();
-    expect(screen.getByText(/Only 1 other usable harness is signed in/)).toBeTruthy();
+    expect(screen.getByText(/Only 1 other usable agent is signed in/)).toBeTruthy();
     // The check turn was never sent: one launch, and it was the codex planner.
     expect(bridge.launchCount()).toBe(1);
     expect(bridge.launched[0]?.instanceId).toBe("codex");
@@ -1902,7 +1902,7 @@ describe("environment-blocked harness", () => {
         if (command.modelSelection.instanceId === "codex") {
           return {
             text: "I couldn't read the file because the sandbox failed to initialize.",
-            errorText: "This harness cannot run its tools on this machine, so this stopped.",
+            errorText: "This agent cannot run its tools on this machine, so this stopped.",
             dispatched: true,
             environmentBlocked: true,
             environmentDetail: "windows sandbox failed: helper_unknown_error: setup refresh had errors",
@@ -2095,7 +2095,7 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.getByText("Send is not enabled.")).toBeTruthy();
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
     expect(await screen.findByText(/could not be loaded, so nothing was sent/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Retry harness access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry agent access" }));
     await screen.findByText(/Nothing runs until you press Send\./);
     expect(discoverCalls).toBe(2);
     await waitFor(() => expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(false));
@@ -2169,7 +2169,7 @@ describe("harness access panel and scoped rounds", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
     typeMessage("plan the helper");
     sendMessage();
-    expect(await screen.findByText(/An independent check needs two harnesses that can run, so select at least two\./)).toBeTruthy();
+    expect(await screen.findByText(/An independent check needs two agents that can run, so select at least two\./)).toBeTruthy();
     expect(bridge.order).not.toContain("authorize");
     expect(bridge.order.filter((item) => item === "launch")).toHaveLength(0);
   });
@@ -2256,7 +2256,7 @@ describe("harness access panel and scoped rounds", () => {
         if (call === 1) {
           return {
             text: "",
-            errorText: "This harness cannot run its tools on this machine, so this stopped.",
+            errorText: "This agent cannot run its tools on this machine, so this stopped.",
             dispatched: true,
             environmentBlocked: true,
             environmentDetail: "helper exploded",
@@ -2277,7 +2277,7 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.getByText(/Codex could not run its tools on this machine, so this stopped for it\./)).toBeTruthy();
     expect(screen.getByText(/Claude is planning instead\./)).toBeTruthy();
     // The top line names the harnesses that finished the round.
-    expect(screen.getByText(/Claude planned and Grok checked — the harnesses you authorized that can run\./)).toBeTruthy();
+    expect(screen.getByText(/Claude planned and Grok checked — the agents you authorized that can run\./)).toBeTruthy();
     // The environment card offers Use again for the blocked harness.
     expect(screen.getByRole("button", { name: "Use again Codex" })).toBeTruthy();
     expect(screen.getByText(/It stays unused until you choose Use again\./)).toBeTruthy();
@@ -2346,7 +2346,7 @@ describe("harness access panel and scoped rounds", () => {
     // turns on the terminal card must open the panel in change mode on a fresh
     // draft of the same goal — not silently flip a hidden panel.
     fireEvent.click(screen.getByRole("button", { name: "Allow more turns" }));
-    expect(await screen.findByRole("button", { name: "Save harness access" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Save agent access" })).toBeTruthy();
     expect((screen.getByLabelText("Message composer") as HTMLTextAreaElement).value).toBe("plan the helper");
     // Nothing was re-authorized or sent by opening change mode.
     expect(bridge.order.filter((step) => step === "authorize").length).toBe(1);
@@ -2370,14 +2370,14 @@ describe("harness access panel and scoped rounds", () => {
     // Enter change mode, make the user's choices: a write harness, non-default
     // write turns, and keep-working consent.
     fireEvent.click(screen.getByRole("button", { name: "Allow more turns" }));
-    expect(await screen.findByRole("button", { name: "Save harness access" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Save agent access" })).toBeTruthy();
     const writeBox = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
     fireEvent.click(writeBox);
     fireEvent.change(await screen.findByRole("spinbutton", { name: /write turns/i }), { target: { value: "3" } });
     fireEvent.click(await screen.findByRole("checkbox", { name: "Keep working after closing" }));
     // The save rotates the draft requestId (anti-replay kept); the panel
     // effect must not wipe the selections the user just saved.
-    fireEvent.click(screen.getByRole("button", { name: "Save harness access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save agent access" }));
     await waitFor(async () => {
       const box = await screen.findByRole("checkbox", { name: "Allow changes through Codex" });
       expect((box as HTMLInputElement).checked).toBe(true);
@@ -2469,7 +2469,7 @@ describe("harness access panel and scoped rounds", () => {
         const id = command.modelSelection.instanceId;
         const envFailure = {
           text: "",
-          errorText: "This harness cannot run its tools on this machine, so this stopped.",
+          errorText: "This agent cannot run its tools on this machine, so this stopped.",
           dispatched: true,
           environmentBlocked: true,
           environmentDetail: "helper exploded",
@@ -2484,7 +2484,7 @@ describe("harness access panel and scoped rounds", () => {
     sendMessage();
     // Both planners failed; the round stops without a third launch.
     await waitFor(() => expect(bridge.launchCount()).toBe(2));
-    expect(await screen.findByText(/an independent check needs two harnesses that can run\./)).toBeTruthy();
+    expect(await screen.findByText(/an independent check needs two agents that can run\./)).toBeTruthy();
     const again = await screen.findByRole("button", { name: /send again without claude/i });
     fireEvent.click(again);
     expect(await screen.findByText(/This send will not use Claude/)).toBeTruthy();
@@ -2840,7 +2840,7 @@ describe("one in-window repair", () => {
       requestId: "historic-repair", workspacePath: "/work/goal", goal: "Fix the helper.",
       planningHarness: "Codex", reviewHarness: "Claude", planText: "Corrective plan.", reviewText: CHECK_TEXT,
       executionHarness: "Codex", auditHarness: "Claude", executionText: REPAIR_EXECUTION, auditText: REPAIR_AUDIT,
-      result: REPAIR_AUDIT, verdict: "verified", stopReason: "The independent harness verified the changes, so this stopped.",
+      result: REPAIR_AUDIT, verdict: "verified", stopReason: "The independent agent verified the changes, so this stopped.",
       planningQuota: "available", reviewQuota: "available", messageDispatched: true,
       feedbackHistory: [{
         planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: CHECK_TEXT,
@@ -3123,7 +3123,7 @@ describe("one in-window repair", () => {
         requestId: "historic-plan-revision", workspacePath: "/work/goal", goal: "Fix the helper.",
         planningHarness: "Codex", reviewHarness: "Claude", planText: revisedPlanText, reviewText: CHECK_TEXT,
         executionHarness: "Codex", auditHarness: "Claude", executionText: revisedExecution, auditText: revisedAudit,
-        result: revisedAudit, verdict: "verified", stopReason: "The independent harness verified the changes, so this stopped.",
+        result: revisedAudit, verdict: "verified", stopReason: "The independent agent verified the changes, so this stopped.",
         planningQuota: "available", reviewQuota: "available", messageDispatched: true,
         planRevisionHistory: [{
           planningHarness: "Codex", reviewHarness: "Claude", planText: PLAN_TEXT, reviewText: planCritique,
@@ -3178,7 +3178,7 @@ describe("one in-window repair", () => {
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
       expect(start).not.toHaveBeenCalled();
       expect(bridge.authorizations).toHaveLength(0);
-      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run agent turns on this profile" }));
       await waitFor(() => expect(screen.queryByText(sentence)).toBeNull());
       expect(grant).toHaveBeenCalledTimes(1);
       expect(grant).toHaveBeenCalledWith("grant");
@@ -3193,7 +3193,7 @@ describe("one in-window repair", () => {
       fireEvent.click(checkbox);
       expect(checkbox.checked).toBe(true);
       expect(screen.queryByText(sentence)).toBeNull();
-      expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeNull();
       typeMessage("Plan this helper"); sendMessage();
       await screen.findByRole("region", { name: "Background goal" });
       expect(start).toHaveBeenCalledTimes(1);
@@ -3212,10 +3212,10 @@ describe("one in-window repair", () => {
       render(<App />); await openDraftWithPanel();
       const checkbox = screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement;
       fireEvent.click(checkbox);
-      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run agent turns on this profile" }));
       fireEvent.click(checkbox);
       finishGrant();
-      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull());
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeNull());
       expect(checkbox.checked).toBe(false);
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
     });
@@ -3226,12 +3226,12 @@ describe("one in-window repair", () => {
       window.goalportCore!.backgroundStart = vi.fn();
       render(<App />); await openDraftWithPanel(); typeMessage("Plan this helper");
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
-      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
-      await screen.findByText("Harness turns could not be allowed. Try again; nothing was sent.");
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run agent turns on this profile" }));
+      await screen.findByText("Agent turns could not be allowed. Try again; nothing was sent.");
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
-      expect(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeTruthy();
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     });
     it("a granted profile can send an ordinary scoped goal without after-close consent", async () => {
@@ -3241,8 +3241,8 @@ describe("one in-window repair", () => {
       window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: allowed });
       window.goalportCore!.backgroundStart = vi.fn();
       render(<App />); await openDraftWithPanel();
-      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run harness turns on this profile" }));
-      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run harness turns on this profile" })).toBeNull());
+      fireEvent.click(screen.getByRole("button", { name: "Allow GoalPort to run agent turns on this profile" }));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeNull());
       expect((screen.getByRole("checkbox", { name: "Keep working after closing" }) as HTMLInputElement).checked).toBe(false);
       typeMessage("Plan this helper"); sendMessage();
       await waitFor(() => expect(bridge.launchCount()).toBe(2));

@@ -178,7 +178,7 @@ describe("Linux Core bridge", () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body)) as { messageType: string };
       if (body.messageType === "coordination_discover") {
-        return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in harness, so nothing will be sent." : null, harnesses: missingHarness ? ["codex"] : ["codex", "pi"] } });
+        return jsonResponse({ ok: true, payload: { sentence: missingHarness ? "An independent check needs a second logged-in agent, so nothing will be sent." : null, harnesses: missingHarness ? ["codex"] : ["codex", "pi"] } });
       }
       if (body.messageType === "coordination_latest") {
         return jsonResponse({ ok: true, payload: { roots: [{ requestId: "coordinate-verified", rootRequestId: "coordinate-verified", title: "Name the two files", workspacePath: "/home/you/project", outcome: "Verified" }], record: { requestId: "coordinate-verified", rootRequestId: "coordinate-verified", rootLatestId: "coordinate-verified", relationStatus: "legacy-root", verdict: "verified", planningHarness: "Codex", reviewHarness: "Pi", goal: "Name the two files", workspacePath: "/home/you/project", outcome: "The two files are named and nothing was edited.", detail: "Pi checked the file and found only that added line.", change: "Codex added pong under before.", rememberedIntent: { background: true, write: false } }, reason: null } });
@@ -224,11 +224,11 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
     expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
-    expect(await screen.findByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeTruthy();
+    expect(await screen.findByText("An independent check needs a second logged-in agent, so nothing will be sent.")).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);
     missingHarness = false;
-    await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in harness, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
+    await waitFor(() => expect(screen.queryByText("An independent check needs a second logged-in agent, so nothing will be sent.")).toBeNull(), { timeout: 4000 });
     expect(screen.getByText("Signed in: Codex, Pi.")).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: "Keep working after closing" })).toHaveProperty("checked", false);
     expect(screen.getByRole("button", { name: "Send message" })).toHaveProperty("disabled", true);

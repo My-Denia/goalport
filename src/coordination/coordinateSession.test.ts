@@ -94,7 +94,7 @@ async function scopedSession(
 const providersWithThird: readonly ProviderSnapshot[] = [...providers, thirdProvider];
 
 describe("coordinate session", () => {
-  it("assigns two harnesses from a real snapshot and does not send when unauthorized", async () => {
+  it("assigns two agents from a real snapshot and does not send when unauthorized", async () => {
     const transport = recordingTransport([
       { text: "", errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.", prepared: true },
       { text: "", errorText: "No model turn was sent, because this session is not authorized to spend subscription quota.", prepared: true },
@@ -191,7 +191,7 @@ describe("coordinate session", () => {
       { sendAuthorized: true },
       recordingTransport([{ text: "", errorText: "authentication failed" }]),
     );
-    expect(signedOut.stopReason).toBe("This harness is not signed in.");
+    expect(signedOut.stopReason).toBe("This agent is not signed in.");
   });
 
   it("does not launch the review harness after the request is replaced", async () => {
@@ -283,11 +283,11 @@ describe("coordinate session", () => {
       { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([
-        { text: "", errorText: "The harness finished without any text, so this stopped. stream error: You are not logged in. Run codex login.", dispatched: false },
+        { text: "", errorText: "The agent finished without any text, so this stopped. stream error: You are not logged in. Run codex login.", dispatched: false },
       ]),
     );
     expect(state.verdict).toBe("failed");
-    expect(state.stopReason).toBe("This harness is not signed in.");
+    expect(state.stopReason).toBe("This agent is not signed in.");
     expect(state.messageDispatched).toBe(false);
   });
 
@@ -296,7 +296,7 @@ describe("coordinate session", () => {
       { catalog: catalogFromProviderSnapshots(providers), goal, workspacePath, sendKey: "send-0" },
       { sendAuthorized: true },
       recordingTransport([
-        { text: "", errorText: "The harness did not finish, so this stopped.", dispatched: true },
+        { text: "", errorText: "The agent did not finish, so this stopped.", dispatched: true },
       ]),
     );
     expect(state.verdict).toBe("failed");
@@ -317,7 +317,7 @@ describe("coordinate session", () => {
     const transport = recordingTransport([
       {
         text: "I couldn't read the file because the sandbox failed to initialize.",
-        errorText: "This harness cannot run its tools on this machine, so this stopped.",
+        errorText: "This agent cannot run its tools on this machine, so this stopped.",
         dispatched: true,
         environmentBlocked: true,
         environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
@@ -332,7 +332,7 @@ describe("coordinate session", () => {
     expect(state.verdict).toBe("failed");
     expect(state.messageDispatched).toBe(true);
     expect(state.planText).toBe("I couldn't read the file because the sandbox failed to initialize.");
-    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
+    expect(state.stopReason).toBe("The agent could not finish the turn, so this stopped.");
     expect(state.environmentBlocked).toEqual({
       role: "planning",
       instanceId: "codex",
@@ -349,7 +349,7 @@ describe("coordinate session", () => {
         { text: "Bounded plan.", errorText: "" },
         {
           text: "",
-          errorText: "This harness cannot run its tools on this machine, so this stopped.",
+          errorText: "This agent cannot run its tools on this machine, so this stopped.",
           dispatched: true,
           environmentBlocked: true,
           environmentDetail: "windows sandbox failed: helper_unknown_error",
@@ -358,7 +358,7 @@ describe("coordinate session", () => {
     );
     expect(state.verdict).toBe("failed");
     expect(state.planText).toBe("Bounded plan.");
-    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
+    expect(state.stopReason).toBe("The agent could not finish the turn, so this stopped.");
     expect(state.environmentBlocked).toEqual({
       role: "review",
       instanceId: "claude",
@@ -371,7 +371,7 @@ describe("coordinate session", () => {
     const transport = recordingTransport([
       {
         text: "",
-        errorText: "The harness did not finish, so this stopped. ERROR codex_core::tools::router: Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
+        errorText: "The agent did not finish, so this stopped. ERROR codex_core::tools::router: Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
         dispatched: true,
       },
     ]);
@@ -388,7 +388,7 @@ describe("coordinate session", () => {
       harness: "Codex",
       detail: "helper_unknown_error",
     });
-    expect(state.stopReason).toBe("The harness could not finish the turn, so this stopped.");
+    expect(state.stopReason).toBe("The agent could not finish the turn, so this stopped.");
   });
 
   it("① a typed environment failure takes over planning and reaches an independent checked review", async () => {
@@ -433,7 +433,7 @@ describe("coordinate session", () => {
     ]);
 
     expect(transport.calls).toHaveLength(1);
-    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two agents that can run.");
     expect(state.roundEvents.map((event) => event.kind)).toEqual(["failed"]);
   });
 
@@ -563,7 +563,7 @@ describe("coordinate session", () => {
     ]);
 
     expect(transport.calls).toHaveLength(2);
-    expect(state.stopReason).toBe("Stopped. Claude cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+    expect(state.stopReason).toBe("Stopped. Claude cannot run on this machine right now, and an independent check needs two agents that can run.");
   });
 
   it("⑩ emits ordered live events and persists only bounded completed facts", async () => {
@@ -890,7 +890,7 @@ describe("explicitly authorized execution and independent audit", () => {
       catalog: catalog.slice(0, 2), allowedInstances: ["codex", "claude"],
     });
     expect(transport.calls).toHaveLength(1);
-    expect(state.stopReason).toContain("two harnesses that can run");
+    expect(state.stopReason).toContain("two agents that can run");
   });
   it("stops before writing when a failed review leaves no independent auditor", async () => {
     const failed = { text: "", errorText: "authentication failed", dispatched: true, turnsRemaining: 2, writeTurnsRemaining: 1 };
@@ -1245,7 +1245,7 @@ describe("one in-window corrective pass", () => {
   it("a proven-not-sent first corrective launch keeps the already-sent goal non-retryable", async () => {
     const { view, transport } = await request([
       ...reviseChain(),
-      { text: "", errorText: "The authorized harness scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
+      { text: "", errorText: "The authorized agent scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
     ], { beforeRepair: async () => true });
     expect(transport.calls).toHaveLength(5);
     expect(view.verdict).toBe("failed");
@@ -1309,7 +1309,7 @@ describe("one in-window corrective pass", () => {
 
   it("carries burned harnesses into the corrective exclusions", async () => {
     const { view, transport } = await request([
-      { text: "", errorText: "This harness cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 5, writeTurnsRemaining: 2 },
+      { text: "", errorText: "This agent cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 5, writeTurnsRemaining: 2 },
       ok("Recovered plan.", 5, 2),
       ok("The plan can be carried out.\nVERDICT: carry-out", 4, 2),
       ok("First executor report.", 4, 1),
@@ -1329,7 +1329,7 @@ describe("one in-window corrective pass", () => {
     const { view, transport } = await request([
       ok("Bounded plan.", 5, 2),
       ok("The plan can be carried out.\nVERDICT: carry-out", 4, 2),
-      { text: "Partial edit retained; revise or stop.", errorText: "The harness did not finish, so this stopped.", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 1 },
+      { text: "Partial edit retained; revise or stop.", errorText: "The agent did not finish, so this stopped.", dispatched: true, turnsRemaining: 4, writeTurnsRemaining: 1 },
     ], { beforeRepair: async () => true });
     expect(transport.calls).toHaveLength(3);
     expect(view.verdict).toBe("failed");
@@ -1492,7 +1492,7 @@ describe("one pre-write plan revision", () => {
     // refuses honestly, so no rejected round and no revision ever forms.
     const transport = recordingTransport([
       ok("Flawed bounded plan.", 4, 1),
-      { text: "", errorText: "This harness cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 3, writeTurnsRemaining: 1 },
+      { text: "", errorText: "This agent cannot run its tools on this machine, so this stopped.", dispatched: true, environmentBlocked: true, environmentDetail: "helper failure", turnsRemaining: 3, writeTurnsRemaining: 1 },
     ]);
     const view = await requestCoordination(
       { goal, workspacePath, sendKey: "plan-revision-send", allowedInstances: allowed,
@@ -1510,7 +1510,7 @@ describe("one pre-write plan revision", () => {
   it("a proven-not-sent first revised launch keeps the already-sent goal non-retryable", async () => {
     const { view, transport } = await request([
       ...rejectedPlan(),
-      { text: "", errorText: "The authorized harness scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
+      { text: "", errorText: "The authorized agent scope was revoked, so this stopped.", dispatched: false, stopCode: "scope-revoked" },
     ], { beforePlanRevision: async () => true });
     expect(transport.calls).toHaveLength(3);
     expect(view.verdict).toBe("failed");

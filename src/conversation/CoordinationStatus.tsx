@@ -132,7 +132,7 @@ function EnvironmentBlockedCard({
       <div className="tl-avatar" aria-hidden="true">⚠</div>
       <div className="tl-event-body">
         <div className="tl-meta">
-          <span className="tl-kind">This harness cannot run on this machine</span>
+          <span className="tl-kind">This agent cannot run on this machine</span>
         </div>
         <div className="tl-system-body">
           {harness} cannot run its tools on this machine right now, so the {step} was not completed.
@@ -151,7 +151,7 @@ function EnvironmentBlockedCard({
         ) : null}
         {alternatives !== null && !enoughOthers ? (
           <div className="tl-system-body">
-            Only {alternatives} other usable {alternatives === 1 ? "harness is" : "harnesses are"} signed in,
+            Only {alternatives} other usable {alternatives === 1 ? "agent is" : "agents are"} signed in,
             so an independent check cannot run until {harness} is fixed or another harness is signed in.
           </div>
         ) : null}
@@ -183,8 +183,8 @@ function RetainedRoundSection({ round, heading }: { round: CoordinationRoundFact
       <summary>{heading}</summary>
       <dl>
         <dt>Outcome</dt><dd>{outcomeLabel(round.verdict)}</dd>
-        <dt>Planning harness</dt><dd>{fact(round.planningHarness)}</dd>
-        <dt>Review harness</dt><dd>{fact(round.reviewHarness)}</dd>
+        <dt>Planning agent</dt><dd>{fact(round.planningHarness)}</dd>
+        <dt>Review agent</dt><dd>{fact(round.reviewHarness)}</dd>
         <dt>Plan</dt><dd>{fact(round.planText)}</dd>
         <dt>Check</dt><dd>{fact(round.reviewText)}</dd>
         {round.executionEvidence ? (

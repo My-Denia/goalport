@@ -260,7 +260,7 @@ function createHarnessRuntime(options = {}) {
       const body = command && typeof command === "object" ? command : {};
       if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, text: "", messageDispatched: false, errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       if (localCli) return localRun(body, generation);
-      return request("run", { command: body }, 660000, "The harness did not finish, so this stopped.", generation);
+      return request("run", { command: body }, 660000, "The agent did not finish, so this stopped.", generation);
     },
     cancel,
     close() {

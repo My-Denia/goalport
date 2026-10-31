@@ -50,7 +50,7 @@ const providers = (ids) => ids.map((id) => ({
 
 const environmentBlockedResult = {
   text: "I couldn't read the file because the sandbox failed to initialize.",
-  errorText: "This harness cannot run its tools on this machine, so this stopped.",
+  errorText: "This agent cannot run its tools on this machine, so this stopped.",
   dispatched: true,
   environmentBlocked: true,
   environmentDetail: "Failed to create unified exec process: helper_unknown_error: setup refresh had errors",
@@ -135,7 +135,7 @@ const widths = [[1440, "1440"], [1020, "1020"], [860, "860"]];
 await goto("shot-env2.html");
 await sendGoal("Explain the failure and leave a bounded plan.");
 await until("Boolean(document.body.innerText.includes('cannot run its tools on this machine'))");
-await until("Boolean(document.body.innerText.includes('Only 1 other usable harness is signed in'))");
+await until("Boolean(document.body.innerText.includes('Only 1 other usable agent is signed in'))");
 for (const [w, label] of widths) {
   await viewport(w, 900);
   await setNavCollapsed(false);

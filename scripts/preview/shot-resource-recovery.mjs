@@ -43,7 +43,7 @@ const PLAN_OK = { text: "1. Open the contract the plan relies on and cite its pa
 const REVIEW_OK = { text: "The plan can be carried out.\nVERDICT: carry-out", errorText: "" };
 const ENV_BLOCKED = {
   text: "I couldn't read the file because the sandbox failed to initialize.",
-  errorText: "This harness cannot run its tools on this machine, so this stopped.",
+  errorText: "This agent cannot run its tools on this machine, so this stopped.",
   dispatched: true,
   environmentBlocked: true,
   environmentDetail: ENV_DETAIL,
@@ -277,7 +277,7 @@ await setNavCollapsed(true);
 await screenshot(resolve(outDir, "rr-panel-fresh-860.png"));
 // ①b — only Claude is selectable, so Send is rejected in one sentence.
 await sendMessage(GOAL);
-await until("Boolean(document.body.innerText.includes('An independent check needs two harnesses'))");
+await until("Boolean(document.body.innerText.includes('An independent check needs two agents'))");
 await screenshot(resolve(outDir, "rr-panel-fewer-than-two-860.png"));
 // ⑦ — Use again clears the health memory; the row becomes a checked checkbox.
 // Fresh page: the ①b rejection banner above belongs to that shot's state.
@@ -399,10 +399,10 @@ await viewport(860, 900);
 await setNavCollapsed(true);
 // ⑥ — Change (via Allow more turns): the panel in change mode with Save.
 await click('button[aria-label="Allow more turns"]');
-await until("Boolean(document.querySelector('button[aria-label=\"Save harness access\"]'))");
+await until("Boolean(document.querySelector('button[aria-label=\"Save agent access\"]'))");
 await screenshot(resolve(outDir, "rr-change-mode-860.png"));
 await fill("#authorization-turns", "6");
-await click('button[aria-label="Save harness access"]');
+await click('button[aria-label="Save agent access"]');
 await until("Boolean(document.body.innerText.includes('6 of 6 turns left.'))");
 await screenshot(resolve(outDir, "rr-exhausted-after-allow-860.png"));
 // ⑥ — Stop allowing: the finished round stays, its budget state is gone.
@@ -458,7 +458,7 @@ await click('button[aria-label^="Plan:"]');
 await viewport(860, 900);
 await setNavCollapsed(true);
 await click('.coordination-access button[aria-label="Change"]');
-await until("Boolean(document.querySelector('button[aria-label=\"Save harness access\"]'))");
+await until("Boolean(document.querySelector('button[aria-label=\"Save agent access\"]'))");
 await screenshot(resolve(outDir, "walkthrough-6-change-panel.png"));
 await click('button[aria-label="Discard draft"]');
 await until("!document.querySelector('#draft-message')");

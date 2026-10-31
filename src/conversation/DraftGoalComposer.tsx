@@ -1,4 +1,5 @@
 import { PiCapacityControl } from './PiCapacityControl';
+import { folderName, readRecentFolders } from "../lib/recentFolders";
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
@@ -147,7 +148,7 @@ export function GoalStatusHeading({
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
   const admissionUnsaidResult = Boolean(coordinationResult?.startsWith("The send returned without saying the goal was admitted.") || coordinationResult?.startsWith("Continue returned without saying the goal was admitted."));
   const stoppedResult = Boolean(coordinationResult?.toLowerCase().includes("no further turn was sent."));
-  const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
+  const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription agent before sending." : "Sign in another agent before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
     : !draft.workspace.trim()
@@ -204,8 +205,10 @@ export function DraftGoalComposer({
   const addressGone = coordinationResult === "That goal is no longer available." || Boolean(coordinationResult?.startsWith("That address is no longer available."));
   const admissionUnsaidResult = Boolean(coordinationResult?.startsWith("The send returned without saying the goal was admitted.") || coordinationResult?.startsWith("Continue returned without saying the goal was admitted."));
   const stoppedResult = Boolean(coordinationResult?.toLowerCase().includes("no further turn was sent."));
+  const [recentFolders] = useState(readRecentFolders);
+  const otherFolders = recentFolders.filter((folder) => folder.toLowerCase() !== draft.workspace.trim().toLowerCase());
   const folderHint = !workspaceHint || inFlightLine || (addressGone && (blockedFromSending || consentWarning || harnessWarning || !activeGoalTitle)) ? null : leftoverHint ? (activeGoalTitle ? "The next goal stays in this folder." : `You can change the folder before the next goal. ${workspaceHint}`) : activeGoalTitle ? (stoppedResult ? "The new send stays in this folder." : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start in this folder yet." : "Your unconfirmed send stays in this folder.") : onContinueCoordination ? (addressGone ? "Continue is the goal on screen, not the missing address." : "Continue stays in this folder. New goal can use another.") : onStopCoordination ? "This goal stays in this folder." : failureHeadline && (blockedFromSending || consentWarning || harnessWarning) ? null : addressGone ? "A new send stays in this folder. It does not open the missing address." : "A new send stays in this folder. New goal can use another.") : workspaceHint;
-  const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription harness before sending." : "Sign in another harness before sending.";
+  const signInFollow = harnessWarning?.startsWith("No signed-in") ? "Sign in a subscription agent before sending." : "Sign in another agent before sending.";
   const allowedFollow = harnessWarning || consentWarning || discoverHint || !backgroundConsent || blockedFromSending || busy
     ? "You can send when the other checks pass."
     : !draft.workspace.trim()
@@ -286,6 +289,13 @@ export function DraftGoalComposer({
             <button className="button button-small button-outline" type="button" onClick={onBrowse} disabled={busy || inputsLocked || Boolean(activeGoalTitle)}>Browse…</button>
           ) : null}
         </div>
+        {!isLinuxActiveTarget && !activeGoalTitle && otherFolders.length > 0 ? (
+          <div className="recent-folders" role="group" aria-label="Recent folders">
+            {otherFolders.map((folder) => (
+              <button key={folder} className="button button-small button-quiet" type="button" title={folder} disabled={busy || inputsLocked} onClick={() => onChange({ ...draft, workspace: folder })}>{folderName(folder)}</button>
+            ))}
+          </div>
+        ) : null}
         {folderHint && !isLinuxActiveTarget ? <p id="draft-folder-hint" className="draft-hint">{folderHint}</p> : null}
         {harnessWarning && harnessWarning !== failureHeadline ? <p className="draft-hint">{harnessWarning}</p> : null}
         {discoverHint ? <p className="draft-hint">{discoverHint}</p> : null}
@@ -323,7 +333,7 @@ export function DraftGoalComposer({
         {linuxCanStartCoordination && (piCapacity || piCapacityReason || piLegacy) ? <div className="draft-hint" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
           <span>{piCapacityChecked
             ? (discoveredHarnesses.includes("codex") ? `Selected roles: Codex plans${linuxWrite ? " / writes" : ""} · Pi independently checks` : "Codex is needed to plan with this Pi capacity.")
-            : piLegacy ? "Legacy harness selection" : "Available choice: Codex + Pi"}</span>
+            : piLegacy ? "Legacy agent selection" : "Available choice: Codex + Pi"}</span>
           {piCapacity ? <PiCapacityControl capacity={piCapacity} checked={piCapacityChecked === true} disabled={Boolean(busy || inputsLocked || piCapacityReason)} onChange={onPiCapacityChange} /> : piLegacy ? <div>Pi route not recorded · Continue is unpinned</div> : null}
           {piCapacityReason ? <div role="status">{piCapacityReason}</div> : null}
         </div> : null}
@@ -355,7 +365,7 @@ export function DraftGoalComposer({
                 <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onGrantConsent}>
                   {grantButtonLabel}
                 </button>
-                <span className="draft-hint-note"> {discoveredHarnesses.length > 0 ? "Uses your existing harness access. Nothing runs until you send a goal." : "Available agents work only after you send a goal."}</span>
+                <span className="draft-hint-note"> {discoveredHarnesses.length > 0 ? "Uses your existing agent access. Nothing runs until you send a goal." : "Available agents work only after you send a goal."}</span>
               </>
             ) : null}
           </p>

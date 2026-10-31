@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// R2 focused pin (independent execution audit r1): the Harness access panel now
+// R2 focused pin (independent execution audit r1): the Agent access panel now
 // renders the workspace-changes decision as a SECOND list, so two discovered
 // harnesses produce four checkboxes (two read members plus two default-OFF write
 // members) and one harness produces two rows. The shared Track A driver may only

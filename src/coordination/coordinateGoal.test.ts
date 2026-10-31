@@ -106,7 +106,7 @@ describe("Synthetic path", () => {
     expect(state.planningHarness).toBe("Pi");
     expect(state.reviewHarness).toBe("Cursor");
     expect(state.result).toBeNull();
-    expect(state.stopReason).toBe("Two different harnesses are assigned. No model turn has been sent.");
+    expect(state.stopReason).toBe("Two different agents are assigned. No model turn has been sent.");
     expect(state.roles).toEqual(["planning", "review"]);
     expect(state.commands).toHaveLength(2);
     expect(state.commands.map((command) => command.modelSelection.instanceId)).toEqual(["pi-local", "cursor-local"]);
@@ -255,7 +255,7 @@ describe("Synthetic path", () => {
     expect(state.result).toBeNull();
     expect(state.roles).toEqual([]);
     expect(state.commands).toEqual([]);
-    expect(state.stopReason).toBe("Stopped. No harness catalog is connected, so no role was assigned.");
+    expect(state.stopReason).toBe("Stopped. No agent catalog is connected, so no role was assigned.");
   });
 
   it("stops when the catalog has one instance and does not emit a second command", () => {
@@ -443,7 +443,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog, avoidInstances: ["codex"] });
 
     expect(state.commands).toHaveLength(0);
-    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two agents that can run.");
     expect(state.quotaLabels.codex).toBe("available");
   });
 
@@ -478,7 +478,7 @@ describe("Synthetic path", () => {
     });
     expect(state.commands).toEqual([]);
     expect(state.roles).toEqual([]);
-    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in agent, so no second role was assigned.");
   });
 
   it("an unusable catalog keeps its original stop reason even with an avoidance", () => {
@@ -489,7 +489,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({ goal, workspacePath, sendKey: "send-0", catalog, avoidInstances: ["codex"] });
 
     expect(state.commands).toHaveLength(0);
-    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in harness, so no second role was assigned.");
+    expect(state.stopReason).toBe("Stopped. An independent check needs a second logged-in agent, so no second role was assigned.");
   });
 
   it("excludes a health-blocked harness from both initial roles", () => {
@@ -525,7 +525,7 @@ describe("Synthetic path", () => {
     const state = coordinateGoal({ goal, workspacePath, sendKey: "health-stop-0", catalog });
 
     expect(state.commands).toEqual([]);
-    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two harnesses that can run.");
+    expect(state.stopReason).toBe("Stopped. Codex cannot run on this machine right now, and an independent check needs two agents that can run.");
   });
 
   it("filters initial role assignment to the authorized instances", () => {

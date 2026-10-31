@@ -88,6 +88,7 @@ export function RuntimePickerMenu({
                     <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
                     <span className="runtime-picker-copy">
                       <strong>{candidate.id === "scenario" ? "Demo run" : candidate.name}</strong>
+                      {runtime?.support === "unsupported" ? <small>Not available on this computer</small> : null}
                       {candidate.id === "scenario" ? <small>No AI, changes nothing</small> : candidate.subtitle && choices ? <small>{candidate.subtitle}</small> : null}
                     </span>
                   </Select.Item>

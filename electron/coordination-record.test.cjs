@@ -124,7 +124,7 @@ test("an environment block survives a save and a reload", () => {
   try {
     const saved = saveRecord(directory, record({
       verdict: "failed",
-      stopReason: "The harness could not finish the turn, so this stopped.",
+      stopReason: "The agent could not finish the turn, so this stopped.",
       environmentBlocked: {
         role: "planning",
         instanceId: "codex",
@@ -495,7 +495,7 @@ test("plan-revision facts round-trip beside the latest pass and stay distinct fr
       auditHarness: "Claude",
       result: "Independently verified.\nVERDICT: verified",
       verdict: "verified",
-      stopReason: "The independent harness verified the changes, so this stopped.",
+      stopReason: "The independent agent verified the changes, so this stopped.",
       messageDispatched: true,
       planRevisionHistory: [planRejectedFact()],
     }));
@@ -556,7 +556,7 @@ test("send-wide dispatch includes the retained plan-rejected pass", () => {
     const combined = saveRecord(directory, record({
       requestId: "revision-then-repair",
       verdict: "verified",
-      stopReason: "The independent harness verified the changes, so this stopped.",
+      stopReason: "The independent agent verified the changes, so this stopped.",
       messageDispatched: true,
       planRevisionHistory: [planRejectedFact({ messageDispatched: true })],
       feedbackHistory: [firstRoundFact({ messageDispatched: false })],

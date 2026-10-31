@@ -108,7 +108,7 @@ export function AuthorizationPanel({
     setGrantError(null);
     try {
       await onAllowBackgroundSend(); // Capability grant never selects another goal's checkbox.
-    } catch { setGrantError("Harness turns could not be allowed. Try again; nothing was sent."); }
+    } catch { setGrantError("Agent turns could not be allowed. Try again; nothing was sent."); }
     finally { setGrantBusy(false); }
   }
   const catalog = catalogFromProviderSnapshots(providers);
@@ -117,7 +117,7 @@ export function AuthorizationPanel({
     .filter((instance) => selected.includes(instance.instanceId))
     .map((instance) => instance.name);
   return (
-    <section className="authorization-panel" aria-label="Harness access">
+    <section className="authorization-panel" aria-label="Agent access">
       <p className="authorization-panel-lead">
         {selectedNames.length > 0
           ? `${joinNames(selectedNames)} will plan and check this goal. They change files only if you allow it below. Nothing runs until you press Send.`
@@ -125,7 +125,7 @@ export function AuthorizationPanel({
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">
         {!backgroundConfigured ? <>
-          <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run harness turns on this profile</button>
+          <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run agent turns on this profile</button>
           {grantError ? <p role="alert">{grantError}</p> : null}
         </> : null}
       </div> : null}
@@ -210,7 +210,7 @@ export function AuthorizationPanel({
                 </label>
                 {state !== "selectable" || instance.billing === "unknown" || instance.instanceId === "pi" ? <span className="authorization-row-reason">
                   {instance.instanceId === "pi" || instance.billing === "unknown"
-                    ? "Unavailable for file changes; this harness has no write sandbox."
+                    ? "Unavailable for file changes; this agent has no write sandbox."
                     : state === "blocked" ? "Blocked on this machine; use the access row above to try it again." : "Unavailable for file changes; see the access reason above."}
                 </span> : null}
               </li>
@@ -227,7 +227,7 @@ export function AuthorizationPanel({
         {!Number.isInteger(writeTurns) || writeTurns < 1 || writeTurns > 8
           ? <p role="alert">Choose 1 to 8 write turns before allowing workspace changes.</p> : null}
         {writeScope ? <p>{writeScope.remaining ?? "Unknown"} of {writeScope.maxTurns} write turns left.</p>
-          : <p>No file changes are allowed unless you check a harness here and press Send.</p>}
+          : <p>No file changes are allowed unless you check an agent here and press Send.</p>}
       </div>
       {scope && !changeMode ? (
         <p className="authorization-scope-line">
@@ -255,7 +255,7 @@ export function AuthorizationPanel({
           <button
             type="button"
             className="button button-primary"
-            aria-label="Save harness access"
+            aria-label="Save agent access"
             onClick={onConfirmChange}
           >
             Save harness access

@@ -62,6 +62,7 @@ import { campaignIdFromLocation, pushGoalRoute, replaceGoalRoute, coordinatedRou
 import { admittedIdentity, continuationUnavailable, type SavedTargetPayload, type SavedTargetResult, type SavedTargetSummary, type CoordinatedCurrentJob, type HostCurrentJob, type SavedCurrentBase, type SavedAllowanceView } from "./coordination/savedTargetView";
 import { useConversationDrafts } from "./lib/useConversationDrafts";
 import { readGoalDefaults, rememberGoalDefaults } from "./lib/goalDefaults";
+import { rememberRecentFolder } from "./lib/recentFolders";
 import {
   canExplicitlyRetry,
   conversationSendIntent,
@@ -1189,7 +1190,7 @@ function App() {
       if (client.mode === "linux-core") {
         if (linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2) {
           if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
-            setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
+            setLinuxHarnessSentence("An independent check needs a second logged-in agent, so nothing will be sent.");
           }
           return;
         }
@@ -1331,7 +1332,7 @@ function App() {
         return;
       }
       if (scopedSend && selectedInstances.length < 2) {
-        setDraftError({ sentence: "An independent check needs two harnesses that can run, so select at least two." });
+        setDraftError({ sentence: "An independent check needs two agents that can run, so select at least two." });
         return;
       }
       setDraftError(null);
@@ -1450,7 +1451,7 @@ function App() {
           const authorized = await window.goalportCore!.coordinationAuthorize!({ instances: chosen, maxTurns: allowedTurns, workspaceRoot: workspace, ...(requestedWrite ? { write: requestedWrite } : {}) });
           if (!stillCurrent()) return;
           if (!authorized || authorized.ok !== true) {
-            setDraftError({ sentence: authorized?.errorText?.trim() || "Harness access could not be authorized, so nothing was sent." });
+            setDraftError({ sentence: authorized?.errorText?.trim() || "Agent access could not be authorized, so nothing was sent." });
             return;
           }
           scopeGeneration = authorized.generation;
@@ -1754,7 +1755,10 @@ function App() {
     if (nativeDraftRef.current) nativeGoalDraftRef.current = sendingDraft;
     setDraftGoal(sendingDraft);
     try {
-      if (client.mode === "electron") rememberGoalDefaults({ workspace, provider });
+      if (client.mode === "electron") {
+        rememberGoalDefaults({ workspace, provider });
+        rememberRecentFolder(workspace);
+      }
       const next = await client.startConversation(workspace, provider, message, intent.requestId, client.mode === "linux-core" ? true : undefined);
       // New goal replaced this send. Publishing its campaign first would close
       // the replacement draft and put the user on the goal they just left.
@@ -1943,7 +1947,7 @@ function App() {
     try {
       await bridge.coordinationUnblock(instanceId);
     } catch {
-      setActiveNotice({ sentence: "GoalPort could not forget that this harness was blocked. Try again in a moment." });
+      setActiveNotice({ sentence: "GoalPort could not forget that this agent was blocked. Try again in a moment." });
       return;
     }
     if (continueFrom) {
@@ -1982,7 +1986,7 @@ function App() {
     try {
       await bridge.coordinationRevoke();
     } catch {
-      setActiveNotice({ sentence: "Harness access could not be stopped. Try again in a moment." });
+      setActiveNotice({ sentence: "Agent access could not be stopped. Try again in a moment." });
       return;
     }
     setScopeMirror(null);
@@ -2025,7 +2029,7 @@ function App() {
     const bridge = window.goalportCore;
     if (!bridge?.coordinationAuthorize) return;
     if (selectedInstances.length < 2) {
-      setDraftError({ sentence: "An independent check needs two harnesses that can run, so select at least two." });
+      setDraftError({ sentence: "An independent check needs two agents that can run, so select at least two." });
       return;
     }
     let authorized: { ok: boolean; generation: number; remaining: number; errorText?: string };
@@ -2038,13 +2042,13 @@ function App() {
         ...(writeInstances.length > 0 ? { write: { instances: [...writeInstances], maxTurns: writeTurns, workspaceRoot: draftGoal!.workspace.trim() } } : {}) });
     } catch (error) {
       setDraftError({
-        sentence: "Harness access could not be updated.",
+        sentence: "Agent access could not be updated.",
         technical: error instanceof Error ? error.message : String(error)
       });
       return;
     }
     if (authorized.ok !== true) {
-      setDraftError({ sentence: authorized.errorText?.trim() || "Harness access could not be updated, so nothing changed." });
+      setDraftError({ sentence: authorized.errorText?.trim() || "Agent access could not be updated, so nothing changed." });
       return;
     }
     setDraftError(null);
@@ -3053,7 +3057,7 @@ function App() {
         body: JSON.stringify({ messageType: "coordination_discover", payload: { workspaceRoot: workspaceInput || undefined } }),
       }).then(async (response) => response.json().catch(() => null)).then((body) => {
         if (cancelled || request !== generation || (draftGoalRef.current?.workspace?.trim() ?? "") !== workspaceInput) return;
-        const unchecked = "The signed-in harnesses could not be checked, so nothing will be sent.";
+        const unchecked = "The signed-in agents could not be checked, so nothing will be sent.";
         if (!body || typeof body !== "object" || (body as { ok?: unknown }).ok === false) {
           const error = (body as { error?: unknown } | null)?.error;
           setLinuxHarnessSentence(typeof error === "string" && error.trim() ? error.trim() : unchecked);
@@ -3076,12 +3080,12 @@ function App() {
           if (!consentStillMissing) grantError.current = false;
           const names = Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : [];
           const reported = typeof sentence === "string" && sentence.trim() ? sentence.trim() : null;
-          setLinuxHarnessSentence(payload?.pi ? reported : reported ?? (names.length === 0 ? "No signed-in subscription harness was found on this machine, so nothing will be sent." : names.length < 2 ? "An independent check needs a second logged-in harness, so nothing will be sent." : null));
+          setLinuxHarnessSentence(payload?.pi ? reported : reported ?? (names.length === 0 ? "No signed-in subscription agent was found on this machine, so nothing will be sent." : names.length < 2 ? "An independent check needs a second logged-in agent, so nothing will be sent." : null));
         }
         setLinuxConsentMissing(consentStillMissing);
         setLinuxSignedIn(Array.isArray(payload?.harnesses) ? payload.harnesses.filter((name): name is string => typeof name === "string" && name.trim().length > 0) : []);
         setLinuxDiscoverChecked(true);
-      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in harnesses could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } }).finally(() => { inFlight = false; });
+      }).catch(() => { if (!cancelled && request !== generation) return; if (!cancelled) { setLinuxHarnessSentence("The signed-in agents could not be checked, so nothing will be sent."); setLinuxSignedIn([]); setLinuxDiscoverChecked(true); } }).finally(() => { inFlight = false; });
     };
     check();
     let legacyTicks = 0;
@@ -3234,7 +3238,7 @@ function App() {
     : null;
   const roundSummaryLine = (planning: string | null, review: string | null, plan: string | null, check: string | null): string | null =>
     planning && review && plan && check
-      ? `${planning} planned and ${review} checked — the harnesses you authorized that can run.`
+      ? `${planning} planned and ${review} checked — the agents you authorized that can run.`
       : null;
   const planActionsLocked = client.mode === "linux-core" && (linuxActionBusy || linuxGranting);
   const unblockAvailable = Boolean(window.goalportCore?.coordinationUnblock);
@@ -3694,7 +3698,7 @@ function App() {
                       if (currentWork?.followUpMode === "live-read-once") return;
                       if (savedContinueReason || linuxLeftoverHeld || admissionUnsaid.current || snapshot.connection !== "connected" || draftBusy || linuxGranting || plansUnreadable || linuxActionBusy || sidebarUnconfirmed || linuxHoldLine || sidebarFailed.current || linuxCoordinationLive || !linuxDiscoverChecked || Boolean(linuxHarnessSentence) || linuxConsentMissing || !backgroundConsent || linuxSignedIn.length < 2 || !linuxCoordinationRequest || leftUnreplayed || leftRequestIds.current.has(linuxCoordinationRequest)) {
                         if (linuxSignedIn.length < 2 && linuxDiscoverChecked && !linuxHarnessSentence && !linuxCoordinationLive) {
-                          setLinuxHarnessSentence("An independent check needs a second logged-in harness, so nothing will be sent.");
+                          setLinuxHarnessSentence("An independent check needs a second logged-in agent, so nothing will be sent.");
                         }
                         return;
                       }
@@ -3787,7 +3791,7 @@ function App() {
                     workspaceHint={client.mode === "linux-core" ? "Use a full path. A leading ~ is your home folder." : undefined}
                     harnessWarning={client.mode === "linux-core" && !linuxCoordinationLive && !linuxActionBusy ? (linuxPiSnapshot ? linuxHarnessProblem : linuxHarnessSentence) : null}
                     signedInHint={client.mode === "linux-core" && !linuxPiSnapshot && !linuxHarnessSentence && (!linuxCoordinationGoal || linuxShowingFreshDraft) ? signedInLine(linuxSignedIn) : null}
-                    discoverHint={draftError ? null : client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in harnesses." : plansUnreadable && !linuxCoordinationLive && !linuxActionBusy ? "Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds." : null}
+                    discoverHint={draftError ? null : client.mode === "linux-core" && !linuxDiscoverChecked && !workerGone && !linuxCoordinationLive && !linuxActionBusy ? "Checking signed-in agents." : plansUnreadable && !linuxCoordinationLive && !linuxActionBusy ? "Saved plans could not be read. Send will try again. Continue stays hidden until that read succeeds." : null}
                     consentWarning={client.mode === "linux-core" && linuxConsentMissing && !linuxCoordinationLive && !linuxActionBusy ? "Background Send is not ready in this GoalPort window yet." : null}
                     leftoverHint={leftoverSlotLine}
                     onGrantConsent={client.mode === "linux-core" && (linuxCoordinationLine === "Allowing Background Send." || (linuxConsentMissing && !linuxGranting)) ? () => {
@@ -4000,7 +4004,7 @@ function App() {
                       <span aria-hidden="true">!</span>
                       <span>
                         GoalPort could not load your agent access choices, so nothing can be sent from this draft yet.
-                        <button className="button button-small button-outline" type="button" onClick={() => setPanelAttempt((attempt) => attempt + 1)}>Retry harness access</button>
+                        <button className="button button-small button-outline" type="button" onClick={() => setPanelAttempt((attempt) => attempt + 1)}>Retry agent access</button>
                         {panelFailSentence ? (
                           <details className="technical-details">
                             <summary>Technical details</summary>
