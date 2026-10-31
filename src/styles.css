@@ -1170,6 +1170,10 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 /* First-use draft composer. */
 .draft-composer { max-width: 640px; margin: 18px auto 0; width: 100%; }
 .composer-dock .draft-composer { margin: 0 auto; }
+/* A fresh goal sits mid-window, not at the foot of an empty page. */
+.timeline-scroll:has(+ .composer-dock form[aria-label="Start a goal"]) { flex: 0 1 auto; margin-top: auto; }
+.timeline-scroll:has(+ .composer-dock form[aria-label="Start a goal"]) > * { max-width: 640px; margin-inline: auto; padding-inline: 0; }
+.timeline-scroll + .composer-dock:has(form[aria-label="Start a goal"]) { margin-bottom: auto; }
 .draft-composer .draft-hint { margin: 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.5; }
 .draft-composer details.draft-hint { margin: 8px 0 0; }
 .draft-composer details.draft-hint p { max-height: 8rem; overflow: auto; white-space: pre-wrap; }

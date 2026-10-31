@@ -161,7 +161,7 @@ fn stale_handoff_source_reuses_one_successor_and_preserves_independent_campaigns
         conflict["error"]
             .as_str()
             .unwrap()
-            .contains("already bound to a different Runtime binding"),
+            .contains("already bound to a different agent binding"),
         "the persisted successor must be resolved before the synthetic firewall: {conflict}"
     );
     assert_eq!(store.counts().unwrap(), baseline_counts);

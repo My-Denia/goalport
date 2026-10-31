@@ -799,7 +799,7 @@ impl StructuredAdapter {
             PreflightStatus::Incompatible
         } else {
             warnings.push(
-                "authentication remains UNKNOWN until a Runtime-owned check is performed".into(),
+                "authentication remains UNKNOWN until an agent-owned check is performed".into(),
             );
             PreflightStatus::ReadyWithWarnings
         };

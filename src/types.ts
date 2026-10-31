@@ -483,7 +483,7 @@ const initialTimeline: TimelineItem[] = [
     kind: "plan",
     actor: "Claude Code · Planner",
     title: "Plan accepted for the preview slice",
-    body: "Keep the desktop conversation focused: persist the Campaign, then hand the active Task to the selected Runtime.",
+    body: "Keep the desktop conversation focused: persist the Campaign, then hand the active Task to the selected agent.",
     timestamp: "Today · 09:41",
     status: "active plan",
     details: ["Root Task: GoalPort preview", "Acceptance: structured events + recoverable history"],
@@ -505,7 +505,7 @@ const initialTimeline: TimelineItem[] = [
     kind: "tool",
     actor: "Codex · Tool activity",
     title: "Output is grouped in the timeline",
-    body: "Incremental tool output is persisted by Core. Expand the source in the native Runtime when the full transcript is needed.",
+    body: "Incremental tool output is persisted by Core. Expand the source in the native agent when the full transcript is needed.",
     timestamp: "Today · 09:43",
     status: "18 events",
     details: ["Output: 3 chunks", "Backpressure: within policy"],
@@ -554,7 +554,7 @@ const initialTimeline: TimelineItem[] = [
     timestamp: "Today · 09:48",
     status: "UNSUPPORTED",
     evidenceState: "unsupported",
-    details: ["Reason: structured permission and resume evidence not verified", "Fallback: request an audit after a supported Runtime is available"],
+    details: ["Reason: structured permission and resume evidence not verified", "Fallback: request an audit after a supported agent is available"],
     accent: "slate"
   }
 ];
@@ -671,7 +671,7 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
     },
     {
       id: "evidence-external-edit",
-      claim: "Runtime output still matches the current workspace",
+      claim: "Agent output still matches the current workspace",
       state: "stale",
       source: "External edit detected by watcher",
       snapshot: "ws-7f3a"
@@ -695,7 +695,7 @@ export const DEMO_SNAPSHOT: CoreSnapshot = {
   relatedHolds: [],
   preview: true,
   notices: [
-    "Preview: Runtime support is capability-gated and may be unsupported.",
+    "Preview: agent support is capability-gated and may be unsupported.",
     "Core projection is authoritative; this browser preview uses synthetic data when Tauri is unavailable."
   ],
   productConversation: {
@@ -744,7 +744,7 @@ export const EMPTY_PREVIEW_SNAPSHOT: CoreSnapshot = {
   evidence: [],
   productConversation: null,
   project: { ...DEMO_SNAPSHOT.project, workspaceRoot: "/tmp/goalport-preview-workspace" },
-  notices: ["Browser preview: this is a synthetic empty profile; no Runtime receives work."]
+  notices: ["Browser preview: this is a synthetic empty profile; no agent receives work."]
 };
 
 /** Empty transport state used only while a packaged Core is being connected. */
@@ -758,7 +758,7 @@ export const EMPTY_SNAPSHOT: CoreSnapshot = {
   campaigns: [],
   activeCampaignId: "",
   activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" },
-  attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No Runtime selected", sessionHash: undefined, eventCount: 0 },
+  attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No agent selected", sessionHash: undefined, eventCount: 0 },
   timeline: [],
   cursor: 0,
   runtimes: [],
@@ -822,7 +822,7 @@ export function createPreviewCampaign(snapshot: CoreSnapshot, workspaceRoot: str
         kind: "recovery",
         actor: "System · Preview",
         title: "Execution is waiting for Core",
-        body: "The campaign is visible immediately. A Core connection is required before a Runtime receives work.",
+        body: "The campaign is visible immediately. A Core connection is required before an agent receives work.",
         timestamp: "Just now",
         status: "WAITING",
         evidenceState: "unavailable",
@@ -838,7 +838,7 @@ export function createPreviewCampaign(snapshot: CoreSnapshot, workspaceRoot: str
     productConversation: {
       items: [],
       runtime: { state: "none", provider: "", name: "" },
-      turn: { state: "idle", canStop: false, canSend: false, reason: "the browser preview has no Runtime; this goal sends nothing" },
+      turn: { state: "idle", canStop: false, canSend: false, reason: "the browser preview has no agent; this goal sends nothing" },
       title
     }
   };
@@ -865,7 +865,7 @@ export function appendPreviewMessage(snapshot: CoreSnapshot, message: string): C
     kind: "attempt",
     actor: "Core · Attempt",
     title: "Message queued for the active Attempt",
-    body: "The preview records the intent. A connected Core decides whether the native Runtime can receive it.",
+    body: "The preview records the intent. A connected Core decides whether the native agent can receive it.",
     timestamp: "Just now",
     status: "WAITING",
     details: ["No duplicate send on reconnect", "Current lease remains unchanged"],
@@ -899,7 +899,7 @@ export function appendPreviewConversationMessage(
       {
         id: `product-preview-note-${now}`,
         kind: "activity-summary",
-        body: "Browser preview: recorded locally. Connect the desktop app for a real Runtime reply.",
+        body: "Browser preview: recorded locally. Connect the desktop app for a real agent reply.",
         timestamp: stamp
       }
     ]
@@ -944,7 +944,7 @@ export function startPreviewConversation(
     activeTask: {
       id: taskId,
       title,
-      acceptance: "Preview conversation; no Runtime receives work.",
+      acceptance: "Preview conversation; no agent receives work.",
       state: "in-progress"
     },
     attempt: {
@@ -961,15 +961,15 @@ export function startPreviewConversation(
         {
           id: `product-preview-note-${requestId}`,
           kind: "activity-summary",
-          body: "Browser preview: this goal was recorded locally. Connect the desktop app before expecting any Runtime work.",
+          body: "Browser preview: this goal was recorded locally. Connect the desktop app before expecting any agent work.",
           timestamp: stamp
         }
       ],
       runtime: { state: "none", provider, name: runtimeName },
-      turn: { state: "idle", canStop: false, canSend: false, reason: "the browser preview has no Runtime; nothing runs here" },
+      turn: { state: "idle", canStop: false, canSend: false, reason: "the browser preview has no agent; nothing runs here" },
       title
     },
-    notices: ["Preview goal recorded locally; nothing was sent to a Runtime.", ...snapshot.notices]
+    notices: ["Preview goal recorded locally; nothing was sent to an agent.", ...snapshot.notices]
   };
 }
 
@@ -1002,7 +1002,7 @@ export function resolvePermission(snapshot: CoreSnapshot, allow = false): CoreSn
         kind: "permission",
         actor: "User · Decision Inbox",
         title: allow ? "Permission allowed once" : "Permission denied",
-        body: allow ? "The native Runtime received a one-time approval for this request." : "No write action was sent. The active Attempt remains waiting for an explicit safe next action.",
+        body: allow ? "The native agent received a one-time approval for this request." : "No write action was sent. The active Attempt remains waiting for an explicit safe next action.",
         timestamp: "Just now",
         status: allow ? "APPROVED ONCE" : "DECLINED",
         details: ["Decision recorded by Core command path", "Session-wide approval: disabled"],
@@ -1251,7 +1251,7 @@ function normalizeAttempt(value: unknown): AttemptSummary {
     provider: asText(raw.provider, "unassigned"),
     role: role === "planner" || role === "auditor" ? role : "executor",
     state: state === "waiting" || state === "completed" || state === "failed" || state === "uncertain" ? state : "active",
-    sessionLabel: asText(raw.sessionLabel ?? raw.session_label, "Runtime identity unavailable"),
+    sessionLabel: asText(raw.sessionLabel ?? raw.session_label, "Agent identity unavailable"),
     sessionHash: typeof raw.sessionHash === "string" ? raw.sessionHash : typeof raw.session_hash === "string" ? raw.session_hash : undefined,
     eventCount: asNumber(raw.eventCount ?? raw.event_count, 0)
   };
@@ -1261,7 +1261,7 @@ function normalizeRuntime(value: unknown): RuntimeProfile | null {
   const raw = asRecord(value) ?? {};
   const explicitId = optionalText(raw.id);
   if (!explicitId) return null;
-  const name = asText(raw.name, "Runtime");
+  const name = asText(raw.name, "Agent");
   const support = normalized(raw.support, "unknown");
   const capabilities = asRecord(raw.capabilities) ?? {};
   return {
@@ -1291,7 +1291,7 @@ function normalizeDecision(value: unknown): DecisionRequest | null {
     id,
     actionKnown: (raw.actionKnown ?? raw.action_known) === false ? false : undefined,
     sessionAnswer: (raw.sessionAnswer ?? raw.session_answer) === true ? true : undefined,
-    title: asText(raw.title, "Runtime approval"),
+    title: asText(raw.title, "Agent approval"),
     kind: kind === "policy" || kind === "handoff" || kind === "lease" ? kind : "permission",
     facts: Array.isArray(raw.facts) ? raw.facts.map((fact) => asText(fact, "")).filter(Boolean) : [],
     recommendation: asText(raw.recommendation, "Review the facts before allowing an external effect."),

@@ -1302,7 +1302,7 @@ if (!reopenOnly) try {
       (handoffSnap.timeline || [])
         .filter(
           (item) =>
-            item.actor === "Native Runtime" &&
+            item.actor === "Native agent" &&
             item.kind === "message" &&
             (item.body || "").trim().length > 0
         )

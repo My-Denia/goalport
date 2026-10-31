@@ -145,7 +145,7 @@ describe("Core client preview transport", () => {
       campaigns: [],
       activeCampaignId: "",
       activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" },
-      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No Runtime selected", eventCount: 0 },
+      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor", state: "waiting", sessionLabel: "No agent selected", eventCount: 0 },
       timeline: [],
       cursor: 0,
       runtimes: [],

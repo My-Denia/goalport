@@ -92,7 +92,7 @@ it("Linux entry exposes exactly coordinated work + qualified Codex, and old Core
   const props = { draft:{workspace:"/fixture", provider:"", message:""}, runtimes:base.runtimes, connected:true, busy:false, blockedFromSending:false, waitingOn:null, error:null, canBrowse:false, coordinationAvailable:false, linuxCanStartCoordination:true, linuxEntry:true, onBrowse:vi.fn(), onChange:vi.fn(), onSubmit:vi.fn(), onDiscard:vi.fn() };
   const view = render(<DraftGoalComposer {...props} />);
   fireEvent.click(screen.getByRole("combobox", { name:"Choose goal mode" }));
-  expect((await screen.findAllByRole("option")).map(el => el.textContent)).toEqual([expect.stringContaining("Coordinated work"), expect.stringContaining("Codex conversation")]);
+  expect((await screen.findAllByRole("option")).map(el => el.textContent)).toEqual([expect.stringContaining("Several agents"), expect.stringContaining("Codex conversation")]);
   view.unmount();
   render(<DraftGoalComposer {...props} runtimes={base.runtimes.map(item => ({...item, nativeSessionTransport:undefined}))} />);
   fireEvent.click(screen.getByRole("combobox", { name:"Choose goal mode" }));
@@ -236,7 +236,7 @@ it("mode change clears the native refusal before opening coordinated work; New g
   fireEvent.change(input, { target: { value: "Still my draft" } }); fireEvent.submit(input.closest("form")!);
   await screen.findByRole("alert");
   fireEvent.click(screen.getByRole("combobox", { name: "Choose goal mode" }));
-  fireEvent.keyDown(await screen.findByRole("option", { name: /Coordinated work/ }), { key: "Enter" });
+  fireEvent.keyDown(await screen.findByRole("option", { name: /Several agents/ }), { key: "Enter" });
   await waitFor(() => expect(window.location.hash).toBe("#coordinated/new"));
   expect(screen.queryByText(/Nothing was sent/)).toBeNull();
   expect(screen.queryByText("Synthetic preflight diagnostic")).toBeNull();
@@ -376,7 +376,7 @@ it("late host refusal cannot reinsert native error or steal focus after delibera
   fireEvent.change(input, { target: { value: "Old draft" } }); fireEvent.submit(input.closest("form")!);
   await waitFor(() => expect(f.calls.filter(c => c.messageType === "start_conversation")).toHaveLength(1));
   window.history.replaceState(null, "", "/#coordinated/new"); fireEvent(window, new PopStateEvent("popstate"));
-  await waitFor(() => expect(screen.getByRole("combobox", { name: "Choose goal mode" }).textContent).toContain("Coordinated work"));
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "Choose goal mode" }).textContent).toContain("Several agents"));
   const coordinated = screen.getByRole("textbox", { name: "Message composer" }); coordinated.focus();
   await act(async () => { release(); await pending; });
   await waitFor(() => expect(screen.queryByText(/Nothing was sent\./)).toBeNull());

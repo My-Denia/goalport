@@ -66,7 +66,7 @@ async function send(id, type, payload) {
 }
 
 function isNativeTerminal(event) {
-  return event?.actor === "Native Runtime"
+  return event?.actor === "Native agent"
     && ["runtime.turn.completed", "runtime.turn.failed", "runtime.turn.cancelled"].includes(event?.body);
 }
 

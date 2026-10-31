@@ -28,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LIVE_REFUSAL: &str = "has a registered Runtime that is no longer live; it is kept, not replaced";
+const LIVE_REFUSAL: &str = "has a registered agent that is no longer live; it is kept, not replaced";
 
 /// One mutex for everything process-global this file touches: the launch-identity variables the
 /// epoch commit sets and `GOALPORT_CODEX_TRANSPORT`.

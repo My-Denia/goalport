@@ -1306,7 +1306,7 @@ fn m1_registration_identities_are_unique_per_registration_and_per_manager() {
 
 /// H1's re-select refusal text: a Queued kept row hits the "session was never established" gate
 /// (projection.rs, before the kept-record branch), exactly as `admission_failure::a3`.
-const NEVER_ESTABLISHED: &str = "has a registered Runtime but its session was never established";
+const NEVER_ESTABLISHED: &str = "has a registered agent but its session was never established";
 
 fn fixture_module_py() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3038,7 +3038,7 @@ fn r11_exec_transport_rejection_replays_as_the_recorded_failure_without_a_second
     // persist_agent_event (:2162) — one of the failure points that recorded nothing before this
     // increment — with the delivery already known: the Runtime did not accept the input.
     assert!(
-        first_error.contains("no canonical Runtime binding"),
+        first_error.contains("no canonical agent binding"),
         "{first_error}"
     );
     let lines = fs::read_to_string(&invocations).unwrap_or_default();
@@ -3070,7 +3070,7 @@ fn r11_exec_transport_rejection_replays_as_the_recorded_failure_without_a_second
         "r11-send",
         "FAILED",
         "FAILED",
-        "no canonical Runtime binding",
+        "no canonical agent binding",
     );
     assert!(
         error_of(&again).contains(&first_error),

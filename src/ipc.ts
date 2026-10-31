@@ -69,7 +69,7 @@ export function previewInitialSnapshot(): CoreSnapshot {
         ...DEMO_SNAPSHOT.productConversation!,
         title: "Fix sample addition",
         items: [{ id: "preview-completed-result", kind: "assistant-message", body: resultSummary }],
-        turn: { state: "completed", canSend: false, canStop: false, reason: "Browser preview does not send work to a Runtime." },
+        turn: { state: "completed", canSend: false, canStop: false, reason: "Browser preview does not send work to an agent." },
         resultSummary
       }
     };
@@ -82,7 +82,7 @@ export function previewInitialSnapshot(): CoreSnapshot {
         runtime: { state: "selected", provider: "codex", name: "Codex" },
         session: { state: "attached", nativeIdKnown: false },
         turn: { state: "failed", canSend: true, canStop: false, reasonCode: PREVIEW_PROVIDER_QUOTA, actions: ["select-runtime", "send"] },
-        items: [{ id: "preview-quota", kind: "actionable-error", body: "Codex has reached its usage limit. Wait for the limit to reset or choose another Runtime.", technicalDetails: "Synthetic example: usageLimitExceeded", actions: ["select-runtime"] }]
+        items: [{ id: "preview-quota", kind: "actionable-error", body: "Codex has reached its usage limit. Wait for the limit to reset or choose another agent.", technicalDetails: "Synthetic example: usageLimitExceeded", actions: ["select-runtime"] }]
       }
     };
   }
@@ -478,7 +478,7 @@ class PreviewCoreClient implements CoreClient {
         productConversation: saved?.product ?? {
           items: [], title: selected.title,
           runtime: { state: "none", provider: "", name: "" },
-          turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no Runtime; nothing runs here." }
+          turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no agent; nothing runs here." }
         }
       };
     }
@@ -492,7 +492,7 @@ class PreviewCoreClient implements CoreClient {
       productConversation: {
         ...this.state.productConversation,
         runtime: { state: "selected", provider, name: runtime.name },
-        turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no Runtime; nothing runs here." }
+        turn: { state: "idle", canStop: false, canSend: false, reason: "The browser preview has no agent; nothing runs here." }
       }
     };
     return this.state;

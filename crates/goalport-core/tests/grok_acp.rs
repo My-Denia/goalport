@@ -167,7 +167,7 @@ fn rpc_error_marks_failed() {
     });
 
     let failed = first(&events, AgentEventType::TurnFailed);
-    assert_eq!(failed.payload["text"], "native Runtime error -32603");
+    assert_eq!(failed.payload["text"], "native agent error -32603");
     assert!(!has(&events, AgentEventType::TurnCompleted));
 }
 
@@ -641,7 +641,7 @@ fn send_to_terminal_attempt_is_refused() {
         error.contains("attempt is terminal (CANCELLED)"),
         "unexpected refusal text: {error}"
     );
-    assert!(error.contains("select a Runtime to start a new Attempt"));
+    assert!(error.contains("select an agent to start a new Attempt"));
     // Nothing was persisted for the refused message: no user event, no command.
     let after = store
         .list_event_records(&attempt, 0)

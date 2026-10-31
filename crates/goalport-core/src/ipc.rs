@@ -511,7 +511,7 @@ impl CoreServer {
                         thread::sleep(Duration::from_millis(100));
                     }
                 })
-                .expect("unable to start Runtime event flusher");
+                .expect("unable to start agent event flusher");
         });
     }
 
@@ -567,7 +567,7 @@ impl CoreServer {
             if let Some((attempt_id, control)) = control {
                 let requested = control.request_cancel(None);
                 if requested == Ok(false) {
-                    return Err("Runtime startup already passed the no-send boundary; check the turn before stopping it.".into());
+                    return Err("Agent startup already passed the no-send boundary; check the turn before stopping it.".into());
                 }
                 let mut detail = requested.err();
                 let mut confirmed = control.wait_finished(Duration::from_millis(650));

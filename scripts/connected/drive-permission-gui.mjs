@@ -58,8 +58,8 @@ try {
       }
     }
     const cards = await evaluate(`[...document.querySelectorAll('.timeline-card')].map(x=>x.innerText)`);
-    terminal = cards.some((text) => text.includes("Native Runtime") && text.includes(marker))
-      && cards.some((text) => text.includes("Native Runtime") && text.includes("Attempt state updated") && text.includes("COMMITTED"))
+    terminal = cards.some((text) => text.includes("Native agent") && text.includes(marker))
+      && cards.some((text) => text.includes("Native agent") && text.includes("Attempt state updated") && text.includes("COMMITTED"))
       && !(current.decisions || []).some((decision) => decision.state === "pending");
     if (terminal) break;
   }
@@ -67,8 +67,8 @@ try {
   const dom = {
     permissionVisible: cards.some((text) => text.includes("Permission")),
     toolVisible: cards.some((text) => text.includes("Tool")),
-    replyVisible: cards.some((text) => text.includes("Native Runtime") && text.includes(marker)),
-    terminalVisible: cards.some((text) => text.includes("Native Runtime") && text.includes("Attempt state updated") && text.includes("COMMITTED"))
+    replyVisible: cards.some((text) => text.includes("Native agent") && text.includes(marker)),
+    terminalVisible: cards.some((text) => text.includes("Native agent") && text.includes("Attempt state updated") && text.includes("COMMITTED"))
   };
   const allResolved = approvals.length > 0 && (current.decisions || []).filter((decision) => approvals.some((item) => item.decisionHash === createHash("sha256").update(decision.id).digest("hex"))).every((decision) => decision.state === "resolved");
   const report = {

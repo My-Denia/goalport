@@ -48,7 +48,7 @@ try {
     assert.equal(await preview.evaluate("document.activeElement?.querySelector('strong')?.textContent"), "Claude Code");
     await preview.key("Escape", "Escape");
     await preview.until("!document.querySelector('.runtime-picker-list:not([data-closed])')");
-    await preview.until("document.activeElement?.getAttribute('aria-label') === 'Select Runtime'");
+    await preview.until("document.activeElement?.getAttribute('aria-label') === 'Select agent'");
     await preview.click('.draft-runtime-picker .runtime-picker-button');
     await preview.until("Boolean(document.querySelector('.runtime-picker-list .runtime-picker-item'))");
     await preview.click('.runtime-picker-list .runtime-picker-item:nth-of-type(2)');

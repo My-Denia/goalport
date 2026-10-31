@@ -1061,7 +1061,7 @@ try {
   await click('button[aria-label="New goal"]');
   await until("Boolean(document.querySelector('.draft-composer-form'))");
   await until("Boolean(document.querySelector('input[aria-label=\"Keep working after closing\"]'))");
-  await clickFound(`document.querySelector('[aria-label="Select Runtime"]')`, "Runtime picker");
+  await clickFound(`document.querySelector('[aria-label="Select agent"]')`, "Runtime picker");
   await until(`document.querySelectorAll('[role="option"]').length > 0`);
   await clickFound(`Array.from(document.querySelectorAll('[role="option"]')).find((node) => (node.textContent || "").includes("Codex"))`, "Codex runtime option");
   await until(`Boolean(document.querySelector('.draft-composer-form .runtime-picker-button strong').textContent.includes("Codex"))`);

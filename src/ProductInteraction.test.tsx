@@ -33,7 +33,7 @@ describe('conversation-first product boundary', () => {
     expect(screen.queryByRole('textbox', { name: /goal title|goal name/i })).toBeNull();
     fireEvent.change(screen.getByRole('textbox', { name: 'Project folder' }), { target: { value: 'C:/fixture' } });
     fireEvent.change(input, { target: { value: 'Check the build and explain the failure.' } });
-    fireEvent.click(screen.getByRole('combobox', { name: 'Select Runtime' }));
+    fireEvent.click(screen.getByRole('combobox', { name: 'Select agent' }));
     clickRuntimeOption(screen.getByRole('option', { name: /codex/i }));
     const send = screen.getByRole('button', { name: 'Send message' });
     fireEvent.click(send); fireEvent.click(send);
@@ -101,7 +101,7 @@ describe('conversation-first product boundary', () => {
     expect(await screen.findByText('Codex')).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: 'Message composer' }), { target: { value: 'continue' } });
     expect((screen.getByRole('button', { name: 'Send message' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByText('No Runtime selected')).toBeNull();
+    expect(screen.queryByText('No agent selected')).toBeNull();
   });
 
   it('uses the typed quota code and an allowed next action without reading error text', async () => {
@@ -109,9 +109,9 @@ describe('conversation-first product boundary', () => {
     quota.productConversation!.turn = { state: 'failed', canSend: false, canStop: false, reason: 'opaque native detail', reasonCode: 'provider-quota', actions: ['select-runtime'] };
     quota.productConversation!.items = [{ id: 'quota', kind: 'actionable-error', body: 'Codex has reached its usage limit.', technicalDetails: 'native provider trace', actions: ['select-runtime'] }];
     mount(quota);
-    expect(await screen.findByText('This Runtime has reached its usage limit. Your draft stays here.')).toBeTruthy();
+    expect(await screen.findByText('This agent has reached its usage limit. Your draft stays here.')).toBeTruthy();
     expect(screen.getByText('native provider trace').closest('details')?.open).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: 'Choose Runtime' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Choose agent' }));
     expect(await screen.findByRole('listbox', { name: 'Runtimes' })).toBeTruthy();
   });
 
@@ -153,7 +153,7 @@ describe('conversation-first product boundary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'End session' }));
     expect(await screen.findAllByText('Closing session…')).not.toHaveLength(0);
     expect(screen.queryByText('Starting')).toBeNull();
-    expect(screen.queryByText('The Runtime is starting. Wait for it to confirm this turn.')).toBeNull();
+    expect(screen.queryByText('The agent is starting. Wait for it to confirm this turn.')).toBeNull();
     const closed = base();
     closed.productConversation!.session = { state: 'closed', nativeIdKnown: true };
     closed.productConversation!.turn = { state: 'completed', canSend: false, canStop: false, actions: [] };

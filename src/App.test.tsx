@@ -34,9 +34,9 @@ function accept(request: CoreCommand, snapshot: unknown) {
   return Promise.resolve({ requestId: request.requestId, accepted: true, duplicate: false, snapshot });
 }
 
-/** Open the composer Runtime chooser (aria-label "Select Runtime"), waiting for boot. */
+/** Open the composer Runtime chooser (aria-label "Select agent"), waiting for boot. */
 async function openRuntimePicker() {
-  fireEvent.click(await screen.findByRole("combobox", { name: /select runtime/i }));
+  fireEvent.click(await screen.findByRole("combobox", { name: /select agent/i }));
 }
 
 /** The app close entry lives in the title-bar application menu (the native X
@@ -235,7 +235,7 @@ describe("GoalPort preview", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /developer diagnostics/i }));
     fireEvent.click(await screen.findByRole("button", { name: /simulate offline/i }));
     expect(screen.getByText("Browser preview is offline")).toBeTruthy();
-    expect(screen.getByText(/nothing is sent to a Runtime/i)).toBeTruthy();
+    expect(screen.getAllByText(/nothing is sent to an agent/i).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByRole("button", { name: /reconnect preview/i })[0]);
     await waitFor(() => expect(screen.queryByText("Browser preview is offline")).toBeNull());
@@ -311,7 +311,7 @@ describe("GoalPort preview", () => {
     clickCloseWindow();
     fireEvent.click(screen.getByRole("button", { name: "Stop background work and quit" }));
     expect(await screen.findByRole("dialog", { name: "Continue running in the background?" })).toBeTruthy();
-    expect(await screen.findByText(/Stop was not durably acknowledged by Core/i)).toBeTruthy();
+    expect(await screen.findByText(/couldn't confirm the stop/i)).toBeTruthy();
     expect(confirmCloseChoice).toHaveBeenCalledOnce();
   });
 
@@ -445,8 +445,8 @@ describe("GoalPort preview", () => {
     await screen.findByRole("region", { name: /stop responsibility/i });
     clickCloseWindow();
     const dialog = screen.getByRole("dialog", { name: "Continue running in the background?" });
-    expect(within(dialog).getByText(/residual execution remains unknown/i)).toBeTruthy();
-    expect(within(dialog).getByText(/Core keeps write responsibility held/i)).toBeTruthy();
+    expect(within(dialog).getByText(/last turn may still be running/i)).toBeTruthy();
+    expect(within(dialog).getByText(/this folder stays paused/i)).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "Stop Claude turn and quit" })).toBeTruthy();
     expect(within(dialog).queryByRole("button", { name: "Stop background work and quit" })).toBeNull();
   });
@@ -604,7 +604,7 @@ describe("GoalPort preview", () => {
       campaigns: [],
       activeCampaignId: "",
       activeTask: { id: "", title: "No task selected", acceptance: "", state: "waiting" as const },
-      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor" as const, state: "waiting" as const, sessionLabel: "No Runtime selected", eventCount: 0 },
+      attempt: { id: "attempt-unassigned", taskId: "", provider: "unassigned", role: "executor" as const, state: "waiting" as const, sessionLabel: "No agent selected", eventCount: 0 },
       timeline: [],
       decisions: [],
       evidence: [],
@@ -686,7 +686,7 @@ describe("GoalPort preview", () => {
     await waitFor(() => expect(workspace.value).toBe("C:\\work\\chosen"));
     const goal = screen.getByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.change(goal, { target: { value: "Keep this exact goal" } });
-    fireEvent.click(screen.getByRole("combobox", { name: "Select Runtime" }));
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
     clickRuntimeOption(await screen.findByRole("option", { name: /claude code/i }));
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
 
@@ -729,7 +729,7 @@ describe("GoalPort preview", () => {
     const composer = await screen.findByRole("textbox", { name: /message composer/i }) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Start anyway" } });
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
-    expect(await screen.findByText("That Runtime didn't start. Nothing was sent.")).toBeTruthy();
+    expect(await screen.findByText("That agent didn't start. Nothing was sent.")).toBeTruthy();
     expect(document.body.textContent).toContain("C:\\bad\\codex.exe");
   });
 

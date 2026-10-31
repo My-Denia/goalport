@@ -92,7 +92,7 @@ if (qualified && existingCoreReport) {
       while (performance.now() - started < timeoutMs) {
         const events = current.timeline || [];
         const terminal = events.some((item) => item.cursor > beforeCursor && item.title === "Attempt state updated" && (item.status === "COMMITTED" || item.status === "FAILED"));
-        const visibleMarker = marker ? events.some((item) => item.cursor > beforeCursor && item.actor === "Native Runtime" && item.kind === "message" && item.body.includes(marker)) : true;
+        const visibleMarker = marker ? events.some((item) => item.cursor > beforeCursor && item.actor === "Native agent" && item.kind === "message" && item.body.includes(marker)) : true;
         if (terminal && visibleMarker) return { snapshot: current, beforeCursor, terminalObserved: terminal, visibleMarker };
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
         current = await send(`${prefix}-poll-${Math.floor(performance.now())}`, "snapshot", {});
@@ -102,7 +102,7 @@ if (qualified && existingCoreReport) {
         snapshot: current,
         beforeCursor,
         terminalObserved: events.some((item) => item.cursor > beforeCursor && item.title === "Attempt state updated" && (item.status === "COMMITTED" || item.status === "FAILED")),
-        visibleMarker: marker ? events.some((item) => item.cursor > beforeCursor && item.actor === "Native Runtime" && item.kind === "message" && item.body.includes(marker)) : true
+        visibleMarker: marker ? events.some((item) => item.cursor > beforeCursor && item.actor === "Native agent" && item.kind === "message" && item.body.includes(marker)) : true
       };
     };
 

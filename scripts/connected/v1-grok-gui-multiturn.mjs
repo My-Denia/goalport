@@ -540,7 +540,7 @@ const result = await withPackagedGui(port, async (session) => {
     handoffTimeline
       .filter(
         (item) =>
-          item.actor === "Native Runtime" &&
+          item.actor === "Native agent" &&
           item.kind === "message" &&
           (item.body || "").trim().length > 0
       )
@@ -624,7 +624,7 @@ const result = await withPackagedGui(port, async (session) => {
       distinctAttempt: "snapshot+sqlite: new id != old id, snapshot attempt == new attempt",
       distinctNativeSession: "handoff.completed-packet",
       nativeResponseObserved:
-        "snapshot timeline: a Native Runtime message item on the new attempt with a non-empty body",
+        "snapshot timeline: a Native agent message item on the new attempt with a non-empty body",
       terminalObserved: "sqlite-events: runtime.turn.completed on the new attempt",
       packetObserved:
         "snapshot timeline: handoff-kind item with body \"Core handoff packet committed\"",

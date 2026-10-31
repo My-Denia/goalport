@@ -33,7 +33,7 @@ export function CloseChoiceDialog({ provider, active, stopResponsibility, onCont
         {stopResponsibility ? (
           <details className="technical-details">
             <summary>Technical details</summary>
-            <p>Residual execution remains unknown. Core keeps write responsibility held.</p>
+            <p>The last turn may still be running, so this folder stays paused.</p>
           </details>
         ) : null}
         <div className="dialog-actions">

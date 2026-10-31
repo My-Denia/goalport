@@ -26,7 +26,7 @@ export function HandoffDialog({ snapshot, onCancel, onConfirm }: HandoffDialogPr
         {candidates.length === 0 ? (
           <div className="dialog-note" role="alert">
             <span aria-hidden="true">!</span>
-            <span>No other Runtime is available from Core. Handoff needs a second Runtime with a capability path.</span>
+            <span>No other agent is available. Set up a second agent to hand this work off.</span>
           </div>
         ) : (
           <div className="handoff-list" role="listbox" aria-label="Handoff target">
