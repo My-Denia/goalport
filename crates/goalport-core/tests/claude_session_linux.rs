@@ -702,7 +702,9 @@ fn a_binary_rewrite_without_a_decision_fails_open() {
     let events = drain(&mut manager, "attempt-binary-rewrite", |seen| {
         has(seen, AgentEventType::TurnFailed) || has(seen, AgentEventType::TurnCompleted)
     });
-    assert!(fail_open(&events), "{events:#?}");
+    assert!(!fail_open(&events), "{events:#?}");
+    assert!(has(&events, AgentEventType::TurnCompleted), "{events:#?}");
+    assert_eq!(tool_payload(&events, "completed")["changedWithoutAsking"], true);
     assert_eq!(fs::read(root.join("cache.bin")).unwrap(), [0, 1, 2, 3]);
 }
 
