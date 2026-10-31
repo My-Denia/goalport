@@ -608,7 +608,7 @@ def native_check_record(data_dir, record):
     return {"recordKind": "native-workspace-check", "requestId": record.get("requestId"), "nativeCheckTarget": target,
             "nativeCheckMaterial": material, "nativeAssociation": bool(valid), "jobId": job.name if valid and job else None,
             "workspacePath": record.get("workspacePath"), "savedAt": record.get("savedAt"), "auditText": record.get("auditText"),
-            "verdict": record.get("verdict"), "statusLabel": "Independent workspace check returned" if record.get("verdict") == "checked" else "Workspace check did not complete"}
+            "verdict": record.get("verdict"), "stopReason": record.get("stopReason"), "statusLabel": "Independent workspace check returned" if record.get("verdict") == "checked" else "Workspace check did not complete"}
 
 
 def latest_coordination_record(data_dir: Path | None, request_id: object = None) -> dict:

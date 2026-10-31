@@ -1,3 +1,4 @@
+import { renderMarkdownBody } from "./lib/markdown";
 // @vitest-environment jsdom
 // Interaction regressions for the windows-desktop-shell-ui-refactor round:
 // IME-safe Enter handling, keyboard submit parity, handoff target selection,
@@ -154,6 +155,13 @@ describe("handoff target selection", () => {
 });
 
 describe("markdown rendering stays inert", () => {
+  it("names a cited local file without a raw link or a clickable path", () => {
+    const { container } = render(<>{renderMarkdownBody("Added it in [README.md](/fixture/project/README.md:8).", "local-file")}</>);
+    expect(container.textContent).toBe("Added it in README.md.");
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.querySelector("span[title]")?.getAttribute("title")).toBe("/fixture/project/README.md:8");
+  });
+
   it("renders HTML and script payloads as text without executing anything", async () => {
     const malicious = [
       "before <script>window.__pwned=1</script> after",

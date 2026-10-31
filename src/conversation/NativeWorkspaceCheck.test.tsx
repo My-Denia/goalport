@@ -56,6 +56,13 @@ it('a saved review of the current turn opens with its verdict; an earlier one st
  expect((await screen.findByText('Looks right')).closest('details')).toHaveProperty('open',false);
 });
 
+it('a saved review that never finished says why instead of opening empty',async()=>{
+ const stopReason='401: {"type":"authentication_error"}';
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({ok:true,payload:{checks:[{requestId:'saved-check',nativeAssociation:true,nativeCheckTarget:target,nativeCheckMaterial:material,statusLabel:'x',stopReason,savedAt:'2026-01-01T00:00:00Z'}]}}))));
+ render(<NativeWorkspaceCheck campaignId={target.campaignId} target={target} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ expect((await screen.findByText(/Pi's review didn't finish/)).closest('details')).toHaveProperty('open',true);expect(screen.getByRole('status').textContent).toContain('API key was rejected');expect(screen.getByText(stopReason).closest('details')).toBeTruthy();
+});
+
 it('return keeps the own dated review when the current Attempt has no completed turn yet',async()=>{
  const calls:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q.messageType);return new Response(JSON.stringify({ok:true,payload:{checks:[{requestId:'saved-check',nativeAssociation:true,nativeCheckTarget:target,nativeCheckMaterial:material,statusLabel:'x',auditText:'Concrete saved critique',savedAt:'2026-01-01T00:00:00Z'}]}}));}));
  render(<NativeWorkspaceCheck campaignId={target.campaignId} target={null} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);await screen.findByText('Concrete saved critique');expect(screen.queryByRole('button',{name:'Ask Pi to review'})).toBeNull();expect(screen.getByText(/earlier turn/)).toBeTruthy();expect(calls).toEqual(['coordination_list']);
@@ -105,6 +112,17 @@ it('a review can go straight to Codex as an editable draft, with nothing sent',(
 it('a verdict shows at a glance and a clean review asks for nothing more',()=>{
  render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:'Looks right: the guide gained the section Codex described.'}}} as never} onStopAllowing={()=>{}} onAskCodex={vi.fn()}/>);
  expect(screen.getByText('Looks right').className).toContain('review-verdict-good');expect(screen.getByText(/The guide gained/).textContent).not.toContain('Looks right');expect(screen.queryByRole('button',{name:'Ask Codex to fix this'})).toBeNull();
+});
+
+it('a review stopped by a rejected key says so, and the provider text stays folded',()=>{
+ const stopReason='The agent finished without any text, so this stopped. 401: {"message":"key disabled","type":"authentication_error"}';
+ render(<BackgroundCoordinationStatus job={{...job,state:'failed',active:false,live:false,outcome:{status:'failed',report:{stopReason}}} as never} onStopAllowing={()=>{}}/>);
+ expect(screen.getByRole('heading',{name:"Pi's review didn't finish"})).toBeTruthy();expect(screen.getByRole('status').textContent).toContain("sign-in or API key was rejected");expect(screen.getByRole('status').textContent).not.toContain('You can ask for another review');expect(screen.getByText(/authentication_error/).closest('details')).toBeTruthy();
+});
+
+it('any other unfinished review keeps the plain retry line with its reason folded',()=>{
+ render(<BackgroundCoordinationStatus job={{...job,state:'failed',active:false,live:false,outcome:{status:'failed',report:{stopReason:'The connection dropped.'}}} as never} onStopAllowing={()=>{}}/>);
+ expect(screen.getByRole('status').textContent).toContain('You can ask for another review');expect(screen.getByText('The connection dropped.').closest('details')).toBeTruthy();
 });
 
 it('a running review invites the user to keep working',()=>{
