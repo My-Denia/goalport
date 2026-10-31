@@ -294,7 +294,7 @@ export function DraftGoalComposer({
             aria-describedby={folderHint ? "draft-folder-hint" : undefined}
             value={draft.workspace}
             onChange={(event) => onChange({ ...draft, workspace: event.target.value })}
-            placeholder={workspacePlaceholder ?? "C:\\workspace\\your-project"}
+            placeholder={workspacePlaceholder ?? "Project folder"}
             disabled={busy || inputsLocked || Boolean(activeGoalTitle)}
             readOnly={isLinuxActiveTarget}
             title={draft.workspace}
