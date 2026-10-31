@@ -3497,7 +3497,7 @@ function App() {
             }
             const draftComposer = (
                   <DraftGoalComposer
-                    linuxEntry={client.mode === "linux-core" && linuxShowingFreshDraft}
+                    linuxEntry={client.mode === "linux-core" && (linuxShowingFreshDraft || (coordinatedRoute === null && !linuxCoordinationGoal && !linuxCoordinationRequest && !snapshot.activeCampaignId))}
                     draft={draftGoal ?? { workspace: (!linuxShowingFreshDraft && linuxCoordinationWorkspace) || snapshot.project.workspaceRoot || (client.mode === "electron" ? readGoalDefaults().workspace : ""), provider: client.mode === "electron" ? startingAgent() : "", message: "" }}
                     runtimes={snapshot.runtimes}
                     connected={snapshot.connection === "connected"}

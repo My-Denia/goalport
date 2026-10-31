@@ -47,6 +47,15 @@ it('lost final reply retains only caller identity across return, resolves the sa
  first.unmount();render(<NativeWorkspaceCheck target={{...target,campaignId:'other-view'}} eligible job={null} onJob={onJob} onBusy={onBusy}/>);fireEvent.click(screen.getByRole('button',{name:'Check on your earlier request'}));fireEvent.click(screen.getByRole('button',{name:'Check on it'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));expect(starts).toHaveLength(2);expect(starts[1]).toEqual(starts[0]);expect(onJob.mock.calls[0][0].nativeCheckTarget).toEqual(target);expect(sessionStorage.getItem('goalport.nativeCheckCallerIntent')).toBeNull();
 });
 
+it('a saved review of the current turn opens with its verdict; an earlier one stays folded',async()=>{
+ const check={requestId:'saved-check',nativeAssociation:true,nativeCheckTarget:target,nativeCheckMaterial:material,statusLabel:'x',auditText:'Looks right: matches.',savedAt:'2026-01-01T00:00:00Z'};
+ vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({ok:true,payload:{checks:[check]}}))));
+ const view=render(<NativeWorkspaceCheck campaignId={target.campaignId} target={target} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ expect((await screen.findByText('Looks right')).closest('details')).toHaveProperty('open',true);view.unmount();
+ render(<NativeWorkspaceCheck campaignId={target.campaignId} target={{...target,turnRequestId:'newer-turn'}} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ expect((await screen.findByText('Looks right')).closest('details')).toHaveProperty('open',false);
+});
+
 it('return keeps the own dated review when the current Attempt has no completed turn yet',async()=>{
  const calls:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q.messageType);return new Response(JSON.stringify({ok:true,payload:{checks:[{requestId:'saved-check',nativeAssociation:true,nativeCheckTarget:target,nativeCheckMaterial:material,statusLabel:'x',auditText:'Concrete saved critique',savedAt:'2026-01-01T00:00:00Z'}]}}));}));
  render(<NativeWorkspaceCheck campaignId={target.campaignId} target={null} eligible={false} job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);await screen.findByText('Concrete saved critique');expect(screen.queryByRole('button',{name:'Ask Pi to review'})).toBeNull();expect(screen.getByText(/earlier turn/)).toBeTruthy();expect(calls).toEqual(['coordination_list']);
