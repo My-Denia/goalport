@@ -1,3 +1,4 @@
+export const NO_PROJECT_NAME = "No project yet";
 export type ConnectionState = "connected" | "disconnected" | "reconnecting" | "degraded";
 
 export type TimelineKind =
@@ -1031,7 +1032,7 @@ export function resolveCoreSnapshot(input: unknown): CoreSnapshot | null {
     selectedProjectId: asText(raw.selectedProjectId ?? raw.selected_project_id, asText(rawProject.id, "")),
     project: {
       id: asText(rawProject.id, ""),
-      name: asText(rawProject.name, "No workspace selected"),
+      name: asText(rawProject.name, NO_PROJECT_NAME),
       workspaceRoot: asText(rawProject.workspaceRoot ?? rawProject.workspace_root, ""),
       color: asText(rawProject.color, "slate")
     },

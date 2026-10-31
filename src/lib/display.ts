@@ -78,7 +78,7 @@ export function presentedSessionLabel(snapshot: CoreSnapshot): string {
 }
 
 export function connectionLabel(snapshot: CoreSnapshot): string {
-  if (snapshot.connection === "connected") return "Core connected";
+  if (snapshot.connection === "connected") return "Connected";
   if (snapshot.connection === "reconnecting") return "Reconnecting";
   if (snapshot.connection === "degraded") return "Core degraded";
   return "Core disconnected";
@@ -144,7 +144,7 @@ export function runtimeSelectionDisplay(runtime: ProductRuntimeSelection): { lab
   const name = runtime.name || runtime.provider;
   return {
     label: name,
-    detail: runtime.state === "starting" ? "starting" : runtime.state === "selected" ? "selected" : "unavailable",
+    detail: runtime.state === "starting" ? "starting" : runtime.state === "selected" ? "Change agent" : "unavailable",
     glyph: name[0]?.toUpperCase() ?? "–"
   };
 }

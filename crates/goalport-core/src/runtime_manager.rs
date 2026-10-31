@@ -9165,6 +9165,29 @@ fn resolve_native_executable(provider: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(provider))
 }
 
+/// Whether a native agent can be found on this computer. Snapshots poll, so answers are kept
+/// briefly; an agent installed while GoalPort is open appears within a few seconds.
+pub fn native_agent_installed(provider: &str) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(Instant, Vec<(String, bool)>)>> = std::sync::Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap_or_else(|poison| poison.into_inner());
+    if known.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(10)) {
+        *known = Some((Instant::now(), Vec::new()));
+    }
+    let (_, answers) = known.as_mut().expect("just filled");
+    if let Some((_, found)) = answers.iter().find(|(name, _)| name == provider) {
+        return *found;
+    }
+    let resolved = resolve_native_executable(provider);
+    let found = resolved.is_absolute() || std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            // A bare name on Windows only starts as an .exe; npm's extensionless shim does not.
+            dir.join(if cfg!(windows) { format!("{provider}.exe") } else { provider.to_owned() }).is_file()
+        })
+    });
+    answers.push((provider.to_owned(), found));
+    found
+}
+
 fn loadable_executable(path: &std::path::Path) -> bool {
     if !path.is_file() {
         return false;

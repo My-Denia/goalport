@@ -114,6 +114,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 }
 .titlebar-app { font-weight: 700; color: var(--ink); white-space: nowrap; }
 .titlebar-sep { color: var(--ink-faint); }
+.titlebar-campaign-wrap { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
 .titlebar-workspace {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 26vw;
 }
@@ -407,7 +408,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 
 .conversation-heading {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
-  min-width: 0; padding: 14px 22px 10px; flex: 0 0 auto;
+  width: 100%; max-width: var(--content-max); min-width: 0; margin: 0 auto; padding: 14px 22px 10px; flex: 0 0 auto;
 }
 .conversation-heading-main { flex: 1; min-width: 0; }
 .conversation-heading h2 {
@@ -1022,7 +1023,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   .connection-neutral .connection-text { display: inline; }
   .connection-pill { padding: 0 8px; }
   .connection-neutral { padding: 0 9px; }
-  .conversation-heading, .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
+  .stop-responsibility-panel { margin-left: 14px; margin-right: 14px; }
   .approvals, .background-attention, .turn-results { width: calc(100% - 28px); }
   .timeline-inner, .composer-dock, .timeline-scroll .native-workspace-check { padding-left: 14px; padding-right: 14px; }
   .native-turn-results, .approvals { width: calc(100% - 28px); max-width: calc(var(--content-max) - 28px); }

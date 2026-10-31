@@ -60,7 +60,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
             </span>
             <span className="runtime-picker-copy">
               <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Several agents") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Several agents" : "Choose an agent")}</strong>
-              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "selected" : coordinationAvailable
+              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "Change agent" : coordinationAvailable
                 ? "Plan, build and check"
                 : (runtimeRequiredHint ?? "Choose an agent before sending.")}</small>
             </span>
@@ -270,7 +270,7 @@ export function DraftGoalComposer({
         {onLeaveGoal ? <button className="button button-small button-outline" type="button" disabled={busy || inputsLocked || inFlightLine} onClick={onLeaveGoal}>Leave it unreplayed</button> : null}
       </div> : null}
       <form className="draft-composer-form" aria-label={activeGoalTitle ? "This goal" : "Start a goal"} onSubmit={handleFormSubmit}>
-        {!isLinuxActiveTarget ? <label className="field-label" htmlFor="draft-workspace">{workspaceHint ? "Project folder" : "Workspace"}</label> : null}
+        {!isLinuxActiveTarget ? <label className="field-label" htmlFor="draft-workspace">Project folder</label> : null}
         <div className={`field-with-icon draft-workspace-row${isLinuxActiveTarget ? " compact-workspace-row" : ""}`} title={draft.workspace}>
           <span aria-hidden="true">⌂</span>
           <input
@@ -371,7 +371,7 @@ export function DraftGoalComposer({
           </p>
         ) : null}
         {onLinuxWriteChange && (isLinuxActiveTarget || discoveredHarnesses.includes("codex")) ? <label className="draft-hint"><input type="checkbox" checked={linuxWrite} disabled={busy || inputsLocked || Boolean(onStopCoordination)} onChange={(event) => onLinuxWriteChange(event.target.checked)} /> Allow Codex to change files in this workspace</label> : null}
-        {onBackgroundConsentChange ? (
+        {onBackgroundConsentChange && (linuxEntry || !runtimes.some((candidate) => candidate.id === draft.provider)) ? (
           <label className="draft-background-consent">
             <input
               type="checkbox"
@@ -413,7 +413,7 @@ export function DraftGoalComposer({
               {activeGoalTitle ? (
                 draft.message.trim() ? <button className="button button-quiet" type="button" aria-label="Clear follow-up" onClick={onDiscard} disabled={busy || inputsLocked}>Clear follow-up</button> : null
               ) : (
-                <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy || inputsLocked}>Discard draft</button>
+                draft.message.trim() || draft.workspace.trim() || inputsLocked ? <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy || inputsLocked}>Discard draft</button> : null
               )}
               <button className="button button-primary" type="submit" aria-label={coordinationResult === "Sending." ? "Sending." : admissionUnsaidResult ? "Send not confirmed" : addressGone ? "Send a new goal" : retryLabel ?? "Send message"} disabled={!canSubmit || coordinationResult === "Sending."}>
                 {coordinationResult === "Sending." ? "Sending." : busy ? "Starting…" : admissionUnsaidResult ? "Not confirmed" : addressGone ? "Send a new goal" : (retryLabel ?? "Send")}

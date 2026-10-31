@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CoreCommandOutcome } from "./types";
+import { turnResultsWorthShowing } from "./panels/TurnResults";
+import type { CoreCommandOutcome, TurnResult } from "./types";
 import {
   canExplicitlyRetry,
   conversationSendIntent,
@@ -139,5 +140,26 @@ describe("stable send intent", () => {
       }
     });
     expect(retained).toEqual(expect.objectContaining({ requestId: "kept", state: "reconcile" }));
+  });
+});
+
+describe("a folder that does not exist", () => {
+  it('releases the draft so the path can be corrected', () => {
+    const intent = startConversationIntent('request', 'C:/nope', 'codex', 'hello');
+    const outcome = { requestId: 'request', messageType: 'start_conversation', kind: 'refused', error: 'missing',
+      rejection: { code: 'workspace-missing', message: 'missing', deliveryState: 'FAILED', nativeDispatchState: 'NOT_STARTED', retryMode: 'NEW_REQUEST', reservation: null } } as CoreCommandOutcome;
+    expect(settleSendIntent(intent, outcome)).toBeNull();
+  });
+});
+
+describe("turn results worth showing", () => {
+  const quiet = { requestId: "a", replyState: "completed", baselineRecorded: false, comparisonUnavailable: true, during: [], unattributed: [], before: [], commands: [] } as unknown as TurnResult;
+  it("drops a finished turn that could only say it was not compared", () => {
+    expect(turnResultsWorthShowing([quiet])).toEqual([]);
+  });
+  it("keeps a turn that ran commands or did not finish", () => {
+    const ran = { ...quiet, commands: [{}] } as unknown as TurnResult;
+    const stopped = { ...quiet, replyState: "stopped" } as unknown as TurnResult;
+    expect(turnResultsWorthShowing([ran, stopped])).toEqual([ran, stopped]);
   });
 });
