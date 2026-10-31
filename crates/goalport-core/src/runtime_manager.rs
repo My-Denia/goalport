@@ -6845,12 +6845,6 @@ impl ClaudeStreamProcess {
                         self.sequence += 1;
                         produced = self.fail_open_envelope(attempt_id);
                     }
-                    UnrequestedBashEffect::Unknown => {
-                        self.unknown_effect = true;
-                        self.execution_ever_admitted = true;
-                        self.sequence += 1;
-                        produced = self.unknown_effect_envelope(attempt_id);
-                    }
                 }
             } else {
                 self.sequence += 1;
@@ -6996,11 +6990,12 @@ impl ClaudeStreamProcess {
     }
 
     fn unrequested_bash_effect(&self, sample: Option<&WorkspaceSample>) -> UnrequestedBashEffect {
+        // A folder without a fingerprint (no git) says nothing about the command: only an observed
+        // change is evidence, and a finished reply must not read as a failure for lack of one.
         match self.fingerprint_view(sample) {
-            FingerprintView::Equal => UnrequestedBashEffect::Complete,
             FingerprintView::Changed => UnrequestedBashEffect::FailOpen,
-            FingerprintView::Unknown | FingerprintView::Unavailable => {
-                UnrequestedBashEffect::Unknown
+            FingerprintView::Equal | FingerprintView::Unknown | FingerprintView::Unavailable => {
+                UnrequestedBashEffect::Complete
             }
         }
     }
@@ -8211,7 +8206,6 @@ enum DeniedEffect {
 enum UnrequestedBashEffect {
     Complete,
     FailOpen,
-    Unknown,
 }
 
 fn observation_from_input(input: &Value) -> ToolObservation {
@@ -11422,6 +11416,8 @@ mod resume_proof_and_tool_result_tests {
         assert!(!process.no_tool_started());
 
         process.unrequested_bash.clear();
+        // A folder without git cannot fingerprint; a finished reply must not turn into a failure.
+        assert!(matches!(process.unrequested_bash_effect(None), UnrequestedBashEffect::Complete));
         process.session_baseline = Some(crate::descendants::SessionBaseline {
             process_epoch: "epoch-pre-message".into(),
             sealed_at: "before-first-message".into(),
