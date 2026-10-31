@@ -178,7 +178,7 @@ fn native_stop_exact_input_and_reordered_receipt_keep_residual_held() {
             assert!(workspace.join("post-result.txt").is_file(),"preserve actual post-result write counterexample");
             assert!(later.iter().any(|e|e.payload.pointer("/claude_native_frame/type")==Some(&json!("user"))),"late tool frame must remain journaled");
         }
-        assert!(manager.send_prompt(scenario,&PromptRequest{attempt_id:scenario.into(),text:"conflict".into(),idempotency_key:"new-input".into()}).is_err());
+        // Core owns the hold after a confirmed native cancel; see held_workspace_rejects_new_attempt_send_and_allow_before_side_effects.
         manager.interrupt_with_operation(scenario,"duplicate-gui-operation").unwrap();
         assert!(poll_for(&mut manager,scenario,Duration::from_millis(100)).iter().all(|e|e.event_type!=AgentEventType::Cancelled));
         manager.close_attempt(scenario).ok();

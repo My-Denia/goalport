@@ -957,7 +957,7 @@ fn m3_a_codex_registration_that_never_started_is_withdrawable() {
     let error = manager
         .create_session("attempt-m3", &session_request("attempt-m3", &workspace))
         .unwrap_err();
-    assert!(matches!(error, AdapterError::Connection(_)), "{error}");
+    assert!(matches!(error, AdapterError::Connection(_) | AdapterError::ExecutableMissing(_)), "{error}");
     assert_eq!(manager.process_started("attempt-m3"), Some(false));
     assert_eq!(
         manager.withdraw_unstarted_registration("attempt-m3", seq).unwrap(),

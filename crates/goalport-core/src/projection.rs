@@ -1422,8 +1422,16 @@ impl UiController {
                 }
             }
         }
-        let campaign_ui = campaigns
-            .iter()
+        // A goal whose first send never reached an agent has nothing to return to.
+        let mut started_campaigns = Vec::with_capacity(campaigns.len());
+        for campaign in &campaigns {
+            let requests = self.store.campaign_conversation_requests(&campaign.id).map_err(store_message)?;
+            if requests.is_empty() || !requests.iter().all(conversation_request_is_predispatch_retryable) {
+                started_campaigns.push(campaign);
+            }
+        }
+        let campaign_ui = started_campaigns
+            .into_iter()
             .map(|campaign| campaign_to_ui(campaign, &self.store, &selected_project.id))
             .collect::<Result<Vec<_>, _>>()?;
         let task_ui = active_task

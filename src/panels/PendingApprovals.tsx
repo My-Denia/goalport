@@ -34,6 +34,7 @@ export function PendingApprovals({ snapshot, onPermissionDecision }: PendingAppr
               {decision.sessionAnswer && decision.actionKnown !== false ? <button className="button button-outline" type="button" onClick={() => onPermissionDecision(decision.id, true, true)} disabled={held}>Allow for this session</button> : null}
               <button className="button button-danger" type="button" aria-label="Decline permission" onClick={() => onPermissionDecision(decision.id, false)}>Decline</button>
             </div>
+            {decision.sessionAnswer && decision.actionKnown !== false && !held ? <p className="decision-scope-note">This session allows the same request again without asking. Anything different still asks.</p> : null}
             {held ? <p className="decision-hold-note">Allow is off until the earlier stop is confirmed. You can still decline.</p> : null}
           </div>
         );
