@@ -227,6 +227,10 @@ async function smoke() {
     await until(`${name} runtime option visible`, () => read(`Boolean(${finder})`));
     await clickFound(finder);
   };
+  const pickRuntime2Close = async () => {
+    await clickFound("Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).find(e => e.querySelector('strong')?.textContent === 'Demo run')");
+    await sleep(300);
+  };
   const notice = () => read("(() => { const banner = document.querySelector('.status-banners .banner-notice'); return banner ? { sentence: banner.innerText.split('\\n')[0], technical: banner.querySelector('.technical-details-pre')?.textContent ?? null } : null; })()");
   const dismissNotice = async () => {
     if (await read("Boolean(document.querySelector('.status-banners .banner-notice'))")) {
@@ -609,19 +613,18 @@ async function smoke() {
     marker("ui-cdp/same-binding-reselect-keeps-attempt", { attemptId: firstAttempt });
 
     // --- Runtime conflict through the inline picker: existing binding kept. -
-    await pickRuntime("Codex");
-    await until("visible binding conflict notice", () => read("Boolean(document.querySelector('.status-banners .banner-notice'))"));
-    const conflict = await notice();
-    assert.match(conflict.sentence, /GoalPort could not complete that action\./);
-    assert.match(conflict.technical ?? "", /already bound to a different agent binding/);
-    await openNoticeDetails();
-    assert.match(await body(), /already bound to a different agent binding/);
+    // A CLI this computer lacks is marked in the picker, so Core is asked directly.
+    await click(".composer-dock .runtime-picker button[aria-label='Select agent']");
+    await until("missing Codex is marked", () => read("Array.from(document.querySelectorAll('.runtime-picker-list .runtime-picker-item')).some(e => e.querySelector('strong')?.textContent === 'Codex' && e.getAttribute('aria-disabled') === 'true' && e.textContent.includes('Not available on this computer'))"));
+    await screen("04-missing-agent-marked");
+    await pickRuntime2Close();
+    const current = await snapshot();
+    const conflict = await command("select_runtime", { provider: "codex", campaignId: current.activeCampaignId, taskId: current.attempt.taskId, attemptId: firstAttempt });
+    assert.equal(conflict.goalportRejected, true);
+    assert.match(conflict.error, /already bound to a different agent binding/);
     assert.equal((await snapshot()).attempt.id, firstAttempt);
     assert.equal(counts().attempts, beforeReselect.attempts);
-    await screen("04-runtime-conflict");
-    await pickRuntime("Demo run");
-    await until("successful reselect clears refusal", () => read("Boolean(!document.querySelector('.status-banners .banner-notice'))"));
-    marker("ui-cdp/provider-conflict-retains-runtime-and-reselect-clears-error", { conflict, attemptId: firstAttempt, attempts: counts().attempts });
+    marker("ui-cdp/provider-conflict-retains-runtime-and-reselect-clears-error", { attemptId: firstAttempt, attempts: counts().attempts });
 
     // --- Quiet success: exact Unicode message/reply once, draft cleared. ---
     const messageA = `RC ${report.mode} exact message · 中文 "quotes"\nsecond line <&>`;

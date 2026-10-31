@@ -129,6 +129,9 @@ function commandFailure(next: CoreSnapshot, messageType: string, priorIntent?: S
       };
     }
     const technical = outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable");
+    if (/already bound to a different agent binding/.test(technical)) {
+      return { sentence: "This goal stays with its current agent. Use Hand over in Details to move it, or start a new goal.", technical };
+    }
     const agentMissing = /program not found/i.test(technical);
     const runtimeDidNotStart = /not a valid Windows application|unable to start|os error 193/i.test(technical);
     return {
