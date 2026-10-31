@@ -152,7 +152,7 @@ export function CampaignNav({ snapshot, collapsed, plans = [], onSelectPlan, sav
         ) : null}
         {goalListUnreadable ? (collapsed ? null : <p className="nav-empty" role="status">{`The goal list could not be read. This is not the workbench connection.${newGoalEnabled ? " New goal can still start." : ""}`}</p>) : null}
         {campaignListUnavailable && !projectOverride ? (
-          collapsed ? null : <p className="nav-empty" role="status">Goal list unavailable until Core returns a full control snapshot.</p>
+          collapsed ? null : <p className="nav-empty" role="status">Goal list unavailable until GoalPort reconnects.</p>
         ) : goalCount === 0 && !runningJob && !goalListUnreadable ? (
           collapsed ? null : <p className="nav-empty">No goals yet.</p>
         ) : overview ? (

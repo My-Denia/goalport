@@ -59,12 +59,12 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
               <span className="rail-icon rail-icon-blue" aria-hidden="true">◎</span>
               <div>
                 <p className="eyebrow">THIS SESSION</p>
-                <h2 id="session-facts-title">{state.label}</h2>
+                <h2 id="session-facts-title">{hasConversation ? state.label : "No session yet"}</h2>
               </div>
             </div>
           </div>
           <div className="detail-facts">
-            <div><span>Workspace</span><strong className="detail-workspace">{snapshot.project.workspaceRoot || snapshot.project.name || "—"}</strong></div>
+            {hasConversation ? <><div><span>Workspace</span><strong className="detail-workspace">{snapshot.project.workspaceRoot || snapshot.project.name || "—"}</strong></div>
             <div>
               <span>Agent</span>
               <strong>
@@ -72,17 +72,17 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
                   ? "None selected"
                   : `${runtimeDisplay.label}${runtime.state === "unavailable" ? " · not connected" : ""}`}
               </strong>
-            </div>
+            </div></> : null}
             <div><span>Connection</span><strong>{browserPreview ? "Browser preview · no Core" : connectionLabel(snapshot)}</strong></div>
             {sessionLabel ? <div><span>Session</span><strong>{sessionLabel}</strong></div> : null}
             {runtime.provider === "codex" && product?.session?.transport === "exec" ? <div><span>Conversation</span><strong>Codex can't continue this conversation after this turn.</strong></div> : null}
-            <div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
+            {hasConversation ? <><div><span>Status</span><strong>{state.label}{held ? " — held by a Stop" : ""}</strong></div>
             <div>
               <span>Approvals</span>
               <strong>{pendingCount === 0 ? "None pending" : `${pendingCount} shown in the conversation`}</strong>
-            </div>
+            </div></> : null}
           </div>
-          <div className="diagnostics-actions session-details-actions">
+          {hasConversation ? <div className="diagnostics-actions session-details-actions">
             <button className="button button-quiet" type="button" onClick={onChangeRuntime} disabled={!hasConversation}>
               Switch agent
             </button>
@@ -98,7 +98,7 @@ export function SessionDetails({ hideHandoff = false, browserPreview = false, op
             <button className="button button-quiet" type="button" onClick={onOpenWorkspaceFolder} disabled={!snapshot.project.workspaceRoot}>
               Open workspace folder
             </button>
-          </div>
+          </div> : null}
         </section>
         {product?.resultSummary ? (
           <section className="rail-panel" aria-labelledby="last-result-title">

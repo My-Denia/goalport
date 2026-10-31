@@ -157,7 +157,7 @@ describe("review debt frontend contracts", () => {
     fireEvent.click(screen.getByRole("button", { name: /send message/i }));
     expect(await screen.findByRole("button", { name: "Check result" })).toBeTruthy();
     expect(screen.getByText(/Conversation controls are temporarily unavailable/i)).toBeTruthy();
-    expect(screen.getByText(/Goal list unavailable until Core returns a full control snapshot/i)).toBeTruthy();
+    expect(screen.getByText(/Goal list unavailable until GoalPort reconnects/i)).toBeTruthy();
     expect(screen.queryByText(/No goals yet/i)).toBeNull();
     expect(screen.queryByRole("heading", { name: /start a goal/i })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Check result" }));
@@ -175,7 +175,7 @@ describe("review debt frontend contracts", () => {
     };
     mountElectron(capacity, async (request) => ({ requestId: request.requestId, accepted: true, snapshot: capacity }));
     expect(await screen.findByText(/Conversation controls are temporarily unavailable/i)).toBeTruthy();
-    expect(screen.getByText(/Goal list unavailable until Core returns a full control snapshot/i)).toBeTruthy();
+    expect(screen.getByText(/Goal list unavailable until GoalPort reconnects/i)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: /start a goal/i })).toBeNull();
     expect(screen.queryByText(/No goals yet/i)).toBeNull();
   });

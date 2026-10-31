@@ -630,6 +630,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   background: transparent; color: var(--ink-muted); font-size: 10.5px;
 }
 .md-copy:hover { color: var(--ink); border-color: #4a4852; }
+.md-code-block pre code { padding: 0; border: 0; background: transparent; }
 .md-code-pre {
   margin: 0; padding: 10px 12px; overflow-x: auto; max-height: 340px;
   font-size: 12px; line-height: 1.5; color: #d6d4da;
