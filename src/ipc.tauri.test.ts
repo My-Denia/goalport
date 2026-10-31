@@ -144,7 +144,7 @@ describe("connected Tauri Core command payloads", () => {
 
     invokeMock.mockResolvedValueOnce({
       goalportRejected: true,
-      error: "attempt attempt-codex-executor-1 is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused"
+      error: "attempt attempt-codex-executor-1 is already bound to a different agent binding; the existing agent is kept and the request is refused"
     });
     const after = await client.selectRuntime!("claude", before.activeCampaignId, before.activeTask.id, before.attempt.id);
 

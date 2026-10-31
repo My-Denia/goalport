@@ -2985,7 +2985,7 @@ impl UiController {
             .map_err(store_message)?;
         self.notices.insert(
             0,
-            "New Attempt queued under resource pressure; existing Runtime and Core were not killed"
+            "New Attempt queued under resource pressure; the running agent was not stopped"
                 .into(),
         );
         Ok(())
@@ -3091,7 +3091,7 @@ impl UiController {
             if *existing != intended {
                 return Err(format!(
                     "attempt {attempt_id} is already bound to a different agent binding; \
-                     the existing Runtime is kept and the request is refused"
+                     the existing agent is kept and the request is refused"
                 ));
             }
             let row = self.store.get_attempt(&attempt_id).map_err(store_message)?;
