@@ -102,7 +102,7 @@ async function resolveTarget(core,selected,target) {
   const s=response?.payload?.snapshot;
   if(response?.ok===false || response?.requestId!==requestId || response?.payload?.requestId!==requestId || response?.payload?.accepted!==true || !s) throw Error(STALE);
   const turns=s.turnResults, turn=Array.isArray(turns)?turns.at(-1):null;
-  if(s.activeCampaignId!==target.campaignId || s.attempt?.id!==target.attemptId || s.attempt?.provider!=='codex' || !['waiting','completed'].includes(s.attempt?.state) || s.productConversation?.runtime?.provider!=='codex' || s.productConversation?.turn?.state!=='completed' || s.productConversation?.turn?.canStop!==false || !s.activeTask?.id || s.attempt.taskId!==s.activeTask.id || !turn || turn.requestId!==target.turnRequestId || turn.replyState!=='completed' || turns.filter(t=>t.requestId===target.turnRequestId).length!==1 || s.decisions?.length) throw Error(STALE);
+  if(s.activeCampaignId!==target.campaignId || s.attempt?.id!==target.attemptId || s.attempt?.provider!=='codex' || !['waiting','completed'].includes(s.attempt?.state) || s.productConversation?.runtime?.provider!=='codex' || s.productConversation?.turn?.state!=='completed' || s.productConversation?.turn?.canStop!==false || !s.activeTask?.id || s.attempt.taskId!==s.activeTask.id || !turn || turn.requestId!==target.turnRequestId || turn.replyState!=='completed' || turns.filter(t=>t.requestId===target.turnRequestId).length!==1 || s.decisions?.some(d=>d?.state!=='resolved')) throw Error(STALE);
   // Do not substitute target detail for the whole-inventory guard above.
   const problem=require('./coordination-core-guard.cjs').coreRefusal(s); if(problem) throw Error(problem);
   const workspace=workspaceIdentity(s.project?.workspaceRoot);

@@ -884,6 +884,15 @@ def coordination_grant_command(data_dir: Path | None, repo_root: Path, endpoint:
     return [*prefix, "grant-access"], None
 
 
+def ensure_coordination_profile(data_dir: Path) -> None:
+    # A first run has no profile yet, and the read-only reservation check refuses
+    # a missing one. Failure stays that refusal: nothing is sent.
+    try:
+        data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
 def coordination_cli_prefix(data_dir: Path, repo_root: Path, endpoint: str | None, core_binary: str | None, refused: str = "nothing was admitted.", database: str | None = None) -> tuple[list[str] | None, str | None]:
     if not endpoint:
         return None, f"The Core socket is required, so {refused}"
@@ -1426,6 +1435,7 @@ def main(argv=None) -> int:
     unix_client = load_unix_client()
     endpoint = unix_client.resolve(args.endpoint)
     coordination_data = (args.coordination_data or (Path.home() / ".goalport" / "linux-coordinate")).resolve()
+    ensure_coordination_profile(coordination_data)
     core_binary = str(args.core_binary.resolve()) if args.core_binary else None
     database = str(args.database.resolve()) if args.database else None
 
