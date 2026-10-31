@@ -1986,7 +1986,7 @@ impl Store {
         }
         if start.selected_provider.trim().is_empty() {
             return Err(StoreError::InvalidState(
-                "the selected Runtime provider is required".into(),
+                "the selected agent is required".into(),
             ));
         }
         if start.campaign.root_task_id != start.task.id
@@ -2539,7 +2539,7 @@ impl Store {
         if let Some(Some(provider)) = preferred.as_ref() {
             if !provider.eq_ignore_ascii_case(&source_provider) {
                 return Err(StoreError::InvalidState(format!(
-                    "selected Runtime preference is {provider} but the confirmed-stop successor must use the source provider {source_provider}"
+                    "selected agent preference is {provider} but the confirmed-stop successor must use the source provider {source_provider}"
                 )));
             }
         }

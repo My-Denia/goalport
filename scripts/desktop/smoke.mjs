@@ -613,9 +613,9 @@ async function smoke() {
     await until("visible binding conflict notice", () => read("Boolean(document.querySelector('.status-banners .banner-notice'))"));
     const conflict = await notice();
     assert.match(conflict.sentence, /GoalPort could not complete that action\./);
-    assert.match(conflict.technical ?? "", /already bound to a different Runtime binding/);
+    assert.match(conflict.technical ?? "", /already bound to a different agent binding/);
     await openNoticeDetails();
-    assert.match(await body(), /already bound to a different Runtime binding/);
+    assert.match(await body(), /already bound to a different agent binding/);
     assert.equal((await snapshot()).attempt.id, firstAttempt);
     assert.equal(counts().attempts, beforeReselect.attempts);
     await screen("04-runtime-conflict");
@@ -726,7 +726,7 @@ async function smoke() {
       // hits the synthetic-profile firewall (deliberately checked after the
       // binding comparison in admit_runtime). Both are exact refusals; anything
       // else fails.
-      const raceBindingConflict = /^attempt \S+ is already bound to a different Runtime binding; the existing Runtime is kept and the request is refused$/;
+      const raceBindingConflict = /^attempt \S+ is already bound to a different agent binding; the existing agent is kept and the request is refused$/;
       const raceFirewall = /^adapter capability unsupported: test profile permits only the in-process Scenario Runtime; native provider codex is refused$/;
       assert.ok(raceBindingConflict.test(race.codex.error) || raceFirewall.test(race.codex.error), `cross-provider race refusal is exact: ${race.codex.error}`);
       assert.deepEqual(counts(), { ...beforeRace, attempts: beforeRace.attempts + 1 }, "the race writes only the Scenario replacement Attempt");

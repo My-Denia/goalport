@@ -1091,7 +1091,7 @@ fn project_turn(
                 can_stop: facts.stoppable,
                 can_send: false,
                 reason: (!facts.stoppable).then(|| {
-                    "the Runtime has not confirmed the turn start; Stop is not offered \
+                    "the agent has not confirmed the turn start; Stop is not offered \
                      without a proven interrupt target"
                         .to_owned()
                 }),
@@ -1114,7 +1114,7 @@ fn project_turn(
             can_stop: false,
             can_send: false,
             reason: Some(
-                "the Runtime has not confirmed the turn start; Stop is not offered \
+                "the agent has not confirmed the turn start; Stop is not offered \
                  without a proven interrupt target"
                     .into(),
             ),

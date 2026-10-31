@@ -183,7 +183,7 @@ fn stream_eof_mid_turn_marks_failed() {
     let failed = first(&events, AgentEventType::TurnFailed);
     assert_eq!(
         failed.payload["text"],
-        "native Runtime closed the ACP stream"
+        "native agent closed the ACP stream"
     );
     assert!(!has(&events, AgentEventType::TurnCompleted));
     assert!(!has(&events, AgentEventType::SessionCreated));
@@ -939,7 +939,7 @@ fn exited_child_is_not_reported_live() {
     });
     assert_eq!(
         first(&events, AgentEventType::TurnFailed).payload["text"],
-        "native Runtime closed the ACP stream"
+        "native agent closed the ACP stream"
     );
 
     assert!(
@@ -960,7 +960,7 @@ fn exited_child_is_not_reported_live() {
         )
         .expect_err("a closed stream must refuse the next prompt");
     assert!(
-        refused.to_string().contains("native Runtime closed the ACP stream"),
+        refused.to_string().contains("native agent closed the ACP stream"),
         "unexpected refusal: {refused}"
     );
     assert!(!has(&events, AgentEventType::SessionCreated));
@@ -1095,7 +1095,7 @@ fn child_exit_while_permission_pending_marks_failed_and_releases_reader() {
     let failed = first(&events, AgentEventType::TurnFailed);
     assert_eq!(
         failed.payload["text"],
-        "native Runtime closed the ACP stream"
+        "native agent closed the ACP stream"
     );
     assert_eq!(
         events
@@ -1167,7 +1167,7 @@ fn interrupt_releases_reader_even_if_pipe_is_broken() {
     assert_eq!(response.payload["option_kind"], "cancelled");
     assert_eq!(
         first(&events, AgentEventType::TurnFailed).payload["text"],
-        "native Runtime closed the ACP stream"
+        "native agent closed the ACP stream"
     );
     assert!(manager.native_pid("attempt-broken-pipe").is_none());
 }

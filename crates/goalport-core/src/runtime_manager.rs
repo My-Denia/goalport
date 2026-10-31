@@ -3861,7 +3861,7 @@ impl GrokAcpProcess {
         request.validate()?;
         if self.stream_closed {
             return Err(AdapterError::Connection(
-                "native Runtime closed the ACP stream".into(),
+                "native agent closed the ACP stream".into(),
             ));
         }
         let Some(session_id) = self.session_id.clone() else {
@@ -4025,7 +4025,7 @@ impl GrokAcpProcess {
                         "option_id": "",
                         "allow": false,
                         "cancelled": true,
-                        "reason": "native Runtime closed the ACP stream while the permission was pending"
+                        "reason": "native agent closed the ACP stream while the permission was pending"
                     }),
                     None,
                 ) {
@@ -4041,7 +4041,7 @@ impl GrokAcpProcess {
                     AgentEventType::TurnFailed,
                     json!({
                         "status": "failed",
-                        "text": "native Runtime closed the ACP stream"
+                        "text": "native agent closed the ACP stream"
                     }),
                     None,
                 ) {
@@ -4718,7 +4718,7 @@ impl GrokAcpProcess {
                 Ok(NativeMessage::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.stream_closed = true;
                     return Err(AdapterError::Connection(
-                        "native Runtime closed the ACP stream".into(),
+                        "native agent closed the ACP stream".into(),
                     ));
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -5617,7 +5617,7 @@ impl ClaudeStreamProcess {
         request.validate()?;
         if self.stream_closed {
             return Err(AdapterError::Connection(
-                "native Runtime closed the Claude stream".into(),
+                "native agent closed the Claude stream".into(),
             ));
         }
         if !self.initialized {
@@ -6217,7 +6217,7 @@ impl ClaudeStreamProcess {
                     "safe_process_stop": false,
                     "unsupported": true,
                     "stopKind": "unsupported",
-                    "text": "Claude stop unsupported: native Runtime closed the stream without interrupt confirmation"
+                    "text": "Claude stop unsupported: native agent closed the stream without interrupt confirmation"
                 }));
                 if let Some(event) =
                     self.envelope(attempt_id, AgentEventType::TurnFailed, payload, None)
@@ -8088,7 +8088,7 @@ fn waited_pid_was_reused(
                         }
                     }
                     return Err(AdapterError::Connection(
-                        "native Runtime closed the Claude stream".into(),
+                        "native agent closed the Claude stream".into(),
                     ));
                 }
                 Err(RecvTimeoutError::Timeout) => {
