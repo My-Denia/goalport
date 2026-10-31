@@ -26,7 +26,7 @@ use crate::{
     },
     provider_failure::ProviderFailure,
     runtime_manager::{
-        CodexTransportKind, RuntimeBinding, configured_codex_transport,
+        CodexTransportKind, RuntimeBinding, configured_codex_transport, native_agent_installed,
         RegistrationWithdrawal, RuntimeManager, StartupControl, TransportClosure, TransportState,
     },
     store::{
@@ -1903,13 +1903,21 @@ impl UiController {
             }
         }
 
+        let missing_folder = request.message_type == "start_conversation"
+            && reservation.is_null()
+            && message.starts_with(WORKSPACE_MISSING);
+        if missing_folder {
+            delivery_state = "FAILED".into();
+            native_dispatch_state = "NOT_STARTED".into();
+            retry_mode = "NEW_REQUEST".into();
+        }
         let snapshot = self.snapshot(None)?;
         Ok(json!({
             "requestId": request.request_id,
             "accepted": false,
             "snapshot": snapshot,
             "rejection": {
-                "code": rejection_code(request, &delivery_state, &native_dispatch_state),
+                "code": if missing_folder { "workspace-missing" } else { rejection_code(request, &delivery_state, &native_dispatch_state) },
                 "message": message,
                 "deliveryState": delivery_state,
                 "nativeDispatchState": native_dispatch_state,
@@ -7701,6 +7709,16 @@ fn stop_responsibility_to_ui(row: StopResponsibility) -> UiStopResponsibility {
 }
 
 fn runtime_profiles() -> Vec<UiRuntime> {
+    let mut profiles = known_runtime_profiles();
+    for profile in profiles.iter_mut().filter(|profile| profile.id != "scenario") {
+        if !native_agent_installed(&profile.id) {
+            profile.support = "unsupported".into();
+        }
+    }
+    profiles
+}
+
+fn known_runtime_profiles() -> Vec<UiRuntime> {
     vec![
         UiRuntime {
             id: "codex".into(),
@@ -7762,7 +7780,7 @@ fn runtime_profiles() -> Vec<UiRuntime> {
         UiRuntime {
             id: "scenario".into(),
             native_session_transport: None,
-            name: "Scenario Runtime".into(),
+            name: "Demo run".into(),
             version: "scenario-1".into(),
             support: "supported".into(),
             mode: "Contract test".into(),
@@ -7883,12 +7901,15 @@ fn payload_text_default(value: &Value, key: &str, fallback: &str) -> String {
     payload_text(value, key).unwrap_or_else(|_| fallback.to_owned())
 }
 
+/// Checked before a conversation request exists, so this refusal means nothing happened.
+const WORKSPACE_MISSING: &str = "workspaceRoot must name an existing directory";
+
 fn canonical_existing_workspace(value: &str) -> Result<String, String> {
     let path = PathBuf::from(value);
     let metadata = fs::metadata(&path)
-        .map_err(|error| format!("workspaceRoot must name an existing directory: {error}"))?;
+        .map_err(|error| format!("{WORKSPACE_MISSING}: {error}"))?;
     if !metadata.is_dir() {
-        return Err("workspaceRoot must name an existing directory".into());
+        return Err(WORKSPACE_MISSING.into());
     }
     let canonical = fs::canonicalize(&path)
         .map_err(|error| format!("workspaceRoot could not be canonicalized: {error}"))?;

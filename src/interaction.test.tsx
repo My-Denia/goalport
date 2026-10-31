@@ -297,11 +297,11 @@ describe("empty-state and goal creation (HARD-02/03)", () => {
     try {
       const empty = { ...DEMO_SNAPSHOT, campaigns: [], activeCampaignId: "", productConversation: null };
       mountElectron(empty);
-      expect(await screen.findByText("No goals yet. Start one from the top bar.")).toBeTruthy();
+      expect(await screen.findByText("No goals yet.")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: /collapse navigation/i }));
       expect(document.querySelector(".nav-empty")).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: /expand navigation/i }));
-      expect(screen.getByText("No goals yet. Start one from the top bar.")).toBeTruthy();
+      expect(screen.getByText("No goals yet.")).toBeTruthy();
     } finally {
       Object.defineProperty(window, "innerWidth", { configurable: true, value: previousWidth });
     }
@@ -3397,7 +3397,7 @@ describe("one in-window repair", () => {
       window.goalportCore!.backgroundStatus = async () => ({ ...liveJob, workspacePath: "/tmp/goalport-execution-fixture-ZOalYm" });
       render(<App />);
       await screen.findByRole("region", { name: "Background goal" });
-      expect(screen.queryByText("No goals yet. Start one from the top bar.")).toBeNull();
+      expect(screen.queryByText("No goals yet.")).toBeNull();
       const workspace = document.querySelector(".titlebar-workspace");
       expect(workspace?.textContent).toBe("goalport-execution-fixture-ZOalYm");
       expect(workspace?.getAttribute("title")).toBe("/tmp/goalport-execution-fixture-ZOalYm");

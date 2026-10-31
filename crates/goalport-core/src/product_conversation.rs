@@ -854,7 +854,7 @@ fn provider_display_name(provider: &str) -> String {
         "codex" => "Codex".into(),
         "claude" => "Claude Code".into(),
         "grok" => "Grok".into(),
-        "scenario" => "Scenario Runtime".into(),
+        "scenario" => "Demo run".into(),
         other => other.to_owned(),
     }
 }

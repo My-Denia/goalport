@@ -27,7 +27,7 @@ export function CloseChoiceDialog({ provider, active, stopResponsibility, onCont
             : isClaude
               ? "Continue closes this window and leaves your task running. Stop asks Claude to interrupt the current turn; tools already started may keep running."
               : isScenario
-                ? "This is a synthetic example. Continue closes the window; Stop ends the example before closing."
+                ? "This is a demo. Continue closes the window; Stop ends the demo before closing."
                 : "Continue closes this window and leaves your task running. Stop interrupts the current turn before closing."}
         </p>
         {stopResponsibility ? (
@@ -38,7 +38,7 @@ export function CloseChoiceDialog({ provider, active, stopResponsibility, onCont
         ) : null}
         <div className="dialog-actions">
           <button className="button button-quiet" type="button" onClick={onKeepOpen}>Keep window open</button>
-          <button className="button button-danger" type="button" onClick={onStop}>{isClaude ? "Stop Claude turn and quit" : isScenario ? "Stop synthetic Scenario and quit" : "Stop background work and quit"}</button>
+          <button className="button button-danger" type="button" onClick={onStop}>{isClaude ? "Stop Claude turn and quit" : isScenario ? "Stop the demo and quit" : "Stop background work and quit"}</button>
           <button className="button button-primary" type="button" onClick={onContinue}>Continue in background</button>
         </div>
     </GoalDialog>

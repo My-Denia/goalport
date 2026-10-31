@@ -212,8 +212,7 @@ describe("GoalPort preview", () => {
     expect(within(inbox).getByText(/Workspace write permission/i)).toBeTruthy();
     fireEvent.click(within(inbox).getByRole("button", { name: /decline permission/i }));
 
-    expect(screen.getAllByText(/Permission denied/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/No write action was sent/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/agent wasn.t allowed/i).length).toBeGreaterThan(0);
   });
 
   it("sends a one-time allow with the selected Decision identity", () => {
@@ -223,7 +222,7 @@ describe("GoalPort preview", () => {
     fireEvent.click(within(inbox).getByRole("button", { name: /allow once/i }));
 
     expect(screen.getAllByText(/Permission allowed once/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/Permission denied/i)).toBeNull();
+    expect(screen.queryByText(/agent wasn.t allowed/i)).toBeNull();
   });
 
   it("shows the reconnect boundary and keeps the no-resend promise explicit", async () => {

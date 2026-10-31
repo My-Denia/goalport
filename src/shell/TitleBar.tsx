@@ -2,7 +2,7 @@ import { Menu } from "@base-ui/react/menu";
 import { shortGoalTitle } from "../conversation/shortGoalTitle";
 import type { AppInfo } from "../ipc";
 import { connectionLabel } from "../lib/display";
-import type { CoreSnapshot } from "../types";
+import { NO_PROJECT_NAME, type CoreSnapshot } from "../types";
 import { GoalLayer } from "../ui/GoalLayer";
 
 interface TitleBarProps {
@@ -64,10 +64,10 @@ export function TitleBar({
           </button>
           <div className="titlebar-identity">
             <span className="titlebar-app" title={appInfo ? `GoalPort ${appInfo.version}` : "GoalPort"}>GoalPort</span>
-            <span className="titlebar-sep" aria-hidden="true">/</span>
+            {!workspaceLabel && snapshot.project.name === NO_PROJECT_NAME ? null : <><span className="titlebar-sep" aria-hidden="true">/</span>
             <span className="titlebar-workspace" title={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name} aria-label={workspaceTitle || snapshot.project.workspaceRoot || snapshot.project.name || "No workspace"}>
-              {workspaceLabel || snapshot.project.name || "No workspace"}
-            </span>
+              {workspaceLabel || snapshot.project.name || "No project"}
+            </span></>}
             {campaignTitle ? (
               <span className="titlebar-campaign-wrap">
                 <span className="titlebar-sep" aria-hidden="true">/</span>

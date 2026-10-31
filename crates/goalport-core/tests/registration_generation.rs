@@ -3709,3 +3709,21 @@ fn pr14_matching_turn_start_error_is_one_durable_failure_across_reopen() {
             .any(|item| item["kind"] == "actionable-error")
     );
 }
+
+#[test]
+fn a_missing_folder_refuses_cleanly_with_nothing_held() {
+    let _lock = lock();
+    let server = CoreServer::new(Store::memory().unwrap());
+    let refused = call(
+        &server,
+        "missing-folder-request",
+        "start_conversation",
+        json!({ "workspaceRoot": "/goalport/no/such/folder", "provider": "scenario", "message": "hello" }),
+    );
+    let rejection = &refused["payload"]["rejection"];
+    assert_eq!(rejection["code"], "workspace-missing");
+    assert_eq!(rejection["retryMode"], "NEW_REQUEST");
+    assert_eq!(rejection["deliveryState"], "FAILED");
+    assert_eq!(rejection["nativeDispatchState"], "NOT_STARTED");
+    assert!(rejection["reservation"].is_null());
+}

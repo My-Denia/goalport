@@ -45,7 +45,7 @@ import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
 import { PendingApprovals } from "./panels/PendingApprovals";
 import { SinceLastVisit } from "./conversation/SinceLastVisit";
 import { BackgroundAttention } from "./panels/BackgroundAttention";
-import { TurnResults } from "./panels/TurnResults";
+import { TurnResults, turnResultsWorthShowing } from "./panels/TurnResults";
 import { StatusBanners, type ActiveNotice } from "./panels/StatusBanners";
 import { BlockedWorkPanel } from "./panels/BlockedWorkPanel";
 import { SessionDetails } from "./panels/SessionDetails";
@@ -117,6 +117,9 @@ function commandFailure(next: CoreSnapshot, messageType: string, priorIntent?: S
         ...(outcome.technical ? { technical: outcome.technical } : {})
       };
     }
+    if (outcome.kind === "refused" && outcome.rejection?.code === "workspace-missing") {
+      return { sentence: "That folder doesn't exist. Check the path or use Browse.", technical: outcome.error };
+    }
     // The one known competing-job guard is a definite pre-dispatch refusal:
     // its own human sentence is the message, not a generic Core failure.
     if (outcome.kind === "refused" && outcome.rejection?.code === "background-job-outstanding") {
@@ -126,11 +129,12 @@ function commandFailure(next: CoreSnapshot, messageType: string, priorIntent?: S
       };
     }
     const technical = outcome.error ?? (outcome.kind === "refused" ? "request not accepted" : "transport unavailable");
+    const agentMissing = /program not found/i.test(technical);
     const runtimeDidNotStart = /not a valid Windows application|unable to start|os error 193/i.test(technical);
     return {
       sentence: outcome.kind === "refused"
         ? (runtimeDidNotStart
-          ? "That agent didn't start. Nothing was sent."
+          ? (agentMissing ? "That agent isn't installed on this computer. Choose another one; nothing was sent." : "That agent didn't start. Nothing was sent.")
           : "GoalPort could not complete that action.")
         : "GoalPort could not reach its background service for that action.",
       technical
@@ -1757,7 +1761,6 @@ function App() {
     try {
       if (client.mode === "electron") {
         rememberGoalDefaults({ workspace, provider });
-        rememberRecentFolder(workspace);
       }
       const next = await client.startConversation(workspace, provider, message, intent.requestId, client.mode === "linux-core" ? true : undefined);
       // New goal replaced this send. Publishing its campaign first would close
@@ -1765,6 +1768,7 @@ function App() {
       if (epoch !== draftEpoch.current || draftGoalRef.current?.requestId !== intent.requestId) return;
       const outcome = next.commandOutcome;
       const matches = !outcome || (outcome.requestId === intent.requestId && outcome.messageType === intent.method);
+      if (client.mode === "electron" && matches && outcome?.kind !== "refused") rememberRecentFolder(workspace);
       if (matches) setSnapshot(next);
       const failure = !matches ? { sentence: "The earlier send is still not confirmed. Your original request is kept." }
         : client.mode === "browser-preview" ? null : commandFailure(next, "start_conversation", priorIntent);
@@ -2333,8 +2337,9 @@ function App() {
 
   function startingAgent(): string {
     const remembered = readGoalDefaults();
-    if (remembered.known) return snapshot.runtimes.some(runtime => runtime.id === remembered.provider) ? remembered.provider : "";
-    return snapshot.runtimes.some(runtime => runtime.id === "codex" && runtime.support !== "unsupported") ? "codex" : "";
+    const usable = (id: string) => snapshot.runtimes.some(runtime => runtime.id === id && runtime.support !== "unsupported");
+    if (remembered.known && (remembered.provider === "" || usable(remembered.provider))) return remembered.provider;
+    return ["codex", "claude", "grok"].find(usable) ?? "";
   }
 
   function openDesktopGoalDraft() {
@@ -2503,7 +2508,7 @@ function App() {
     }
     setActiveNotice(allow
       ? { sentence: forSession ? "Allowed. It won't ask again for the same action this session." : "Permission allowed once." }
-      : { sentence: "Permission denied. No write action was sent and automatic retry is disabled." });
+      : { sentence: "Declined. The agent wasn't allowed to do that." });
     if (client.notify) {
       void client.notify("GoalPort decision", allow ? (forSession ? "Allowed for the same action this session." : "Permission allowed once.") : "Permission denied.");
     }
@@ -3226,6 +3231,7 @@ function App() {
   const heldNow = heldPanel?.writeResponsibility === "held";
   const taskState = headlineState(product, snapshot, closingSession ? "closing-session" : undefined);
   const title = conversationTitle(snapshot);
+  const resultsToShow = turnResultsWorthShowing(snapshot.turnResults);
   // The live overlay exists only for the round that just ran in this window
   // and only while its request id is the one selected. A reloaded or
   // historical record never matches, so it renders without any of it.
@@ -3840,6 +3846,7 @@ function App() {
                     keepRunningHint={client.mode === "linux-core" && linuxDiscoverChecked && !backgroundConsent && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) && !linuxHarnessSentence && !linuxConsentMissing ? "Keep working after closing must be explicitly selected." : null}
                     onBrowse={() => { void chooseWorkspace(); }}
                     onChange={(value) => {
+                      setDraftError(null);
                       if (client.mode === "linux-core" && value.provider === "codex") { openNativeDraft(value); return; }
                       if (client.mode === "linux-core") {
                         if (draftGoal?.workspace !== value.workspace) { linuxWorkspaceExpansion.current = null; setLinuxPiSelection(undefined); setLinuxPiSnapshot(null); setLinuxDiscoverChecked(false); }
@@ -4052,12 +4059,6 @@ function App() {
               </div>
 
               <SinceLastVisit campaignId={snapshot.activeCampaignId} product={product} results={snapshot.turnResults} />
-              {client.mode === "linux-core" || client.mode === "electron" ? ((snapshot.turnResults?.length || snapshot.bounds?.omittedCounts.turnResults) ? (
-                <details className="native-turn-results">
-                  <summary>Files changed</summary>
-                  <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
-                </details>
-              ) : null) : <TurnResults results={snapshot.turnResults} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />}
 
               <BackgroundAttention
                 snapshot={snapshot}
@@ -4089,6 +4090,13 @@ function App() {
                   </button>
                 ) : null}
               </div>
+
+              {(client.mode === "linux-core" || client.mode === "electron") ? ((resultsToShow.length || snapshot.bounds?.omittedCounts.turnResults) ? (
+                <details className="native-turn-results">
+                  <summary>Files changed</summary>
+                  <TurnResults results={resultsToShow} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />
+                </details>
+              ) : null) : <TurnResults results={resultsToShow} omittedTurns={snapshot.bounds?.omittedCounts.turnResults ?? 0} />}
 
               <PendingApprovals
                 snapshot={snapshot}

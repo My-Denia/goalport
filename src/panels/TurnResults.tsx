@@ -17,6 +17,12 @@ const REPLY_LABEL: Record<TurnResult["replyState"], string> = {
  * answers the other question: which files, and what ran to get there.
  * A reply that mentions tests is not an exit code; the commands stay reachable.
  */
+/** A finished turn that changed nothing and ran nothing has no result to open. */
+export function turnResultsWorthShowing(results: TurnResultsProps["results"]) {
+  return (results ?? []).filter((result) => result.replyState !== "completed" || result.commands.length > 0 || result.before.length > 0
+    || result.filesTruncated || result.during.length > 0 || result.unattributed.length > 0);
+}
+
 export function TurnResults({ results, omittedTurns = 0 }: TurnResultsProps) {
   if ((!results || results.length === 0) && omittedTurns === 0) return null;
   const ordered = [...(results ?? [])].reverse();

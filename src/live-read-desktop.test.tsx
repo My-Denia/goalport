@@ -42,7 +42,7 @@ function fixture(child = false) {
 it("a running workspace check stays beside its goal and never takes over the desktop view", async () => {
   const f = fixture();
   const target = { campaignId: "campaign-desktop", attemptId: "attempt-desktop", turnRequestId: "turn-desktop" };
-  const snapshot = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: target.campaignId, attempt: { ...DEMO_SNAPSHOT.attempt, id: target.attemptId, provider: "codex", state: "waiting" }, turnResults: [{ requestId: target.turnRequestId, replyState: "completed", baselineRecorded: true, before: [], during: [], unattributed: [], commands: [] }] };
+  const snapshot = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: target.campaignId, attempt: { ...DEMO_SNAPSHOT.attempt, id: target.attemptId, provider: "codex", state: "waiting" }, turnResults: [{ requestId: target.turnRequestId, replyState: "completed", baselineRecorded: true, filesTruncated: true, before: [], during: [], unattributed: [], commands: [] }] };
   const job = { ...f.terminal, jobId: "check-job", requestId: "check-request", recordKind: "native-workspace-check", nativeCheckTarget: target, state: "running", active: true, live: true, outcome: null, followUpMode: undefined, progress: { activity: "Pi is checking" } };
   const nativeCheck = vi.fn(async () => ({ ok: true, payload: { checks: [] } }));
   window.goalportCore = { ...window.goalportCore, snapshot: async () => snapshot, startCore: async () => snapshot, backgroundStatus: async () => job, nativeCheck } as never;

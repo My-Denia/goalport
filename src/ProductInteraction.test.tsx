@@ -286,6 +286,7 @@ describe('conversation-first product boundary', () => {
   it('offers a way back after the only draft is discarded', async () => {
     const fresh = { ...EMPTY_SNAPSHOT, connection: 'connected' as const, runtimes: DEMO_SNAPSHOT.runtimes };
     mount(fresh);
+    fireEvent.change(await screen.findByRole('textbox', { name: /message composer/i }), { target: { value: 'not this one' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Discard draft' }));
     const empty = await screen.findByRole('region', { name: 'No goal yet' });
     expect(within(empty).getByRole('heading', { name: 'No goal open' })).toBeTruthy();

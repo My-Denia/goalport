@@ -792,7 +792,7 @@ async function smoke() {
           return ui.attemptId === replacement
             && core.attempt?.id === replacement
             && core.productConversation?.turn.canSend === true
-            && ui.runtimeLabel === "Scenario Runtime"
+            && ui.runtimeLabel === "Demo run"
             && ui.sendLabel === "Send message"
             && ui.draftValue === raceNextMessage
             && ui.sendDisabled === false

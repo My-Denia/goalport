@@ -47,7 +47,7 @@ async function chooseNative() {
 
 it("keeps native chat primary by folding saved workspace results without discarding them", async () => {
   window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/goals/campaign-native");
-  server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,before:[],during:[],unattributed:[],commands:[]}]});
+  server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,filesTruncated:true,before:[],during:[],unattributed:[],commands:[]}]});
   render(<App />);
   const summary = await screen.findByText("Files changed");
   const disclosure = summary.closest("details")!;
@@ -55,7 +55,7 @@ it("keeps native chat primary by folding saved workspace results without discard
   expect(disclosure.querySelector('[aria-label="Results"]')).not.toBeNull();
   expect(screen.getByRole("textbox", {name:"Message composer"})).toBeTruthy();
   fireEvent.click(summary); expect(disclosure.open).toBe(true);
-  expect(screen.getByText("No files changed.")).toBeTruthy();
+  expect(screen.getByText("Some file changes are not listed.")).toBeTruthy();
 });
 
 it('keeps one native composer, draft node/focus and IME/Enter behavior through the optional check dialog',async()=>{
