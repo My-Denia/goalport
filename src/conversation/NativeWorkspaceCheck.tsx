@@ -2,7 +2,7 @@ import {useEffect,useRef,useState} from 'react';
 import {renderMarkdownBody} from '../lib/markdown';
 import {normalizePiCapacity, selectedPiEligible, type PiCapacitySelection} from '../../electron/pi-capacity.mjs';
 import {GoalLayer} from '../ui/GoalLayer';
-import {BackgroundCoordinationStatus,PiReview} from './CoordinationStatus';
+import {BackgroundCoordinationStatus,PiReview,unfinishedReviewLine} from './CoordinationStatus';
 import {parseAllowanceStatus} from '../coordination/allowanceStatus';
 import {parseNativeCheckMaterial,parseNativeCheckTarget,type NativeCheckMaterial,type NativeCheckTarget} from '../coordination/nativeWorkspaceCheck';
 import type {BackgroundStatus} from '../coordination/backgroundStatus';
@@ -16,7 +16,7 @@ async function ipc(messageType:string,payload:unknown) {
   if((response && !response.ok) || body?.ok!==true) throw new CheckError(body?.error || 'Workspace check is unavailable.',body?.previewAgain===true);
   return body.payload;
 }
-interface SavedCheck {requestId:string;nativeCheckTarget:NativeCheckTarget;nativeCheckMaterial:NativeCheckMaterial;nativeAssociation:boolean;auditText?:string;savedAt?:string;statusLabel?:string}
+interface SavedCheck {requestId:string;nativeCheckTarget:NativeCheckTarget;nativeCheckMaterial:NativeCheckMaterial;nativeAssociation:boolean;stopReason?:string|null;auditText?:string;savedAt?:string;statusLabel?:string}
 interface PendingCheck {requestId:string;target:NativeCheckTarget;piCapacity:PiCapacitySelection}
 const PENDING_KEY='goalport.nativeCheckCallerIntent';
 // Caller identity only, like the existing send intent. Never material, Ready,
@@ -112,6 +112,6 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     {owns && job && !earlier?<BackgroundCoordinationStatus job={job} onStopAllowing={()=>{void stop();}} onLeave={()=>{void leave();}} onAskCodex={onAskCodex}/>:null}
     {(owns&&holding)||(!eligible&&!pending)?null:<button type="button" className="button button-small button-outline" disabled={busy||(!pending&&(!target||!eligible||holding))} onClick={()=>{setOpen(true);if(!pending){request.current='native-check-'+crypto.randomUUID();void prepare();}}}>{starting?'Sending to Pi…':pending?'Check on your earlier request':'Ask Pi to review'}</button>}
     {!open && error?<CheckMessage text={error} pending={Boolean(pending)}/>:null}
-    {saved.filter(s=>earlier||s.requestId!==job?.requestId).map(s=><details key={s.requestId} open={s.nativeCheckTarget.turnRequestId===target?.turnRequestId}><summary>Pi's review · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · earlier turn':''}</summary><PiReview text={s.auditText ?? ''} id={s.requestId}/><details><summary>What Pi was sent</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}
+    {saved.filter(s=>earlier||s.requestId!==job?.requestId).map(s=><details key={s.requestId} open={s.nativeCheckTarget.turnRequestId===target?.turnRequestId}><summary>{s.auditText?"Pi's review":"Pi's review didn't finish"} · {s.savedAt?new Date(s.savedAt).toLocaleString():'Saved'}{s.nativeCheckTarget.turnRequestId!==target?.turnRequestId?' · earlier turn':''}</summary>{s.auditText?<PiReview text={s.auditText} id={s.requestId}/>:<><p role="status">{unfinishedReviewLine(s.stopReason)}</p>{s.stopReason?<details><summary>Technical details</summary><p>{s.stopReason}</p></details>:null}</>}<details><summary>What Pi was sent</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{s.nativeCheckMaterial.exactPrompt}</pre></details></details>)}
   </section>;
 }

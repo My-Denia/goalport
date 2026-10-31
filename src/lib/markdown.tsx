@@ -55,6 +55,9 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
             {label}
           </a>
         );
+      } else if (linkMatch && /^(\/|[A-Za-z]:[\\/])/.test(linkMatch[2] as string)) {
+        // Agents cite local files this way. Show the name; a page cannot open the path.
+        nodes.push(<span key={key} title={linkMatch[2]}>{label}</span>);
       } else {
         nodes.push(token);
       }

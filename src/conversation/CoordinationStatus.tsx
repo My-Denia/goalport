@@ -6,6 +6,7 @@ import type { EnvironmentBlockedInfo } from "../coordination/coordinateSession";
 import type { CoordinationRoundFact, RoundEvent } from "../coordination/savedPlan";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { renderMarkdownBody } from "../lib/markdown";
+import { classifyProviderError } from "../coordination/providerError";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
@@ -468,6 +469,12 @@ export function CoordinationProgress({ failures, activity, repair, planRevision,
 
 /** The user returns to the SAME live job, not a draft or saved permission. */
 /** The answer first; the working behind it stays one click away. */
+export function unfinishedReviewLine(reason?: string | null): string {
+  return reason && classifyProviderError(reason) === "authentication"
+    ? "Pi's sign-in or API key was rejected. Fix it in Pi, then ask for another review. Your files weren't changed."
+    : "Your files weren't changed. You can ask for another review.";
+}
+
 export function PiReview({ text, id }: { text: string; id: string }) {
   const body = text.trim();
   const split = body.search(/\n\s*\n/);
@@ -516,12 +523,13 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
     const running = job.active && job.live && !job.revoked;
     const review = report?.auditText;
     const unfinished = !review && !running && !job.revoked;
+    const unfinishedDetail = job.outcome?.error || (unfinished ? report?.stopReason : null);
     return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>
       <h3>{review ? "Pi's review" : running ? `Pi is reviewing Codex's changes · ${elapsed}` : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
       {running ? <p role="status">Keep working or close this window. The review will be here when it's done.</p> : null}
-      {unfinished ? <p role="status">Your files weren't changed. You can ask for another review.</p> : null}
+      {unfinished ? <p role="status">{unfinishedReviewLine(unfinishedDetail)}</p> : null}
       {review ? <PiReview text={review} id={job.jobId} /> : null}
-      {job.outcome?.error ? <details><summary>Technical details</summary><p>{job.outcome.error}</p></details> : null}
+      {unfinishedDetail ? <details><summary>Technical details</summary><p>{unfinishedDetail}</p></details> : null}
       {job.nativeCheckMaterial ? <details><summary>What Pi was sent · {savedLabel(job.nativeCheckMaterial.capturedAt)}</summary><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:320,overflow:'auto'}}>{job.nativeCheckMaterial.exactPrompt}</pre></details> : null}
       <div className="native-check-actions">
         {running ? <button type="button" className="button button-small button-outline" onClick={onStopAllowing}>Stop review</button> : null}

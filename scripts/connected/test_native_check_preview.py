@@ -124,6 +124,7 @@ class NativePreviewTest(unittest.TestCase):
             admission = {'requestId': 'check', 'workspacePath': '/fixture', 'goal': 'Ordinary goal', 'allowedInstances': ['pi'], 'maxTurns': 2, 'writeAuthorization': None, 'backgroundConsent': True, 'priorPlan': None, 'priorReview': None, 'avoidInstances': [], 'piCapacity': check['piCapacity'], 'nativeCheckTarget': target, 'nativeCheckMaterial': material}
             (job / 'admission.json').write_text(json.dumps({'schema': 'goalport.coordination-job-admission.v1', 'jobId': job.name, 'createdAt': '2026-01-01T00:00:00Z', 'input': admission}), encoding='utf-8')
             self.assertTrue(wb.latest_coordination_record(root, 'check')['record']['nativeAssociation'])
+            self.assertEqual(wb.native_check_record(root, check)['stopReason'], 'returned')
             records.write_text(json.dumps([check, check, ordinary]), encoding='utf-8')
             self.assertFalse(wb.native_check_record(root, check)['nativeAssociation'])
             records.write_text(json.dumps([check, ordinary]), encoding='utf-8')
