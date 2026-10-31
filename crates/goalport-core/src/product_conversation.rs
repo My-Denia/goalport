@@ -582,7 +582,14 @@ fn activity_sentence(tool: &str, status: &str, payload: Option<&Value>) -> Strin
         if shown.len() < whole.len() {
             shown.push('…');
         }
-        return if failed { format!("Failed: {shown}") } else { format!("Ran {shown}") };
+        let unasked = payload.and_then(|value| value.get("changedWithoutAsking")).and_then(Value::as_bool) == Some(true);
+        return if failed {
+            format!("Failed: {shown}")
+        } else if unasked {
+            format!("Ran {shown} without asking and changed files")
+        } else {
+            format!("Ran {shown}")
+        };
     }
     let mut paths: Vec<&str> = payload
         .and_then(|value| value.get("paths"))
@@ -1259,6 +1266,7 @@ mod activity_sentence_tests {
         let wrapped = r#""C:\\Users\\me\\pwsh.exe" -Command "git status --short""#;
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": wrapped}))), "Ran git status --short");
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "/bin/bash -lc 'npm test'"}))), "Ran npm test");
+        assert_eq!(activity_sentence("Bash", "completed", Some(&json!({"command": "pnpm build", "changedWithoutAsking": true}))), "Ran pnpm build without asking and changed files");
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "git status"}))), "Ran git status");
         assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["C:\\Users\\me\\repo\\GUIDE.md"]}))), "Changed GUIDE.md");
         assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["docs/guide.md"]}))), "Changed docs/guide.md");

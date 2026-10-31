@@ -6837,13 +6837,14 @@ impl ClaudeStreamProcess {
                         self.sequence += 1;
                         produced = self.completed_tool_result(attempt_id, &tool_use_id, block);
                     }
-                    UnrequestedBashEffect::FailOpen => {
-                        self.note_fail_open(
-                            true,
-                            "mutating Claude tool ran without a host Decision",
-                        );
+                    UnrequestedBashEffect::ChangedWithoutAsking => {
+                        // Claude's own rules allowed this command, so the reply stands; the step
+                        // says so plainly instead of the whole turn reading as a failure.
                         self.sequence += 1;
-                        produced = self.fail_open_envelope(attempt_id);
+                        produced = self.completed_tool_result(attempt_id, &tool_use_id, block).map(|mut envelope| {
+                            envelope.payload["changedWithoutAsking"] = json!(true);
+                            envelope
+                        });
                     }
                 }
             } else {
@@ -6993,7 +6994,7 @@ impl ClaudeStreamProcess {
         // A folder without a fingerprint (no git) says nothing about the command: only an observed
         // change is evidence, and a finished reply must not read as a failure for lack of one.
         match self.fingerprint_view(sample) {
-            FingerprintView::Changed => UnrequestedBashEffect::FailOpen,
+            FingerprintView::Changed => UnrequestedBashEffect::ChangedWithoutAsking,
             FingerprintView::Equal | FingerprintView::Unknown | FingerprintView::Unavailable => {
                 UnrequestedBashEffect::Complete
             }
@@ -8205,7 +8206,7 @@ enum DeniedEffect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UnrequestedBashEffect {
     Complete,
-    FailOpen,
+    ChangedWithoutAsking,
 }
 
 fn observation_from_input(input: &Value) -> ToolObservation {
