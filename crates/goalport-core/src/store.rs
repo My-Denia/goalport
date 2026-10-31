@@ -2413,6 +2413,26 @@ impl Store {
         cancellation_confirmed_on(&connection, attempt_id)
     }
 
+    /// Every conversation request recorded for one campaign.
+    pub fn campaign_conversation_requests(
+        &self,
+        campaign_id: &str,
+    ) -> Result<Vec<ConversationRequestRow>, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        let ids = {
+            let mut statement = connection
+                .prepare("SELECT request_id FROM conversation_requests WHERE campaign_id=?1")?;
+            statement
+                .query_map(params![campaign_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            rows.extend(conversation_request_on(&connection, &id)?);
+        }
+        Ok(rows)
+    }
+
     pub fn conversation_request(
         &self,
         request_id: &str,

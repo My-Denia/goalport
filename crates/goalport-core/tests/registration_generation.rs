@@ -3429,6 +3429,7 @@ fn pr14_first_send_same_id_rearms_after_restart_and_dispatches_once() {
     let first_error = error_of(&first);
     assert!(first_error.contains("withdrawn"), "{first_error}");
     let reservation = &first["payload"]["rejection"]["reservation"];
+    assert_eq!(first["payload"]["snapshot"]["campaigns"], json!([]), "a goal that never started stays out of the list");
     assert_eq!(first["payload"]["rejection"]["retryMode"], "SAME_REQUEST");
     assert_eq!(reservation["kind"], "first-send");
     assert_eq!(reservation["messageReserved"], true);

@@ -949,6 +949,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .button-danger { border-color: rgba(235, 123, 125, 0.32); background: var(--red-soft); color: #f5b0b1; }
 .button-quiet { color: var(--ink-soft); }
 .decision-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+.decision-scope-note { margin: 8px 0 0; color: var(--ink-muted); font-size: 12px; }
 
 /* ---------- Dialogs ---------- */
 
