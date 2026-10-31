@@ -60,7 +60,9 @@ function piAdmissionContext(input, directory, discovered, platform=process.platf
   } else if(!selection) throw new Error("Choose Use Pi's configured capacity for this new goal; nothing was admitted.");
   const pi=discovered?.ok === false ? undefined : discovered?.providers?.find(p=>p.instanceId==='pi');
   if(!selectedPiEligible(pi,selection,legacy)) throw new Error("This goal's requested Pi route is unavailable; nothing was admitted.");
-  if(!input.continuation && !existingRequest && (!samePiPair(selection,pi.piCapacity?.offer) || pi.piCapacity?.provisional
+  // A workspace review may name any catalog model; a goal keeps its configured route.
+  const anyCatalogModel=Boolean(input.nativeCheckTarget);
+  if(!input.continuation && !existingRequest && ((!anyCatalogModel && !samePiPair(selection,pi.piCapacity?.offer)) || pi.piCapacity?.provisional
       || workspaceIdentity(pi.piCapacity?.workspacePath,platform)!==workspaceIdentity(input.workspacePath??input.workspaceRoot,platform))) throw new Error('The configured Pi choice changed or belongs to another folder. Recheck this folder; nothing was admitted.');
   return { ...(selection?{piCapacity:{...selection}}:{}), legacyPiContinuation:legacy };
 }

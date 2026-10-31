@@ -582,6 +582,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   margin: 0 0 8px; padding-left: 20px;
 }
 .tl-agent-body li, .tl-system-body li, .tl-compact-body li { margin: 2px 0; }
+.pi-model-positioner { z-index: 61; }
+.pi-model-trigger { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 2px 8px; overflow-wrap: anywhere; text-align: left; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
 .check-summary { margin: 0 0 12px; padding: 0; list-style: none; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
 .native-check-panel h3 { margin: 0 0 6px; font-size: 14px; }
 .native-check-panel > p { margin: 0 0 10px; color: var(--ink-soft); }

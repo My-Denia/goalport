@@ -11,6 +11,8 @@ interface RuntimePickerMenuProps {
   /** Content of the trigger button (avatar, labels, chevron). */
   triggerContent: ReactNode;
   triggerClassName?: string;
+  /** Set when the menu opens from inside a modal, so it stacks above the modal. */
+  positionerClassName?: string;
   triggerAriaLabel: string;
   triggerTitle?: string;
   emptyText: string;
@@ -39,6 +41,7 @@ export function RuntimePickerMenu({
   selectedId,
   triggerContent,
   triggerClassName,
+  positionerClassName,
   triggerAriaLabel,
   triggerTitle,
   emptyText,
@@ -70,7 +73,7 @@ export function RuntimePickerMenu({
         {triggerContent}
       </Select.Trigger>
       <Select.Portal>
-        <Select.Positioner sideOffset={6} collisionPadding={10} alignItemWithTrigger={false}>
+        <Select.Positioner className={positionerClassName} sideOffset={6} collisionPadding={10} alignItemWithTrigger={false}>
           <Select.Popup className="runtime-picker-list">
             <Select.List aria-label="Runtimes" style={{ display: "grid", gap: 2 }}>
               {items.map((candidate) => {

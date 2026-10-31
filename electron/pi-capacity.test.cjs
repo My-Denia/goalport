@@ -149,6 +149,13 @@ test('canonical optional field / same-request conflict / malformed prior profile
  assert.throws(()=>store.startAdmission(admission(root,{requestId:'another'})),error=>error.code==='malformed-admission');
  const bad=record(root,{piCapacity:{...pair,extra:true}});assert.equal(normalizeRecord(bad).result,'Checked');assert.throws(()=>saveRecord(root,bad),/malformed/);
 });
+test('a workspace review may name another catalog model; a goal still may not',t=>{
+ const root=temp(t),pi=snapshot(root),other={...pair,provider:'Other',model:'beta'},d={providers:[{...pi,piCapacity:{...pi.piCapacity,catalog:[...pi.piCapacity.catalog,{provider:other.provider,model:other.model}]}}]};
+ const nativeCheckTarget={campaignId:'campaign',attemptId:'attempt',turnRequestId:'turn'};
+ assert.deepEqual(piAdmissionContext(admission(root,{piCapacity:other,nativeCheckTarget}),root,d).piCapacity,other);
+ assert.throws(()=>piAdmissionContext(admission(root,{piCapacity:other}),root,d),/changed or belongs/);
+ assert.throws(()=>piAdmissionContext(admission(root,{piCapacity:{...other,model:'missing'},nativeCheckTarget}),root,d),/unavailable/);
+});
 test('fresh Start requires intent and exact current offer; Continue uses UNIQUE OWN admission pair, not changed defaults',t=>{
  const root=temp(t),pi=snapshot(root),d={providers:[pi]};
  assert.throws(()=>piAdmissionContext(admission(root),root,d),/Choose Use Pi/);
