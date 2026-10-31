@@ -494,7 +494,7 @@ pub(crate) fn project_items(records: &[EventRecord]) -> Vec<ProductConversationI
 }
 
 /// What the user would have typed: agents wrap commands in their shell.
-fn inside_shell(command: &str) -> &str {
+pub(crate) fn inside_shell(command: &str) -> &str {
     let (program, rest) = match command.strip_prefix('"') {
         Some(quoted) => match quoted.split_once('"') {
             Some(parts) => parts,
@@ -1266,6 +1266,7 @@ mod activity_sentence_tests {
         let wrapped = r#""C:\\Users\\me\\pwsh.exe" -Command "git status --short""#;
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": wrapped}))), "Ran git status --short");
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "/bin/bash -lc 'npm test'"}))), "Ran npm test");
+        assert_eq!(super::inside_shell(r#""C:\Apps\pwsh.exe" -Command "mkdir ..\out""#), r"mkdir ..\out");
         assert_eq!(activity_sentence("Bash", "completed", Some(&json!({"command": "pnpm build", "changedWithoutAsking": true}))), "Ran pnpm build without asking and changed files");
         assert_eq!(activity_sentence("commandExecution", "completed", Some(&json!({"command": "git status"}))), "Ran git status");
         assert_eq!(activity_sentence("fileChange", "completed", Some(&json!({"paths": ["C:\\Users\\me\\repo\\GUIDE.md"]}))), "Changed GUIDE.md");

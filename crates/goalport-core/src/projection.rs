@@ -20,6 +20,7 @@ use crate::{
     },
     ipc::{CONNECTED_UI_PROTOCOL_VERSION, UiCommandRequest},
     product_conversation::{
+        inside_shell,
         ProductConversation, ProductConversationContext, ProductRuntimeSelection, ProductSession,
         ProductTurn, ProductSessionTransport,
         product_conversation,
@@ -7574,7 +7575,8 @@ fn decision_to_ui(decision: Decision, store: &Store) -> UiDecision {
         .permission_request_text(&decision.attempt_id, &decision.id)
         .ok()
         .flatten()
-        .filter(|text| !text.trim().is_empty());
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| inside_shell(&text).to_owned());
     let provider = store
         .get_attempt(&decision.attempt_id)
         .ok()
