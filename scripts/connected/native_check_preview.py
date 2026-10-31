@@ -37,7 +37,7 @@ def checked_payload(payload, start=False):
 def valid_material(value):
     try:
         from datetime import datetime
-        if not isinstance(value, dict) or set(value) != {'exactPrompt', 'deliveredEvidence', 'coverage', 'contentObservation', 'nativeReportedContext', 'capturedAt', 'disclosureVersion'} or value['disclosureVersion'] != 1:
+        if not isinstance(value, dict) or set(value) != {'exactPrompt', 'deliveredEvidence', 'coverage', 'contentObservation', 'nativeReportedContext', 'capturedAt', 'disclosureVersion'} or type(value['disclosureVersion']) is not int or value['disclosureVersion'] not in (1, 2):
             return False
         datetime.fromisoformat(value['capturedAt'].replace('Z', '+00:00'))
         if any(not isinstance(value[k], str) or not value[k] or len(value[k].encode('utf-8')) > cap for k, cap in [('exactPrompt', 32768), ('deliveredEvidence', 16384)]):

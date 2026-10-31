@@ -19,6 +19,8 @@ test('target requires itself newest/completed/current task and retains whole-inv
  const privateContext=(await purpose.resolveTarget(core,base,target)).context;assert.deepEqual(privateContext.commands,[]);assert.equal(privateContext.commandsOmitted,1);assert.equal(JSON.stringify(privateContext).includes('host detail'),false);
  for(const state of ['failed','cancelled','uncertain']){snapshot={...base,turnResults:[...base.turnResults,{requestId:'newer',replyState:state,commands:[]}]};await assert.rejects(purpose.resolveTarget(core,base,target),/Preview again/);}
  for(const patch of [{attempt:{...base.attempt,id:'other'}},{attempt:{...base.attempt,taskId:'other'}},{turnResults:[]},{turnResults:[...base.turnResults,...base.turnResults]},{bounds:{projectionUnavailable:false,truncated:true}},{attempt:{...base.attempt,state:'active'},productConversation:{...base.productConversation,turn:{state:'idle',canStop:false}}}]){snapshot={...base,...patch};await assert.rejects(purpose.resolveTarget(core,base,target));}
+ snapshot={...base,decisions:[{id:'answered',state:'resolved'}]};assert.equal((await purpose.resolveTarget(core,base,target)).target.turnRequestId,'turn');
+ for(const decision of [{id:'open',state:'pending'},{id:'odd'},null]){snapshot={...base,decisions:[{id:'answered',state:'resolved'},decision]};await assert.rejects(purpose.resolveTarget(core,base,target),/Preview again/);}
  snapshot=base;pending=[{}];await assert.rejects(purpose.resolveTarget(core,base,target),/permission/);pending=[];snapshot={...base,attempt:{...base.attempt,state:'completed'}};assert.equal((await purpose.resolveTarget(core,snapshot,target)).target.attemptId,'attempt');
 });
 

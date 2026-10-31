@@ -252,5 +252,24 @@ class NativeParserTests(unittest.TestCase):
         for raw in (b"", b"job projection: {}", preflight() + preflight(), b"native preflight: null", b"native preflight: \xff"):
             self.assertFalse(w._status.parse_native_preflight(raw, None))
 
+    def test_first_run_creates_a_private_profile_and_keeps_an_existing_one(self):
+        temp = tempfile.TemporaryDirectory(prefix="gp-native-profile-")
+        self.addCleanup(temp.cleanup)
+        profile = Path(temp.name) / "fresh" / "linux-coordinate"
+        w.ensure_coordination_profile(profile)
+        self.assertTrue(profile.is_dir())
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o700)
+        (profile / "kept").write_text("kept")
+        w.ensure_coordination_profile(profile)
+        self.assertEqual((profile / "kept").read_text(), "kept")
+
+    def test_unusable_profile_location_stays_a_refusal_not_a_crash(self):
+        temp = tempfile.TemporaryDirectory(prefix="gp-native-profile-")
+        self.addCleanup(temp.cleanup)
+        blocker = Path(temp.name) / "file"
+        blocker.write_text("not a directory")
+        w.ensure_coordination_profile(blocker / "linux-coordinate")
+        self.assertFalse((blocker / "linux-coordinate").exists())
+
 
 if __name__ == "__main__": unittest.main()

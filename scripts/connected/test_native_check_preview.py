@@ -104,6 +104,10 @@ class NativePreviewTest(unittest.TestCase):
             root = Path(folder)
             context = {'reply': 'reported', 'replyTruncated': False, 'commands': [], 'commandsOmitted': 0, 'commandsTruncated': False, 'filesTruncated': False, 'comparisonUnavailable': False, 'olderTurnsOmitted': 0}
             material = {'exactPrompt': 'exact bytes 😀 ', 'deliveredEvidence': 'diff', 'coverage': {'limited': False, 'excluded': 0, 'omitted': 0, 'selected': 1, 'evidenceCropped': False, 'excludedCategories': []}, 'contentObservation': {'head': 'a' * 40, 'paths': [], 'selectedDiff': 'diff', 'selectedStatus': '', 'nativeReportedContext': context}, 'nativeReportedContext': context, 'capturedAt': '2026-01-01T00:00:00Z', 'disclosureVersion': 1}
+            self.assertTrue(preview.valid_material(material))
+            self.assertTrue(preview.valid_material({**material, 'disclosureVersion': 2}))
+            self.assertFalse(preview.valid_material({**material, 'disclosureVersion': 3}))
+            self.assertFalse(preview.valid_material({**material, 'disclosureVersion': True}))
             target = {k: self.payload()[k] for k in ('campaignId', 'attemptId', 'turnRequestId')}
             ordinary = {'requestId': 'ordinary', 'goal': 'Ordinary goal', 'workspacePath': '/fixture', 'verdict': 'checked', 'stopReason': 'returned', 'savedAt': '2026-01-01T00:00:00Z'}
             check = {**ordinary, 'requestId': 'check', 'recordKind': 'native-workspace-check', 'nativeCheckTarget': target, 'nativeCheckMaterial': material, 'piCapacity': self.payload()['piCapacity'], 'auditText': 'Concrete independent critique', 'savedAt': '2026-01-02T00:00:00Z'}
