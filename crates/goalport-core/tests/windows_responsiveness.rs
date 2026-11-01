@@ -246,8 +246,12 @@ impl Drop for Harness {
 }
 
 fn connect_result(pipe: &str, id: &str, kind: &str) -> Result<NamedPipeClient, WireError> {
+    connect_result_within(pipe, id, kind, Duration::from_secs(10))
+}
+
+fn connect_result_within(pipe: &str, id: &str, kind: &str, timeout: Duration) -> Result<NamedPipeClient, WireError> {
     let start = Instant::now();
-    let end = start + Duration::from_secs(10);
+    let end = start + timeout;
     loop {
         match NamedPipeClient::connect(pipe) {
             Ok(client) => return Ok(client),
@@ -636,7 +640,7 @@ fn malformed_and_disconnected_clients_do_not_kill_listener() {
 fn diagnostic_harness_classifiers_distinguish_errors() {
     // 1. Missing pipe reports stage 'connect' with OS code 2 (ERROR_FILE_NOT_FOUND)
     let non_existent = format!("goalport-missing-pipe-{}", std::process::id());
-    let err = connect_result(&non_existent, "test-missing", "snapshot").unwrap_err();
+    let err = connect_result_within(&non_existent, "test-missing", "snapshot", Duration::from_millis(50)).unwrap_err();
     assert_eq!(err.stage, "connect");
     match err.error {
         WireErrorKind::Connect { os_error, .. } => {
@@ -670,13 +674,13 @@ fn diagnostic_harness_classifiers_distinguish_errors() {
         failure_observed: RefCell::new(false),
     };
 
-    // (2a) Wire error reporting through the real harness.call_within entry point
+    // (2a) Wire error reporting through the real harness.recv_call_within path
     let call_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        harness.call_within("test-fail", "snapshot", json!({}), Duration::from_secs(12));
+        harness.recv_call_within("test-fail", "snapshot", rx_wire_err, Duration::from_millis(50));
     }));
     let panic_msg = call_res.unwrap_err();
     let msg_str = panic_msg.downcast_ref::<String>().map(|s| s.as_str()).unwrap_or("");
-    assert!(msg_str.contains("failed wire check") && msg_str.contains("stage 'connect'"), "expected wire failure report from real call_within, got: {msg_str}");
+    assert!(msg_str.contains("failed wire check") && msg_str.contains("stage 'connect'"), "expected wire failure report from real recv_call_within, got: {msg_str}");
 
     // (2b) Worker disconnection reporting
     let (tx_disconn, rx_disconn) = mpsc::channel::<Result<Value, WireError>>();
