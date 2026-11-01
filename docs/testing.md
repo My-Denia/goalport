@@ -70,7 +70,7 @@ The normal run also captures a 1000-pixel-wide screenshot. It checks layout only
 | --- | --- |
 | `frontend` | Locked install, `pnpm lint`, `pnpm test:unit`, runtime-safety and IPC client node tests |
 | `core` | Core library and contract tests (Stop, recovery, handoff, workspace identity and more), the deterministic `goal_scope`/`grok_acp`/`ipc_lifecycle`/`claude_stop_broker` tranche, selected registration cases, launcher tests, Tauri host tests |
-| `desktop` | `pnpm test:desktop` (which includes the `background-native`, `feedback-native` and `plan-revision-native` driver units), a fresh Electron package build and verify, normal and synthetic packaged smoke, early-failure cleanup; failure summaries are redacted and kept for 7 days |
+| `desktop` | `pnpm test:desktop` (which includes the `background-native`, `feedback-native` and `plan-revision-native` driver units), a fresh Electron package build and verify, normal and synthetic packaged smoke, early-failure cleanup; failure summaries are redacted; successful package/component hashes and smoke status are retained separately for 7 days |
 
 The `linux-unix-socket` job runs Linux Core library, Unix socket, native protocol and responsiveness, Claude stop/resume, launcher, Python operator/bridge and Node coordination checks, followed by a built Core socket round-trip.
 

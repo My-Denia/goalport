@@ -183,7 +183,7 @@ test("Desktop JS step runs the offline driver units but never a live driver", ()
   assert.ok(commands.includes("pnpm test:desktop"));
 });
 
-test("Desktop CI retains only redacted failure summaries and never tolerates a failed step", () => {
+test("Desktop CI retains bounded success identities and redacted failures", () => {
   const { body } = desktopJob(workflow);
   assert.doesNotMatch(body, /continue-on-error/);
   const steps = body.split(/\r?\n(?=      - )/);
@@ -193,5 +193,8 @@ test("Desktop CI retains only redacted failure summaries and never tolerates a f
   assert.match(last, /\n\s+if-no-files-found: ignore\r?\n/);
   const paths = [...last.matchAll(/^ {12}(\S+)\s*$/gm)].map((match) => match[1]);
   assert.deepEqual(paths, ["normal-smoke", "synthetic-smoke", "early-cleanup"].map((name) => `artifacts/electron-rc/ci-${name}/failure-summary.json`));
-  assert.equal(steps.filter((step) => /upload-artifact/.test(step)).length, 1);
+  assert.equal(steps.filter((step) => /upload-artifact/.test(step)).length, 2);
+  const success = steps.find(step => step.includes("desktop-success-summary"));
+  assert.match(success, /path: artifacts\/electron-rc\/ci-success-summary.json/);
+  assert.match(success, /if-no-files-found: error/);
 });
