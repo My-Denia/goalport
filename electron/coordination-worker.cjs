@@ -284,7 +284,12 @@ async function runWorker(config, deps = {}) {
           if (saved?.requestId === admitted.requestId && saved.verdict === "checked" && saved.planText && saved.reviewText) initialResult = saved;
           else initialSaveFailed = true;
         } catch { initialSaveFailed = true; }
-        if (initialSaved && initialResult) {
+        // Awaited persistence permits revoke/control events to run. Never
+        // advertise ready after a failed revoke or stale allowance snapshot.
+        if (storageFailed) throw new Error("Job storage failed during initial save; admission remains held.");
+        const savedFacts = localFacts(), savedScope = scope.current();
+        if (initialSaved && initialResult && !savedFacts.pendingCommand && !savedFacts.revoked
+          && savedScope && savedScope.generation === authorization.generation && !savedScope.write && savedScope.remaining >= 2) {
           idleDeadline = nowMs() + 900000;
           expiresAt = new Date(wallNowMs() + 900000).toISOString();
           persist({ phase: "awaiting-followup", counters: counters(), display: { activity: "Ready for one follow-up. No model is running.", failures } });
