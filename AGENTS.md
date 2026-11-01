@@ -1,7 +1,7 @@
 # AGENTS.md — 本项目最高行为准则
 
 > 这份文件对所有在本仓库工作的 Agent 具有最高优先级。
-> 它与代码不一致时，以这份文件为准。它的每一条都来自真实返工的血泪，不是风格建议。
+> 它不覆盖可验证的当前事实。它的每一条都来自真实返工的血泪，不是风格建议。
 
 ---
 
@@ -46,14 +46,7 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
 
 ## 3. 安全的位置
 
-- Core 层那套诚实语义（丢了回执标 UNKNOWN、绝不自动重放、held 不假装释放）是**正确的底层**，保留，不用推翻。
-- **禁止事项**：在下面这五件事完成之前，仓库里不允许新增任何安全 / 收据 / epoch / 审计 / 加固类基础设施代码。不许给水管再加一层装甲。
-  1. 共享的 Picker / Popover / Dialog primitive（消灭重复实现）
-  2. 焦点 / 草稿 / 轮询快照三条生命周期的分离
-  3. 独立的会话标题生成（不污染主对话，额度不足时用本地标题，不阻塞正文）
-  4. 类型化的 provider 错误映射（如额度错误的结构化处理，而非猜字符串）
-  5. Agent 可观察的调试接口（preview_snapshot / click / evaluate 一级工具）
-- 前置完成状态（2026-10-04 记录，PR #24 修复轮交付）：#1 共享浮层 primitive（`src/ui/GoalLayer.tsx`，Base UI 封装；composer 输入规则合一 `useComposerInput`）；#2 焦点/草稿/轮询生命周期分离（`useConversationDrafts` + 轮询 epoch 守卫 + draft composer 稳定挂载）；#3 独立会话标题生成（`crates/goalport-core/src/async_title.rs`，脱线程、限额回退本地标题）；#4 类型化 provider 错误映射（`crates/goalport-core/src/provider_failure.rs` 闭集 + 前端 union + 锁测试）；#5 Agent 可观察调试接口（`scripts/connected/ui-debug.mjs`，preview_snapshot/click/evaluate，localhost-only，不进生产路径）。此后本条禁令恢复完全效力：再加安全/收据/epoch/审计/加固基础设施前，先回到本清单核对。
+- Core 诚实语义保留（丢了回执标 UNKNOWN、绝不自动重放、held 不假装释放）；新增安全、收据、审计基础设施要说清对应的真实问题。
 - 当你发现自己又在写"可证明正确"的东西、而过去两小时没人看过一眼界面时，**停下来，这就是那个病**。
 
 ## 4. UI 的正确姿势：抄，别发明
@@ -72,7 +65,7 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
 | 每 750ms 快照轮询都对同一个 pending decision 发系统通知 | 用户可见副作用必须有去重/记忆 |
 | 决策卡全宽琥珀色、内容只占左半，右半一大块空 | 组件在大宽度下也要看一眼 |
 | 同一状态两个词：HandoffDialog 叫 "Preview"，别处叫 "Limited" | 同一概念全应用一个词汇 |
-| 生产代码里留测试钩子：无条件写 `window.__goalportCloseRequestId`、handoff 硬编码 `goal-runs/.../evidence/locks/...` 路径 | 测试设施不许进生产路径，除非隔离在 test 构建 |
+| 生产代码里留测试钩子：handoff 硬编码 `goal-runs/.../evidence/locks/...` 路径 | 测试设施不许进生产路径，除非隔离在 test 构建 |
 | limitations.md 说"时间戳是原始 epoch 毫秒"，代码早已本地化 | 文档与代码一起改，漂移即谎言 |
 | README 截图展示旧版 raw timeline UI | 截图随代码更新，用户第一印象必须等于实物 |
 | 为 file:// 主文档身份维护一串大小写/百分号编码仪式 | 方向是自定义协议（`t3code://app/` 模式），别再给 file:// 擦屁股 |
@@ -80,10 +73,7 @@ GoalPort 是一个**人坐在前面的桌面窗口**。它不是库、不是服�
 
 ## 6. 当前产品方向（据此判断每个任务该不该做）
 
-- **前端基线转向 t3code**：认真评估以 pingdotgg/t3code 为 fork 基线，而不是继续在现有前端上增量修补。
-- 现有 Core 仅在以下差异化确实是要卖的产品价值时才保留：跨 Runtime handoff、held responsibility、后台续跑。否则它们是负担不是资产。
-- 更新（2026-10-04，事实已按上游源码核实）：t3code 的 orchestration-v2 现在**有** first-class provider switching（同一条 app thread 可包含多个 provider 的 run，各保留原生会话句柄）、`ProviderThread` 与 `ContextHandoff` 概念（上游 `docs/orchestration-v2/provider-switching-and-context.md`、`apps/server/src/orchestration-v2/ContextHandoffService.ts`）。旧说法"same-thread 拒绝跨 driver、handoff 不存在"已过时。仍然只抄 primitive、输入规则、错误映射、测试；provider 切换/handoff 的业务语义与 GoalPort 的 durable hold 语义不同，评估 fork 基线时逐项对照，不整体照搬。
-- t3code 的 MIT 许可证允许复制修改，但必须保留其版权与许可声明；其组件依赖的其他库需分别核查。
+- 本项目不是 t3code 的 fork。借鉴 T3 Code（pingdotgg/t3code，MIT）中成熟的已有实现，不闭门造车，不重复实现别人已做好的东西；复制时保留其版权与许可声明。
 
 ## 7. 与我的沟通规则
 
@@ -124,7 +114,7 @@ Reviewer 只分类，不把当前 PR 接过来自己实现。
 - 与本 PR 产品路径无关的 tooling、文案风格、泛化重构
 - 只为了「还可以证明得更严格」而新加的安全或审计机制
 
-**GoalPort 的层不要揉在一起。** UI、Runtime、Core、profile、storage、IPC、safety 是不同边界。产品验收和测试/形式证明是不同证据。session 级 ownership 和 turn 级 responsibility 是不同东西。不许为了补一层表象，把另一层已经成立的 durable/safety 语义推翻；也不许用 safety hardening 把已经定义的产品交付无限压住。这与 §0、§3、§6 一致：用户喜欢使用高于验证仪式；诚实语义保留，但不为它再加一层装甲；Core 只保留真正要卖的差异。
+**GoalPort 的层不要揉在一起。** UI、Runtime、Core、profile、storage、IPC、safety 是不同边界，产品验收和测试/形式证明是不同证据，session 级 ownership 和 turn 级 responsibility 是不同东西。不许为了补一层表象推翻另一层已经成立的 durable/safety 语义，也不许用 safety hardening 把已经定义的产品交付无限压住。
 
 已经被 current HEAD 的代码和真实证据修好的问题，不得因为 review thread 还挂着 unresolved 就继续算 blocker。
 
@@ -134,12 +124,11 @@ Reviewer 只分类，不把当前 PR 接过来自己实现。
 
 Windows GUI、Electron、Claude native path：真实打包的 EXE、真实的鼠标键盘、真实 Runtime 行为，高于 synthetic 和 unit 测试。不得用更多形式验证替换已经定义的产品验收。
 
-已经授权并创建的 PR，在同一分支上为 **成立且属于当前 scope** 的修复做普通 fast-forward commit 和 push，算这条 PR 生命周期里的持续授权。不要为此再向 owner 要一次「继续」或重新授权 push。merge 在没有违背 owner 的意思、没有添油加醋、没有自作主张的内容时由 agent 直接做，有就先改好再合并；release（含 tag 和版本变更）由 agent 自行判断。force-push、扩大 PR scope、deploy、签名，以及其他不可逆的外部操作，仍要单独明确授权。
-
+已经授权并创建的 PR，在同一分支上为成立且属于当前 scope 的修复做普通 fast-forward commit 和 push，算这条 PR 生命周期里的持续授权，不用再向 owner 要一次「继续」。force-push、扩大 PR scope、deploy、签名仍要单独明确授权。
 
 ## 收尾清理工作区
 
-本地 agent 收尾时清理工作区：先把可复用的内容归档，再删掉已合并或过时的本地分支和 worktree。磁盘是多个项目共用的，不清理会被占满。（Denia 2026-10-15：「删分支是项目设置，规则有没有不重要，本地agent整理工作区删分支工作树归档可复用内容很重要，因为我的储存就这么点…不是只有一个项目在占用资源」）
+收尾清理按 owner 的共享规则做：归档可复用内容，再删已合并或过时的本地分支和 worktree。
 
 ---
 
