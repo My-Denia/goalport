@@ -45,7 +45,9 @@ it("a running workspace check stays beside its goal and never takes over the des
   const snapshot = { ...DEMO_SNAPSHOT, preview: false, connection: "connected", activeCampaignId: target.campaignId, attempt: { ...DEMO_SNAPSHOT.attempt, id: target.attemptId, provider: "codex", state: "waiting" }, turnResults: [{ requestId: target.turnRequestId, replyState: "completed", baselineRecorded: true, filesTruncated: true, before: [], during: [], unattributed: [], commands: [] }] };
   const job = { ...f.terminal, jobId: "check-job", requestId: "check-request", recordKind: "native-workspace-check", nativeCheckTarget: target, state: "running", active: true, live: true, outcome: null, followUpMode: undefined, progress: { activity: "Pi is checking" } };
   const nativeCheck = vi.fn(async () => ({ ok: true, payload: { checks: [] } }));
-  window.goalportCore = { ...window.goalportCore, snapshot: async () => snapshot, startCore: async () => snapshot, backgroundStatus: async () => job, nativeCheck } as never;
+  const backgroundStatus = vi.fn(async () => ({ ...job }));
+  const command = vi.fn();
+  window.goalportCore = { ...window.goalportCore, command, snapshot: async () => snapshot, startCore: async () => snapshot, backgroundStatus, nativeCheck } as never;
   window.history.replaceState(null, "", "/goals/campaign-desktop");
   render(<App />);
   await screen.findByRole("region", { name: "Pi review" });
@@ -54,6 +56,18 @@ it("a running workspace check stays beside its goal and never takes over the des
   // A long command log must not squeeze the conversation and this button out of view.
   expect(screen.getByText("Files changed").closest("details")?.open).toBe(false);
   expect(document.querySelector(".composer-hint")?.textContent).not.toMatch(/background goal|when it finishes/);
+  const draft = screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement;
+  expect(draft.disabled).toBe(false);
+  fireEvent.change(draft, { target: { value: "Keep working while Pi reviews" } });
+  const polls = backgroundStatus.mock.calls.length;
+  const commands = command.mock.calls.length;
+  await waitFor(() => expect(backgroundStatus.mock.calls.length).toBeGreaterThan(polls), { timeout: 4000 });
+  expect((screen.getByRole("textbox", { name: "Message composer" }) as HTMLTextAreaElement).value).toBe("Keep working while Pi reviews");
+  expect(screen.getByRole("button", { name: "Stop review" })).toBeTruthy();
+  expect(command.mock.calls.length).toBe(commands);
+  expect(f.start).not.toHaveBeenCalled();
+  expect(f.liveContinue).not.toHaveBeenCalled();
+
 });
 
 it.each(["unconfirmed", "running"] as const)("desktop interrupted live-read allowance (%s) can be left without replaying or releasing its held folder", async state => {

@@ -149,7 +149,7 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
   assert.ok(commands.includes("node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup"));
 });
 
-test("Windows Core CI runs the deterministic contract tranche and keeps red suites out", () => {
+test("Windows Core CI runs the deterministic contract tranche", () => {
   const { body, lines, script, tests } = coreJob(workflow);
   assert.match(body, /runs-on: windows-latest/);
   assert.match(body, /node-version: 22\.19\.0/);
@@ -157,13 +157,10 @@ test("Windows Core CI runs the deterministic contract tranche and keeps red suit
   // Inherited GOALPORT_* stays scrubbed before any cargo command runs.
   assert.ok(lines.findIndex((line) => /Where-Object \{ \$_\.Name -like 'GOALPORT_\*' \}/.test(line)) > 0);
   assert.ok(script.some(({ command }) => command === "cargo test -p goalport-core --lib"));
-  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker"]) {
+  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker", "admission_failure", "recovery_classification"]) {
     assert.ok(tests.includes(name), `core CI runs --test ${name}`);
   }
-  // Real failures and non-hermetic suites stay opt-in; never whitelisted to look green.
-  for (const name of ["claude_stream", "admission_failure", "recovery_classification"]) {
-    assert.ok(!tests.includes(name), `core CI must not whitelist --test ${name}`);
-  }
+  assert.ok(!tests.includes("claude_stream"), "non-hermetic Claude successor tests remain opt-in");
   for (const { index, command } of script) {
     assert.match(command, /^cargo test /);
     assert.equal(lines[index + 1]?.trim(), "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", `${command} keeps the fail-fast guard`);
@@ -187,7 +184,7 @@ test("Desktop JS step runs the offline driver units but never a live driver", ()
   assert.ok(commands.includes("pnpm test:desktop"));
 });
 
-test("Desktop CI retains only redacted failure summaries and never tolerates a failed step", () => {
+test("Desktop CI retains bounded success identities and redacted failures", () => {
   const { body } = desktopJob(workflow);
   assert.doesNotMatch(body, /continue-on-error/);
   const steps = body.split(/\r?\n(?=      - )/);
@@ -197,5 +194,8 @@ test("Desktop CI retains only redacted failure summaries and never tolerates a f
   assert.match(last, /\n\s+if-no-files-found: ignore\r?\n/);
   const paths = [...last.matchAll(/^ {12}(\S+)\s*$/gm)].map((match) => match[1]);
   assert.deepEqual(paths, ["normal-smoke", "synthetic-smoke", "early-cleanup"].map((name) => `artifacts/electron-rc/ci-${name}/failure-summary.json`));
-  assert.equal(steps.filter((step) => /upload-artifact/.test(step)).length, 1);
+  assert.equal(steps.filter((step) => /upload-artifact/.test(step)).length, 2);
+  const success = steps.find(step => step.includes("desktop-success-summary"));
+  assert.match(success, /path: artifacts\/electron-rc\/ci-success-summary.json/);
+  assert.match(success, /if-no-files-found: error/);
 });

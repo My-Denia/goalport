@@ -106,7 +106,7 @@ function createNativeCheckHost(options) {
         const bound = !!own && target.campaignId === campaignId && records.filter(r => r?.requestId === record.requestId).length === 1
           && same(own.admission.nativeCheckTarget, target) && same(own.admission.nativeCheckMaterial, material) && same(own.admission.piCapacity, record.piCapacity)
           && own.admission.workspacePath === record.workspacePath && same(own.admission.allowedInstances, ["pi"]) && own.admission.maxTurns === 2 && own.admission.writeAuthorization === null;
-        if (bound) checks.push({ recordKind: record.recordKind, requestId: record.requestId, nativeCheckTarget: target, nativeCheckMaterial: material, nativeAssociation: true, jobId: own.jobId, workspacePath: record.workspacePath, savedAt: record.savedAt, auditText: record.auditText, verdict: record.verdict, statusLabel: record.verdict === "checked" ? "Independent workspace check returned" : "Workspace check did not complete" });
+        if (bound) checks.push({ recordKind: record.recordKind, requestId: record.requestId, nativeCheckTarget: target, nativeCheckMaterial: material, nativeAssociation: true, jobId: own.jobId, workspacePath: record.workspacePath, savedAt: record.savedAt, auditText: record.auditText, stopReason: record.stopReason, verdict: record.verdict, statusLabel: record.verdict === "checked" ? "Independent workspace check returned" : "Workspace check did not complete" });
       } catch { /* Descriptive damage never repairs or retargets. */ }
     }
     return { checks };

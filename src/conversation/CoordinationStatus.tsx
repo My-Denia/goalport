@@ -522,11 +522,13 @@ export function BackgroundCoordinationStatus({ job, onStopAllowing, onContinue, 
   if (job.recordKind === 'native-workspace-check') {
     const running = job.active && job.live && !job.revoked;
     const review = report?.auditText;
-    const unfinished = !review && !running && !job.revoked;
+    const unconfirmed = !review && job.active && !job.live && !job.revoked;
+    const unfinished = !review && !running && !unconfirmed && !job.revoked;
     const unfinishedDetail = job.outcome?.error || (unfinished ? report?.stopReason : null);
     return <section className="background-job native-check-panel" aria-label="Pi review" data-job-id={job.jobId}>
-      <h3>{review ? "Pi's review" : running ? `Pi is reviewing Codex's changes · ${elapsed}` : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
+      <h3>{review ? "Pi's review" : running ? `Pi is reviewing Codex's changes · ${elapsed}` : unconfirmed ? "Confirming review status…" : job.revoked && !settled ? 'Stopping the review…' : "Pi's review didn't finish"}</h3>
       {running ? <p role="status">Keep working or close this window. The review will be here when it's done.</p> : null}
+      {unconfirmed ? <p role="status">The review may still be running. You can keep working while its status is checked. Nothing will be sent again.</p> : null}
       {unfinished ? <p role="status">{unfinishedReviewLine(unfinishedDetail)}</p> : null}
       {review ? <PiReview text={review} id={job.jobId} /> : null}
       {unfinishedDetail ? <details><summary>Technical details</summary><p>{unfinishedDetail}</p></details> : null}

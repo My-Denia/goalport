@@ -134,8 +134,11 @@ rather than fabricating license text.
 - A published tag is never moved and never reused for different bytes. If
   `v1.0.0-rc.1` needs a fix after publishing, the next binary release is
   `v1.0.0-rc.2` (or later), not a second `v1.0.0-rc.1`.
-- A profile is bound to the Core binary hash of the build that created it
-  ([local data](local-data.md)); release notes must keep saying so.
+- Current profile compatibility is based on the data format, not an immutable
+  binding to the creating binary hash. Compatible builds can reopen the same
+  data; hashes still identify build provenance and the running Core. Describe
+  older published packages separately from current candidates and link to
+  [profile continuity](profile-continuity.md) and [local data](local-data.md).
 
 ## GitHub Release contract (for the owner, when the time comes)
 

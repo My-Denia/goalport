@@ -10,7 +10,7 @@ const { assertPipePeer, assertCoreIdentity, pipePeerBusy } = require("./launch-c
 const { createHarnessRuntime } = require("./harness-runtime.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
 const { authorizeCoordination, authorizeMembershipError, discoverCoordination, launchOne } = require("./coordinate-service.cjs");
-const { saveRecord } = require("./coordination-record.cjs");
+const { saveRecordAsync } = require("./coordination-record.cjs");
 const liveRead = require("./live-read-once.cjs");
 
 const { coreRefusal, guardCoreCoverage } = require("./coordination-core-guard.cjs");
@@ -270,7 +270,7 @@ async function runWorker(config, deps = {}) {
         auditInputEvidenceText: input.nativeCheckMaterial.deliveredEvidence };
     };
     liveResult = await runRound(discovery, piContext);
-    const saveResult = () => (deps.saveRecord ?? saveRecord)(config.directory, {
+    const saveResult = () => (deps.saveRecord ?? saveRecordAsync)(config.directory, {
       ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal,
       savedAt: new Date(wallNowMs()).toISOString(), ...(input.continuation ? { continuation: input.continuation } : {}),
       ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}) });
@@ -279,12 +279,17 @@ async function runWorker(config, deps = {}) {
       const facts = localFacts(), current = scope.current();
       if (!facts.pendingCommand && !facts.revoked && current && current.generation === authorization.generation && !current.write && current.remaining >= 2) {
         try {
-          const saved = saveResult();
+          const saved = await saveResult();
           initialSaved = true;
           if (saved?.requestId === admitted.requestId && saved.verdict === "checked" && saved.planText && saved.reviewText) initialResult = saved;
           else initialSaveFailed = true;
         } catch { initialSaveFailed = true; }
-        if (initialSaved && initialResult) {
+        // Awaited persistence permits revoke/control events to run. Never
+        // advertise ready after a failed revoke or stale allowance snapshot.
+        if (storageFailed) throw new Error("Job storage failed during initial save; admission remains held.");
+        const savedFacts = localFacts(), savedScope = scope.current();
+        if (initialSaved && initialResult && !savedFacts.pendingCommand && !savedFacts.revoked
+          && savedScope && savedScope.generation === authorization.generation && !savedScope.write && savedScope.remaining >= 2) {
           idleDeadline = nowMs() + 900000;
           expiresAt = new Date(wallNowMs() + 900000).toISOString();
           persist({ phase: "awaiting-followup", counters: counters(), display: { activity: "Ready for one follow-up. No model is running.", failures } });
@@ -316,6 +321,18 @@ async function runWorker(config, deps = {}) {
     }
     stage = "ending";
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
+    // The plan record (history/Plans) and the job's own terminal outcome
+    // are separate durable facts. A record-save failure must not prevent
+    // the honest terminal outcome, the scope revoke, or the admission
+    // release — otherwise one failed history write wedges the profile slot
+    // forever and no later goal can start. The outcome carries an honest
+    // note instead; the success path keeps the audited record-before-
+    // outcome order unchanged.
+    let recordSaveFailed = initialSaveFailed;
+    try { if ((!initialSaved && !initialSaveFailed) || accepted) await saveResult(); } catch { recordSaveFailed = true; }
+    // Saving may wait for another process. A Stop or storage failure accepted
+    // during that wait must be reflected in the outcome we are about to commit.
+    if (storageFailed) throw new Error("Job storage failed while saving; admission remains held.");
     const pending = store.getStatus(config.jobId).pendingCommand;
     const currentStatus = store.getStatus(config.jobId);
     const status = pending || liveResult.verdict === "unconfirmed"
@@ -325,15 +342,6 @@ async function runWorker(config, deps = {}) {
         : ["verified", "checked", "revise"].includes(liveResult.verdict)
           ? "completed"
           : "failed";
-    // The plan record (history/Plans) and the job's own terminal outcome
-    // are separate durable facts. A record-save failure must not prevent
-    // the honest terminal outcome, the scope revoke, or the admission
-    // release — otherwise one failed history write wedges the profile slot
-    // forever and no later goal can start. The outcome carries an honest
-    // note instead; the success path keeps the audited record-before-
-    // outcome order unchanged.
-    let recordSaveFailed = initialSaveFailed;
-    try { if ((!initialSaved && !initialSaveFailed) || accepted) saveResult(); } catch { recordSaveFailed = true; }
     if (accepted) store.updateLiveFollowUpPhase(config.jobId, status === "unconfirmed" ? "unconfirmed" : "completed", owner);
     store.recordOutcome(config.jobId, {
       status,

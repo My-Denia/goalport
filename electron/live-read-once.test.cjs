@@ -40,7 +40,7 @@ async function fixture(t, options = {}) {
   { instanceId: 'codex', displayName: 'Codex', driver: 'codex', enabled: true, installed: true, availability: 'available', status: 'ready', auth: { status: 'authenticated', type: 'chatgpt' }, models: [{ slug: 'gpt-6-astra', isDefault: true }] },
   { instanceId: 'pi', displayName: 'Pi', driver: 'pi', enabled: true, installed: true, availability: 'available', status: 'ready', auth: { status: 'unknown', type: 'apiKey' }, models: [], piCapacity: { offer: pair, catalog: [{provider:'Fixture',model:'alpha'}], workspacePath: directory } },
  ];
- const adapter = { ...store, updateProgress: (...args) => { const result = store.updateProgress(...args); if (args[1].phase === 'awaiting-followup') ready.resolve(); return result; },
+ const adapter = { ...store, updateProgress: (...args) => { const result = store.updateProgress(...args); if (args[1].phase === 'awaiting-followup') { capture.enteredReady = true; ready.resolve(); } return result; },
   startControlServer: async callbacks => { Object.assign(capture, callbacks); return { close: async () => { capture.closed = (capture.closed ?? 0) + 1; } }; },
   recordLiveFollowUpAccepted: (...args) => { if(options.storageFail) throw Error('fixture disk full'); const result=store.recordLiveFollowUpAccepted(...args); if(options.stopAfterSave) {store.revoke(start.jobId);capture.onRevoke({storageError:false});} return result; },
   recordPendingCommand: (...args) => { if(options.stopBeforeChildReserve && launches.length===2) store.revoke(start.jobId); return store.recordPendingCommand(...args); } }; 
@@ -55,9 +55,10 @@ async function fixture(t, options = {}) {
   core: { invoke: async () => ({ bounds:{projectionUnavailable:false}, attempt:{state:'completed'} }), exchangeVerified: async request => ({ requestId:request.requestId, ok:true,payload:{requestId:request.requestId,accepted:true,overview:{truncated:false,goals:[],pending:[]}} }) },
   discover: async () => { discoveryCount++; if(discoveryCount > 1 && options.checkBarrier) await options.checkBarrier.promise; return {ok:true,providers:roster}; },
   env: {GOALPORT_COORDINATE_SEND:'1'},
+  ...(options.initialSaveGate ? {saveRecord:async (...args)=>{options.initialSaveGate.entered.resolve();await options.initialSaveGate.release.promise;return saveRecord(...args);}} : {}),
   ...(options.saveFailure ? {saveRecord:()=>{saveAttempts++;throw Error('fixture initial record unavailable');}} : {}),
  });
- if(options.expectTerminal) await worker; else await ready.promise;
+ if(options.initialSaveGate) await options.initialSaveGate.entered.promise; else if(options.expectTerminal) await worker; else await ready.promise;
  const status = () => capture.getLiveReadStatus(store.getStatus(start.jobId));
  const stop = () => { store.revoke(start.jobId); capture.onRevoke({storageError:false}); };
  t.after(async () => { if (!capture.closed) { stop(); options.checkBarrier?.resolve(); options.blockChild?.resolve(); await worker; } });
@@ -227,4 +228,28 @@ test('actual control endpoint retains legacy status/revoke, invokes revoke wake 
  await assert.rejects(requestControl(endpoint,token,'continue',{payload:{...exact,followUp:exact.followUp+'x'}}));assert.equal(frames.length,1);
  await requestControl(endpoint,token,'revoke');await requestControl(endpoint,token,'revoke');assert.equal(wakes,2);
  await assert.rejects(requestControl(endpoint,token,'unknown'));
+});
+
+test('failed revoke during initial save closes unconfirmed without entering follow-up readiness', async t => {
+ const gate={entered:deferred(),release:deferred()};
+ const r=await fixture(t,{initialSaveGate:gate});
+ let settled=false;r.worker.then(()=>{settled=true;});
+ r.capture.onRevoke({storageError:true});
+ gate.release.resolve();
+ await new Promise(resolve=>setImmediate(resolve));
+ const settledAfterSave=settled;
+ // Release the old faulty worker so the failing regression leaves no open wait.
+ if(!settled){r.capture.onRevoke({storageError:true});await r.worker;}
+ assert.equal(settledAfterSave,true);
+ const result=await r.worker;
+ assert.equal(result.storageFailed,true);
+ assert.equal(result.status,'unconfirmed');
+ assert.notEqual(r.capture.enteredReady,true);
+ assert.equal(r.fakeClock.scheduled.size,0);
+ assert.equal(r.launches.length,2);
+ assert.equal(readRecords(r.directory).length,1);
+ assert.equal(r.store.getStatus(r.start.jobId).active,true);
+ assert.equal(r.store.getStatus(r.start.jobId).outcome,null);
+ assert.equal(r.capture.closed,1);
+ assert.equal(r.counts().closed,1);
 });

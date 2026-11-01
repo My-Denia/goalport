@@ -37,6 +37,16 @@ it('choosing another model refreshes the preview and sends that one model',async
  fireEvent.click(screen.getByRole('button',{name:'Send to Pi'}));await waitFor(()=>expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(true));
  expect(calls.find(c=>c.messageType==='native_workspace_check_start')?.payload.piCapacity).toEqual(other);
 });
+it('a missing default still allows selecting the only available model before preview',async()=>{
+ const other={...pair,provider:'Other',model:'beta'},calls:{messageType:string;payload:Record<string,unknown>}[]=[];
+ vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q);const payload=q.messageType==='coordination_list'?{checks:[]}:q.messageType==='native_workspace_check_start'?{job:{...job,requestId:q.payload.requestId}}:q.payload.piCapacity?{requestId:q.payload.requestId,nativeCheckTarget:target,piCapacity:q.payload.piCapacity,nativeCheckMaterial:material,uiExclusions:[]}:{offer:{instanceId:'pi',piCapacity:{offer:null,catalog:[other]}},backgroundSendConsent:true};return new Response(JSON.stringify({ok:true,payload:{...payload,...(q.messageType==='native_workspace_check_prepare'?{workspacePath:'/fixture'}:{})}}));}));
+ render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ const send=await sendReady();expect((send as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.click(screen.getByRole('combobox',{name:'Choose Pi model'}));fireEvent.keyDown(await screen.findByRole('option',{name:/beta/}),{key:'Enter'});
+ await waitFor(()=>expect(screen.getByRole('combobox',{name:'Choose Pi model'}).textContent).toContain('Other/beta'));await waitFor(()=>expect((screen.getByRole('button',{name:'Send to Pi'}) as HTMLButtonElement).disabled).toBe(false));
+ fireEvent.click(screen.getByRole('button',{name:'Send to Pi'}));await waitFor(()=>expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(true));
+ expect(calls.find(c=>c.messageType==='native_workspace_check_start')?.payload.piCapacity).toEqual(other);
+});
 it('Pi that is not set up says so and offers no send',async()=>{
  const calls:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q.messageType);return new Response(JSON.stringify({ok:true,payload:q.messageType==='coordination_list'?{checks:[]}:{workspacePath:'/fixture',backgroundSendConsent:true,offer:{instanceId:'pi',auth:{status:'unauthenticated'},piCapacity:{offer:pair,catalog:[pair]}}}}));}));
  render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);const send=await sendReady();await screen.findByText(/Pi isn’t set up/);expect((send as HTMLButtonElement).disabled).toBe(true);expect(calls.filter(c=>c==='native_workspace_check_prepare')).toHaveLength(1);
@@ -102,10 +112,10 @@ it('on the desktop it talks only to the preload bridge and accepts a Windows fol
  finally{delete window.goalportCore;}
 });
 
-it('a review that stopped running says the files are safe and can be dismissed without sending anything',async()=>{
+it('an unconfirmed review can be left without claiming failure or sending anything again',async()=>{
  const calls=server();const dead={...job,requestId:'r',live:false,active:true,state:'unconfirmed'};const onJob=vi.fn();
  render(<NativeWorkspaceCheck target={target} eligible job={dead as never} onJob={onJob} onBusy={vi.fn()}/>);
- expect(screen.getByText(/didn't finish/)).toBeTruthy();expect(screen.getByText(/weren't changed/)).toBeTruthy();expect(screen.queryByRole('button',{name:'Stop review'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
+ expect(screen.getByRole('heading',{name:'Confirming review status…'})).toBeTruthy();expect(screen.getByText(/may still be running/)).toBeTruthy();expect(screen.queryByText(/didn't finish/)).toBeNull();expect(screen.queryByRole('button',{name:'Stop review'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
  expect(calls.find(c=>c.messageType==='coordination_acknowledge')?.payload).toEqual({jobId:job.jobId});expect(onJob.mock.calls[0][0].acknowledgedStuckAt).toBeTruthy();expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);
 });
 

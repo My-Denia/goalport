@@ -303,6 +303,7 @@ export async function runPackagedJourney(options) {
     const root = await waitFor(() => processes().find(p => p.ProcessId === child.pid), p => p && sameWorkspace(p.ExecutablePath, path.join(packageRoot, 'GoalPort.exe')), 'spawned GoalPort process identity', 10000);
     owned.set(fingerprint(root), root); inventory();
     s.app = await attachApp(port, { electronPid: child.pid, pwshPath });
+    await s.app.cdp('Page.bringToFront');
     // bootstrapCurrent is asynchronous. Await the result, never Boolean(Promise).
     await s.app.until('(async () => !!window.goalportCore && (await window.goalportCore.bootstrapCurrent()).phase === "done")()', 45000);
     const info = await infoFor();
@@ -351,6 +352,19 @@ export async function runPackagedJourney(options) {
     await session.app.until('!!document.querySelector("#draft-workspace")', 10000);
     await session.app.input('#draft-workspace', workspace);
     await session.app.input('#draft-message', goal);
+    // New goals may default to a native Runtime. This journey exercises
+    // coordination, so choose that mode through the same picker as a user.
+    if (!await session.app.evaluate('!!document.querySelector(".draft-background-consent input")')) {
+      await session.app.click('.draft-runtime-picker button[aria-label="Select agent"]');
+      await session.app.until(`[...document.querySelectorAll('[role="option"]')].some(e=>e.querySelector('strong')?.textContent.trim()==='Several agents')`, 15000);
+      const point = await waitFor(() => session.app.evaluate(`(() => {
+        const e=[...document.querySelectorAll('[role="option"]')].find(e=>e.querySelector('strong')?.textContent.trim()==='Several agents');
+        e.scrollIntoView({block:'center'});
+        const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,top=document.elementFromPoint(x,y);
+        return {x,y,hit:!!r.width&&!!r.height&&(top===e||e.contains(top)),rect:r.toJSON(),visibility:document.visibilityState,occluder:top?.tagName};
+      })()`), point => point.hit, 'coordination option hit target', 15000);
+      for (const type of ['mousePressed','mouseReleased']) await session.app.cdp('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',clickCount:1});
+    }
     await session.app.until('!!document.querySelector(".draft-background-consent input")', 10000);
     if (!await session.app.evaluate('document.querySelector(".draft-background-consent input").checked')) await session.app.click('.draft-background-consent input');
     await session.app.until('!!document.querySelector(".authorization-panel")', 15000);
@@ -512,6 +526,12 @@ export async function runPackagedJourney(options) {
     const stillHeld = await status(interruptedLive.statusFacts.jobId);
     invariant(!stillHeld.live && !terminal(stillHeld) && stillHeld.acknowledgedStuckAt, 'Old interrupted folder was falsely released after B send');
   } catch (error) {
+    if (session?.app) {
+      try {
+        const shot = await session.app.cdp('Page.captureScreenshot', {format:'png',captureBeyondViewport:false});
+        fs.writeFileSync(path.join(outDir,'failure.png'),Buffer.from(shot.data,'base64'));
+      } catch { /* Preserve the primary failure if the window is already gone. */ }
+    }
     if (error.blocked) { report.blocked = error.message; } else report.errors.push(error.stack || error.message);
   } finally {
     const cleanupErrors = [];

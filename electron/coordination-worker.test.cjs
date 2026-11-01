@@ -9,7 +9,7 @@ const path = require("node:path");
 const { createCoordinationJobStore } = require("./coordination-job.cjs");
 const { launchOne } = require("./coordinate-service.cjs");
 const { runWorker, coreRefusal } = require("./coordination-worker.cjs");
-const { readRecords } = require("./coordination-record.cjs");
+const { readRecords, saveRecord } = require("./coordination-record.cjs");
 const engine = require("../dist/coordination-engine.cjs");
 const providers = [
   { instanceId: "codex", displayName: "Codex", driver: "codex", enabled: true, installed: true, availability: "available", status: "ready", auth: { status: "authenticated", type: "chatgpt" }, models: [{ slug: "gpt-6-astra", isDefault: true }] },
@@ -69,7 +69,7 @@ async function scenario(t, options = {}) {
     invoke: async () => options.snapshot ?? ({ bounds: { projectionUnavailable: false }, attempt: { state: "completed" } }),
     exchangeVerified: async request => ({ requestId: request.requestId, ok: true, payload: { requestId: request.requestId, accepted: true,
       ...(request.messageType === "goal_overview" ? { overview: options.overview ?? { truncated: false, goals: [], pending: [] } } : { snapshot: (typeof options.detail === "function" ? options.detail(launches.length, request) : options.detail) ?? { bounds: { projectionUnavailable: false }, activeCampaignId: request.payload.campaignId } }) } }),
-  }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
+  }, discover: async () => ({ ok: true, providers: roster }), env: options.env ?? { GOALPORT_COORDINATE_SEND: "1" }, ...(options.saveRecord ? { saveRecord: options.saveRecord } : {}), ...(options.saveFailure ? { saveRecord: () => { throw Error("record failed"); } } : {}) });
   return { result, launches, status: store.getStatus(start.jobId), authorizations, records: readRecords(directory), scope, store, jobId: start.jobId, directory, backgroundEngineInputValue, requestCoordinationInputValue };
 }
 test("bound Pi own admission reaches engine, actual launch facts and saved requested projection without a provider", async t => {
@@ -402,4 +402,21 @@ test("a worker encountering stuck-acknowledged between turns settles stopped and
   });
   assert.equal(nextSameFolder.ok, true);
   assert.equal(nextSameFolder.created, true);
+});
+
+test("Stop received during asynchronous save settles stopped without another dispatch", async t => {
+  let currentStore, jobId;
+  const r = await scenario(t, {
+    storeDecorator: (store, start) => { currentStore = store; jobId = start.jobId; return store; },
+    saveRecord: async (directory, record) => {
+      await new Promise(resolve => setImmediate(() => { currentStore.revoke(jobId); resolve(); }));
+      return saveRecord(directory, record);
+    },
+  });
+  assert.equal(r.status.revoked, true);
+  assert.equal(r.status.state, "stopped");
+  assert.equal(r.status.active, false);
+  assert.equal(r.status.pendingCommand, null);
+  assert.equal(r.records.length, 1);
+  assert.equal(r.launches.length, 8);
 });

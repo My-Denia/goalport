@@ -1083,14 +1083,14 @@ mod windows_pipe {
         fs::File,
         io::{Read, Write},
         os::windows::ffi::OsStrExt,
-        os::windows::io::FromRawHandle,
+        os::windows::io::{AsRawHandle, FromRawHandle},
         ptr::null_mut,
         time::{Duration, Instant},
     };
     use winapi::{
         ctypes::c_void,
         shared::{
-            minwindef::{DWORD, FALSE, ULONG},
+            minwindef::{DWORD, FALSE, TRUE, ULONG},
             ntdef::NULL,
             sddl::{
                 ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -1099,23 +1099,25 @@ mod windows_pipe {
             winerror::{
                 ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_OWNER,
                 ERROR_INVALID_PARAMETER, ERROR_INVALID_SECURITY_DESCR, ERROR_PIPE_BUSY,
-                ERROR_PIPE_CONNECTED,
+                ERROR_PIPE_CONNECTED, ERROR_IO_PENDING, ERROR_BROKEN_PIPE,
             },
         },
         um::{
             accctrl::SE_KERNEL_OBJECT,
             aclapi::GetSecurityInfo,
             errhandlingapi::GetLastError,
-            fileapi::{CreateFileW, OPEN_EXISTING},
+            fileapi::{CreateFileW, ReadFile, WriteFile, OPEN_EXISTING},
+            ioapiset::{CancelIoEx, GetOverlappedResult},
+            synchapi::{CreateEventW, WaitForSingleObject},
             handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
-            minwinbase::SECURITY_ATTRIBUTES,
+            minwinbase::{SECURITY_ATTRIBUTES, OVERLAPPED},
             namedpipeapi::{ConnectNamedPipe, CreateNamedPipeW, WaitNamedPipeW},
             processthreadsapi::{GetCurrentProcess, OpenProcess, OpenProcessToken},
             securitybaseapi::{
                 EqualSid, GetAce, GetSecurityDescriptorControl, GetTokenInformation,
             },
             winbase::{
-                FILE_FLAG_FIRST_PIPE_INSTANCE, GetNamedPipeServerProcessId, LocalFree,
+                FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, INFINITE, GetNamedPipeServerProcessId, LocalFree,
                 PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
                 PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, SECURITY_IDENTIFICATION,
                 SECURITY_SQOS_PRESENT,
@@ -1357,7 +1359,7 @@ mod windows_pipe {
             lpSecurityDescriptor: descriptor,
             bInheritHandle: FALSE,
         };
-        let open_mode = PIPE_ACCESS_DUPLEX
+        let open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED
             | if first {
                 FILE_FLAG_FIRST_PIPE_INSTANCE
             } else {
@@ -1414,11 +1416,16 @@ mod windows_pipe {
         }
 
         pub fn accept(&mut self) -> Result<NamedPipeConnection, IpcError> {
-            let connected = unsafe { ConnectNamedPipe(self.handle as _, std::ptr::null_mut()) };
+            let mut operation = PipeOperation::new()?;
+            let connected = unsafe { ConnectNamedPipe(self.handle as _, &mut operation.overlapped) };
             if connected == 0 {
                 let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
-                    return Err(IpcError::Io(error));
+                match error.raw_os_error() {
+                    Some(code) if code == ERROR_PIPE_CONNECTED as i32 => {}
+                    Some(code) if code == ERROR_IO_PENDING as i32 => {
+                        operation.finish(self.handle as _, None)?;
+                    }
+                    _ => return Err(IpcError::Io(error)),
                 }
             }
             let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
@@ -1427,7 +1434,7 @@ mod windows_pipe {
             // open. A failure drops the connection and is fatal for the server.
             let next = create_pipe_instance(&self.name, false)?;
             self.handle = next as _;
-            Ok(NamedPipeConnection { file })
+            Ok(NamedPipeConnection { file, read_deadline: None, write_deadline: None, io_timeout: Duration::from_secs(30) })
         }
 
         /// Replaces an invalidated listening instance with a further instance
@@ -1457,21 +1464,177 @@ mod windows_pipe {
         }
     }
 
+    // The OVERLAPPED and its buffer remain alive until completion, including
+    // after a timeout requests cancellation. Never cancel the handler thread.
+    struct PipeOperation {
+        overlapped: OVERLAPPED,
+        _event: OwnedHandle,
+    }
+    impl PipeOperation {
+        fn new() -> std::io::Result<Self> {
+            let event = unsafe { CreateEventW(null_mut(), TRUE, FALSE, std::ptr::null()) };
+            if event.is_null() { return Err(std::io::Error::last_os_error()); }
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = event;
+            Ok(Self { overlapped, _event: OwnedHandle(event) })
+        }
+
+        fn finish(&mut self, handle: HANDLE, deadline: Option<Instant>) -> std::io::Result<usize> {
+            let wait_ms = deadline.map(|end| end.saturating_duration_since(Instant::now())
+                .as_millis().min((u32::MAX - 1) as u128) as u32).unwrap_or(INFINITE);
+            let wait = unsafe { WaitForSingleObject(self.overlapped.hEvent, wait_ms) };
+            if wait != 0 {
+                let error = if wait == 258 { std::io::Error::new(std::io::ErrorKind::TimedOut, "Pipe I/O deadline exceeded") }
+                    else { std::io::Error::last_os_error() };
+                unsafe {
+                    CancelIoEx(handle, &mut self.overlapped);
+                    let mut transferred = 0;
+                    GetOverlappedResult(handle, &mut self.overlapped, &mut transferred, TRUE);
+                }
+                return Err(error);
+            }
+            let mut transferred = 0;
+            if unsafe { GetOverlappedResult(handle, &mut self.overlapped, &mut transferred, FALSE) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(transferred as usize)
+        }
+    }
+
     #[derive(Debug)]
     pub struct NamedPipeConnection {
         file: File,
+        read_deadline: Option<Instant>,
+        write_deadline: Option<Instant>,
+        io_timeout: Duration,
     }
     impl Read for NamedPipeConnection {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.file.read(buf)
+            if buf.is_empty() { return Ok(0); }
+            let deadline = *self.read_deadline.get_or_insert_with(|| Instant::now() + self.io_timeout);
+            if Instant::now() >= deadline { return Err(std::io::ErrorKind::TimedOut.into()); }
+            let mut operation = PipeOperation::new()?;
+            let handle = self.file.as_raw_handle() as HANDLE;
+            let mut transferred = 0;
+            let result = unsafe { ReadFile(handle, buf.as_mut_ptr() as _, buf.len().min(u32::MAX as usize) as u32, &mut transferred, &mut operation.overlapped) };
+            if result != 0 { return Ok(transferred as usize); }
+            let error = std::io::Error::last_os_error();
+            let completed = if error.raw_os_error() == Some(ERROR_IO_PENDING as i32) {
+                operation.finish(handle, Some(deadline))
+            } else {
+                Err(error)
+            };
+            // Preserve std::fs::File's pipe Read contract: a peer closing
+            // between frames is EOF. read_frame still rejects a partial frame.
+            match completed {
+                Err(error) if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+                result => result,
+            }
         }
     }
     impl Write for NamedPipeConnection {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.file.write(buf)
+            if buf.is_empty() { return Ok(0); }
+            let deadline = *self.write_deadline.get_or_insert_with(|| Instant::now() + self.io_timeout);
+            if Instant::now() >= deadline { return Err(std::io::ErrorKind::TimedOut.into()); }
+            let mut operation = PipeOperation::new()?;
+            let handle = self.file.as_raw_handle() as HANDLE;
+            let mut transferred = 0;
+            let result = unsafe { WriteFile(handle, buf.as_ptr() as _, buf.len().min(u32::MAX as usize) as u32, &mut transferred, &mut operation.overlapped) };
+            if result != 0 { return Ok(transferred as usize); }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) { return Err(error); }
+            operation.finish(handle, Some(deadline))
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.file.flush()
+            // Writes above already completed. FlushFileBuffers on a pipe waits
+            // for the peer to read and would reintroduce an unbounded wait.
+            self.read_deadline = None;
+            self.write_deadline = None;
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod deadline_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        fn server() -> (String, NamedPipeServer) {
+            let name = format!("goalport-io-deadline-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+            let server = NamedPipeServer::bind(&name).unwrap();
+            (name, server)
+        }
+
+        #[test]
+        fn partial_frame_times_out_while_client_stays_open() {
+            let (name, mut server) = server();
+            let worker = std::thread::spawn(move || {
+                let mut stream = server.accept().unwrap();
+                stream.io_timeout = Duration::from_millis(200);
+                let error = super::super::read_frame(&mut stream).unwrap_err();
+                assert!(matches!(error, IpcError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut));
+            });
+            let mut client = NamedPipeClient::connect(&name).unwrap();
+            client.write_all(&[10, 0]).unwrap();
+            worker.join().unwrap();
+            drop(client);
+        }
+
+        #[test]
+        fn peer_close_is_eof_only_at_a_frame_boundary() {
+            for partial in [false, true] {
+                let (name, mut server) = server();
+                let (accepted, ready) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let mut stream = server.accept().unwrap();
+                    accepted.send(()).unwrap();
+                    stream.io_timeout = Duration::from_secs(2);
+                    let result = super::super::read_frame(&mut stream);
+                    if partial {
+                        assert!(matches!(result, Err(IpcError::TruncatedFrame)));
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                });
+                let mut client = NamedPipeClient::connect(&name).unwrap();
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                if partial { client.write_all(&[10, 0]).unwrap(); client.flush().unwrap(); }
+                drop(client);
+                worker.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn unread_response_times_out_while_client_stays_open() {
+            let (name, mut server) = server();
+            let worker = std::thread::spawn(move || {
+                let mut stream = server.accept().unwrap();
+                stream.io_timeout = Duration::from_millis(200);
+                let error = stream.write_all(&vec![1; 1024 * 1024]).unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            });
+            let client = NamedPipeClient::connect(&name).unwrap();
+            worker.join().unwrap();
+            drop(client);
+        }
+
+        #[test]
+        fn handler_time_does_not_consume_response_deadline() {
+            let (name, mut server) = server();
+            let worker = std::thread::spawn(move || {
+                let mut stream = server.accept().unwrap();
+                stream.io_timeout = Duration::from_millis(200);
+                assert!(super::super::read_frame(&mut stream).unwrap().is_some());
+                std::thread::sleep(Duration::from_millis(300));
+                super::super::write_frame(&mut stream, &serde_json::json!({"ok":true})).unwrap();
+                assert!(super::super::read_frame(&mut stream).unwrap().is_some());
+            });
+            let mut client = NamedPipeClient::connect(&name).unwrap();
+            super::super::write_frame(&mut client, &serde_json::json!({})).unwrap();
+            assert!(super::super::read_frame(&mut client).unwrap().is_some());
+            super::super::write_frame(&mut client, &serde_json::json!({})).unwrap();
+            worker.join().unwrap();
         }
     }
 
@@ -1828,7 +1991,9 @@ mod tests {
             shared::winerror::ERROR_FILE_NOT_FOUND,
             um::{
                 errhandlingapi::GetLastError,
-                fileapi::{CreateFileW, OPEN_EXISTING},
+                fileapi::{CreateFileW, ReadFile, WriteFile, OPEN_EXISTING},
+            ioapiset::{CancelIoEx, GetOverlappedResult},
+            synchapi::{CreateEventW, WaitForSingleObject},
                 handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
                 processthreadsapi::{GetCurrentProcess, OpenProcessToken},
                 securitybaseapi::GetTokenInformation,

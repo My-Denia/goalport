@@ -3227,6 +3227,21 @@ describe("one in-window repair", () => {
       expect(checkbox.checked).toBe(false);
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
     });
+    it("an ungranted profile can return from a native Runtime to the coordination grant", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      window.goalportCore!.backgroundSendConsent = async () => ({ allowed: false });
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: false });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />); await openDraftWithPanel();
+      fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
+      clickRuntimeOption(await screen.findByRole("option", { name: /Codex/ }));
+      await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull());
+      fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
+      clickRuntimeOption(await screen.findByRole("option", { name: /Several agents/ }));
+      expect(await screen.findByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeTruthy();
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();
+    });
     it("a failed profile grant leaves all coordinated Send blocked and explains how to retry", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       window.goalportCore!.backgroundSendConsent = async () => { throw new Error("disk full"); };

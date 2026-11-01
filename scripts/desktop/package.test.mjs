@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { finished } from "node:stream/promises";
 import test from "node:test";
-import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity, STAGED_APP_MODULES } from "./package.mjs";
+import { artifactPaths, asarApi, COMPONENTS, fileHash, ROOT, sha256, sourceIdentity, stageRecordLockDependencies, STAGED_APP_MODULES } from "./package.mjs";
 import { stagedDependenciesCoverGraph, verifyPackage } from "./verify-package.mjs";
 
 function fixtureGitEnv(root) {
@@ -92,7 +92,8 @@ test("an existing package destination is refused before any build or overwrite",
   writeFileSync(sentinel, "existing candidate");
   const result = spawnSync(process.execPath, [resolve(ROOT, "scripts/connected/package-electron.mjs"), "--out", destination], { encoding: "utf8", windowsHide: true });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Output already exists/);
+  assert.match(result.stderr, process.platform === "win32" && process.arch === "x64"
+    ? /Output already exists/ : /supports Windows x64 only/);
   assert.equal(readFileSync(sentinel, "utf8"), "existing candidate");
   assert.deepEqual(artifactPaths(destination), ["keep.txt"]);
 });
@@ -239,4 +240,17 @@ test("C2 offline staging includes detached owner and shared engine without Windo
   assert.ok(source.includes('"--config", "vite.coordination.config.ts", "--outDir", frontend'));
   const verification = readFileSync(resolve(ROOT, "scripts/desktop/verify-package.mjs"), "utf8");
   assert.ok(verification.includes('"dist/coordination-engine.cjs"'));
+});
+
+
+test("staged record locking loads and operates without the repository dependencies", async t => {
+  const stage = mkdtempSync(resolve(tmpdir(), "goalport-staged-lock-"));
+  t.after(() => rmSync(stage, { recursive: true, force: true }));
+  stageRecordLockDependencies(stage);
+  const require = createRequire(resolve(stage, "main.cjs"));
+  const lock = require("proper-lockfile");
+  const release = await lock.lock(stage);
+  assert.equal(await lock.check(stage), true);
+  await release();
+  assert.equal(await lock.check(stage), false);
 });

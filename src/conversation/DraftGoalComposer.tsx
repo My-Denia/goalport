@@ -85,6 +85,7 @@ interface DraftGoalComposerProps {
   error: { sentence: string; technical?: string } | null;
   canBrowse: boolean;
   coordinationAvailable: boolean;
+  coordinationEntryAvailable?: boolean;
   runtimeRequiredHint?: string;
   coordinationResult?: string | null;
   failureHeadline?: string | null;
@@ -190,7 +191,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const allowanceExplained = useRef(false);
@@ -322,7 +323,7 @@ export function DraftGoalComposer({
             runtimes={runtimes}
             provider={draft.provider}
             connected={connected}
-            coordinationAvailable={coordinationAvailable}
+            coordinationAvailable={coordinationAvailable || coordinationEntryAvailable}
             runtimeRequiredHint={runtimeRequiredHint}
             onSelect={(provider) => onChange({ ...draft, provider })}
           />

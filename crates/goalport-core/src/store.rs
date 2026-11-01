@@ -3115,6 +3115,16 @@ impl Store {
         Ok(command.clone())
     }
 
+    /// Claim the legacy executor's command exactly once across connections.
+    /// A repeated Executing state is not a second permission to run.
+    pub fn claim_pending_command(&self, id: &str) -> Result<bool, StoreError> {
+        let connection = self.inner.lock().expect("store mutex poisoned");
+        Ok(connection.execute(
+            "UPDATE commands SET state='EXECUTING', version=version+1 WHERE id=?1 AND state='PENDING'",
+            params![id],
+        )? == 1)
+    }
+
     pub fn update_command_state(
         &self,
         id: &str,

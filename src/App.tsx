@@ -3512,6 +3512,7 @@ function App() {
                     error={draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
+                    coordinationEntryAvailable={scopeBridgeReady}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     linuxCanStartCoordination={client.mode === "linux-core"}
                     piCapacity={client.mode === "linux-core" ? (linuxPiSelection ?? (piOwnGoal ? normalizePiCapacity(savedTarget?.piCapacity) ?? undefined : linuxPiSnapshot?.piCapacity?.offer)) : undefined}
