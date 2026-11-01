@@ -17,6 +17,7 @@ import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { runtimeProbeCommand } from "./runtime-probe-command.mjs";
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -26,7 +27,6 @@ const SCENARIO_MANIFEST = path.join(ROOT, "tests", "scenarios", "manifest.json")
 const MAX_TIMEOUT_SECONDS = 3600;
 const OUTPUT_LIMIT = 1024 * 1024;
 const REDACTED_ROOT = "<workspace>";
-const SYNTHETIC_TASK = "Reply exactly GOALPORT_RUNTIME_OK. Do not use tools, read or write files, access the network, or perform any external action.";
 
 const SCENARIO_IDS = [
   "DUR-01", "DUR-02", "DUR-03", "DUR-04",
@@ -54,14 +54,7 @@ const PROVIDERS = {
       { name: "version", argvClass: "codex.version", args: ["--version"] },
       { name: "help", argvClass: "codex.app-server-help", args: ["app-server", "--help"] },
       { name: "auth", argvClass: "codex.login-status", args: ["login", "status"] }
-    ],
-    live: {
-      send: {
-        argvClass: "codex.synthetic-exec",
-        args: ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--cd", "<synthetic-root>", "GOALPORT_SYNTHETIC_TASK"]
-      },
-      probe: ["app-server", "--help"]
-    }
+    ]
   },
   grok: {
     displayName: "Grok",
@@ -71,14 +64,7 @@ const PROVIDERS = {
       { name: "version", argvClass: "grok.version", args: ["--version"] },
       { name: "help", argvClass: "grok.agent-help", args: ["agent", "--help"] },
       { name: "auth", argvClass: "grok.models", args: ["models"] }
-    ],
-    live: {
-      send: {
-        argvClass: "grok.synthetic-headless",
-        args: ["-p", "GOALPORT_SYNTHETIC_TASK", "--output-format", "streaming-json", "--max-turns", "1", "--no-subagents", "--disable-web-search"]
-      },
-      probe: ["agent", "--help"]
-    }
+    ]
   },
   claude: {
     displayName: "Claude Code",
@@ -88,14 +74,7 @@ const PROVIDERS = {
       { name: "version", argvClass: "claude.version", args: ["--version"] },
       { name: "help", argvClass: "claude.help", args: ["--help"] },
       { name: "auth", argvClass: "claude.auth-status", args: ["auth", "status", "--json"] }
-    ],
-    live: {
-      send: {
-        argvClass: "claude.synthetic-print",
-        args: ["-p", "GOALPORT_SYNTHETIC_TASK", "--output-format", "stream-json", "--max-turns", "1", "--verbose"]
-      },
-      probe: ["--help"]
-    }
+    ]
   }
 };
 
@@ -448,12 +427,6 @@ function parseStructuredEvents(output) {
   return events;
 }
 
-function safeArgs(args, syntheticRoot) {
-  // The child is started with cwd=syntheticRoot for the task case. Keep the
-  // placeholder relative and do not put a user path in argv evidence.
-  return args.map((value) => value === "<synthetic-root>" ? "." : value === "GOALPORT_SYNTHETIC_TASK" ? SYNTHETIC_TASK : value);
-}
-
 async function ensureSyntheticRoot(input) {
   const root = workspacePath(input, "synthetic root");
   const allowedPrefix = path.join(ROOT, "goal-runs", "goalport-v1", "fixtures", "runtime");
@@ -545,16 +518,13 @@ async function runRuntimeProbe(provider, args, build) {
       continue;
     }
     if (!live) continue;
-    const spec = name === "send" ? profile.live.send : {
-      argvClass: profile.executable + "." + name + "-capability-probe",
-      args: profile.live.probe
-    };
+    const command = runtimeProbeCommand({ provider, executable: profile.executable, invocation, name, syntheticRoot, root: ROOT });
     const remaining = Math.max(0, (deadlineAt - Date.now()) / 1000);
     const result = remaining <= 0
       ? { exit: null, timedOut: true, spawnError: "provider total timeout elapsed", stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(""), stderrSha256: sha256(""), stdoutPreview: "", stderrPreview: "", stdoutText: "", stderrText: "" }
-      : await runProcess(invocation.command, [...invocation.prefix, ...safeArgs(spec.args, syntheticRoot)], {
+      : await runProcess(command.command, command.args, {
         timeoutSeconds: Math.min(caseTimeout, remaining),
-        cwd: name === "send" ? syntheticRoot : ROOT,
+        cwd: command.cwd,
         env: { GOALPORT_SYNTHETIC_PROBE: "1" }
       });
     const events = parseStructuredEvents(result.stdoutText);
@@ -566,7 +536,7 @@ async function runRuntimeProbe(provider, args, build) {
       executed: result.timedOut || result.spawnError ? 0 : 1,
       assertions: sendPass ? 2 : 0,
       skipped: 0,
-      argvClass: spec.argvClass,
+      argvClass: command.argvClass,
       exit: result.exit,
       timedOut: result.timedOut,
       spawnError: result.spawnError,
