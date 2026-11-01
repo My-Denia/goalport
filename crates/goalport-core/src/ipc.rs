@@ -1099,7 +1099,7 @@ mod windows_pipe {
             winerror::{
                 ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_OWNER,
                 ERROR_INVALID_PARAMETER, ERROR_INVALID_SECURITY_DESCR, ERROR_PIPE_BUSY,
-                ERROR_PIPE_CONNECTED, ERROR_IO_PENDING,
+                ERROR_PIPE_CONNECTED, ERROR_IO_PENDING, ERROR_BROKEN_PIPE,
             },
         },
         um::{
@@ -1519,8 +1519,17 @@ mod windows_pipe {
             let result = unsafe { ReadFile(handle, buf.as_mut_ptr() as _, buf.len().min(u32::MAX as usize) as u32, &mut transferred, &mut operation.overlapped) };
             if result != 0 { return Ok(transferred as usize); }
             let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) { return Err(error); }
-            operation.finish(handle, Some(deadline))
+            let completed = if error.raw_os_error() == Some(ERROR_IO_PENDING as i32) {
+                operation.finish(handle, Some(deadline))
+            } else {
+                Err(error)
+            };
+            // Preserve std::fs::File's pipe Read contract: a peer closing
+            // between frames is EOF. read_frame still rejects a partial frame.
+            match completed {
+                Err(error) if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
+                result => result,
+            }
         }
     }
     impl Write for NamedPipeConnection {
@@ -1570,6 +1579,30 @@ mod windows_pipe {
             client.write_all(&[10, 0]).unwrap();
             worker.join().unwrap();
             drop(client);
+        }
+
+        #[test]
+        fn peer_close_is_eof_only_at_a_frame_boundary() {
+            for partial in [false, true] {
+                let (name, mut server) = server();
+                let (accepted, ready) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let mut stream = server.accept().unwrap();
+                    accepted.send(()).unwrap();
+                    stream.io_timeout = Duration::from_secs(2);
+                    let result = super::super::read_frame(&mut stream);
+                    if partial {
+                        assert!(matches!(result, Err(IpcError::TruncatedFrame)));
+                    } else {
+                        assert!(result.unwrap().is_none());
+                    }
+                });
+                let mut client = NamedPipeClient::connect(&name).unwrap();
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
+                if partial { client.write_all(&[10, 0]).unwrap(); client.flush().unwrap(); }
+                drop(client);
+                worker.join().unwrap();
+            }
         }
 
         #[test]
