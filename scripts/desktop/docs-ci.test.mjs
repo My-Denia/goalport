@@ -157,9 +157,10 @@ test("Windows Core CI runs the deterministic contract tranche", () => {
   // Inherited GOALPORT_* stays scrubbed before any cargo command runs.
   assert.ok(lines.findIndex((line) => /Where-Object \{ \$_\.Name -like 'GOALPORT_\*' \}/.test(line)) > 0);
   assert.ok(script.some(({ command }) => command === "cargo test -p goalport-core --lib"));
-  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker", "claude_stream", "admission_failure", "recovery_classification"]) {
+  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker", "admission_failure", "recovery_classification"]) {
     assert.ok(tests.includes(name), `core CI runs --test ${name}`);
   }
+  assert.ok(!tests.includes("claude_stream"), "non-hermetic Claude successor tests remain opt-in");
   for (const { index, command } of script) {
     assert.match(command, /^cargo test /);
     assert.equal(lines[index + 1]?.trim(), "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", `${command} keeps the fail-fast guard`);
