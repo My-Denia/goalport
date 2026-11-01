@@ -37,6 +37,16 @@ it('choosing another model refreshes the preview and sends that one model',async
  fireEvent.click(screen.getByRole('button',{name:'Send to Pi'}));await waitFor(()=>expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(true));
  expect(calls.find(c=>c.messageType==='native_workspace_check_start')?.payload.piCapacity).toEqual(other);
 });
+it('a missing default still allows selecting the only available model before preview',async()=>{
+ const other={...pair,provider:'Other',model:'beta'},calls:{messageType:string;payload:Record<string,unknown>}[]=[];
+ vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q);const payload=q.messageType==='coordination_list'?{checks:[]}:q.messageType==='native_workspace_check_start'?{job:{...job,requestId:q.payload.requestId}}:q.payload.piCapacity?{requestId:q.payload.requestId,nativeCheckTarget:target,piCapacity:q.payload.piCapacity,nativeCheckMaterial:material,uiExclusions:[]}:{offer:{instanceId:'pi',piCapacity:{offer:null,catalog:[other]}},backgroundSendConsent:true};return new Response(JSON.stringify({ok:true,payload:{...payload,...(q.messageType==='native_workspace_check_prepare'?{workspacePath:'/fixture'}:{})}}));}));
+ render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);
+ const send=await sendReady();expect((send as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.click(screen.getByRole('combobox',{name:'Choose Pi model'}));fireEvent.keyDown(await screen.findByRole('option',{name:/beta/}),{key:'Enter'});
+ await waitFor(()=>expect(screen.getByRole('combobox',{name:'Choose Pi model'}).textContent).toContain('Other/beta'));await waitFor(()=>expect((screen.getByRole('button',{name:'Send to Pi'}) as HTMLButtonElement).disabled).toBe(false));
+ fireEvent.click(screen.getByRole('button',{name:'Send to Pi'}));await waitFor(()=>expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(true));
+ expect(calls.find(c=>c.messageType==='native_workspace_check_start')?.payload.piCapacity).toEqual(other);
+});
 it('Pi that is not set up says so and offers no send',async()=>{
  const calls:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_u,init)=>{const q=JSON.parse(init.body);calls.push(q.messageType);return new Response(JSON.stringify({ok:true,payload:q.messageType==='coordination_list'?{checks:[]}:{workspacePath:'/fixture',backgroundSendConsent:true,offer:{instanceId:'pi',auth:{status:'unauthenticated'},piCapacity:{offer:pair,catalog:[pair]}}}}));}));
  render(<NativeWorkspaceCheck target={target} eligible job={null} onJob={vi.fn()} onBusy={vi.fn()}/>);const send=await sendReady();await screen.findByText(/Pi isn’t set up/);expect((send as HTMLButtonElement).disabled).toBe(true);expect(calls.filter(c=>c==='native_workspace_check_prepare')).toHaveLength(1);

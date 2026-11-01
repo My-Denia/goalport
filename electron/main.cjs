@@ -18,7 +18,7 @@ const { createBackgroundHost, backgroundStartReply } = require("./coordination-b
 const { createNativeCheckHost } = require("./native-check-host.cjs");
 const { createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { controlEndpointFor } = require("./coordination-job.cjs");
-const { readRecords, saveRecord } = require("./coordination-record.cjs");
+const { readRecords, saveRecordAsync } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
@@ -1431,7 +1431,7 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
-  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(record?.workspacePath); return saveRecord(coordinationDirectory(), record); });
+  handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(record?.workspacePath); return saveRecordAsync(coordinationDirectory(), record); });
   handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
     clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
     return { ok: true };

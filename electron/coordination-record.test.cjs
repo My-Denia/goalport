@@ -782,3 +782,52 @@ test("malformed existing continuation on disk is preserved raw without dropping 
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+test("independent writers preserve both successful saves", async t => {
+  const { spawn } = require("node:child_process");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-record-race-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  saveRecord(directory, record({ requestId: "existing" }));
+  const script = `
+    const fs = require("node:fs");
+    const original = fs.readFileSync;
+    fs.readFileSync = function(file, ...args) {
+      const value = original.call(this, file, ...args);
+      if (String(file).endsWith("coordination-records.json"))
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+      return value;
+    };
+    const {saveRecordAsync} = require(process.argv[1]);
+    process.send("ready");
+    process.once("message", async () => {
+      try {
+        await saveRecordAsync(process.argv[2], JSON.parse(process.argv[3]));
+        process.disconnect();
+      } catch (error) { console.error(error); process.exit(1); }
+    });
+  `;
+  const children = ["foreground", "pi-review"].map(requestId => spawn(process.execPath,
+    ["-e", script, require.resolve("./coordination-record.cjs"), directory, JSON.stringify(record({ requestId }))],
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
+  t.after(() => children.forEach(child => { if (child.exitCode === null) child.kill(); }));
+  const completed = children.map(child => new Promise((resolve, reject) => {
+    let stderr = "";
+    child.stderr.on("data", data => { stderr += data; });
+    child.on("error", reject);
+    child.on("exit", code => code === 0 ? resolve() : reject(Error(stderr || `exit ${code}`)));
+  }));
+  await Promise.all(children.map(child => new Promise(resolve => child.once("message", resolve))));
+  children.forEach(child => child.send("save"));
+  await Promise.all(completed);
+  assert.deepEqual(readRecords(directory).map(r => r.requestId).sort(), ["existing", "foreground", "pi-review"]);
+  assert.deepEqual(fs.readdirSync(directory), ["coordination-records.json"]);
+});
+
+test("a failed save releases its lock for the next result", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-record-retry-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const { saveRecordAsync } = require("./coordination-record.cjs");
+  await assert.rejects(saveRecordAsync(directory, {}), /could not be saved/);
+  await saveRecordAsync(directory, record());
+  assert.equal(readRecords(directory).length, 1);
+});

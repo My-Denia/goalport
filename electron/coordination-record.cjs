@@ -393,7 +393,7 @@ function readRecords(directory) {
   }
 }
 
-function saveRecord(directory, input, clock = () => new Date().toISOString()) {
+function saveUnlocked(directory, input, clock = () => new Date().toISOString()) {
   if (input && input.continuation !== undefined) {
     if (!isValidContinuationDescriptor(input.continuation)) {
       throw new Error("The continuation descriptor is malformed.");
@@ -414,16 +414,48 @@ function saveRecord(directory, input, clock = () => new Date().toISOString()) {
   const existing = readRecords(directory).filter((item) => item.requestId !== stamped.requestId);
   const records = [stamped, ...existing];
   const file = recordFile(directory);
-  const temporary = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`, records.some(r => r.recordKind === 'native-workspace-check') ? { mode: 0o600, flag: 'wx' } : undefined);
-  fs.renameSync(temporary, file);
+  const temporary = `${file}.${process.pid}.${require("node:crypto").randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
   return stamped;
+}
+
+// Both APIs share one cross-process lock, including on first save. Resolve the
+// existing profile directory so alternate symlink spellings use the same lock.
+function recordLock(directory) {
+  fs.mkdirSync(directory, { recursive: true });
+  const profile = fs.realpathSync(directory);
+  return { profile, options: { lockfilePath: recordFile(profile) + ".lock" } };
+}
+
+function saveRecord(directory, input, clock) {
+  const { profile, options } = recordLock(directory);
+  const release = require("proper-lockfile").lockSync(profile, options);
+  try { return saveUnlocked(profile, input, clock); }
+  finally { release(); }
+}
+
+// Production callers wait without blocking the Electron event loop. Waiting
+// also permits a crashed writer's stale lock to recover using the library's
+// heartbeat policy; lock timeout remains a visible save failure.
+async function saveRecordAsync(directory, input, clock) {
+  const { profile, options } = recordLock(directory);
+  const release = await require("proper-lockfile").lock(profile, {
+    ...options, retries: { retries: 60, factor: 1, minTimeout: 250, maxTimeout: 250 },
+  });
+  try { return saveUnlocked(profile, input, clock); }
+  finally { await release(); }
 }
 
 module.exports = {
   normalizeRecord: normalize,
   readRecords,
   saveRecord,
+  saveRecordAsync,
   isValidContinuationDescriptor,
   normalizeContinuationDescriptor,
   validatedContinuationOf,

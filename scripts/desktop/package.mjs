@@ -19,6 +19,25 @@ export const STAGED_APP_MODULES = Object.freeze([
   "harness-runtime.cjs", "coordination-job.cjs", "coordination-worker.cjs", "coordination-background.cjs", "coordination-core-guard.cjs", "native-workspace-check.cjs", "native-check-host.cjs", "native-check-lookup.cjs",
   "background-send-consent.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs", "live-read-once.cjs"
 ]);
+// Native-free runtime dependency, copied with its licenses and transitive deps.
+// Resolve from each package so pnpm's isolated dependency layout is supported.
+export function stageRecordLockDependencies(stage) {
+  const seen = new Set();
+  function copy(name, from) {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const req = createRequire(from);
+    const manifest = req.resolve(name + "/package.json");
+    const metadata = JSON.parse(readFileSync(manifest, "utf8"));
+    const source = resolve(manifest, "..");
+    cpSync(source, resolve(stage, "node_modules", name), {
+      recursive: true, filter: file => !relative(source, file).split(/[\\/]/).includes("node_modules"),
+    });
+    for (const child of Object.keys(metadata.dependencies ?? {})) copy(child, manifest);
+  }
+  copy("proper-lockfile", resolve(ROOT, "package.json"));
+}
+
 export const ROOT_BUILD_INPUTS = Object.freeze([
   "Cargo.lock", "Cargo.toml", "index.html", "package.json", "pnpm-lock.yaml", "rust-toolchain.toml",
   "tsconfig.app.json", "tsconfig.json", "tsconfig.node.json", "vite.config.ts", "vite.coordination.config.ts"
@@ -188,7 +207,8 @@ export async function main(argv = process.argv.slice(2)) {
     mkdirSync(stage);
     for (const name of [...STAGED_APP_MODULES, "pinned-harness-child.ts"]) cpSync(resolve(ROOT, "electron", name), resolve(stage, name));
     cpSync(frontend, resolve(stage, "dist"), { recursive: true });
-    writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, main: "main.cjs" }, null, 2));
+    stageRecordLockDependencies(stage);
+    writeFileSync(resolve(stage, "package.json"), JSON.stringify({ name: "goalport-electron-rc", productName: "GoalPort", version: pkg.version, distribution, dependencies: { "proper-lockfile": pkg.dependencies["proper-lockfile"] }, main: "main.cjs" }, null, 2));
     writeFileSync(resolve(stage, "build-info.json"), `${JSON.stringify(buildInfo, null, 2)}\n`);
     const { default: packager } = await import("electron-packager");
     const packages = await packager({

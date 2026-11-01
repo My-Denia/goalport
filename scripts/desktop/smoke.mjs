@@ -348,10 +348,13 @@ async function smoke() {
     }
     logFd = openSync(resolve(out, "electron.log"), "a");
     stage = "spawn-electron";
-    child = spawn(resolve(packageRoot, "GoalPort.exe"), [normal ? "--data-dir" : "--test-profile", profile, "--user-data-dir", appDataRoot, `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], { cwd: packageRoot, env, stdio: ["ignore", logFd, logFd], windowsHide: true });
+    child = spawn(resolve(packageRoot, "GoalPort.exe"), [normal ? "--data-dir" : "--test-profile", profile, "--user-data-dir", appDataRoot, `--remote-debugging-port=${port}`, "--remote-debugging-address=127.0.0.1"], { cwd: packageRoot, env, stdio: ["ignore", logFd, logFd], windowsHide: false });
     child.once("error", (error) => { report.launchError = error.message; save(); });
     stage = "attach-cdp";
     page = await attachGoalPort(port);
+    // GUI acceptance needs a visible page: hidden windows can defer the
+    // animation frames used to lay out Base UI menus.
+    await page.cdp("Page.bringToFront");
     // --- Phase-aware bootstrap observation ---------------------------------
     // A startup classification bug must surface as the structured bootstrap
     // refusal it is (phase/kind/headline/original inspect trace), never be

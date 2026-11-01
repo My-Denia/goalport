@@ -36,7 +36,7 @@ cargo test --locked -p goalport-core-launcher
 | `cargo test -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker` | The deterministic Core contract tranche added to the ordinary `core` job (see [deterministic coverage](#deterministic-contract-coverage)) |
 | `cargo test -p goalport-core-launcher` | Launcher behavior |
 
-`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case. It also pins the CI coverage contract below: the ordinary `core` whitelist must keep the deterministic tranche and its `$LASTEXITCODE` guard, must not whitelist the excluded red suites, and `test:desktop` must keep the offline driver unit files while never running a driver (the Linux `background-native.mjs` included).
+`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case. It also pins the CI coverage contract below: the ordinary `core` whitelist must keep the deterministic tranche and its `$LASTEXITCODE` guard, must retain the three Windows suites revalidated below, and `test:desktop` must keep the offline driver unit files while never running a driver (the Linux `background-native.mjs` included).
 
 ## Packaged smoke tests
 
@@ -64,13 +64,15 @@ The normal run also captures a 1000-pixel-wide screenshot. It checks layout only
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`, all on `windows-latest`:
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. The frontend, core and desktop jobs use `windows-latest`; `linux-unix-socket` uses Ubuntu:
 
 | Job | Steps |
 | --- | --- |
 | `frontend` | Locked install, `pnpm lint`, `pnpm test:unit`, runtime-safety and IPC client node tests |
 | `core` | Core library and contract tests (Stop, recovery, handoff, workspace identity and more), the deterministic `goal_scope`/`grok_acp`/`ipc_lifecycle`/`claude_stop_broker` tranche, selected registration cases, launcher tests, Tauri host tests |
 | `desktop` | `pnpm test:desktop` (which includes the `background-native`, `feedback-native` and `plan-revision-native` driver units), a fresh Electron package build and verify, normal and synthetic packaged smoke, early-failure cleanup; failure summaries are redacted and kept for 7 days |
+
+The `linux-unix-socket` job runs Linux Core library, Unix socket, native protocol and responsiveness, Claude stop/resume, launcher, Python operator/bridge and Node coordination checks, followed by a built Core socket round-trip.
 
 A local run is not a remote CI result.
 
@@ -86,9 +88,9 @@ The Node pin matters for the JavaScript suites: several offline fixture checks c
 | `grok_acp` | `cargo test --locked -p goalport-core --test grok_acp` | ordinary CI (`core` job) and local | 23 hermetic tests over the offline ACP peer |
 | `ipc_lifecycle` | `cargo test --locked -p goalport-core --test ipc_lifecycle` | ordinary CI (`core` job) and local | 10 hermetic tests |
 | `claude_stop_broker` | `cargo test --locked -p goalport-core --test claude_stop_broker` | ordinary CI (`core` job) and local | 8 hermetic tests; own child cleanup |
-| `claude_stream` | `cargo test --locked -p goalport-core --test claude_stream` | opt-in local only | Excluded: one real product assertion fails (`native_stop_exact_input_and_reordered_receipt_keep_residual_held`). It is a defect to fix, not a test to weaken |
-| `admission_failure` | `cargo test --locked -p goalport-core --test admission_failure` | opt-in local only | Excluded: `m3_a_codex_registration_that_never_started_is_withdrawable` looks for an external `app-server` binary, so it is not hermetic |
-| `recovery_classification` | `cargo test --locked -p goalport-core --test recovery_classification` | opt-in local only | Excluded: four tests, then a live-server probe times out after 60 s. Not deterministic |
+| `claude_stream` | `cargo test --locked -p goalport-core --test claude_stream` | Windows core CI | Revalidated 2026-11-01: all 32 fake-Claude tests passed, including the formerly failing stop case |
+| `admission_failure` | `cargo test --locked -p goalport-core --test admission_failure` | Windows core CI | Revalidated 2026-11-01: all 12 tests passed using the explicit fake-Codex fixture; the old external-binary exclusion is obsolete |
+| `recovery_classification` | `cargo test --locked -p goalport-core --test recovery_classification` | Windows core CI | Revalidated 2026-11-01: all six fake-Codex tests passed in 91.47 seconds. The runner’s “over 60 seconds” message is progress reporting, not a timeout failure |
 | `background-native` units | `node --test scripts/acceptance/background-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 3 tests over the driver, validator and report predicates. They assert driver behavior and never parse a child `node --test` summary, so the CI Node version cannot change their result. The Linux-only driver `scripts/acceptance/background-native.mjs` is never run in CI |
 | `feedback-native` units | `node --test scripts/acceptance/feedback-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 6 tests. The fixture check accepts `#`, `ℹ` or `info` in the child summary and still asserts exactly 2 failures, so the same assertions pass on Node 22 and 25 |
 | `plan-revision-native` units | `node --test scripts/acceptance/plan-revision-native.test.mjs` (part of `pnpm test:desktop`) | ordinary CI (`desktop` job) and local | 7 tests, run in ordinary CI as part of `pnpm test:desktop`; the fixture check accepts `#`, `ℹ` or `info` runner-format text |
@@ -215,3 +217,38 @@ and the final auditor are closed offline fixture behaviors and separate read-onl
 Node processes over a disposable fixture: real filesystem/subprocess evidence,
 **not independent-model judgment**. This does not establish Windows behavior,
 real CLI confinement or a general revision loop; full GAH is not claimed.
+
+
+## Audit follow-up checks (2026-11-01 working tree)
+
+The coordination record tests now exercise two independent Node writers against
+one profile, including a delayed read to expose lost updates. Worker tests cover
+waiting for the asynchronous save. Desktop packaging stages the record-lock
+dependency and its transitive packages; an isolated loading test checks that the
+staged dependency works outside the repository.
+
+The ordinary renderer test entries include `continuation.test.ts` and
+`savedPlan.test.ts`; `test:coordination` includes `pi-capacity.test.cjs`.
+A desktop host regression saves a failed Pi review with its admission and checks
+that reopening it returns the saved failure reason.
+
+For the missing-default-model interaction, run
+`node scripts/preview/shot-audit-model-choice.mjs <fresh-evidence-directory>`.
+It builds the actual component with a synthetic host, selects the sole available
+model at 820, 1020 and 1440 pixels, and captures the blocked, menu and prepared
+states. It neither sends a model request nor proves a complete first-use journey,
+Windows packaging, native Runtime behavior or background survival.
+
+
+The same working-tree follow-up was tested on the local Windows host using its
+native Cargo/MSVC toolchain: 11 IPC library tests passed, including real named-pipe
+partial-frame timeout, unread-response timeout and a slow handler followed by a
+successful response and next request. The 12-test `pipe_security` integration suite
+also passed. These are Windows kernel-object tests, not packaged GUI acceptance.
+The Linux Core library run passed 238 tests.
+
+The built-app execute-slice fixture additionally completed its first-launch,
+New goal, explicit file-change authorization, Send and application-menu Close
+paths at 860, 1020 and 1440 pixels. Its 21 screenshots were retained locally with
+the walkthrough and build-asset manifest. The authorization is synthetic; no
+native provider permission prompt or real CLI run is established by this fixture.

@@ -119,3 +119,32 @@ test("the saved list ignores unbound records and refuses an unusable goal id", a
   assert.deepEqual((await host.handle("coordination_list", { nativeCampaignId: "campaign" })).payload, { checks: [] });
   assert.equal((await host.handle("coordination_list", { nativeCampaignId: "../x" })).ok, false);
 });
+
+test("saved failed checks retain their reason through the desktop host after reopening", async t => {
+  const { host, directory, workspace } = fixture(t);
+  const preview = await host.prepare({ requestId: "failed-check", ...ids, piCapacity: pair });
+  const { createCoordinationJobStore, workspaceIdentity } = require("./coordination-job.cjs");
+  const store = createCoordinationJobStore(directory, { bootstrapReady: true });
+  const workspacePath = workspaceIdentity(workspace);
+  store.startAdmission({
+    requestId: "failed-check", goal: "Review changes", workspacePath,
+    allowedInstances: ["pi"], maxTurns: 2, writeAuthorization: null,
+    backgroundConsent: true, piCapacity: pair,
+    nativeCheckTarget: ids, nativeCheckMaterial: preview.nativeCheckMaterial,
+  });
+  const stopReason = "401 authentication_error: sign in to Pi again";
+  require("./coordination-record.cjs").saveRecord(directory, {
+    requestId: "failed-check", recordKind: "native-workspace-check",
+    workspacePath, goal: "Review changes", piCapacity: pair,
+    nativeCheckTarget: ids, nativeCheckMaterial: preview.nativeCheckMaterial,
+    verdict: "failed", stopReason, auditText: "",
+    planningHarness: null, reviewHarness: null, planText: null, reviewText: null,
+    result: null, planningQuota: "unknown", reviewQuota: "unknown",
+  });
+  const reopened = createNativeCheckHost({ directory: () => directory });
+  const response = await reopened.handle("coordination_list", { nativeCampaignId: "campaign" });
+  assert.equal(response.ok, true);
+  assert.equal(response.payload.checks.length, 1);
+  assert.equal(response.payload.checks[0].nativeAssociation, true);
+  assert.equal(response.payload.checks[0].stopReason, stopReason);
+});

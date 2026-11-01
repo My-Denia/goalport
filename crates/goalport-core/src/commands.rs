@@ -130,17 +130,17 @@ impl CommandProcessor {
     /// payload is rejected by the store.
     pub fn execute(&self, request: CoreCommand) -> Result<CommandExecution, CommandError> {
         let persisted = self.store.record_command(&request.command)?;
-        if !matches!(persisted.state, CommandState::Pending) {
+        if !matches!(persisted.state, CommandState::Pending)
+            || !self.store.claim_pending_command(&request.command.id)?
+        {
             return Ok(CommandExecution {
-                command: persisted,
+                command: self.store.get_command(&request.command.id)?,
                 duplicate: true,
                 event: None,
                 lease: None,
                 outbox: None,
             });
         }
-        self.store
-            .update_command_state(&request.command.id, CommandState::Executing)?;
         let result = self.execute_operation(&request.operation);
         match result {
             Ok((event, lease, outbox)) => {
@@ -292,6 +292,25 @@ mod tests {
         assert!(second.duplicate);
         assert_eq!(store.list_events("a").unwrap().len(), 1);
         assert_eq!(store.get_attempt("a").unwrap().last_event_seq, 1);
+    }
+
+    #[test]
+    fn concurrent_command_calls_execute_the_operation_once() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_attempt(&Attempt::new("a", "t", "scenario", "cap-v1")).unwrap();
+        let command = CoreCommand::new("race", "a", CoreOperation::TransitionAttempt {
+            attempt_id: "a".into(), state: AttemptState::Active, event_id: "race-event".into(),
+        }).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8).map(|_| {
+            let processor = CommandProcessor::new(store.clone());
+            let command = command.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || { barrier.wait(); processor.execute(command).unwrap() })
+        }).collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| !r.duplicate).count(), 1);
+        assert_eq!(store.list_events("a").unwrap().len(), 1);
     }
 
     #[test]

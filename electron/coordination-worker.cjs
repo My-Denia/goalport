@@ -10,7 +10,7 @@ const { assertPipePeer, assertCoreIdentity, pipePeerBusy } = require("./launch-c
 const { createHarnessRuntime } = require("./harness-runtime.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
 const { authorizeCoordination, authorizeMembershipError, discoverCoordination, launchOne } = require("./coordinate-service.cjs");
-const { saveRecord } = require("./coordination-record.cjs");
+const { saveRecordAsync } = require("./coordination-record.cjs");
 const liveRead = require("./live-read-once.cjs");
 
 const { coreRefusal, guardCoreCoverage } = require("./coordination-core-guard.cjs");
@@ -270,7 +270,7 @@ async function runWorker(config, deps = {}) {
         auditInputEvidenceText: input.nativeCheckMaterial.deliveredEvidence };
     };
     liveResult = await runRound(discovery, piContext);
-    const saveResult = () => (deps.saveRecord ?? saveRecord)(config.directory, {
+    const saveResult = () => (deps.saveRecord ?? saveRecordAsync)(config.directory, {
       ...liveResult, requestId: input.requestId, workspacePath: input.workspaceRoot, goal: input.goal,
       savedAt: new Date(wallNowMs()).toISOString(), ...(input.continuation ? { continuation: input.continuation } : {}),
       ...(input.piCapacity ? { piCapacity: input.piCapacity } : {}) });
@@ -279,7 +279,7 @@ async function runWorker(config, deps = {}) {
       const facts = localFacts(), current = scope.current();
       if (!facts.pendingCommand && !facts.revoked && current && current.generation === authorization.generation && !current.write && current.remaining >= 2) {
         try {
-          const saved = saveResult();
+          const saved = await saveResult();
           initialSaved = true;
           if (saved?.requestId === admitted.requestId && saved.verdict === "checked" && saved.planText && saved.reviewText) initialResult = saved;
           else initialSaveFailed = true;
@@ -333,7 +333,7 @@ async function runWorker(config, deps = {}) {
     // note instead; the success path keeps the audited record-before-
     // outcome order unchanged.
     let recordSaveFailed = initialSaveFailed;
-    try { if ((!initialSaved && !initialSaveFailed) || accepted) saveResult(); } catch { recordSaveFailed = true; }
+    try { if ((!initialSaved && !initialSaveFailed) || accepted) await saveResult(); } catch { recordSaveFailed = true; }
     if (accepted) store.updateLiveFollowUpPhase(config.jobId, status === "unconfirmed" ? "unconfirmed" : "completed", owner);
     store.recordOutcome(config.jobId, {
       status,

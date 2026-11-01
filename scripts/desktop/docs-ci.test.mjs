@@ -149,7 +149,7 @@ test("Windows Desktop CI builds locked source and runs normal plus synthetic pac
   assert.ok(commands.includes("node scripts/desktop/verify-early-cleanup.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --out artifacts/electron-rc/ci-early-cleanup"));
 });
 
-test("Windows Core CI runs the deterministic contract tranche and keeps red suites out", () => {
+test("Windows Core CI runs the deterministic contract tranche", () => {
   const { body, lines, script, tests } = coreJob(workflow);
   assert.match(body, /runs-on: windows-latest/);
   assert.match(body, /node-version: 22\.19\.0/);
@@ -157,12 +157,8 @@ test("Windows Core CI runs the deterministic contract tranche and keeps red suit
   // Inherited GOALPORT_* stays scrubbed before any cargo command runs.
   assert.ok(lines.findIndex((line) => /Where-Object \{ \$_\.Name -like 'GOALPORT_\*' \}/.test(line)) > 0);
   assert.ok(script.some(({ command }) => command === "cargo test -p goalport-core --lib"));
-  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker"]) {
+  for (const name of ["goal_scope", "grok_acp", "ipc_lifecycle", "claude_stop_broker", "claude_stream", "admission_failure", "recovery_classification"]) {
     assert.ok(tests.includes(name), `core CI runs --test ${name}`);
-  }
-  // Real failures and non-hermetic suites stay opt-in; never whitelisted to look green.
-  for (const name of ["claude_stream", "admission_failure", "recovery_classification"]) {
-    assert.ok(!tests.includes(name), `core CI must not whitelist --test ${name}`);
   }
   for (const { index, command } of script) {
     assert.match(command, /^cargo test /);
