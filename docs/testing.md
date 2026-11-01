@@ -252,3 +252,5 @@ New goal, explicit file-change authorization, Send and application-menu Close
 paths at 860, 1020 and 1440 pixels. Its 21 screenshots were retained locally with
 the walkthrough and build-asset manifest. The authorization is synthetic; no
 native provider permission prompt or real CLI run is established by this fixture.
+
+Ordinary content changes to Markdown under `docs/` use the lightweight documentation job, as do the existing root documentation files. Code, workflow/build inputs, file mode changes, additions, deletions and renames still select the full matrix. Required workflows continue to run; their job conditions select the work.
