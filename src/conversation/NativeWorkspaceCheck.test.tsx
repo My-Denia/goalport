@@ -112,10 +112,10 @@ it('on the desktop it talks only to the preload bridge and accepts a Windows fol
  finally{delete window.goalportCore;}
 });
 
-it('a review that stopped running says the files are safe and can be dismissed without sending anything',async()=>{
+it('an unconfirmed review can be left without claiming failure or sending anything again',async()=>{
  const calls=server();const dead={...job,requestId:'r',live:false,active:true,state:'unconfirmed'};const onJob=vi.fn();
  render(<NativeWorkspaceCheck target={target} eligible job={dead as never} onJob={onJob} onBusy={vi.fn()}/>);
- expect(screen.getByText(/didn't finish/)).toBeTruthy();expect(screen.getByText(/weren't changed/)).toBeTruthy();expect(screen.queryByRole('button',{name:'Stop review'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
+ expect(screen.getByRole('heading',{name:'Confirming review status…'})).toBeTruthy();expect(screen.getByText(/may still be running/)).toBeTruthy();expect(screen.queryByText(/didn't finish/)).toBeNull();expect(screen.queryByRole('button',{name:'Stop review'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Dismiss'}));await waitFor(()=>expect(onJob).toHaveBeenCalledTimes(1));
  expect(calls.find(c=>c.messageType==='coordination_acknowledge')?.payload).toEqual({jobId:job.jobId});expect(onJob.mock.calls[0][0].acknowledgedStuckAt).toBeTruthy();expect(calls.some(c=>c.messageType==='native_workspace_check_start')).toBe(false);
 });
 
