@@ -36,7 +36,7 @@ cargo test --locked -p goalport-core-launcher
 | `cargo test -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker` | The deterministic Core contract tranche added to the ordinary `core` job (see [deterministic coverage](#deterministic-contract-coverage)) |
 | `cargo test -p goalport-core-launcher` | Launcher behavior |
 
-`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case. It also pins the CI coverage contract below: the ordinary `core` whitelist must keep the deterministic tranche and its `$LASTEXITCODE` guard, must retain the Windows suites revalidated below, and `test:desktop` must keep the offline driver unit files while never running a driver (the Linux `background-native.mjs` included).
+`docs-ci.test.mjs` checks documentation links, executable help and package/license metadata. It does not lock workflow formatting, toolchain versions, artifact step counts or which repaired suites may return to CI. Packaged smoke and WebContents checks exercise desktop behavior; summary tests check the content allowed in exported evidence.
 
 ## Packaged smoke tests
 
