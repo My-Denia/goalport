@@ -1,5 +1,6 @@
 # GoalPort verification and evidence
 
+> **Retired 2026-11-01.** M0–M5, baseline-m1 and scenario PASS wrappers no longer execute. Commands below are historical, not current instructions. Use [current testing commands](../testing.md); old reports are not evidence for the current product.
 > **Reference record.** The original M0–M5 verification gates, kept unchanged for audit. Day-to-day checks: [testing](../testing.md).
 
 GoalPort is a local control plane for the native Claude Code, Codex, and Grok

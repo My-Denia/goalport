@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 // Keep the additive lifecycle cases in the existing test:coordination entry.
-require("./live-read-once.test.cjs");
+require("./live-read-once.cases.cjs");
 const { randomUUID } = require("node:crypto");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

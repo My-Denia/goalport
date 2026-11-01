@@ -1,5 +1,6 @@
 # Validation matrix
 
+> **Retired 2026-11-01.** M0–M5, baseline-m1 and scenario PASS wrappers no longer execute. Commands below are historical, not current instructions. Use [current testing commands](../testing.md); old reports are not evidence for the current product.
 > **Reference record.** Dated contracts and evidence for specific historical builds, kept unchanged for audit. It is not a current guide; start at the [documentation index](../README.md).
 
 All gates are fail-closed. A command that exits zero with zero tests, all

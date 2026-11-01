@@ -25,7 +25,7 @@ test("verify-acceptance refuses closure evidence-root even when RUN_SLUG is this
   const report = `goal-runs/${CLOSURE_SLUG}/evidence/should-not-write-acceptance.json`;
   const result = run(["--evidence-root", `goal-runs/${CLOSURE_SLUG}/evidence`, "--report", report]);
   assert.notEqual(result.status, 0);
-  assert.match(`${result.stderr}${result.stdout}`, /refusing|preserved/i);
+  assert.match(`${result.stderr}${result.stdout}`, /retired/i);
   assert.equal(existsSync(resolve(ROOT, report)), false);
 });
 

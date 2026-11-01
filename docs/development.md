@@ -19,7 +19,7 @@ pnpm install --frozen-lockfile
 | `src-tauri/` | Tauri host, kept as a regression target for shared Core and protocol changes |
 | `scripts/desktop/` | Packaging helpers, package verification, start, packaged smoke tests |
 | `scripts/connected/` | Packaging entry point, the maintained `ui-debug` driver (see below), plus historical live-admission and GUI evidence drivers |
-| `scripts/verify.mjs` | Original fail-closed M0–M5 verification gates (see [reference](reference/verification-gates.md)) |
+| `scripts/verify.mjs` | Runtime preflight and IPC checks; retired M0–M5 gates (see [reference](reference/verification-gates.md)) |
 | `tests/scenarios/` | The 23 declared synthetic Scenario contracts (`manifest.json`) |
 | `docs/` | This documentation |
 

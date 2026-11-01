@@ -3,10 +3,8 @@
 /*
  * GoalPort verification entry point.
  *
- * This file is deliberately a small, dependency-free gate. It never treats
- * an exit code by itself as evidence: every gate needs a non-zero execution
- * range, a current build identity, and an explicit limitation record. Real
- * Runtime probes are preflight-only unless --live is supplied.
+ * Runtime probes are preflight-only unless --live is supplied. Historical
+ * milestone and scenario wrappers are retired; current tests own their contracts.
  */
 
 import { spawn } from "node:child_process";
@@ -23,24 +21,11 @@ const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
 const DEFAULT_EVIDENCE_DIR = path.join(ROOT, "goal-runs", "goalport-v1", "evidence");
-const SCENARIO_MANIFEST = path.join(ROOT, "tests", "scenarios", "manifest.json");
 const MAX_TIMEOUT_SECONDS = 3600;
 const OUTPUT_LIMIT = 1024 * 1024;
 const REDACTED_ROOT = "<workspace>";
 
-const SCENARIO_IDS = [
-  "DUR-01", "DUR-02", "DUR-03", "DUR-04",
-  "QUA-01", "QUA-02", "QUA-03", "QUA-04",
-  "ROU-01", "ROU-02", "ROU-03",
-  "EFF-01", "EFF-02", "EFF-03",
-  "SEC-01", "SEC-02",
-  "SAF-01", "SAF-02",
-  "COM-01", "COM-02",
-  "RES-01", "RES-02",
-  "DAT-01"
-];
-
-const REQUIRED_M0_CASES = [
+const RUNTIME_CASES = [
   "auth", "send", "approval", "cancel", "resume",
   "native-config", "adapter-exit", "connection-owner"
 ];
@@ -480,9 +465,9 @@ async function runRuntimeProbe(provider, args, build) {
   const live = asBoolean(args.live);
   const totalTimeout = seconds(option(args, "total-timeout", "timeout"), live ? 420 : 120, "timeout");
   const caseTimeout = seconds(option(args, "case-timeout"), live ? 90 : Math.min(30, totalTimeout), "case-timeout");
-  const requestedCases = splitList(args.cases, REQUIRED_M0_CASES);
+  const requestedCases = splitList(args.cases, RUNTIME_CASES);
   for (const name of requestedCases) {
-    if (!REQUIRED_M0_CASES.includes(name)) fail("unknown Runtime probe case", { case: name });
+    if (!RUNTIME_CASES.includes(name)) fail("unknown Runtime probe case", { case: name });
   }
   let syntheticRoot = null;
   if (live) syntheticRoot = await ensureSyntheticRoot(option(args, "synthetic-root"));
@@ -607,15 +592,6 @@ function parseRustTestSummary(output) {
   return { passed, failed, ignored, executed: passed + failed, skipped: ignored, summaries };
 }
 
-function parseVitestSummary(output) {
-  const values = [];
-  for (const match of output.matchAll(/Tests\s+[^0-9]*(\d+)\s+passed/gi)) values.push(Number(match[1]));
-  const passed = values.length ? Math.max(...values) : (output.match(/^\s*[✓✔]\s+/gm) || []).length;
-  const failed = (output.match(/^\s*[×✘]\s+/gm) || []).length;
-  const skipped = (output.match(/\b(\d+)\s+skipped\b/gi) || []).reduce((sum, line) => sum + Number(line.match(/\d+/)[0]), 0);
-  return { passed, failed, skipped, executed: passed + failed };
-}
-
 async function runCargoTest(target, timeoutSeconds, extraEnv = {}) {
   const cargo = executableFor(process.platform === "win32" ? "cargo.exe" : "cargo");
   const result = await runProcess(cargo, ["test", "-p", "goalport-core", "--test", target, "--", "--nocapture"], {
@@ -624,257 +600,6 @@ async function runCargoTest(target, timeoutSeconds, extraEnv = {}) {
   });
   const summary = parseRustTestSummary(result.stdoutText + "\n" + result.stderrText);
   return { result, summary };
-}
-
-async function runPnpm(args, timeoutSeconds) {
-  const pnpm = executableFor(process.platform === "win32" ? "pnpm.cmd" : "pnpm");
-  return runProcess(pnpm, args, { timeoutSeconds });
-}
-
-function requireNonZeroTests(summary, label, minimum = 1) {
-  if (summary.executed < minimum || summary.failed > 0 || summary.skipped > 0) {
-    fail(label + " did not execute the required non-zero test range", summary);
-  }
-}
-
-async function coreRunner() {
-  const candidates = [
-    path.join(ROOT, "target", "debug", process.platform === "win32" ? "goalport-core.exe" : "goalport-core"),
-    path.join(ROOT, "target", "release", process.platform === "win32" ? "goalport-core.exe" : "goalport-core")
-  ];
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    let binaryStamp = 0;
-    try {
-      binaryStamp = (await fs.stat(candidate)).mtimeMs;
-      const sourceFiles = await walkFiles(path.join(ROOT, "crates", "goalport-core", "src"));
-      const latestSource = Math.max(...(await Promise.all(sourceFiles.map(async (file) => (await fs.stat(file)).mtimeMs))), 0);
-      if (binaryStamp < latestSource) continue;
-    } catch {
-      continue;
-    }
-    return { command: candidate, prefix: [] };
-  }
-  const cargoFile = executableFor(process.platform === "win32" ? "cargo.exe" : "cargo");
-  try {
-    const build = await execFileAsync(cargoFile, ["build", "-p", "goalport-core", "--bin", "goalport-core", "--quiet"], {
-      cwd: ROOT,
-      windowsHide: true,
-      timeout: 180000,
-      maxBuffer: 256 * 1024
-    });
-    void build;
-    const candidate = path.join(ROOT, "target", "debug", process.platform === "win32" ? "goalport-core.exe" : "goalport-core");
-    if (existsSync(candidate)) return { command: candidate, prefix: [] };
-  } catch {
-    // A source checkout without a buildable Core cannot satisfy S.
-  }
-  try {
-    await execFileAsync(cargoFile, ["metadata", "--no-deps", "--format-version", "1"], {
-      cwd: ROOT,
-      windowsHide: true,
-      timeout: 15000,
-      maxBuffer: 1024 * 1024
-    });
-  } catch {
-    return null;
-  }
-  return { command: cargoFile, prefix: ["run", "--quiet", "-p", "goalport-core", "--"] };
-}
-
-function parseCoreJson(output) {
-  const lines = String(output || "").trim().split(/\r?\n/).reverse();
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      // Keep looking for the final structured result.
-    }
-  }
-  return null;
-}
-
-function readField(value, ...names) {
-  for (const name of names) {
-    if (value && value[name] !== undefined) return value[name];
-  }
-  return undefined;
-}
-
-function normalizeCoreSummary(raw) {
-  const range = readField(raw, "nonZeroRange", "non_zero_range", "range") || {};
-  const forbidden = readField(raw, "forbiddenEffects", "forbidden_effects");
-  const coreBuildId = readField(raw, "coreBuildId", "core_build_id", "buildId", "build_id");
-  const status = String(readField(raw, "status", "verdict") || "").toUpperCase();
-  return {
-    scenarioId: readField(raw, "scenarioId", "scenario_id", "id"),
-    status,
-    engine: String(readField(raw, "engine", "runner", "source") || ""),
-    coreBuildId: coreBuildId === undefined ? null : String(coreBuildId),
-    executed: Number(readField(raw, "executed", "commandsExecuted") ?? range.executed ?? 0),
-    assertions: Number(readField(raw, "assertions", "assertionsExecuted") ?? range.assertions ?? 0),
-    skipped: Number(readField(raw, "skipped", "skippedAssertions") ?? range.skipped ?? 0),
-    forbiddenEffects: Array.isArray(forbidden) ? forbidden : null,
-    predicateSet: readField(raw, "predicateSet", "predicate_set") || null,
-    predicates: Array.isArray(readField(raw, "predicates", "predicate_names"))
-      ? readField(raw, "predicates", "predicate_names")
-      : null,
-    nonZeroRange: range,
-    raw
-  };
-}
-
-export function predicateBindingErrors(summary, id) {
-  const errors = [];
-  if (summary.predicateSet !== id) errors.push("scenario predicate set is not bound to the selected ID");
-  if (!summary.predicates || summary.predicates.length < 2) errors.push("scenario needs at least two named specific predicates");
-  if (summary.predicates && summary.predicates.some((name) => !String(name).startsWith(id + ":"))) errors.push("scenario predicate name is not ID-scoped");
-  if (summary.predicates && new Set(summary.predicates).size !== summary.predicates.length) errors.push("scenario predicate names must be unique");
-  if (summary.predicates && summary.predicates.some((name) => /generic/i.test(String(name)))) errors.push("generic scenario predicates are forbidden");
-  return errors;
-}
-
-async function loadManifest(file = SCENARIO_MANIFEST) {
-  const manifestFile = workspacePath(file, "scenario manifest");
-  const manifest = await readJson(manifestFile, "scenario manifest");
-  if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.scenarios)) {
-    fail("scenario manifest schema must be version 1 with a scenarios array");
-  }
-  if (manifest.scenarios.length !== SCENARIO_IDS.length) {
-    fail("scenario manifest must contain exactly 23 scenarios", { count: manifest.scenarios.length });
-  }
-  const ids = manifest.scenarios.map((scenario) => scenario && scenario.id);
-  if (new Set(ids).size !== ids.length || SCENARIO_IDS.some((id) => !ids.includes(id))) {
-    fail("scenario manifest IDs do not match the required 23 IDs", { ids });
-  }
-  for (const scenario of manifest.scenarios) {
-    const required = ["initialState", "inputs", "faults", "expectedEvents", "expectedFinalState", "forbiddenEffects", "requiredLevels"];
-    for (const key of required) {
-      if (scenario[key] === undefined) fail("scenario is missing required declarative field", { id: scenario.id, field: key });
-    }
-    if (!Array.isArray(scenario.requiredLevels) || !scenario.requiredLevels.includes("S")) {
-      fail("every scenario must require executable S evidence", { id: scenario.id });
-    }
-    if (!Array.isArray(scenario.forbiddenEffects)) fail("forbiddenEffects must be an array", { id: scenario.id });
-  }
-  return { file: manifestFile, manifest, manifestHash: sha256(JSON.stringify(manifest)) };
-}
-
-async function runScenario(args, build) {
-  const loaded = await loadManifest(option(args, "scenario-manifest") || SCENARIO_MANIFEST);
-  const id = String(option(args, "id") || "");
-  if (!SCENARIO_IDS.includes(id)) fail("scenario --id must name one of the 23 declared scenarios");
-  const scenario = loaded.manifest.scenarios.find((item) => item.id === id);
-  const timeoutSeconds = seconds(option(args, "timeout"), 60, "scenario timeout");
-  const reportFile = option(args, "report") || path.join(DEFAULT_EVIDENCE_DIR, "scenarios", id + ".json");
-  const base = {
-    schemaVersion: 1,
-    kind: "scenario-result",
-    buildId: build.buildId,
-    scenarioId: id,
-    requiredLevels: scenario.requiredLevels,
-    manifest: relativeWorkspace(loaded.file),
-    manifestHash: loaded.manifestHash,
-    startedAt: now(),
-    timeoutSeconds,
-    evidence: {
-      S: { status: "UNMET", required: true, executed: 0, assertions: 0 },
-      R: { status: scenario.requiredLevels.includes("R") ? "UNMET" : "NOT_REQUIRED", required: scenario.requiredLevels.includes("R") },
-      D: { status: scenario.requiredLevels.includes("D") ? "UNMET" : "NOT_REQUIRED", required: scenario.requiredLevels.includes("D") }
-    },
-    limitations: ["R/D evidence is a separate obligation and is never inferred from Scenario execution."]
-  };
-  const runner = await coreRunner();
-  if (!runner) {
-    const report = { ...base, status: "BLOCKED", executed: 0, assertions: 0, skipped: 1, forbiddenEffects: [], error: "goalport-core scenario CLI is unavailable", finishedAt: now() };
-    await writeJson(reportFile, report);
-    fail("scenario S runner is unavailable; no synthetic assertion was executed");
-  }
-  const argsForCore = [
-    ...runner.prefix,
-    "scenario",
-    "--manifest", relativeWorkspace(loaded.file),
-    "--id", id,
-    "--json",
-    "--timeout", String(timeoutSeconds),
-    "--build-id", build.buildId
-  ];
-  const result = await runProcess(runner.command, argsForCore, { timeoutSeconds });
-  const raw = parseCoreJson(result.stdoutText);
-  if (!raw) {
-    const report = { ...base, status: "FAIL", executed: 0, assertions: 0, skipped: 1, forbiddenEffects: [], process: { exit: result.exit, timedOut: result.timedOut, spawnError: result.spawnError, stdoutSha256: result.stdoutSha256, stderrSha256: result.stderrSha256 }, error: "Core did not return a structured scenario result", finishedAt: now() };
-    await writeJson(reportFile, report);
-    fail("Core scenario CLI returned no structured result");
-  }
-  const summary = normalizeCoreSummary(raw);
-  const reasons = [];
-  if (summary.scenarioId && summary.scenarioId !== id) reasons.push("scenario ID mismatch");
-  if (summary.coreBuildId && summary.coreBuildId !== build.buildId) reasons.push("Core build ID is stale");
-  if (!summary.coreBuildId) reasons.push("Core result did not bind itself to the current build ID");
-  if (summary.engine && /mock|fake|stub/i.test(summary.engine)) reasons.push("mock/fake/stub engine is not admissible");
-  if (result.timedOut) reasons.push("scenario timed out");
-  if (result.exit !== 0) reasons.push("Core exited non-zero");
-  if (summary.executed !== 1) reasons.push("scenario executed count must equal 1");
-  if (summary.assertions <= 0) reasons.push("scenario assertion count must be greater than zero");
-  if (summary.skipped !== 0) reasons.push("required scenario assertions were skipped");
-  if (summary.forbiddenEffects === null) reasons.push("Core did not report forbidden effects");
-  if (summary.forbiddenEffects && summary.forbiddenEffects.length > 0) reasons.push("forbidden effect observed");
-  reasons.push(...predicateBindingErrors(summary, id));
-  if (summary.status !== "PASS" && summary.status !== "SUPPORTED") reasons.push("Core scenario verdict is not PASS");
-  const report = {
-    ...base,
-    status: reasons.length === 0 ? "PASS" : "FAIL",
-    executed: summary.executed,
-    assertions: summary.assertions,
-    skipped: summary.skipped,
-    forbiddenEffects: summary.forbiddenEffects || [],
-    evidence: {
-      ...base.evidence,
-      S: { status: reasons.length === 0 ? "PASS" : "UNMET", required: true, executed: summary.executed, assertions: summary.assertions, skipped: summary.skipped, engine: summary.engine || "unknown" }
-    },
-    core: { status: summary.status, engine: summary.engine || "unknown", buildId: summary.coreBuildId, predicateSet: summary.predicateSet, predicates: summary.predicates, nonZeroRange: summary.nonZeroRange },
-    process: { exit: result.exit, timedOut: result.timedOut, spawnError: result.spawnError, stdoutBytes: result.stdoutBytes, stderrBytes: result.stderrBytes, stdoutSha256: result.stdoutSha256, stderrSha256: result.stderrSha256 },
-    failures: reasons,
-    finishedAt: now()
-  };
-  await writeJson(reportFile, report);
-  if (reasons.length > 0) fail("scenario failed closed", { id, reasons });
-  return report;
-}
-
-function reportBuildId(report, expected) {
-  if (!report || report.buildId !== expected) fail("evidence report build ID is stale or missing", { expected, observed: report && report.buildId });
-}
-
-async function loadEvidence(file, expectedBuildId, label) {
-  const reportFile = workspacePath(file, label);
-  const report = await readJson(reportFile, label);
-  reportBuildId(report, expectedBuildId);
-  return report;
-}
-
-function requireReportRange(report, label, minimum = 1) {
-  if (!Number.isInteger(report.executed) || report.executed < minimum || !Number.isInteger(report.assertions) || report.assertions <= 0 || report.skipped !== 0) {
-    fail(label + " lacks a non-zero, non-skipped execution range", { executed: report.executed, assertions: report.assertions, skipped: report.skipped });
-  }
-  if (report.forbiddenEffects && report.forbiddenEffects.length > 0) fail(label + " contains a forbidden effect");
-}
-
-async function scenarioSet(args, build, ids = SCENARIO_IDS) {
-  const results = [];
-  for (const id of ids) {
-    const scenarioArgs = { ...args, id, report: path.join(DEFAULT_EVIDENCE_DIR, "scenarios", id + ".json") };
-    try {
-      results.push(await runScenario(scenarioArgs, build));
-    } catch (error) {
-      results.push({ scenarioId: id, status: "FAIL", error: error.message });
-    }
-  }
-  const passed = results.filter((item) => item.status === "PASS").length;
-  if (passed !== ids.length) fail("not every required scenario passed S", { expected: ids.length, passed, results });
-  return results;
 }
 
 async function runIpc(args, build) {
@@ -904,243 +629,15 @@ async function runIpc(args, build) {
   return report;
 }
 
-async function runBaseline(args, build) {
-  const timeoutSeconds = seconds(option(args, "timeout"), 300, "baseline timeout");
-  const events = integer(args.events, 10000, "events", 1);
-  const history = integer(args.history, 1000, "history", 1);
-  const reconnects = integer(args.reconnects, 20, "reconnects", 1);
-  const reportFile = option(args, "report") || path.join(DEFAULT_EVIDENCE_DIR, "m1-baseline.json");
-  const target = path.join(ROOT, "crates", "goalport-core", "tests", "baseline_m1.rs");
-  let result;
-  let summary = { passed: 0, failed: 0, ignored: 0, executed: 0, skipped: 0, summaries: 0 };
-  if (existsSync(target)) {
-    const output = await runCargoTest("baseline_m1", timeoutSeconds, {
-      GOALPORT_BASELINE_EVENTS: String(events),
-      GOALPORT_BASELINE_HISTORY: String(history),
-      GOALPORT_BASELINE_RECONNECTS: String(reconnects)
-    });
-    result = output.result;
-    summary = output.summary;
-  } else {
-    result = { exit: null, timedOut: false, spawnError: "baseline_m1 integration test target is absent", stdoutBytes: 0, stderrBytes: 0, stdoutSha256: sha256(""), stderrSha256: sha256("") };
-  }
-  const outputText = result.stdoutText + "\n" + result.stderrText;
-  const observed = {
-    events: Number((outputText.match(/events(?:=|:|\s+)(\d+)/i) || [])[1] || 0),
-    history: Number((outputText.match(/history(?:=|:|\s+)(\d+)/i) || [])[1] || 0),
-    reconnects: Number((outputText.match(/reconnects?(?:=|:|\s+)(\d+)/i) || [])[1] || 0)
-  };
-  const measured = observed.events >= events && observed.history >= history && observed.reconnects >= reconnects;
-  const status = result.exit === 0 && !result.timedOut && summary.executed > 0 && summary.failed === 0 && summary.skipped === 0 && measured ? "PASS" : "FAIL";
-  const report = {
-    schemaVersion: 1, kind: "m1-baseline", buildId: build.buildId, startedAt: now(), finishedAt: now(), timeoutSeconds,
-    requested: { events, history, reconnects }, observed, status, executed: summary.executed, assertions: summary.executed, skipped: summary.skipped,
-    nonZeroRange: { tests: summary.executed, events: observed.events, history: observed.history, reconnects: observed.reconnects },
-    process: { exit: result.exit, timedOut: result.timedOut, spawnError: result.spawnError, stdoutSha256: result.stdoutSha256, stderrSha256: result.stderrSha256 },
-    limitations: measured ? [] : ["The baseline must print measured event, history, and reconnect counts; configured numbers are not evidence."]
-  };
-  await writeJson(reportFile, report);
-  if (status !== "PASS") fail("M1 baseline failed closed", report);
-  return report;
-}
-
-async function requireLiveLayer(file, expectedBuildId, layer, label) {
-  const report = await loadEvidence(file, expectedBuildId, label);
-  requireReportRange(report, label);
-  if (String(report.layer || report.evidenceLayer || "").toUpperCase() !== layer) fail(label + " has the wrong evidence layer");
-  if (report.directObservation !== true && report.actual !== true && report.real !== true) fail(label + " must explicitly identify a direct real observation");
-  if (report.mock === true || /mock|fake|stub/i.test(String(report.mode || "") + " " + String(report.engine || ""))) fail(label + " cannot use a mock/fake/stub for a real evidence layer");
-  if (report.status !== "PASS" && report.status !== "SUPPORTED") fail(label + " is not a passing direct observation");
-  return report;
-}
-
-async function runM1(args, build) {
-  const timeoutSeconds = seconds(args.timeout, 900, "M1 timeout");
-  const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m1.json");
-  const selectionFile = args["runtime-selection"];
-  const checks = [];
-  if (!selectionFile) fail("M1 requires --runtime-selection");
-  const selection = await loadEvidence(selectionFile, build.buildId, "runtime selection");
-  const selected = selection.selected || selection.providers || {};
-  const provider = String(selected.primary || selection.primary || "").toLowerCase();
-  assertKnownProvider(provider);
-  if (selection.status && !["PASS", "SUPPORTED", "SELECTED"].includes(String(selection.status).toUpperCase())) fail("M0 runtime selection is not passing");
-  const rust = await runCargoTest("m1", timeoutSeconds);
-  requireNonZeroTests(rust.summary, "M1 Rust tests", 15);
-  checks.push({ name: "rust", ...rust.summary, exit: rust.result.exit });
-  const ui = await runPnpm(["test", "--", "--run"], timeoutSeconds);
-  const uiSummary = parseVitestSummary(ui.stdoutPreview + "\n" + ui.stderrPreview);
-  if (ui.result.exit !== 0 || uiSummary.executed < 6 || uiSummary.failed > 0 || uiSummary.skipped > 0) fail("M1 UI tests failed closed", uiSummary);
-  checks.push({ name: "ui", ...uiSummary, exit: ui.result.exit });
-  const buildResult = await runPnpm(["build"], timeoutSeconds);
-  if (buildResult.exit !== 0 || buildResult.timedOut) fail("M1 frontend build failed", { exit: buildResult.exit, timedOut: buildResult.timedOut });
-  const runtimeEvidence = option(args, "runtime-evidence");
-  const desktopEvidence = option(args, "desktop-evidence");
-  if (!runtimeEvidence || !desktopEvidence) fail("M1 requires direct R and D evidence; Scenario or Mock output cannot substitute");
-  await requireLiveLayer(runtimeEvidence, build.buildId, "R", "M1 Runtime evidence");
-  await requireLiveLayer(desktopEvidence, build.buildId, "D", "M1 Desktop evidence");
-  const report = {
-    schemaVersion: 1, kind: "m1-gate", buildId: build.buildId, status: "PASS", provider, startedAt: now(), finishedAt: now(), checks,
-    executed: checks.reduce((sum, item) => sum + item.executed, 0), assertions: checks.reduce((sum, item) => sum + item.executed, 0), skipped: 0,
-    nonZeroRange: { rustTests: rust.summary.executed, uiTests: uiSummary.executed, realTurn: 1, uiRestart: 1 }, limitations: []
-  };
-  await writeJson(reportFile, report);
-  return report;
-}
-
-async function runM2(args, build) {
-  const timeoutSeconds = seconds(args.timeout, 1200, "M2 timeout");
-  const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m2.json");
-  const selectionFile = args["runtime-selection"];
-  if (!selectionFile) fail("M2 requires --runtime-selection");
-  const selection = await loadEvidence(selectionFile, build.buildId, "runtime selection");
-  const ranked = splitList(args["provider-ranks"], ["primary", "secondary"]);
-  if (ranked.length < 2) fail("M2 requires primary and secondary runtime ranks");
-  const selected = selection.selected || selection.providers || {};
-  for (const rank of ranked.slice(0, 2)) assertKnownProvider(String(selected[rank] || "").toLowerCase());
-  const contract = await runCargoTest("m2", timeoutSeconds);
-  requireNonZeroTests(contract.summary, "M2 cross-adapter contract tests", 12);
-  const requiredIds = ["QUA-02", "ROU-01", "ROU-02", "ROU-03", "EFF-03"];
-  const scenarios = await scenarioSet(args, build, requiredIds);
-  const runtimeEvidence = option(args, "runtime-evidence");
-  const desktopEvidence = option(args, "desktop-evidence");
-  if (!runtimeEvidence || !desktopEvidence) fail("M2 requires two direct Runtime reports and one direct Desktop report");
-  const runtimeReports = String(runtimeEvidence).split(",").map((item) => item.trim()).filter(Boolean);
-  if (runtimeReports.length < 2) fail("M2 --runtime-evidence must contain two report paths");
-  for (const file of runtimeReports.slice(0, 2)) await requireLiveLayer(file, build.buildId, "R", "M2 Runtime evidence");
-  await requireLiveLayer(desktopEvidence, build.buildId, "D", "M2 Desktop evidence");
-  const report = {
-    schemaVersion: 1, kind: "m2-gate", buildId: build.buildId, status: "PASS", startedAt: now(), finishedAt: now(),
-    providers: ranked.slice(0, 2).map((rank) => selected[rank]),
-    executed: contract.summary.executed + scenarios.length,
-    assertions: contract.summary.executed + scenarios.reduce((sum, item) => sum + item.assertions, 0),
-    skipped: 0, nonZeroRange: { contractTests: contract.summary.executed, scenarios: scenarios.length },
-    limitations: ["R/D obligations remain direct evidence requirements; this gate does not promote S to R/D."]
-  };
-  await writeJson(reportFile, report);
-  return report;
-}
-
-async function runM3(args, build) {
-  const timeoutSeconds = seconds(args.timeout, 900, "M3 timeout");
-  const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m3.json");
-  const loaded = await loadManifest(option(args, "scenario-manifest") || SCENARIO_MANIFEST);
-  if (loaded.manifest.scenarios.length !== 23) fail("M3 requires exactly 23 scenarios");
-  const traces = integer(args.traces, 1000, "traces", 1);
-  const scenarios = await scenarioSet(args, build);
-  const stateMachine = await runCargoTest("state_machine", timeoutSeconds, { GOALPORT_STATE_MACHINE_TRACES: String(traces) });
-  requireNonZeroTests(stateMachine.summary, "M3 state-machine tests", 1);
-  const stateMachineOutput = stateMachine.result.stdoutText + "\n" + stateMachine.result.stderrText;
-  const observedTraces = Number((stateMachineOutput.match(/traces(?:=|:|\s+)(\d+)/i) || [])[1] || 0);
-  if (observedTraces < traces) fail("M3 state-machine test did not report the requested non-zero trace range", { requested: traces, observed: observedTraces });
-  const report = {
-    schemaVersion: 1, kind: "m3-gate", buildId: build.buildId, status: "PASS", startedAt: now(), finishedAt: now(),
-    scenarios: 23, tracesRequested: traces, executed: scenarios.length + stateMachine.summary.executed,
-    assertions: scenarios.reduce((sum, item) => sum + item.assertions, 0) + stateMachine.summary.executed, skipped: 0,
-    nonZeroRange: { scenarios: scenarios.length, traces: observedTraces, stateMachineTests: stateMachine.summary.executed },
-    limitations: ["Only S is settled here; each required R/D result remains a separate direct observation."]
-  };
-  await writeJson(reportFile, report);
-  return report;
-}
-
-async function validateSupportMatrix(file, expectedBuildId) {
-  const matrixFile = workspacePath(file || path.join(ROOT, "docs", "reference", "runtime-support-matrix.md"), "support matrix");
-  const text = await fs.readFile(matrixFile, "utf8");
-  const missingScenarios = SCENARIO_IDS.filter((id) => !text.includes("| " + id + " |"));
-  if (missingScenarios.length > 0) fail("support matrix is missing scenario rows", { missingScenarios });
-  for (const provider of Object.keys(PROVIDERS)) {
-    if (!new RegExp("\\|\\s*" + provider + "\\s*\\|", "i").test(text)) fail("support matrix is missing provider row", { provider });
-  }
-  if (!/Agent SDK/i.test(text) || !/unmodified(?: Claude Code)? CLI/i.test(text)) fail("support matrix must record the Claude CLI/Agent SDK boundary");
-  const buildMarker = text.match(/Build ID:\s*([a-f0-9]{64})/i);
-  if (buildMarker && buildMarker[1] !== expectedBuildId) fail("support matrix build ID is stale", { expected: expectedBuildId, observed: buildMarker[1] });
-  return { file: relativeWorkspace(matrixFile), scenarioRows: SCENARIO_IDS.length, providers: Object.keys(PROVIDERS), buildId: buildMarker ? buildMarker[1] : null };
-}
-
-async function runM4(args, build) {
-  const timeoutSeconds = seconds(args.timeout, 1200, "M4 timeout");
-  const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m4.json");
-  const providers = splitList(args.providers, Object.keys(PROVIDERS));
-  if (providers.length !== 3 || new Set(providers).size !== 3) fail("M4 requires all three provider IDs");
-  providers.forEach(assertKnownProvider);
-  const matrix = await validateSupportMatrix(args["support-matrix"], build.buildId);
-  const runtimeReports = [];
-  for (const provider of providers) {
-    const candidate = option(args, provider + "-report") || path.join(DEFAULT_EVIDENCE_DIR, "m0-" + provider + ".json");
-    const report = await loadEvidence(candidate, build.buildId, provider + " Runtime evidence");
-    if (!report.liveRequested) fail(provider + " Runtime report is preflight-only; M4 needs attempted live evidence");
-    if (!Number.isInteger(report.nonZeroRange && report.nonZeroRange.casesAttempted) || report.nonZeroRange.casesAttempted < 8) fail(provider + " did not attempt all eight Runtime cases");
-    runtimeReports.push({ provider, status: report.status, casesAttempted: report.nonZeroRange.casesAttempted });
-  }
-  const report = {
-    schemaVersion: 1, kind: "m4-gate", buildId: build.buildId, status: "PASS", productLabel: "Preview", startedAt: now(), finishedAt: now(),
-    providers: runtimeReports, supportMatrix: matrix,
-    executed: runtimeReports.reduce((sum, item) => sum + item.casesAttempted, 0), assertions: runtimeReports.length, skipped: 0,
-    nonZeroRange: { providers: runtimeReports.length, providerCases: runtimeReports.reduce((sum, item) => sum + item.casesAttempted, 0) },
-    limitations: ["Stable remains ineligible until every provider and every required R/D layer has direct passing evidence."]
-  };
-  await writeJson(reportFile, report);
-  return report;
-}
-
-async function scanForSecrets() {
-  const files = [];
-  for (const root of ["scripts", "tests", "docs", "src", "src-tauri", "crates"]) {
-    const directory = path.join(ROOT, root);
-    if (existsSync(directory)) await walkFiles(directory, files);
-  }
-  const findings = [];
-  const secret = /(?:sk-[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{20,}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----|Bearer\s+[A-Za-z0-9._~+\/=-]{20,})/;
-  for (const file of files) {
-    const text = await fs.readFile(file, "utf8");
-    if (secret.test(text)) findings.push(relativeWorkspace(file));
-  }
-  return { files: files.length, findings };
-}
-
-async function runM5(args, build) {
-  const timeoutSeconds = seconds(args.timeout, 1800, "M5 timeout");
-  const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m5.json");
-  const events = integer(args.events, 10000, "events", 1);
-  const history = integer(args.history, 1000, "history", 1);
-  const outputBytes = integer(args["output-bytes"], 16 * 1024 * 1024, "output-bytes", 1);
-  const soakSeconds = integer(args["soak-seconds"], 600, "soak-seconds", 1);
-  const security = await scanForSecrets();
-  if (security.findings.length > 0) fail("diagnostic/source secret scan failed", security);
-  const hardening = await runCargoTest("hardening", timeoutSeconds, {
-    GOALPORT_HARDEN_EVENTS: String(events),
-    GOALPORT_HARDEN_HISTORY: String(history),
-    GOALPORT_HARDEN_OUTPUT_BYTES: String(outputBytes),
-    GOALPORT_HARDEN_SOAK_SECONDS: String(soakSeconds)
-  });
-  requireNonZeroTests(hardening.summary, "M5 hardening tests", 1);
-  if (hardening.result.exit !== 0 || hardening.result.timedOut) fail("M5 hardening test process failed");
-  const output = hardening.result.stdoutText + "\n" + hardening.result.stderrText;
-  const measuredSoak = Number((output.match(/wall[-_ ]?clock(?:_seconds| seconds)?(?:=|:|\\s+)(\\d+(?:\\.\\d+)?)/i) || [])[1] || 0);
-  if (measuredSoak < soakSeconds) fail("M5 requires a measured real wall-clock soak; virtual configuration is not evidence", { requested: soakSeconds, observed: measuredSoak });
-  const report = {
-    schemaVersion: 1, kind: "m5-gate", buildId: build.buildId, status: "PASS", productLabel: "Preview", startedAt: now(), finishedAt: now(),
-    security, requested: { events, history, outputBytes, soakSeconds }, observed: { wallClockSeconds: measuredSoak },
-    executed: hardening.summary.executed, assertions: hardening.summary.executed, skipped: 0,
-    nonZeroRange: { hardeningTests: hardening.summary.executed, events, history, outputBytes, wallClockSeconds: measuredSoak },
-    limitations: ["Stable requires separate direct Desktop and Runtime evidence for all required scenario layers and all three providers."]
-  };
-  await writeJson(reportFile, report);
-  return report;
-}
-
 function help() {
   console.log([
     "GoalPort verification",
     "",
     "Commands:",
     "  build-id       compute the current source/tool build identity",
-    "  scenario       run exactly one declared S scenario through the Core CLI",
     "  runtime        preflight a native Runtime; add --live for synthetic execution",
     "  ipc            run the real ipc_lifecycle integration target",
-    "  baseline-m1     run the real baseline_m1 integration target",
-    "  m0 .. m5       execute the corresponding fail-closed milestone gate",
+    "  Legacy milestone and scenario gates are retired; see docs/testing.md.",
     "",
     "Every report is bound to the current build ID. Reports with zero/skipped",
     "tests, stale IDs, forbidden effects, unsupported Core output, or timeouts fail."
@@ -1150,20 +647,17 @@ function help() {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const command = String(args._[0] || "");
-  if (!command || command === "help" || args.help) {
-    help();
-    return;
+  if (!command || command === "help" || args.help) { help(); return; }
+  if (/^m[0-5]$/.test(command) || ["scenario", "baseline-m1"].includes(command)) {
+    console.error("Retired milestone/scenario gate. Use the current unit, IPC and packaged acceptance commands in docs/testing.md. Historical reports are not current capability evidence.");
+    process.exitCode = 2; return;
   }
+  if (!["build-id", "runtime", "ipc"].includes(command)) fail("unknown verification command", { command });
   const build = await currentBuild(args);
   if (command === "build-id") {
     const output = option(args, "out", "report") || path.join(DEFAULT_EVIDENCE_DIR, "build-id.json");
     await writeJson(output, { schemaVersion: 1, kind: "build-id", ...build, computedAt: now(), host: os.platform() + "-" + os.arch() });
     console.log(JSON.stringify({ status: "PASS", buildId: build.buildId, fileCount: build.fileCount, output: relativeWorkspace(workspacePath(output, "report path")) }));
-    return;
-  }
-  if (command === "scenario") {
-    await runScenario(args, build);
-    console.log(JSON.stringify({ status: "PASS", scenarioId: args.id, buildId: build.buildId }));
     return;
   }
   if (command === "runtime") {
@@ -1185,84 +679,12 @@ async function main() {
     console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
     return;
   }
-  if (command === "baseline-m1") {
-    await runBaseline(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
-  if (command === "m0") {
-    const timeoutSeconds = seconds(args.timeout, 1200, "M0 timeout");
-    const providers = splitList(args.providers, Object.keys(PROVIDERS));
-    const reports = [];
-    for (const provider of providers) reports.push(await runRuntimeProbe(provider, { ...args, live: asBoolean(args.live), "total-timeout": Math.min(timeoutSeconds, 420), "case-timeout": Math.min(seconds(args["case-timeout"], 90, "case-timeout"), 90), cases: REQUIRED_M0_CASES.join(",") }, build));
-    let ipc = null;
-    try {
-      ipc = await runIpc({ ...args, timeout: Math.min(timeoutSeconds, 120), report: path.join(DEFAULT_EVIDENCE_DIR, "m0-ipc.json") }, build);
-    } catch (error) {
-      ipc = { status: "FAIL", error: error.message };
-    }
-    const primaryCases = ["auth", "send", "approval", "resume", "native-config", "adapter-exit", "connection-owner"];
-    const secondaryCases = ["auth", "send", "resume", "native-config", "adapter-exit", "connection-owner"];
-    const statusMap = (report) => Object.fromEntries(report.cases.map((item) => [item.name, item.status]));
-    const primaryEligible = reports.filter((report) => {
-      const statuses = statusMap(report);
-      const requiredPass = primaryCases.every((name) => statuses[name] === "PASS");
-      const cancelGap = statuses.cancel === "PASS" || (statuses.cancel === "UNSUPPORTED" && report.liveRequested);
-      return report.liveRequested && requiredPass && cancelGap;
-    }).map((report) => report.provider);
-    const secondaryEligible = reports.filter((report) => {
-      const statuses = statusMap(report);
-      return report.liveRequested && secondaryCases.every((name) => statuses[name] === "PASS");
-    }).map((report) => report.provider);
-    const secondary = secondaryEligible.find((provider) => !primaryEligible.includes(provider));
-    const selected = primaryEligible.length > 0 && secondary && ipc && ipc.status === "PASS" ? { primary: primaryEligible[0], secondary } : null;
-    const reportFile = args.report || path.join(DEFAULT_EVIDENCE_DIR, "m0-selection.json");
-    const report = {
-      schemaVersion: 1, kind: "m0-selection", buildId: build.buildId, status: selected ? "PASS" : "BLOCKED", productLabel: "Preview",
-      startedAt: now(), finishedAt: now(), providers: reports, ipc, selected,
-      executed: reports.reduce((sum, item) => sum + item.executed, 0) + (ipc ? ipc.executed || 0 : 0),
-      assertions: reports.reduce((sum, item) => sum + item.assertions, 0) + (ipc ? ipc.assertions || 0 : 0),
-      skipped: reports.reduce((sum, item) => sum + item.skipped, 0) + (ipc ? ipc.skipped || 0 : 0),
-      nonZeroRange: { providerCases: reports.reduce((sum, item) => sum + item.nonZeroRange.casesAttempted, 0), ipcTests: ipc ? ipc.executed || 0 : 0 },
-      limitations: selected ? [] : ["M0 selection is withheld until IPC and at least two live native capability reports pass; preflight cannot select a provider."]
-    };
-    await writeJson(reportFile, report);
-    if (!selected) fail("M0 selection failed closed; no provider was promoted", { report: relativeWorkspace(workspacePath(reportFile, "report path")) });
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId, selected }));
-    return;
-  }
-  if (command === "m1") {
-    await runM1(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
-  if (command === "m2") {
-    await runM2(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
-  if (command === "m3") {
-    await runM3(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
-  if (command === "m4") {
-    await runM4(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
-  if (command === "m5") {
-    await runM5(args, build);
-    console.log(JSON.stringify({ status: "PASS", buildId: build.buildId }));
-    return;
-  }
   fail("unknown verification command", { command });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(async (error) => {
-    const details = error instanceof VerificationError ? error.details : {};
-    console.error(JSON.stringify({ status: "FAIL", error: error.message, details }));
+  main().catch(error => {
+    console.error(JSON.stringify({ status: "FAIL", error: error.message, details: error instanceof VerificationError ? error.details : {} }));
     process.exitCode = 1;
   });
 }
