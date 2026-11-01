@@ -22,7 +22,7 @@ pnpm lint
 pnpm test:unit
 pnpm test:desktop
 cargo test --locked -p goalport-core --lib
-cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch
+cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test store_behavior --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch
 cargo test --locked -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker
 cargo test --locked -p goalport-core-launcher
 ```
@@ -36,7 +36,7 @@ cargo test --locked -p goalport-core-launcher
 | `cargo test -p goalport-core --test goal_scope --test grok_acp --test ipc_lifecycle --test claude_stop_broker` | The deterministic Core contract tranche added to the ordinary `core` job (see [deterministic coverage](#deterministic-contract-coverage)) |
 | `cargo test -p goalport-core-launcher` | Launcher behavior |
 
-`docs-ci.test.mjs` also checks this documentation. The README must show the `package.json` version and the Stable V1 RC status, every documented `pnpm` script must exist, and every relative link and image in the README and `docs/` must resolve with exact file-name case. It also pins the CI coverage contract below: the ordinary `core` whitelist must keep the deterministic tranche and its `$LASTEXITCODE` guard, must retain the Windows suites revalidated below, and `test:desktop` must keep the offline driver unit files while never running a driver (the Linux `background-native.mjs` included).
+`docs-ci.test.mjs` checks documentation links, executable help and package/license metadata. It does not lock workflow formatting, toolchain versions, artifact step counts or which repaired suites may return to CI. Packaged smoke and WebContents checks exercise desktop behavior; summary tests check the content allowed in exported evidence.
 
 ## Packaged smoke tests
 
@@ -252,3 +252,17 @@ New goal, explicit file-change authorization, Send and application-menu Close
 paths at 860, 1020 and 1440 pixels. Its 21 screenshots were retained locally with
 the walkthrough and build-asset manifest. The authorization is synthetic; no
 native provider permission prompt or real CLI run is established by this fixture.
+
+Ordinary content changes to Markdown under `docs/` use the lightweight documentation job, as do the existing root documentation files. Code, workflow/build inputs, file mode changes, additions, deletions and renames still select the full matrix. Required workflows continue to run; their job conditions select the work.
+
+### Test discovery
+
+`pnpm test:unit` discovers Vitest tests under `src/` and runs the separate acceptance-selector fixture. `pnpm test:node` discovers offline Node `.test.mjs` and `.test.cjs` files under `scripts/`, excluding the desktop, acceptance, preview and release groups. `pnpm test:desktop` builds the coordination engine and discovers Node tests in `electron/`, `scripts/desktop/`, `scripts/acceptance/` and `scripts/preview/`; `pnpm test:release` handles release checks separately.
+
+Fixtures, dependencies and generated directories are excluded. Tests named `.live.test.*`, `.historical.test.*`, `.windows.test.*`, `.linux.test.*` or `.macos.test.*` require explicit platform/environment invocation. Existing offline tests with names such as `windows-window.test.mjs` remain ordinary mocks. Drivers without a `.test` suffix are never discovered. Use `node scripts/run-node-tests.mjs GROUP --list` to inspect each inventory. The live-read cases are loaded once by the worker suite. Documentation checks run in the changes job; packaging already verifies the produced package before smoke.
+
+Installed Runtime preflight is explicitly separate: `pnpm test:runtime-installed` depends on local CLI installation and authentication and is not part of ordinary test discovery. `pnpm test:runtime-preflight` checks offline invocation contracts. Historical M0–M5, baseline-m1, scenario gates and the old SEC-01/acceptance PASS generators are retired; their direct entrypoints exit without producing new evidence.
+
+Historical closure-identity tests require the archived closure run and are labelled `.historical.test.mjs`; they do not run on a fresh checkout. The Node unit group builds the shared coordination engine before exercising its offline CLI contracts.
+
+`scenario_predicates` now verifies that the retired CLI cannot emit an acceptance report and retains the adapter closed-session contract. `store_behavior` holds the useful Store transitions and persistence checks migrated from that legacy wrapper. Neither test target is a product journey or a 23-scenario coverage claim.

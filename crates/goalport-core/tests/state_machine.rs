@@ -1,25 +1,18 @@
 use goalport_core::{Attempt, AttemptState};
-use std::env;
 
 #[test]
-fn generated_state_traces_preserve_attempt_invariants() {
-    let traces = env::var("GOALPORT_STATE_MACHINE_TRACES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1_000)
-        .max(1);
-    for index in 0..traces {
-        let mut attempt = Attempt::new(format!("attempt-{index}"), "task", "scenario", "cap-v1");
+fn direct_and_revised_attempts_close_without_reactivation() {
+    for (name, path) in [
+        ("direct", vec![AttemptState::Active, AttemptState::AwaitingReview, AttemptState::Closed]),
+        ("revised", vec![AttemptState::Active, AttemptState::AwaitingReview, AttemptState::Active, AttemptState::AwaitingReview, AttemptState::Closed]),
+    ] {
+        let mut attempt = Attempt::new(format!("attempt-{name}"), "task", "scenario", "cap-v1");
         assert_eq!(attempt.state, AttemptState::Queued);
-        attempt.transition(AttemptState::Active).unwrap();
-        if index % 2 == 0 {
-            attempt.transition(AttemptState::AwaitingReview).unwrap();
-            attempt.transition(AttemptState::Active).unwrap();
+        for state in path {
+            attempt.transition(state).unwrap();
+            assert_eq!(attempt.state, state, "{name}");
         }
-        attempt.transition(AttemptState::AwaitingReview).unwrap();
-        attempt.transition(AttemptState::Closed).unwrap();
         assert!(attempt.state.is_terminal());
-        assert!(attempt.transition(AttemptState::Active).is_err());
+        assert!(attempt.transition(AttemptState::Active).is_err(), "{name}");
     }
-    println!("traces={traces}");
 }

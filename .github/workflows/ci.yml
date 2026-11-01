@@ -78,7 +78,7 @@ jobs:
       - if: needs.changes.outputs.full == 'true'
         run: pnpm test:unit
       - if: needs.changes.outputs.full == 'true'
-        run: node --test scripts/runtime-live-safety.test.mjs scripts/scenario-predicate-gate.test.mjs scripts/connected/strict-predicates.test.mjs scripts/connected/ipc-client.test.mjs scripts/pnpm-test-entry.test.mjs
+        run: pnpm test:node
 
   core:
     needs: changes
@@ -104,7 +104,7 @@ jobs:
             ForEach-Object { Remove-Item "Env:$($_.Name)" }
           cargo test -p goalport-core --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch --test product_interaction --test review_debt_core --test conversation_paging --test profile_ops_recovery
+          cargo test --locked -p goalport-core --test workspace_aliases --test workspace_identity --test electron_rc_core --test handoff_lineage --test product_receipts --test scenario_turn_failure --test selection_preservation --test registration_boundary --test core_contract --test connected_projection --test connected_flow --test scenario_predicates --test store_behavior --test state_machine --test hardening --test recovery --test stop_responsibility --test stop_continuation --test pipe_security --test core_restart_epoch --test product_interaction --test review_debt_core --test conversation_paging --test profile_ops_recovery
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p goalport-core --test registration_generation
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -251,7 +251,6 @@ jobs:
         run: cargo fetch --locked --target x86_64-pc-windows-msvc
       - run: pnpm test:release
       - run: pnpm electron:package --out artifacts/electron-rc/ci
-      - run: pnpm electron:verify --package artifacts/electron-rc/ci/GoalPort-win32-x64
       - name: Packaged normal first use
         run: node scripts/desktop/smoke.mjs --package artifacts/electron-rc/ci/GoalPort-win32-x64 --normal --out artifacts/electron-rc/ci-normal-smoke
       - name: Packaged synthetic consecutive tasks

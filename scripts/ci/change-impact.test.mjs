@@ -53,7 +53,7 @@ function prResult(cwd, base, head, merge) {
   });
 }
 
-test("only content edits to the four existing ordinary root docs are light", (t) => {
+test("content edits to the existing ordinary root docs are light", (t) => {
   const { cwd, base } = fixture(t);
   const head = commit(cwd, () => {
     for (const name of ["README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md"]) {
@@ -75,9 +75,8 @@ test("PR light result binds both event parents and the actual merge tree", (t) =
   assert.throws(() => prResult(cwd, base, head, base), /GITHUB_SHA/);
 });
 
-test("nested docs, code, additions, deletions, modes and renames all require full", (t) => {
+test("code, additions, deletions, modes and renames require full", (t) => {
   const changes = [
-    (cwd) => writeFileSync(join(cwd, "docs", "guide.md"), "# Changed\n"),
     (cwd) => writeFileSync(join(cwd, "app.js"), "export const value = 2;\n"),
     (cwd) => writeFileSync(join(cwd, "NEW.md"), "# New\n"),
     (cwd) => rmSync(join(cwd, "README.md")),
@@ -121,7 +120,7 @@ test("raw parser refuses incomplete or malformed Git output", () => {
   assert.equal(docsOnlyRaw(Buffer.alloc(0)), false);
   assert.equal(docsOnlyRaw(Buffer.from(":100644 100644 a b M\0README.md")), false);
   assert.equal(docsOnlyRaw(Buffer.from(":100644 100644 a b M\0README.md\0")), true);
-  assert.equal(docsOnlyRaw(Buffer.from(":100644 100644 a b M\0README.md\0:100644 100644 a b M\0docs/guide.md\0")), false);
+  assert.equal(docsOnlyRaw(Buffer.from(":100644 100644 a b M\0README.md\0:100644 100644 a b M\0docs/runtime-schema.json\0")), false);
   assert.equal(docsOnlyRaw(Buffer.from(":100644 100755 a b M\0README.md\0")), false);
 });
 
@@ -146,4 +145,10 @@ test("CLI writes an exact Boolean output, and a detector error writes none", (t)
   const failure = spawnSync(process.execPath, [SCRIPT], { cwd, env: { ...env, GITHUB_SHA: base }, encoding: "utf8" });
   assert.notEqual(failure.status, 0);
   assert.equal(readFileSync(outputPath, "utf8"), "");
+});
+
+test("ordinary nested documentation content uses lightweight checks", (t) => {
+  const { cwd, base } = fixture(t);
+  const head = commit(cwd, () => writeFileSync(join(cwd, "docs", "guide.md"), "# Changed documentation\n"));
+  assert.equal(pushResult(cwd, base, head).full, false);
 });

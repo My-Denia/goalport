@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT_DOCS = new Set(["README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md"]);
+const isDocumentation = (name) => ROOT_DOCS.has(name) || /^docs\/(?:[^/]+\/)*[^/]+\.md$/.test(name);
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 function git(cwd, args) {
@@ -39,7 +40,7 @@ export function docsOnlyRaw(raw) {
   if (parts.length % 2 !== 0) return false;
   for (let i = 0; i < parts.length; i += 2) {
     const entry = /^:([0-7]{6}) ([0-7]{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z][0-9]*)$/.exec(parts[i]);
-    if (!entry || entry[1] !== "100644" || entry[2] !== "100644" || entry[3] !== "M" || !ROOT_DOCS.has(parts[i + 1])) {
+    if (!entry || entry[1] !== "100644" || entry[2] !== "100644" || entry[3] !== "M" || !isDocumentation(parts[i + 1])) {
       return false;
     }
   }
@@ -69,7 +70,7 @@ export function classifyChange({ cwd, eventName, event, githubSha }) {
     }
     if (!hasCommit(cwd, base) || !hasCommit(cwd, head)) return { full: true, reason: "PR base or head is unavailable" };
     const light = docsOnlyDiff(cwd, base, head) && docsOnlyDiff(cwd, base, checkout);
-    return { full: !light, reason: light ? "root documentation content only" : "code, metadata, empty, or unknown PR diff" };
+    return { full: !light, reason: light ? "documentation content only" : "code, metadata, empty, or unknown PR diff" };
   }
 
   if (eventName === "push") {
@@ -82,7 +83,7 @@ export function classifyChange({ cwd, eventName, event, githubSha }) {
     if (!hasCommit(cwd, base) || !hasCommit(cwd, head)) return { full: true, reason: "push base or head is unavailable" };
     if (!isAncestor(cwd, base, head)) return { full: true, reason: "push base is not an ancestor of head" };
     const light = docsOnlyDiff(cwd, base, checkout);
-    return { full: !light, reason: light ? "root documentation content only" : "code, metadata, empty, or unknown push diff" };
+    return { full: !light, reason: light ? "documentation content only" : "code, metadata, empty, or unknown push diff" };
   }
 
   return { full: true, reason: "unrecognized event" };
