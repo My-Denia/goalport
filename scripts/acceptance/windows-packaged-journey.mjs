@@ -351,6 +351,20 @@ export async function runPackagedJourney(options) {
     await session.app.until('!!document.querySelector("#draft-workspace")', 10000);
     await session.app.input('#draft-workspace', workspace);
     await session.app.input('#draft-message', goal);
+    // New goals may default to a native Runtime. This journey exercises
+    // coordination, so choose that mode through the same picker as a user.
+    if (!await session.app.evaluate('!!document.querySelector(".draft-background-consent input")')) {
+      await session.app.click('.draft-runtime-picker button[aria-label="Select agent"]');
+      await session.app.until(`[...document.querySelectorAll('[role="option"]')].some(e=>e.querySelector('strong')?.textContent.trim()==='Several agents')`, 15000);
+      const point = await session.app.evaluate(`(() => {
+        const e=[...document.querySelectorAll('[role="option"]')].find(e=>e.querySelector('strong')?.textContent.trim()==='Several agents');
+        e.scrollIntoView({block:'center'});
+        const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,top=document.elementFromPoint(x,y);
+        if(!r.width||!r.height||!(top===e||e.contains(top)))throw Error('Coordination option is not hit-testable');
+        return {x,y};
+      })()`);
+      for (const type of ['mousePressed','mouseReleased']) await session.app.cdp('Input.dispatchMouseEvent',{type,...point,button:'left',clickCount:1});
+    }
     await session.app.until('!!document.querySelector(".draft-background-consent input")', 10000);
     if (!await session.app.evaluate('document.querySelector(".draft-background-consent input").checked')) await session.app.click('.draft-background-consent input');
     await session.app.until('!!document.querySelector(".authorization-panel")', 15000);
