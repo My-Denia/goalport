@@ -316,15 +316,6 @@ async function runWorker(config, deps = {}) {
     }
     stage = "ending";
     if (storageFailed) throw new Error("Job storage failed after a turn; admission and pending facts are retained, not retryable.");
-    const pending = store.getStatus(config.jobId).pendingCommand;
-    const currentStatus = store.getStatus(config.jobId);
-    const status = pending || liveResult.verdict === "unconfirmed"
-      ? "unconfirmed"
-      : currentStatus.revoked || currentStatus.acknowledgedStuckAt
-        ? "stopped"
-        : ["verified", "checked", "revise"].includes(liveResult.verdict)
-          ? "completed"
-          : "failed";
     // The plan record (history/Plans) and the job's own terminal outcome
     // are separate durable facts. A record-save failure must not prevent
     // the honest terminal outcome, the scope revoke, or the admission
@@ -334,6 +325,18 @@ async function runWorker(config, deps = {}) {
     // outcome order unchanged.
     let recordSaveFailed = initialSaveFailed;
     try { if ((!initialSaved && !initialSaveFailed) || accepted) await saveResult(); } catch { recordSaveFailed = true; }
+    // Saving may wait for another process. A Stop or storage failure accepted
+    // during that wait must be reflected in the outcome we are about to commit.
+    if (storageFailed) throw new Error("Job storage failed while saving; admission remains held.");
+    const pending = store.getStatus(config.jobId).pendingCommand;
+    const currentStatus = store.getStatus(config.jobId);
+    const status = pending || liveResult.verdict === "unconfirmed"
+      ? "unconfirmed"
+      : currentStatus.revoked || currentStatus.acknowledgedStuckAt
+        ? "stopped"
+        : ["verified", "checked", "revise"].includes(liveResult.verdict)
+          ? "completed"
+          : "failed";
     if (accepted) store.updateLiveFollowUpPhase(config.jobId, status === "unconfirmed" ? "unconfirmed" : "completed", owner);
     store.recordOutcome(config.jobId, {
       status,
