@@ -2,10 +2,34 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 const require = createRequire(import.meta.url);
 const { externalHttpUrl, createTrustedIpcHandler, protectRenderer, isAppDocument } = require("../../electron/security-policy.cjs");
 const appUrl = "file:///goalport/dist/index.html";
+const windowsAppUrl = "file:///C:/GoalPort/dist/index.html";
+const documentCases = [
+  [appUrl, appUrl, true],
+  [`${appUrl}#anchor`, appUrl, true],
+  ["https://evil.example/", appUrl, false],
+  ["file:///other.html", appUrl, false],
+  ["file:///c:/GoalPort/dist/index.html", windowsAppUrl, true],
+  ["file:///C:/goalport/dist/INDEX.html", windowsAppUrl, true],
+  [`${windowsAppUrl}#local-anchor`, windowsAppUrl, true],
+  ["file://localhost/C:/GoalPort/dist/index.html", windowsAppUrl, true],
+  ["file:///C:/GoalPort/dist/other.html", windowsAppUrl, false],
+  [`${windowsAppUrl}?next=1`, windowsAppUrl, false],
+  ["file:///C:/GoalPort/dist/index.html%2Fsecret", windowsAppUrl, false],
+  ["file:///C:/GoalPort/My%20App/index.html", "file:///C:/GoalPort/My App/index.html", true],
+  ["file:///C:/foo%2Fbar", "file:///C:/foo/bar", false],
+  ["file://server/share/index.html", windowsAppUrl, false],
+  ["file://remote/C:/GoalPort/dist/index.html", windowsAppUrl, false],
+  ["https://evil.example/index.html", windowsAppUrl, false],
+  ["file:///goalport/dist/Index.html", appUrl, false],
+  ["not a url", windowsAppUrl, false],
+  [windowsAppUrl, "://bad", false],
+];
 
 function fixture() {
   const handlers = new Map(), listeners = new Map(), opens = [];
@@ -18,36 +42,157 @@ function fixture() {
     event: { sender: contents, senderFrame: mainFrame } };
 }
 
-test("every real IPC channel uses one fail-closed sender gate", () => {
-  const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /ipcMain\.handle\(/);
-  const channels = [...source.matchAll(/handleTrusted\("([^"]+)"/g)].map((m) => m[1]);
-  assert.equal(channels.length, 29);
-  for (const channel of ["goalport:background-send-consent", "goalport:background-start", "goalport:native-check", "goalport:background-status", "goalport:background-continue", "goalport:background-revoke", "goalport:background-acknowledge", "goalport:background-release-terminal", "goalport:background-held-workspaces"]) assert.ok(channels.includes(channel));
-  for (const channel of channels) {
-    const f = fixture(); let calls = 0;
-    f.handle(channel, () => ++calls);
-    const invoke = f.handlers.get(channel);
-    for (const bad of [null, {}, { sender: {} }, { ...f.event, sender: {} },
-      { ...f.event, senderFrame: null }, { ...f.event, senderFrame: { ...f.mainFrame, detached: true } },
-      { ...f.event, senderFrame: { ...f.mainFrame, routingId: 8 } },
-      { ...f.event, senderFrame: { ...f.mainFrame, processId: 5 } },
-      { ...f.event, senderFrame: { ...f.mainFrame, url: "https://evil.example/" } },
-      { ...f.event, senderFrame: { ...f.mainFrame, url: "file:///goalport/dist/other.html" } }]) {
-      assert.throws(() => invoke(bad), /Untrusted/, channel);
+// Execute the actual main entrypoint through registration and the first window
+// load. The boundary stubs prevent profile writes, process launches, and network
+// access; they do not replace the production security policy or its wiring.
+async function mainWiring() {
+  const handlers = new Map(), externalUrls = [], effects = [];
+  let ready, loaded;
+  const loadStarted = new Promise((resolve) => { loaded = resolve; });
+  const app = {
+    isPackaged: false,
+    getPath: () => "/fixture/user-data",
+    setAppUserModelId: () => {},
+    on: () => {},
+    whenReady: () => ({ then: (callback) => { ready = callback; return { catch: () => {} }; } }),
+    exit: (code) => { throw new Error(`unexpected app exit: ${code}`); },
+  };
+  const ipcMain = { handle: (channel, handler) => {
+    assert.equal(handlers.has(channel), false, `duplicate handler: ${channel}`);
+    handlers.set(channel, handler);
+  } };
+  let win;
+  class BrowserWindow {
+    constructor(options) {
+      win = this;
+      this.options = options;
+      this.listeners = new Map();
+      const listeners = new Map();
+      const mainFrame = { processId: 4, routingId: 7, detached: false, url: "" };
+      this.webContents = {
+        listeners, mainFrame,
+        isDestroyed: () => false,
+        getURL: () => mainFrame.url,
+        on: (name, handler) => listeners.set(name, handler),
+        setWindowOpenHandler: (handler) => { this.webContents.popup = handler; },
+      };
     }
-    assert.equal(calls, 0);
-    assert.equal(invoke(f.event), 1, channel);
-    f.win.isDestroyed = () => true;
-    assert.throws(() => invoke(f.event), /Untrusted/);
-    f.win.isDestroyed = () => false;
-    f.contents.isDestroyed = () => true;
-    assert.throws(() => invoke(f.event), /Untrusted/);
-    f.contents.isDestroyed = () => false;
-    f.contents.getURL = () => "https://evil.example/";
-    assert.throws(() => invoke(f.event), /Untrusted/);
-    assert.equal(calls, 1);
+    isDestroyed() { return false; }
+    on(name, handler) { this.listeners.set(name, handler); }
+    loadFile(file) {
+      this.webContents.mainFrame.url = pathToFileURL(file).href;
+      this.atLoad = { file, listeners: new Map(this.webContents.listeners), popup: this.webContents.popup };
+      loaded();
+      // Startup is intentionally held here: the wiring under test happens
+      // before load, while later bootstrap would start the Core process.
+      return new Promise(() => {});
+    }
   }
+  const noIO = () => { throw new Error("unexpected fixture I/O"); };
+  const fakeFs = {
+    existsSync: () => false,
+    readFileSync: (file) => {
+      if (path.basename(file) === "package.json") return JSON.stringify({ version: "fixture" });
+      return noIO();
+    },
+  };
+  const modules = {
+    electron: { app, BrowserWindow, ipcMain, Notification: {}, screen: {},
+      shell: { openExternal: (url) => { externalUrls.push(url); } }, dialog: {} },
+    "node:fs": fakeFs,
+    "node:child_process": { spawn: noIO, execFile: noIO },
+    "node:net": { createConnection: noIO },
+    "./security-policy.cjs": require("../../electron/security-policy.cjs"),
+    "./launch-config.cjs": { launchArguments: () => ({}), resolveProfilePaths: () => null, windowsPipeName: (name) => name },
+    "./profile-manager.cjs": {},
+    "./core-client.cjs": {
+      createCoreConnection: () => ({ exchangeVerified: noIO, invoke: noIO }),
+      createPendingDecisionNotifier: () => () => {},
+    },
+    "./window-state.cjs": { loadWindowState: () => ({ bounds: {}, maximized: false }), STATE_FILE: "window-state.json" },
+    "./coordinate-service.cjs": {},
+    "./coordination-scope.cjs": {},
+    "./coordination-background.cjs": { createBackgroundHost: () => ({
+      status: (jobId) => { effects.push(["status", jobId]); return { jobId }; },
+    }) },
+    "./native-check-host.cjs": { createNativeCheckHost: () => ({}) },
+    "./background-send-consent.cjs": {},
+    "./coordination-job.cjs": {},
+    "./coordination-record.cjs": {},
+    "./harness-health.cjs": {},
+    "./cli-coordinate.cjs": {},
+    "./harness-runtime.cjs": {},
+  };
+  const mainFile = fileURLToPath(new URL("../../electron/main.cjs", import.meta.url));
+  const source = readFileSync(mainFile, "utf8");
+  const mainRequire = (name) => {
+    if (Object.hasOwn(modules, name)) return modules[name];
+    if (name.startsWith("node:")) return require(name);
+    throw new Error(`unexpected main dependency: ${name}`);
+  };
+  const module = { exports: {} };
+  const runMain = vm.runInNewContext(`(function (require, module, exports, __filename, __dirname) {\n${source}\n})`, {
+    URL, console, process: { argv: ["electron", mainFile], env: { GOALPORT_ALLOW_MULTI_INSTANCE: "1" },
+      platform: "linux", resourcesPath: "/fixture/resources", pid: 1 },
+  }, { filename: mainFile });
+  runMain(mainRequire, module, module.exports, mainFile, path.dirname(mainFile));
+  assert.equal(typeof ready, "function", "main registered its app-ready callback");
+  const startup = ready();
+  await Promise.race([loadStarted, startup.then(() => { throw new Error("startup ended before window load"); })]);
+  return { handlers, win, externalUrls, effects,
+    event: { sender: win.webContents, senderFrame: win.webContents.mainFrame } };
+}
+
+test("main registers its actual IPC handlers behind the sender gate", async () => {
+  const f = await mainWiring();
+  for (const channel of ["goalport:app-info", "goalport:core-command", "goalport:background-send-consent", "goalport:background-start", "goalport:native-check", "goalport:background-status", "goalport:background-continue", "goalport:background-revoke", "goalport:background-acknowledge", "goalport:background-release-terminal", "goalport:background-held-workspaces"]) {
+    assert.ok(f.handlers.has(channel), `missing ${channel}`);
+  }
+  const { win, event } = f;
+  const contents = win.webContents, mainFrame = contents.mainFrame;
+  for (const [channel, invoke] of f.handlers) {
+    for (const bad of [null, {}, { sender: {} }, { ...event, sender: {} },
+      { ...event, senderFrame: null }, { ...event, senderFrame: { ...mainFrame, detached: true } },
+      { ...event, senderFrame: { ...mainFrame, routingId: 8 } },
+      { ...event, senderFrame: { ...mainFrame, processId: 5 } },
+      { ...event, senderFrame: { ...mainFrame, url: "https://evil.example/" } },
+      { ...event, senderFrame: { ...mainFrame, url: "file:///goalport/dist/other.html" } }]) {
+      await assert.rejects(async () => invoke(bad), /Untrusted/, channel);
+    }
+    for (const [target, key, replacement] of [
+      [win, "isDestroyed", () => true],
+      [contents, "isDestroyed", () => true],
+      [contents, "getURL", () => "https://evil.example/"],
+    ]) {
+      const original = target[key];
+      target[key] = replacement;
+      try { await assert.rejects(async () => invoke(event), /Untrusted/, channel); }
+      finally { target[key] = original; }
+    }
+  }
+  assert.deepEqual(f.effects, []);
+  assert.deepEqual(await f.handlers.get("goalport:background-status")(event, "job-1"), { jobId: "job-1" });
+  assert.deepEqual(f.effects, [["status", "job-1"]]);
+});
+
+test("main protects the actual window before loading the app document", async () => {
+  const { win, externalUrls } = await mainWiring();
+  assert.equal(path.basename(win.atLoad.file), "index.html");
+  assert.equal(win.options.webPreferences.contextIsolation, true);
+  assert.equal(win.options.webPreferences.nodeIntegration, false);
+  assert.equal(win.options.webPreferences.sandbox, true);
+  assert.equal(typeof win.atLoad.popup, "function", "popup policy installed before load");
+  assert.deepEqual(win.atLoad.popup({ url: "https://external.example/path" }), { action: "deny" });
+  assert.deepEqual(win.atLoad.popup({ url: "javascript:alert(1)" }), { action: "deny" });
+  for (const name of ["will-navigate", "will-frame-navigate", "will-redirect", "will-attach-webview"]) {
+    const handler = win.atLoad.listeners.get(name);
+    assert.equal(typeof handler, "function", `${name} installed before load`);
+    let prevented = false;
+    handler({ preventDefault: () => { prevented = true; } }, "https://evil.example/");
+    assert.equal(prevented, true, name);
+  }
+  await Promise.resolve();
+  assert.deepEqual(externalUrls, ["https://external.example/path"]);
 });
 
 test("popup always denied; only credential-free HTTP(S) reaches system shell", async () => {
@@ -64,58 +209,33 @@ test("popup always denied; only credential-free HTTP(S) reaches system shell", a
   assert.deepEqual(f.opens, ["https://external.example/path", "http://external.example/"]);
 });
 
-test("renderer main/subframe navigation, redirects and webviews are denied before load", () => {
+test("renderer main/subframe navigation, redirects and webviews are denied", () => {
   const f = fixture(); protectRenderer(f.contents, appUrl, () => assert.fail());
   for (const name of ["will-navigate", "will-frame-navigate", "will-redirect", "will-attach-webview"]) {
     let prevented = 0;
     f.listeners.get(name)({ preventDefault: () => prevented++ }, "https://evil.example/");
     assert.equal(prevented, 1, name);
   }
-  const main = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
-  assert.ok(main.indexOf("protectRenderer(mainWindow.webContents") < main.indexOf("await mainWindow.loadFile"));
 });
 
 test("app document identity folds Windows drive-path case only", () => {
-  const app = "file:///C:/GoalPort/dist/index.html";
-  assert.equal(isAppDocument("file:///c:/GoalPort/dist/index.html", app), true);
-  assert.equal(isAppDocument("file:///C:/goalport/dist/INDEX.html", app), true);
-  assert.equal(isAppDocument(`${app}#local-anchor`, app), true);
-  assert.equal(isAppDocument("file://localhost/C:/GoalPort/dist/index.html", app), true);
-  assert.equal(isAppDocument("file:///C:/GoalPort/dist/other.html", app), false);
-  assert.equal(isAppDocument(`${app}?next=1`, app), false);
-  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html%2Fsecret", app), false);
-  assert.equal(isAppDocument("file:///C:/GoalPort/My%20App/index.html", "file:///C:/GoalPort/My App/index.html"), true);
-  assert.equal(isAppDocument("file:///C:/foo%2Fbar", "file:///C:/foo/bar"), false);
-  assert.equal(isAppDocument("file://server/share/index.html", app), false);
-  assert.equal(isAppDocument("file://remote/C:/GoalPort/dist/index.html", app), false);
-  assert.equal(isAppDocument("https://evil.example/index.html", app), false);
-  assert.equal(isAppDocument("file:///goalport/dist/Index.html", "file:///goalport/dist/index.html"), false);
-  assert.equal(isAppDocument("not a url", app), false);
-  assert.equal(isAppDocument("file:///C:/GoalPort/dist/index.html", "://bad"), false);
+  for (const [actual, expected, trusted] of documentCases) {
+    assert.equal(isAppDocument(actual, expected), trusted, `${actual} against ${expected}`);
+  }
 });
 
 test("preload exposes bridge only to exact main app document, never external/subframe", () => {
   const code = readFileSync(new URL("../../electron/preload.cjs", import.meta.url), "utf8");
-  const policy = readFileSync(new URL("../../electron/security-policy.cjs", import.meta.url), "utf8");
-  const key = (source) => source.slice(source.indexOf("function appDocumentKey(href) {"), source.indexOf("\n}", source.indexOf("function appDocumentKey(href) {")) + 2);
-  assert.equal(key(code).replace(/\r\n/g, "\n"), key(policy).replace(/\r\n/g, "\n"));
-  for (const [url, main, argument, trusted, expected] of [
-    [appUrl, true, true, true], [appUrl + "#anchor", true, true, true],
-    [appUrl, false, true, false], ["https://evil.example/", true, true, false],
-    ["file:///other.html", true, true, false], [appUrl, true, false, false],
-    ["file:///c:/GoalPort/dist/index.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/GoalPort/dist/index.html#anchor", true, true, true, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/goalport/dist/INDEX.html", true, true, true, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/GoalPort/dist/index.html?next=1", true, true, false, "file:///C:/GoalPort/dist/index.html"],
-    ["file://server/share/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
-    ["file://remote/C:/GoalPort/dist/index.html", true, true, false, "file:///C:/GoalPort/dist/index.html"],
-    ["https://evil.example/", true, true, false, "file:///C:/GoalPort/dist/index.html"],
-    ["file:///C:/GoalPort/dist/other.html", true, true, false, "file:///C:/GoalPort/dist/index.html"]
-  ]) {
+  const cases = [
+    ...documentCases.map(([url, expected, trusted]) => [url, true, true, trusted, expected]),
+    [appUrl, false, true, false, appUrl],
+    [appUrl, true, false, false, appUrl],
+  ];
+  for (const [url, main, argument, trusted, expected] of cases) {
     const exposed = [];
     const logs = [];
     vm.runInNewContext(code, { URL, location: { href: url }, console: { error: (line) => logs.push(line) },
-      process: { isMainFrame: main, argv: argument ? [`--goalport-app-document=${encodeURIComponent(expected || appUrl)}`] : [] },
+      process: { isMainFrame: main, argv: argument ? [`--goalport-app-document=${encodeURIComponent(expected)}`] : [] },
       require: () => ({ contextBridge: { exposeInMainWorld: (name) => exposed.push(name) }, ipcRenderer: {} }) });
     assert.equal(exposed.includes("goalportCore"), trusted, `${url}/${main}/${argument}`);
     assert.equal(logs.length, trusted ? 0 : 1, logs.join(" "));
