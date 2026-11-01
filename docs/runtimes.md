@@ -24,9 +24,9 @@ What GoalPort does not do:
 | Runtime | How it is driven | Notes |
 | --- | --- | --- |
 | Codex | `codex app-server --listen stdio://` (JSON-RPC: `initialize`, `thread/start`, `turn/start`, `turn/interrupt`) | Uses the installed ChatGPT-authenticated CLI. Threads start with `approvalPolicy: on-request` (or `untrusted` via `GOALPORT_CODEX_APPROVAL_POLICY`) |
-| Claude Code | One persistent `claude -p` process per Attempt with stream-json input and output; key flags `--permission-prompts host --permission-mode manual --permission-prompt-tool stdio` | Native `--resume` is reported as unsupported. The optional Stop broker component ships in the package but is off unless explicitly enabled |
+| Claude Code | One persistent `claude -p` process per Attempt with stream-json input and output; key flags `--permission-prompts host --permission-mode manual --permission-prompt-tool stdio` | Explicit stored-session resume is supported: spawning alone does not verify it; the first send verifies the stored session id without replaying earlier input. See [current limitations](limitations.md). The optional Stop broker component ships in the package but is off unless explicitly enabled |
 | Grok | `grok agent stdio` (ACP: `initialize`, `session/new`, `session/prompt`) | Turns native permission prompting on per session with `/always-approve off` when the CLI advertises that command; otherwise Grok's own default applies. Only `allow_once` or `reject_once` is ever answered. A declined permission ends the turn, and the next message is refused rather than retried |
-| Scenario | In-process deterministic adapter; no external process | Synthetic test Runtime. Labelled "Synthetic Scenario" in the UI and never counted as native Runtime evidence |
+| Scenario | In-process deterministic adapter; no external process | Synthetic test Runtime. Labelled "Demo run" in the picker and never counted as native Runtime evidence |
 
 GoalPort looks for each CLI in its usual install location first, then on `PATH`:
 
@@ -40,14 +40,14 @@ The admission records were made against Codex 0.152.0, Claude Code 2.1.259/2.1.2
 
 ## Support status
 
-The window labels every native Runtime **Preview**.
+Runtime capability labels are **Available**, **Limited**, or unavailable, according to the current projection. The picker uses **Demo run** for the synthetic Runtime.
 
 "Admission" is this project's term for a recorded decision that a Runtime path meets its declared core capabilities on live evidence. **Admitted** means it met them. **Partial** or **partially admitted** means some capabilities were shown and named gaps remain. Each decision applies to the specific build it was recorded against. A package you build from current source has not been re-admitted.
 
 | Runtime | Recorded status | Main open gaps |
 | --- | --- | --- |
 | Codex | Partial | In one historical durability run, a second mutating acquire was not blocked after the Runtime exited and its lease became uncertain; soak process evidence incomplete |
-| Claude Code | Partially admitted | Native interrupt vs residual execution: quiescence is unproven, so responsibility stays held after Stop; `--resume` unsupported |
+| Claude Code | Partially admitted | Native interrupt does not prove residual execution has ended, so responsibility can remain held. The earlier unsupported-resume conclusion is historical; current explicit resume behavior is described above |
 | Grok | Admitted | Limit semantics proven only against a fake ACP agent; `session/load` resume not exercised in the GUI; a Grok → Codex handoff was observed to stall and self-cancel |
 | Scenario | Test only | Never native evidence |
 
