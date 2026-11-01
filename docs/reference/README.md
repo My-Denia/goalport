@@ -15,4 +15,4 @@ Current behavior is described in the [documentation index](../README.md). If a r
 | [Preview and Stable limits](preview-stable-limits.md) | Limits written for the earlier Preview |
 | [Privacy and trust design](privacy-trust-design.md) | The Preview-era privacy design, including features not implemented in the RC |
 
-`scripts/connected/verify-docs.mjs` reads some of these files by default; the former M4 gate is retired.
+The old `verify-docs.mjs` and M4 gates are retired. These files remain historical references; current document links and metadata are checked by `scripts/desktop/docs-ci.test.mjs`.

@@ -11,6 +11,7 @@ test('retired proof entrypoints reject before executing or writing a PASS report
     for (const [script, args] of [
       ...['m0','m1','m2','m3','m4','m5','scenario','baseline-m1'].map(command => ['scripts/verify.mjs', [command]]),
       ['scripts/connected/verify-acceptance.mjs', []],
+      ['scripts/connected/verify-docs.mjs', []],
       ['scripts/connected/v1-sec-01-exclusion.mjs', []],
     ]) {
       const output = join(dir, 'report.json');

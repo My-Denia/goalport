@@ -20,7 +20,6 @@
     "verify:connected": "node scripts/connected/verify-connected.mjs",
     "verify:soak": "node scripts/connected/verify-soak.mjs",
     "verify:desktop-compare": "node scripts/connected/verify-desktop-compare.mjs",
-    "verify:docs": "node scripts/connected/verify-docs.mjs",
     "verify:launch": "node scripts/connected/verify-launch.mjs",
     "verify:raw-manifest": "node scripts/connected/verify-raw-manifest.mjs",
     "verify:select-second-runtime": "node scripts/connected/verify-select-second-runtime.mjs",
