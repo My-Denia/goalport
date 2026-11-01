@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+import { discoverNodeTests } from '../run-node-tests.mjs';
 import { fileURLToPath } from 'node:url';
 import { assertWindowsHost, assertNodeVersion, parseArgs, planWindowsRun, resolveWindowsTool, preparePackage, validateWindowsReport, WINDOWS_KIND, WINDOWS_NOT_VERIFIED } from './windows-run.mjs';
 import { SCENARIOS } from './lib/scenarios.mjs';
@@ -144,9 +145,10 @@ test('actual shared report APIs validate a1-a5, CWD/schema, native geometry and 
   assert.equal(validateWindowsReport(blocked), blocked);
 });
 
-test('component and integration tests and owner command are registered in package.json', () => {
+test('desktop discovery includes Windows host tests and the owner command remains available', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.equal(pkg.scripts['acceptance:windows'], 'node scripts/acceptance/windows-run.mjs');
-  for (const filename of ['scripts/acceptance/lib/windows-host.test.mjs', 'scripts/acceptance/windows-window.test.mjs', 'scripts/acceptance/windows-run.test.mjs']) assert.ok(pkg.scripts['test:desktop'].includes(filename));
+  const discovered = discoverNodeTests(ROOT, 'desktop');
+  for (const filename of ['scripts/acceptance/lib/windows-host.test.mjs', 'scripts/acceptance/windows-window.test.mjs', 'scripts/acceptance/windows-run.test.mjs']) assert.ok(discovered.includes(filename));
   assert.match(read('../../docs/acceptance-windows.md'), /pnpm acceptance:windows/);
 });
