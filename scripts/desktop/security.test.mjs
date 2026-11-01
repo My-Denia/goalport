@@ -237,7 +237,7 @@ test("coordination launch, authorize and save hand the draft workspace to the ou
   });
   vm.runInNewContext(slice("goalport:coordination-save", "goalport:coordination-unblock"), {
     ...shared,
-    saveRecord: (...args) => { saveCalls += 1; return { saved: true, args }; },
+    saveRecordAsync: async (...args) => { saveCalls += 1; return { saved: true, args }; },
     coordinationDirectory: () => "/injected/profile",
   });
   const launch = f.handlers.get("goalport:coordinate-launch");
@@ -266,7 +266,8 @@ test("coordination launch, authorize and save hand the draft workspace to the ou
   assert.deepEqual(guarded.at(-1), undefined);
   assert.equal(authorizeCalls, 3);
 
-  await save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" });
+  const saved = await save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" });
+  assert.equal(saved.saved, true);
   assert.deepEqual(guarded.at(-1), "/work/draft-goal");
   assert.equal(saveCalls, 1);
 
