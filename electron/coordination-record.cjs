@@ -378,16 +378,30 @@ function normalize(input) {
   };
 }
 
-function readRecords(directory) {
+function readRecordsStrict(directory) {
   const file = recordFile(directory);
-  if (!fs.existsSync(file)) return [];
+  let raw;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((item) => {
-      const record = normalize(item);
-      return record ? [record] : [];
-    });
+    raw = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Coordination records file is not an array.");
+  }
+  return parsed.flatMap((item) => {
+    const record = normalize(item);
+    return record ? [record] : [];
+  });
+}
+
+function readRecords(directory) {
+  try {
+    return readRecordsStrict(directory);
   } catch {
     return [];
   }
@@ -411,7 +425,7 @@ function saveUnlocked(directory, input, clock = () => new Date().toISOString()) 
   }
   const stamped = { ...record, savedAt: clock() };
   fs.mkdirSync(directory, { recursive: true });
-  const existing = readRecords(directory).filter((item) => item.requestId !== stamped.requestId);
+  const existing = readRecordsStrict(directory).filter((item) => item.requestId !== stamped.requestId);
   const records = [stamped, ...existing];
   const file = recordFile(directory);
   const temporary = `${file}.${process.pid}.${require("node:crypto").randomUUID()}.tmp`;
@@ -454,6 +468,7 @@ async function saveRecordAsync(directory, input, clock) {
 module.exports = {
   normalizeRecord: normalize,
   readRecords,
+  readRecordsStrict,
   saveRecord,
   saveRecordAsync,
   isValidContinuationDescriptor,

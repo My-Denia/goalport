@@ -831,3 +831,52 @@ test("a failed save releases its lock for the next result", async t => {
   await saveRecordAsync(directory, record());
   assert.equal(readRecords(directory).length, 1);
 });
+
+test("save preserves existing file and aborts when existing records cannot be read or parsed", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-record-preserve-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "coordination-records.json");
+  const { saveRecord, saveRecordAsync, readRecords, readRecordsStrict } = require("./coordination-record.cjs");
+
+  // Initial save succeeds
+  saveRecord(directory, record({ requestId: "initial-1" }));
+  assert.equal(readRecords(directory).length, 1);
+
+  // Corrupt existing file (non-array or invalid JSON)
+  const corruptContent = "{ this is not valid json";
+  fs.writeFileSync(file, corruptContent, "utf8");
+
+  // readRecords degrades gracefully for display
+  assert.deepEqual(readRecords(directory), []);
+  // readRecordsStrict throws
+  assert.throws(() => readRecordsStrict(directory), SyntaxError);
+
+  // saveRecord and saveRecordAsync MUST throw and NOT overwrite the corrupt file
+  assert.throws(() => saveRecord(directory, record({ requestId: "should-fail" })), SyntaxError);
+  await assert.rejects(() => saveRecordAsync(directory, record({ requestId: "should-fail-async" })), SyntaxError);
+
+  // The file on disk was NOT overwritten with [should-fail]
+  assert.equal(fs.readFileSync(file, "utf8"), corruptContent);
+
+  // Non-array JSON root (e.g. object instead of array)
+  fs.writeFileSync(file, JSON.stringify({ notAnArray: true }), "utf8");
+  assert.throws(() => saveRecord(directory, record({ requestId: "should-fail-object" })), /not an array/);
+  assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify({ notAnArray: true }));
+
+  // File read error (e.g. simulated readFileSync throw)
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    fs.readFileSync = function (target, ...args) {
+      if (String(target).endsWith("coordination-records.json")) {
+        const err = new Error("EACCES: permission denied");
+        err.code = "EACCES";
+        throw err;
+      }
+      return originalReadFileSync.call(this, target, ...args);
+    };
+    assert.throws(() => saveRecord(directory, record({ requestId: "should-fail-eacces" })), /EACCES/);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+});
+

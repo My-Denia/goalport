@@ -6,8 +6,8 @@ GoalPort **1.0.0-rc.1** is a **Stable V1 RC** (release candidate). It has not cl
 
 - **The desktop distribution targets Windows x64.** Linux Core has a developer entry, not a packaged Linux desktop.
 - Linux Core can run native Codex through the Unix command client ([Linux development](linux-development.md)). Connections are isolated with bounded waits. This does not establish native Claude/Grok or Windows desktop acceptance. Socket ownership and peer checks remain in force; a foreign or unidentifiable stale endpoint is never silently replaced.
-- **The Windows Pi workspace check has one bounded real acceptance.** A packaged build ran one real Codex turn and one real Pi check, including closing the window while Pi ran and returning to the result. It did not cover an attached session on the final build, Stop during a real run, or native OS input. While a check runs on another goal, the composer names it; there is no Open current work strip on the desktop.
-- **No downloadable release.** You build the package from source ([building](building.md)).
+- **The Windows Pi workspace check has real acceptance records.** A packaged Windows build ran real Codex turns and Pi checks, including closing the window while Pi ran, returning to the result, and native mouse/keyboard permission actions (#55). It did not cover an attached session on the final build or Stop during an in-flight real run. While a check runs on another goal, the composer names it; there is no Open current work strip on the desktop.
+- **Public release vs current source.** The earlier public release is [v1.0.0-rc.1](https://github.com/My-Denia/goalport/releases/tag/v1.0.0-rc.1); testing the latest development candidate requires building from source ([building](building.md)).
 - **Unsigned package.** Windows may warn before running it.
 - **Tauri** is a bounded regression target, not a second product.
 

@@ -46,7 +46,7 @@ Agent CLIs work well inside one terminal session. Long tasks outgrow it: the ter
 
 ## Quick start
 
-There is no downloadable release yet. Build the RC from source on Windows x64 ([prerequisites](docs/building.md#prerequisites)):
+The earlier public release is published as [v1.0.0-rc.1](https://github.com/My-Denia/goalport/releases/tag/v1.0.0-rc.1). To run or test the current development candidate, build from source on Windows x64 ([prerequisites](docs/building.md#prerequisites)):
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -73,7 +73,7 @@ GoalPort Core (Rust) ── SQLite
 codex app-server · claude -p stream-json · grok agent stdio
 ```
 
-The window only presents. Core owns all GoalPort state and supervises each Runtime through its native protocol. Read more in [Architecture](docs/architecture.md) and [Safety](docs/safety.md).
+The window only presents. Core owns native session state and supervises each Runtime through its native protocol in SQLite, while coordination history and background jobs are held in profile JSON records. Read more in [Architecture](docs/architecture.md) and [Safety](docs/safety.md).
 
 ## Native, not reimplemented
 

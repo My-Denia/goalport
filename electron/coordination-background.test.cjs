@@ -531,3 +531,40 @@ test("a dead worker pid is gone and is not called stopped", () => {
     process.kill = original;
   }
 });
+
+test("targeted status(jobId) query does not overwrite lastJobId used by unparameterized queries", async t => {
+  const r = setup(t);
+  const jobA = await r.host.start({ ...r.input, requestId: "req-A", goal: "Goal A" });
+  assert.equal((await r.host.status()).jobId, jobA.jobId);
+
+  // Settle job A to completed
+  const store = createCoordinationJobStore(r.directory, { bootstrapReady: true });
+  const claimA = store.claimWorker(jobA.jobId);
+  store.recordOutcome(jobA.jobId, { status: "completed" }, claimA.ownerToken);
+  store.releaseAdmission(jobA.jobId, claimA.ownerToken);
+
+  // Start job B in a different folder
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-b-"));
+  t.after(() => fs.rmSync(elsewhere, { recursive: true, force: true }));
+  const jobB = await r.host.start({ ...r.input, requestId: "req-B", goal: "Goal B", workspaceRoot: elsewhere });
+
+  // Unparameterized query returns job B (active)
+  const currentBefore = await r.host.status();
+  assert.equal(currentBefore.jobId, jobB.jobId);
+
+  // Targeted query for job A
+  const checkA = await r.host.status(jobA.jobId);
+  assert.equal(checkA.jobId, jobA.jobId);
+  assert.equal(checkA.active, false);
+
+  // Settle job B to completed and release slot
+  const claimB = store.claimWorker(jobB.jobId);
+  store.recordOutcome(jobB.jobId, { status: "completed" }, claimB.ownerToken);
+  store.releaseAdmission(jobB.jobId, claimB.ownerToken);
+
+  // Now no active job holds slot: unparameterized query MUST still return job B, NOT job A!
+  const currentAfter = await r.host.status();
+  assert.equal(currentAfter.jobId, jobB.jobId);
+  assert.equal(currentAfter.active, false);
+});
+

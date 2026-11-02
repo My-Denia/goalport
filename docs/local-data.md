@@ -22,6 +22,8 @@ A durable profile directory contains only data you would back up, migrate or res
 | `goalport.sqlite` (plus WAL files) | All Campaign, Task, Attempt, event, decision and receipt records |
 | `goalport.sqlite.launcher.log` | How Core was launched, including breakaway or inherited-job mode |
 | `goalport.sqlite.core.log` | Core diagnostics |
+| `coordination-records.json` | Saved planning, revision, execution and workspace check records |
+| `coordination-jobs/` | Background coordination jobs, admissions, and control credentials |
 | `backups/`, `import-journal.json`, `.import-staging-*` | Atomically published consistency backups and proof-bound crash-safe import/recovery staging |
 
 The Electron/Chromium browser state (caches, `Local State`, `Preferences`, `Network`, session storage, `window-state.json`) lives in its own namespace keyed by the durable profile identity. It is never written into the durable profile directory, so backing up a `--data-dir` gives you pure GoalPort data, and a fresh profile decision can never race Chromium session files. Browser-state identity follows the canonical durable profile path (not the Core build), and deleting it only resets window geometry and caches. A `--user-data-dir <absolute path>` (the standard Chromium switch) relocates the application-data root: both the durable channel directories and the `electron` namespace move inside the relocated root and stay physically separate; combined with `--data-dir`, the `--data-dir` keeps owning the durable location. Historical Chromium files left in an older profile directory are ignored, never deleted, and no longer used.
