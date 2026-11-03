@@ -44,9 +44,10 @@ Build hashes record provenance; compatible builds can reopen the same data.
 GoalPort refuses unknown files in an unmarked directory, incompatible or corrupt
 data, a mismatched marker identity, and a missing database after a recorded open.
 Known Chromium leftovers from the former shared directory remain compatible and
-are preserved. Reopening compatible data does not automatically replay in-flight
-commands (which become unknown) and never restores session-bound harness
-authorizations or background write grants. No generalized migration is introduced.
+are preserved. Only commands with lost receipts or interrupted turns remain
+unknown; reopening does not grant new window-bound authorization; an already
+admitted live background job retains its own original scope/budget, no replay.
+No generalized migration is introduced.
 See [profile continuity](profile-continuity.md) for backup and import behavior.
 
 When older GoalPort data has a nonempty SQLite WAL but no SHM, GoalPort does not
