@@ -10,6 +10,7 @@ published rc.1 assets retain their original storage behavior.
 | How GoalPort was started | Durable profile directory | Electron/Chromium browser state |
 | --- | --- | --- |
 | Packaged RC (`GoalPort.exe`) | `%APPDATA%\GoalPort\rc` | `%APPDATA%\GoalPort\electron\<profile key>` |
+| Packaged dev candidate (`GoalPort.exe` from `--distribution dev-candidate`) | `%APPDATA%\GoalPort\dev` | `%APPDATA%\GoalPort\electron\<profile key>` |
 | Unpackaged development (`pnpm electron:dev`) | `%APPDATA%\GoalPort\dev` | `%APPDATA%\GoalPort\electron\<profile key>` |
 | `--data-dir <absolute path>` | that directory | the separate `electron\<profile key>` namespace next to the app-data root, never inside the `--data-dir` |
 | `--test-profile <absolute path>` | that directory, synthetic Scenario only (see [testing](testing.md)) | `<parent of the test directory>\electron\<profile key>` (test-owned scratch) |
@@ -33,7 +34,7 @@ The RC profile is separate from data folders used by earlier GoalPort developmen
 To keep a separate normal profile:
 
 ```powershell
-pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64 --data-dir C:\GoalPortData\rc1
+pnpm electron:start --package artifacts/electron-rc/rc2-dev/GoalPort-win32-x64 --data-dir C:\GoalPortData\rc2-dev
 ```
 
 ## Profile identity and compatibility
@@ -43,7 +44,11 @@ Build hashes record provenance; compatible builds can reopen the same data.
 GoalPort refuses unknown files in an unmarked directory, incompatible or corrupt
 data, a mismatched marker identity, and a missing database after a recorded open.
 Known Chromium leftovers from the former shared directory remain compatible and
-are preserved. See [profile continuity](profile-continuity.md) for backup and import behavior.
+are preserved. Only commands with lost receipts or interrupted turns remain
+unknown; reopening does not grant new window-bound authorization; an already
+admitted live background job retains its own original scope/budget, no replay.
+No generalized migration is introduced.
+See [profile continuity](profile-continuity.md) for backup and import behavior.
 
 When older GoalPort data has a nonempty SQLite WAL but no SHM, GoalPort does not
 write-open the original database. It copies a stable main+WAL snapshot into the

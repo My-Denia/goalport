@@ -232,6 +232,63 @@ test("a record-save failure still settles the job terminal and releases the slot
 test("blank selected workspace cannot clear governing hold", async t => { const r = await scenario(t, { snapshot: { bounds: { projectionUnavailable: false }, project: { workspaceRoot: "" }, stopResponsibility: { writeResponsibility: "held" } } }); assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0); });
 test("Core unavailable/active projections refuse", () => { assert.ok(coreRefusal(null)); assert.ok(coreRefusal({ bounds: { projectionUnavailable: true } })); assert.ok(coreRefusal({ bounds: {}, attempt: { state: "ACTIVE" } })); });
 
+test("Core guard allows history-only omissions but refuses control omissions, unconfirmed/held, and invalid bounds", async t => {
+  // coreRefusal unit assertions
+  assert.equal(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { timelineItems: 1 } } }), null);
+  assert.equal(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { conversationItems: 3 } } }), null);
+  assert.equal(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { turnResults: 2 } } }), null);
+
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { timelineItems: 1, decisions: 1 } } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { notices: 1 } } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: {} } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { timelineItems: 0 } } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: false } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projectionUnavailable: true, omittedCounts: { timelineItems: 1 } } }));
+  assert.ok(coreRefusal({ bounds: { truncated: true, projection_unavailable: true, omittedCounts: { timelineItems: 1 } } }));
+
+  // Worker scenario: history-only bounds pass fresh check and run normally
+  const historyBounds = { truncated: true, projectionUnavailable: false, omittedCounts: { timelineItems: 1 } };
+  const rOk = await scenario(t, { snapshot: { bounds: historyBounds, project: { workspaceRoot: "" }, attempt: { state: "completed" } } });
+  assert.ok(rOk.launches.length > 0);
+
+  // Worker scenario: mixed control omission in snapshot refuses before dispatch
+  const rMixed = await scenario(t, { snapshot: { bounds: { truncated: true, projectionUnavailable: false, omittedCounts: { timelineItems: 1, decisions: 1 } }, project: { workspaceRoot: "" } } });
+  assert.equal(rMixed.launches.length, 0); assert.equal(rMixed.authorizations, 0);
+
+  // Worker scenario: held, active, truncated overview, pending permissions, or wrong detail identity still refuse with zero dispatch even if detail has history omission
+  const heldWithHistory = await scenario(t, {
+    snapshot: { bounds: historyBounds, project: { workspaceRoot: "" } },
+    overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] },
+    detail: { bounds: historyBounds, activeCampaignId: "elsewhere", project: { workspaceRoot: "/held/workspace" }, stopResponsibility: { writeResponsibility: "held" } },
+  });
+  assert.equal(heldWithHistory.launches.length, 0); assert.equal(heldWithHistory.authorizations, 0);
+
+  const activeWithHistory = await scenario(t, {
+    snapshot: { bounds: historyBounds, project: { workspaceRoot: "" } },
+    overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "running" }] },
+  });
+  assert.equal(activeWithHistory.launches.length, 0); assert.equal(activeWithHistory.authorizations, 0);
+
+  const truncatedOverview = await scenario(t, {
+    snapshot: { bounds: historyBounds, project: { workspaceRoot: "" } },
+    overview: { truncated: true, pending: [], goals: [] },
+  });
+  assert.equal(truncatedOverview.launches.length, 0); assert.equal(truncatedOverview.authorizations, 0);
+
+  const pendingPermissions = await scenario(t, {
+    snapshot: { bounds: historyBounds, project: { workspaceRoot: "" } },
+    overview: { truncated: false, pending: [{}], goals: [] },
+  });
+  assert.equal(pendingPermissions.launches.length, 0); assert.equal(pendingPermissions.authorizations, 0);
+
+  const wrongDetailIdentity = await scenario(t, {
+    snapshot: { bounds: historyBounds, project: { workspaceRoot: "" } },
+    overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] },
+    detail: { bounds: historyBounds, activeCampaignId: "mismatched-id", project: { workspaceRoot: "" } },
+  });
+  assert.equal(wrongDetailIdentity.launches.length, 0); assert.equal(wrongDetailIdentity.authorizations, 0);
+});
+
 test("a held goal outside the blank selected view refuses before first dispatch", async t => {
   const r = await scenario(t, { snapshot: { bounds: {}, project: { workspaceRoot: "" } }, overview: { truncated: false, pending: [], goals: [{ campaignId: "elsewhere", attention: "idle" }] }, detail: { bounds: {}, activeCampaignId: "elsewhere", project: { workspaceRoot: "/held/workspace" }, stopResponsibility: { writeResponsibility: "held" } } });
   assert.equal(r.launches.length, 0); assert.equal(r.authorizations, 0);

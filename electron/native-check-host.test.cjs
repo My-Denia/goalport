@@ -50,6 +50,51 @@ test("the first read offers Pi and consent without collecting or holding any mat
   await assert.rejects(host.start({ requestId: "one", ...ids, piCapacity: pair, backgroundConsent: true }), error => error.previewAgain === true);
 });
 
+test("offer and exact preview succeed with history-only omitted bounds and zero dispatch", async t => {
+  const historySnapshot = {
+    bounds: { projectionUnavailable: false, truncated: true, omittedCounts: { timelineItems: 1 } },
+  };
+  const { host, started, workspace } = fixture(t, {
+    core: {
+      exchangeVerified: async request => ({
+        ok: true,
+        requestId: request.requestId,
+        payload: {
+          requestId: request.requestId,
+          accepted: true,
+          ...(request.messageType === "goal_overview"
+            ? { overview: { truncated: false, goals: [{ campaignId: "campaign", attention: "completed" }], pending: [] } }
+            : {
+                snapshot: {
+                  bounds: historySnapshot.bounds,
+                  activeCampaignId: "campaign",
+                  attempt: { id: "attempt", taskId: "task", provider: "codex", state: "waiting" },
+                  activeTask: { id: "task", title: "Fixture goal" },
+                  project: { workspaceRoot: workspace },
+                  decisions: [],
+                  productConversation: { runtime: { provider: "codex" }, turn: { state: "completed", canStop: false } },
+                  turnResults: [{ requestId: "turn", replyState: "completed", replyText: "Reported reply", commands: [] }],
+                },
+              }),
+        },
+      }),
+    },
+    snapshot: async () => ({
+      bounds: historySnapshot.bounds,
+      activeCampaignId: "campaign",
+      attempt: { id: "attempt", taskId: "task", provider: "codex", state: "waiting" },
+      activeTask: { id: "task", title: "Fixture goal" },
+      project: { workspaceRoot: workspace },
+      decisions: [],
+      productConversation: { runtime: { provider: "codex" }, turn: { state: "completed", canStop: false } },
+      turnResults: [{ requestId: "turn", replyState: "completed", replyText: "Reported reply", commands: [] }],
+    }),
+  });
+  const preview = await host.prepare({ requestId: "one", ...ids, piCapacity: pair });
+  assert.match(preview.nativeCheckMaterial.exactPrompt, /\+new/);
+  assert.equal(started.length, 0);
+});
+
 test("start admits exactly the previewed bytes once, read-only, Pi only, with nothing from the renderer", async t => {
   const { host, started } = fixture(t);
   const preview = await host.prepare({ requestId: "one", ...ids, piCapacity: pair });

@@ -255,7 +255,7 @@ test("trusted authorization handler validates optional write through the tested 
     "./cli-coordinate.cjs": {
       discoverCliProviders: async (options) => {
         probes += 1;
-        assert.equal(typeof options.stateDir, "string");
+        assert.equal(options.stateDir, "/injected/state");
         return { ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] };
       },
     },
