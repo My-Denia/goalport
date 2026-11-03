@@ -846,8 +846,8 @@ test("save preserves existing file and aborts when existing records cannot be re
   const corruptContent = "{ this is not valid json";
   fs.writeFileSync(file, corruptContent, "utf8");
 
-  // readRecords degrades gracefully for display
-  assert.deepEqual(readRecords(directory), []);
+  // readRecords throws on corrupt JSON (does not swallow error)
+  assert.throws(() => readRecords(directory), SyntaxError);
   // readRecordsStrict throws
   assert.throws(() => readRecordsStrict(directory), SyntaxError);
 
@@ -860,6 +860,8 @@ test("save preserves existing file and aborts when existing records cannot be re
 
   // Non-array JSON root (e.g. object instead of array)
   fs.writeFileSync(file, JSON.stringify({ notAnArray: true }), "utf8");
+  assert.throws(() => readRecords(directory), /not an array/);
+  assert.throws(() => readRecordsStrict(directory), /not an array/);
   assert.throws(() => saveRecord(directory, record({ requestId: "should-fail-object" })), /not an array/);
   assert.equal(fs.readFileSync(file, "utf8"), JSON.stringify({ notAnArray: true }));
 
@@ -874,9 +876,93 @@ test("save preserves existing file and aborts when existing records cannot be re
       }
       return originalReadFileSync.call(this, target, ...args);
     };
+    assert.throws(() => readRecords(directory), /EACCES/);
+    assert.throws(() => readRecordsStrict(directory), /EACCES/);
     assert.throws(() => saveRecord(directory, record({ requestId: "should-fail-eacces" })), /EACCES/);
   } finally {
     fs.readFileSync = originalReadFileSync;
   }
+});
+
+test("read and save propagate real underlying filesystem read errors", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-real-read-error-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "coordination-records.json");
+  const { saveRecord, saveRecordAsync, readRecords, readRecordsStrict } = require("./coordination-record.cjs");
+
+  fs.mkdirSync(file);
+  assert.throws(() => readRecords(directory), /EISDIR/);
+  assert.throws(() => readRecordsStrict(directory), /EISDIR/);
+  assert.throws(() => saveRecord(directory, record({ requestId: "should-fail-eisdir" })), /EISDIR/);
+  await assert.rejects(() => saveRecordAsync(directory, record({ requestId: "should-fail-eisdir-async" })), /EISDIR/);
+});
+
+test("save preserves unsupported raw items, unknown same-id items, and primitives across sync and async saves", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-raw-preserve-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, "coordination-records.json");
+  const { saveRecord, saveRecordAsync, readRecords } = require("./coordination-record.cjs");
+
+  const validA = record({ requestId: "valid-a", goal: "goal a" });
+  const validB = record({ requestId: "valid-b", goal: "goal b" });
+  const rawUnsupported = { rawType: "future-unknown-format", data: 12345 };
+  const rawSameIdUnsupported = { requestId: "valid-a", customFutureExtension: "preserve-me" };
+  const rawItems = [
+    validA,
+    rawUnsupported,
+    rawSameIdUnsupported,
+    null,
+    "primitive-string",
+    42,
+    true,
+    [1, 2, 3],
+    validB,
+  ];
+  fs.writeFileSync(file, `${JSON.stringify(rawItems, null, 2)}\n`, "utf8");
+
+  // Normalized read returns only valid supported records without crashing
+  const initialRead = readRecords(directory);
+  assert.equal(initialRead.length, 2);
+  assert.deepEqual(initialRead.map(r => r.requestId), ["valid-a", "valid-b"]);
+
+  // Sync save updating valid-a
+  const updatedA = record({ requestId: "valid-a", goal: "goal a updated" });
+  const savedA = saveRecord(directory, updatedA);
+  assert.equal(savedA.requestId, "valid-a");
+
+  // Read raw file from disk
+  let diskRaw = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(diskRaw[0].requestId, "valid-a");
+  assert.equal(diskRaw[0].goal, "goal a updated");
+  // valid-b is preserved
+  assert.ok(diskRaw.some(item => item && item.requestId === "valid-b" && item.goal === "goal b"));
+  // rawUnsupported is preserved
+  assert.ok(diskRaw.some(item => item && item.rawType === "future-unknown-format"));
+  // rawSameIdUnsupported is preserved even though it has requestId === "valid-a"
+  assert.ok(diskRaw.some(item => item && item.requestId === "valid-a" && item.customFutureExtension === "preserve-me"));
+  // null and primitives are preserved
+  assert.ok(diskRaw.includes(null));
+  assert.ok(diskRaw.includes("primitive-string"));
+  assert.ok(diskRaw.includes(42));
+  assert.ok(diskRaw.includes(true));
+  assert.ok(diskRaw.some(item => Array.isArray(item) && item[0] === 1));
+
+  // Async save adding a new record valid-c
+  const validC = record({ requestId: "valid-c", goal: "goal c" });
+  await saveRecordAsync(directory, validC);
+
+  diskRaw = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(diskRaw[0].requestId, "valid-c");
+  assert.ok(diskRaw.some(item => item && item.rawType === "future-unknown-format"));
+  assert.ok(diskRaw.some(item => item && item.requestId === "valid-a" && item.customFutureExtension === "preserve-me"));
+  assert.ok(diskRaw.includes(null));
+  assert.ok(diskRaw.includes("primitive-string"));
+  assert.ok(diskRaw.includes(42));
+  assert.ok(diskRaw.includes(true));
+
+  // readRecords returns valid-c, valid-a (updated), valid-b
+  const reloaded = readRecords(directory);
+  assert.deepEqual(reloaded.map(r => r.requestId), ["valid-c", "valid-a", "valid-b"]);
+  assert.equal(reloaded.find(r => r.requestId === "valid-a").goal, "goal a updated");
 });
 

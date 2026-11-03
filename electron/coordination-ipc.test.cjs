@@ -418,3 +418,25 @@ test("attempt-less campaign selects runtime by resolving workspace from selected
   assert.deepEqual(seen, [path.resolve("/work/selected-campaign"), undefined]);
   assert.deepEqual(invoked, ["req-selected"]);
 });
+
+test("coordination-records IPC returns [] on missing records and propagates error on unreadable records", async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-records-ipc-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const registration = /handleTrusted\("goalport:coordination-records",\s*(\(\) => readRecords\(coordinationDirectory\(\)\))\);/.exec(mainSource);
+  assert.ok(registration, "coordination-records handler uses the trusted boundary");
+  const { readRecords } = require("./coordination-record.cjs");
+  const callback = vm.runInNewContext(`(${registration[1]})`, { readRecords, coordinationDirectory: () => directory });
+
+  // Missing history returns empty array
+  assert.deepEqual(callback(), []);
+
+  // Corrupt history propagates error to IPC caller
+  const file = path.join(directory, "coordination-records.json");
+  fs.writeFileSync(file, "{ invalid json", "utf8");
+  assert.throws(() => callback(), SyntaxError);
+
+  // Preload bridge forwards IPC invocation
+  const { exposed, invocations } = loadPreload(null);
+  await exposed.goalportCore.coordinationRecords();
+  assert.deepEqual(invocations.at(-1), { channel: "goalport:coordination-records", args: [] });
+});

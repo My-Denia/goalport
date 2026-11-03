@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_accepts_committed_concurrent_writes_from_active_source() {
+    fn backup_count_verification_accepts_simulated_write_counts() {
         let dir = temp_dir("backup-active-concurrent");
         let db = dir.join("active.sqlite");
         {
