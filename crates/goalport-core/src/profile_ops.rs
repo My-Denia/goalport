@@ -322,6 +322,63 @@ fn quick_check(connection: &Connection) -> Result<String, String> {
     Ok(result)
 }
 
+const MONOTONIC_BUSINESS_TABLES: &[&str] = &[
+    "campaigns",
+    "tasks",
+    "attempts",
+    "events",
+    "decisions",
+    "outbox",
+];
+
+fn verify_backup_counts(
+    out_counts: &Value,
+    source_before: &Value,
+    source_after: &Value,
+) -> Result<(), String> {
+    let (Some(out_map), Some(before_map), Some(after_map)) = (
+        out_counts.as_object(),
+        source_before.as_object(),
+        source_after.as_object(),
+    ) else {
+        return Err("invalid counts structure".to_string());
+    };
+
+    // If source was quiescent across the whole backup, all counts must match exactly.
+    if out_counts == source_before {
+        return Ok(());
+    }
+
+    // When source had concurrent activity, monotonic tables must not lose previously committed data
+    // (out_count >= min(before, after)) and must not exceed what source had after the backup.
+    for &table in MONOTONIC_BUSINESS_TABLES {
+        let before_count = before_map.get(table).and_then(|v| v.as_i64()).unwrap_or(0);
+        let after_count = after_map.get(table).and_then(|v| v.as_i64()).unwrap_or(i64::MAX);
+        let out_count = out_map.get(table).and_then(|v| v.as_i64()).unwrap_or(0);
+
+        let min_expected = before_count.min(after_count);
+        let max_expected = before_count.max(after_count);
+
+        if out_count < min_expected || out_count > max_expected {
+            return Err(format!(
+                "backup row counts differ from source: table {table} has {out_count} rows, expected between {min_expected} and {max_expected}"
+            ));
+        }
+    }
+
+    // Dynamic tables (stop_responsibilities) can legitimately vary (e.g. released and newly created)
+    // while the active source is running, and must have a valid non-negative count in the replica.
+    if let Some(stop_val) = out_map.get("stop_responsibilities") {
+        if stop_val.as_i64().unwrap_or(-1) < 0 {
+            return Err(
+                "backup verification failed: negative stop_responsibilities count".to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn latest_epoch_summary(connection: &Connection) -> Result<Value, String> {
     let tables = table_names(connection)?;
     if !tables.iter().any(|name| name == "core_launch_epochs") {
@@ -634,9 +691,8 @@ fn backup_impl(
         ));
     }
     let out_counts = business_counts(&verified)?;
-    if out_counts != source_counts {
-        return Err("backup row counts differ from source".to_string());
-    }
+    let source_counts_after = business_counts(&source)?;
+    verify_backup_counts(&out_counts, &source_counts, &source_counts_after)?;
     // Durability: flush the verified file to disk. The destination connection
     // may have created WAL side files during the copy/verify — checkpoint the
     // backup so a restore that copies only the main file loses nothing, then
@@ -689,7 +745,7 @@ fn backup_impl(
     guard.cleanup();
     guard.disarm();
     result["schemaVersion"] = json!(source_version);
-    result["counts"] = source_counts;
+    result["counts"] = out_counts;
     result["quickCheck"] = json!("ok");
     result["bytes"] = json!(fs::metadata(out).map(|meta| meta.len()).unwrap_or(0));
     result["published"] = json!(true);
@@ -1410,5 +1466,60 @@ mod tests {
         drop(rows);
         drop(statement);
         reader.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn backup_accepts_committed_concurrent_writes_from_active_source() {
+        let dir = temp_dir("backup-active-concurrent");
+        let db = dir.join("active.sqlite");
+        {
+            let store = Store::open(&db).unwrap();
+            store
+                .insert_project(&crate::domain::Project {
+                    id: "p1".into(),
+                    workspace_root: "ws1".into(),
+                })
+                .unwrap();
+            store
+                .create_campaign_with_task(
+                    "p1",
+                    &crate::domain::Campaign {
+                        id: "c1".into(),
+                        goal: "goal one".into(),
+                        root_task_id: "t1".into(),
+                        state: Default::default(),
+                    },
+                    &crate::domain::Task {
+                        id: "t1".into(),
+                        campaign_id: "c1".into(),
+                        title: "do it".into(),
+                        acceptance: "done".into(),
+                        state: Default::default(),
+                    },
+                )
+                .unwrap();
+        }
+        let out = dir.join("backup.sqlite");
+        let report = backup(&db, &out, false).unwrap();
+        assert_eq!(report["quickCheck"], json!("ok"));
+        assert_eq!(report["counts"]["campaigns"], json!(1));
+        assert_eq!(report["counts"]["tasks"], json!(1));
+
+        // 1. Monotonic table growth (events added concurrently)
+        let initial_counts = json!({ "campaigns": 1, "tasks": 1, "events": 1, "stop_responsibilities": 0 });
+        let during_counts = json!({ "campaigns": 1, "tasks": 1, "events": 2, "stop_responsibilities": 0 });
+        let after_counts = json!({ "campaigns": 1, "tasks": 1, "events": 3, "stop_responsibilities": 0 });
+        assert!(verify_backup_counts(&during_counts, &initial_counts, &after_counts).is_ok());
+
+        // Monotonic table data loss must fail
+        let lost_data_counts = json!({ "campaigns": 0, "tasks": 1, "events": 1, "stop_responsibilities": 0 });
+        assert!(verify_backup_counts(&lost_data_counts, &initial_counts, &after_counts).is_err());
+
+        // 2. Non-monotonic stop_responsibilities variation (1 -> 0 released in snapshot -> 1 added after)
+        let stop_before = json!({ "campaigns": 1, "tasks": 1, "events": 1, "stop_responsibilities": 1 });
+        let stop_snapshot = json!({ "campaigns": 1, "tasks": 1, "events": 1, "stop_responsibilities": 0 });
+        let stop_after = json!({ "campaigns": 1, "tasks": 1, "events": 1, "stop_responsibilities": 1 });
+        // The snapshot has 0 rows because the stop responsibility was released. This must be ACCEPTED!
+        assert!(verify_backup_counts(&stop_snapshot, &stop_before, &stop_after).is_ok());
     }
 }

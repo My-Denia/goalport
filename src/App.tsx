@@ -700,6 +700,16 @@ function App() {
         const epoch = desktopStatusEpoch.current;
         const job = await read();
         if (cancelled || epoch !== desktopStatusEpoch.current) return;
+        if (nativeCheckJobRef.current?.active && nativeCheckJobRef.current.jobId && job?.jobId !== nativeCheckJobRef.current.jobId) {
+          try {
+            const checkStatus = await read(nativeCheckJobRef.current.jobId);
+            if (!cancelled && epoch === desktopStatusEpoch.current && checkStatus?.recordKind === "native-workspace-check") {
+              setNativeCheckJob(checkStatus);
+            }
+          } catch {
+            // Keep existing check state on transient read failure
+          }
+        }
         // A workspace check belongs beside its own goal, never in the job view.
         if (job?.recordKind === "native-workspace-check") { setNativeCheckJob(job); return; }
         const freshIntent = desktopNewAllowanceIntent.current;

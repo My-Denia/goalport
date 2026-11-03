@@ -136,3 +136,129 @@ it("desktop missing saved continuation context retains the follow-up without any
   await screen.findByText(/saved result could not be confirmed/);
   expect(text.value).toBe("Keep missing-context draft"); expect(f.start).not.toHaveBeenCalled(); expect(f.liveContinue).not.toHaveBeenCalled();
 });
+
+it("when another job takes over the unparameterized status, an active workspace check polls its own jobId to completion", async () => {
+  const f = fixture();
+  const target = { campaignId: "campaign-check-recovery", attemptId: "attempt-recovery", turnRequestId: "turn-recovery" };
+  const snapshot = {
+    ...DEMO_SNAPSHOT,
+    preview: false,
+    connection: "connected",
+    activeCampaignId: target.campaignId,
+    attempt: { ...DEMO_SNAPSHOT.attempt, id: target.attemptId, provider: "codex", state: "waiting" },
+    turnResults: [
+      {
+        requestId: target.turnRequestId,
+        replyState: "completed",
+        baselineRecorded: true,
+        filesTruncated: false,
+        before: [],
+        during: [],
+        unattributed: [],
+        commands: [],
+      },
+    ],
+  };
+  const activeCheckJob: BackgroundStatus = {
+    ...f.terminal,
+    jobId: "check-job-id-99",
+    requestId: "check-req-99",
+    recordKind: "native-workspace-check",
+    nativeCheckTarget: target,
+    state: "running",
+    active: true,
+    live: true,
+    outcome: null,
+    followUpMode: undefined,
+    progress: { activity: "Pi is checking" },
+  };
+  const finishedCheckJob: BackgroundStatus = {
+    ...activeCheckJob,
+    state: "completed",
+    active: false,
+    live: false,
+    outcome: {
+      status: "completed",
+      report: { auditText: "Pi review succeeded: all checks passed cleanly." } as never,
+    },
+  };
+  const competingJob: BackgroundStatus = {
+    jobId: "competing-job-100",
+    requestId: "competing-req-100",
+    goal: "Another background task",
+    state: "running",
+    active: true,
+    live: true,
+    revoked: false,
+    workerPid: null,
+    readMaxTurns: 4,
+    writeMaxTurns: null,
+    counters: { readTurnsLeft: 2 },
+    pendingCommand: null,
+    completedCommands: [],
+    progress: null,
+    outcome: null,
+  };
+
+  let unparameterizedReturnedCompeting = false;
+  const backgroundStatus = vi.fn(async (jobId?: string) => {
+    if (jobId === "check-job-id-99") {
+      return finishedCheckJob;
+    }
+    if (unparameterizedReturnedCompeting) {
+      return competingJob;
+    }
+    return activeCheckJob;
+  });
+
+  const nativeCheck = vi.fn(async () => ({ ok: true, payload: { checks: [] } }));
+  window.goalportCore = {
+    ...window.goalportCore,
+    snapshot: async () => snapshot,
+    startCore: async () => snapshot,
+    backgroundStatus,
+    nativeCheck,
+  } as never;
+
+  window.history.replaceState(null, "", "/goals/campaign-check-recovery");
+  render(<App />);
+
+  // Initially activeCheckJob is returned
+  await screen.findByRole("region", { name: "Pi review" });
+  expect(screen.getByRole("button", { name: "Stop review" })).toBeTruthy();
+  expect(screen.queryByText("Pi review succeeded: all checks passed cleanly.")).toBeNull();
+
+  // Now make unparameterized status return the competing task B
+  unparameterizedReturnedCompeting = true;
+
+  // Clicking "Leave job view" returns the user to the conversation
+  fireEvent.click(await screen.findByRole("button", { name: "Leave job view" }));
+
+  // The poll loop must query backgroundStatus("check-job-id-99"), discover terminal state, and render finished review
+  await waitFor(() => {
+    expect(screen.getByText("Pi review succeeded: all checks passed cleanly.")).toBeTruthy();
+  }, { timeout: 4000 });
+
+  expect(screen.queryByRole("button", { name: "Stop review" })).toBeNull();
+  expect(screen.getByRole("heading", { name: "Pi's review" })).toBeTruthy();
+  expect(backgroundStatus).toHaveBeenCalledWith("check-job-id-99");
+
+  // Now task B also finishes and unparameterized status returns B terminal
+  const terminalCompetingJob: BackgroundStatus = {
+    ...competingJob,
+    state: "completed",
+    active: false,
+    live: false,
+    outcome: { status: "completed" },
+  };
+  backgroundStatus.mockImplementation(async (jobId?: string) => {
+    if (jobId === "check-job-id-99") return finishedCheckJob;
+    return terminalCompetingJob;
+  });
+
+  // Task B must settle and list plans without being swallowed by check A
+  await waitFor(() => {
+    expect(f.list).toHaveBeenCalled();
+  }, { timeout: 4000 });
+});
+
