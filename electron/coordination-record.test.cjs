@@ -904,9 +904,9 @@ test("save preserves unsupported raw items, unknown same-id items, and primitive
   const { saveRecord, saveRecordAsync, readRecords } = require("./coordination-record.cjs");
 
   const validA = record({ requestId: "valid-a", goal: "goal a" });
-  const validB = record({ requestId: "valid-b", goal: "goal b" });
-  const rawUnsupported = { rawType: "future-unknown-format", data: 12345 };
-  const rawSameIdUnsupported = { requestId: "valid-a", customFutureExtension: "preserve-me" };
+  const validB = record({ requestId: "valid-b", goal: "goal b", futureMetadata: { nested: ["keep", { version: 2 }] } });
+  const rawUnsupported = { rawType: "future-unknown-format", data: { nested: [12345, { enabled: true }] } };
+  const rawSameIdUnsupported = { requestId: "valid-a", customFutureExtension: { nested: ["preserve-me", { version: 3 }] } };
   const rawItems = [
     validA,
     rawUnsupported,
@@ -929,36 +929,14 @@ test("save preserves unsupported raw items, unknown same-id items, and primitive
   const updatedA = record({ requestId: "valid-a", goal: "goal a updated" });
   const savedA = saveRecord(directory, updatedA);
   assert.equal(savedA.requestId, "valid-a");
+  assert.equal(savedA.goal, "goal a updated");
 
-  // Read raw file from disk
-  let diskRaw = JSON.parse(fs.readFileSync(file, "utf8"));
-  assert.equal(diskRaw[0].requestId, "valid-a");
-  assert.equal(diskRaw[0].goal, "goal a updated");
-  // valid-b is preserved
-  assert.ok(diskRaw.some(item => item && item.requestId === "valid-b" && item.goal === "goal b"));
-  // rawUnsupported is preserved
-  assert.ok(diskRaw.some(item => item && item.rawType === "future-unknown-format"));
-  // rawSameIdUnsupported is preserved even though it has requestId === "valid-a"
-  assert.ok(diskRaw.some(item => item && item.requestId === "valid-a" && item.customFutureExtension === "preserve-me"));
-  // null and primitives are preserved
-  assert.ok(diskRaw.includes(null));
-  assert.ok(diskRaw.includes("primitive-string"));
-  assert.ok(diskRaw.includes(42));
-  assert.ok(diskRaw.includes(true));
-  assert.ok(diskRaw.some(item => Array.isArray(item) && item[0] === 1));
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), [savedA, ...rawItems.slice(1)]);
 
   // Async save adding a new record valid-c
   const validC = record({ requestId: "valid-c", goal: "goal c" });
-  await saveRecordAsync(directory, validC);
-
-  diskRaw = JSON.parse(fs.readFileSync(file, "utf8"));
-  assert.equal(diskRaw[0].requestId, "valid-c");
-  assert.ok(diskRaw.some(item => item && item.rawType === "future-unknown-format"));
-  assert.ok(diskRaw.some(item => item && item.requestId === "valid-a" && item.customFutureExtension === "preserve-me"));
-  assert.ok(diskRaw.includes(null));
-  assert.ok(diskRaw.includes("primitive-string"));
-  assert.ok(diskRaw.includes(42));
-  assert.ok(diskRaw.includes(true));
+  const savedC = await saveRecordAsync(directory, validC);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), [savedC, savedA, ...rawItems.slice(1)]);
 
   // readRecords returns valid-c, valid-a (updated), valid-b
   const reloaded = readRecords(directory);
