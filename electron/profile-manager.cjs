@@ -13,6 +13,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { canonicalPath, normalizedPath } = require("./launch-config.cjs");
+const { carryWorkflows } = require("./workflow-store.cjs");
 
 const MARKER_FILE = "goalport-profile.json";
 const JOURNAL_FILE = "import-journal.json";
@@ -899,6 +900,10 @@ class ProfileManager {
     }
     const v2 = journal.schema === JOURNAL_SCHEMA;
     const sourceDirectory = v2 ? journal.source.directory : journal.source;
+    // The user's saved workflows come along when this profile has none. Every
+    // import path ends here, so a resumed import carries them too; failing to
+    // carry never fails the import.
+    carryWorkflows(sourceDirectory, this.directory, this.fsApi);
     const marker = buildMarkerV2({
       profileKey: this.build.profileKey,
       mode: this.build.mode,

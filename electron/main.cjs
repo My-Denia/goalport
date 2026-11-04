@@ -19,6 +19,7 @@ const { createNativeCheckHost } = require("./native-check-host.cjs");
 const { createBackgroundSendConsentStore } = require("./background-send-consent.cjs");
 const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecordAsync } = require("./coordination-record.cjs");
+const { createWorkflowStore, ipcResult } = require("./workflow-store.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
 const { piCapacityOffer } = require("./pi-capacity-admission.cjs");
@@ -1434,6 +1435,10 @@ app.whenReady().then(() => {
   });
   handleTrusted("goalport:coordination-records", () => readRecords(coordinationDirectory()));
   handleTrusted("goalport:coordination-save", (_event, record) => { refuseCompetingCoordination(record?.workspacePath); return saveRecordAsync(coordinationDirectory(), record); });
+  const workflowStore = () => createWorkflowStore({ directory: coordinationDirectory(), backupsDirectory: path.join(coordinationDirectory(), "backups") });
+  handleTrusted("goalport:workflows-list", () => ipcResult(() => workflowStore().read()));
+  handleTrusted("goalport:workflows-save", (_event, input) => ipcResult(() => workflowStore().save(input)));
+  handleTrusted("goalport:workflows-delete", (_event, id) => ipcResult(() => workflowStore().delete(typeof id === "string" ? id : "")));
   handleTrusted("goalport:coordination-unblock", (_event, instanceId) => {
     clearBlocked(coordinationRuntime().stateDir, typeof instanceId === "string" ? instanceId : "");
     return { ok: true };

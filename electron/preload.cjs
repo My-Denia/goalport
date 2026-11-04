@@ -80,6 +80,9 @@ contextBridge.exposeInMainWorld("goalportCore", {
   coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),
   coordinationRecords: () => ipcRenderer.invoke("goalport:coordination-records"),
   coordinationSave: (record) => ipcRenderer.invoke("goalport:coordination-save", record),
+  workflowsList: () => ipcRenderer.invoke("goalport:workflows-list"),
+  workflowsSave: (input) => ipcRenderer.invoke("goalport:workflows-save", input),
+  workflowsDelete: (id) => ipcRenderer.invoke("goalport:workflows-delete", id),
   coordinationUnblock: (instanceId) => ipcRenderer.invoke("goalport:coordination-unblock", instanceId),
   onClosePrompt: (callback) => {
     const listener = () => callback();

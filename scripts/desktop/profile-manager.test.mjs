@@ -1231,3 +1231,85 @@ test("nonzero/lost import response preserves valid proof, while replaced staging
   assert.equal(readFileSync(resolve(outside, "sentinel.txt"), "utf8"), "keep");
   assert.equal(existsSync(resolve(unsafeDir, "import-journal.json")), true, "unsafe journal is retained for refusal");
 });
+
+const validWorkflowsFile = (name = "Quick plan") => JSON.stringify({
+  schema: 1,
+  workflows: [{
+    schema: 1, id: "my-0a1b2c3d", version: 2, name, parent: "recommended@1",
+    modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } }
+  }]
+});
+
+// An ordinary import with a source folder and an optional pre-existing target workflows.json.
+async function importWorkflows(t, { sourceWorkflows, targetWorkflows }) {
+  const root = fixture(t);
+  const source = resolve(root, "rc");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(resolve(source, "goalport-profile.json"), markerV1());
+  writeFileSync(resolve(source, "goalport.sqlite"), "source database bytes");
+  if (sourceWorkflows !== undefined) writeFileSync(resolve(source, "workflows.json"), sourceWorkflows);
+  const dir = resolve(root, "dev");
+  const manager = new ProfileManager({
+    directory: dir, appData: root, build: currentBuild,
+    deps: {
+      execCore: async (args) => {
+        if (args[1] === "inspect") return { code: 0, stdout: `${JSON.stringify(inspect8())}\n` };
+        if (args[1] === "import") {
+          const staging = args[args.indexOf("--staging-dir") + 1];
+          const proof = mockProof({
+            operationId: args[args.indexOf("--operation-id") + 1],
+            markerSha256: args[args.indexOf("--source-marker-sha256") + 1],
+            provenanceSha256: args[args.indexOf("--provenance-sha256") + 1]
+          });
+          mkdirSync(staging, { recursive: true });
+          writeFileSync(resolve(staging, "goalport.sqlite"), "imported database bytes");
+          writeFileSync(resolve(staging, "import-proof.json"), JSON.stringify(proof));
+          if (targetWorkflows !== undefined) writeFileSync(resolve(dir, "workflows.json"), targetWorkflows);
+          return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, stage: "import", proof })}\n` };
+        }
+        if (args[1] === "verify-staging") {
+          const proofToken = args[args.indexOf("--expected-proof-token") + 1];
+          return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, stage: "verify-staging", verified: true, recoveryProofToken: proofToken })}\n` };
+        }
+        return { code: 0, stdout: `${JSON.stringify({ schema: "goalport.profile-ops.v1", ok: true, quickCheck: "ok" })}\n` };
+      }
+    }
+  });
+  await manager.runImport({ path: source, marker: parseMarkerText(markerV1()), inspection: inspect8() }, { allowSourceRecovery: false });
+  return { dir, source, manager };
+}
+
+test("import carries the source's saved workflows when this profile has none", async (t) => {
+  const { dir, source } = await importWorkflows(t, { sourceWorkflows: validWorkflowsFile() });
+  assert.equal(JSON.parse(readFileSync(resolve(dir, "workflows.json"), "utf8")).workflows[0].id, "my-0a1b2c3d");
+  assert.equal(existsSync(resolve(source, "workflows.json")), true, "source untouched");
+});
+
+test("import keeps this profile's own workflows.json", async (t) => {
+  const own = validWorkflowsFile("Mine already");
+  const { dir } = await importWorkflows(t, { sourceWorkflows: validWorkflowsFile(), targetWorkflows: own });
+  assert.equal(readFileSync(resolve(dir, "workflows.json"), "utf8"), own);
+});
+
+test("import does not carry an unreadable source workflows.json and still succeeds", async (t) => {
+  const { dir } = await importWorkflows(t, { sourceWorkflows: "{ not json" });
+  assert.equal(existsSync(resolve(dir, "workflows.json")), false);
+  assert.equal(readFileSync(resolve(dir, "goalport.sqlite"), "utf8"), "imported database bytes");
+});
+
+test("a carry failure never fails the import, and finalizing again is idempotent", async (t) => {
+  const { dir, source, manager } = await importWorkflows(t, { sourceWorkflows: validWorkflowsFile() });
+  // Make the carry impossible: the target path is now a directory-shaped obstacle.
+  rmSync(resolve(dir, "workflows.json"), { force: true });
+  mkdirSync(resolve(dir, "workflows.json"));
+  const journal = { phase: "finalized", source, sourceCreatedBy: null, stagingDir: resolve(dir, ".import-staging-y") };
+  mkdirSync(journal.stagingDir, { recursive: true });
+  assert.doesNotThrow(() => manager.finalizeImport(journal));
+  rmSync(resolve(dir, "workflows.json"), { recursive: true, force: true });
+  mkdirSync(journal.stagingDir, { recursive: true });
+  manager.finalizeImport(journal);
+  const first = readFileSync(resolve(dir, "workflows.json"), "utf8");
+  mkdirSync(journal.stagingDir, { recursive: true });
+  manager.finalizeImport(journal);
+  assert.equal(readFileSync(resolve(dir, "workflows.json"), "utf8"), first);
+});

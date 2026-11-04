@@ -966,3 +966,36 @@ test("a native workspace check is not a Recommended run and carries no workflow"
   const normalized = normalizeRecord(record({ recordKind: "native-workspace-check", workflow: { id: "recommended", version: 1 }, checksRan: [] }));
   assert.equal("workflow" in normalized || "checksRan" in normalized, false);
 });
+
+const QUICK = { schema: 1, id: "my-0a1b2c3d", version: 2, name: "Quick plan", parent: "recommended@1",
+  modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } };
+
+test("a planned result and its workflow name, effective review and definition snapshot round-trip", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-planned-"));
+  try {
+    const saved = saveRecord(directory, record({
+      verdict: "planned", reviewHarness: null, reviewText: null, result: "Bounded plan.",
+      stopReason: "The plan is ready. Independent review did not run, because it is off in Quick plan.",
+      workflow: { id: "my-0a1b2c3d", version: 2, name: " Quick plan ", planReview: "off" }, checksRan: [], workflowDefinition: QUICK,
+    }));
+    assert.ok(saved, "a planned record is saved");
+    const read = readRecords(directory)[0];
+    assert.equal(read.verdict, "planned");
+    assert.deepEqual(read.workflow, { id: "my-0a1b2c3d", version: 2, name: "Quick plan", planReview: "off" });
+    assert.deepEqual(read.workflowDefinition, QUICK);
+    assert.deepEqual(read.checksRan, []);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("an invalid workflow definition or workflow label is dropped without rejecting the record", () => {
+  const broken = { ...QUICK, modules: { checks: { planReview: "sometimes" } } };
+  const kept = normalizeRecord(record({ workflow: { id: "my-0a1b2c3d", version: 2, name: "x".repeat(61), planReview: "maybe" }, workflowDefinition: broken }));
+  assert.ok(kept, "the record still reads");
+  assert.equal("workflowDefinition" in kept, false);
+  assert.deepEqual(kept.workflow, { id: "my-0a1b2c3d", version: 2 });
+  assert.equal("workflowDefinition" in normalizeRecord(record({ workflowDefinition: "nope" })), false);
+  assert.equal("workflowDefinition" in normalizeRecord(record()), false, "an old record behaves as Recommended");
+  assert.equal("workflowDefinition" in normalizeRecord(record({ recordKind: "native-workspace-check", nativeCheckTarget: {}, nativeCheckMaterial: {}, workflowDefinition: QUICK })), false);
+});

@@ -196,6 +196,7 @@ function createBackgroundHost(options) {
           ...(Object.hasOwn(input, 'nativeCheckTarget') || Object.hasOwn(input, 'nativeCheckMaterial') ? { nativeCheckTarget: input.nativeCheckTarget, nativeCheckMaterial: input.nativeCheckMaterial } : {}),
           ...(['followUpMode', 'execute'].some(k => Object.hasOwn(input, k)) ? Object.fromEntries(['followUpMode', 'execute'].filter(k => Object.hasOwn(input, k)).map(k => [k, input[k]])) : {}),
           ...(input.continuation !== undefined && input.continuation !== null ? { continuation: input.continuation } : {}),
+          ...(input.workflowDefinition !== undefined && input.workflowDefinition !== null ? { workflowDefinition: input.workflowDefinition } : {}),
           ...(Object.hasOwn(input, "piCapacity") ? { piCapacity: input.piCapacity } : {}),
         };
         try { admissionInput = normalizeAdmissionInput(durableInput, platform); }

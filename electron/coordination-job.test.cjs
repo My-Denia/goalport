@@ -1094,3 +1094,27 @@ test("revoke writes revocation marker on active unconfirmed job while keeping st
     termStore.releaseAdmission(job.jobId, tok);
   }
 });
+
+test("admission carries a valid workflow definition snapshot and refuses one the engine cannot compile", () => {
+  const quick = { schema: 1, id: "my-0a1b2c3d", version: 2, name: "Quick plan", parent: "recommended@1",
+  modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } };
+  const carried = normalizeAdmissionInput(admission({ workflowDefinition: quick }));
+  assert.deepEqual(carried.workflowDefinition, quick);
+  assert.equal("workflowDefinition" in normalizeAdmissionInput(admission()), false, "no definition means Recommended");
+  assert.equal("workflowDefinition" in normalizeAdmissionInput(admission({ workflowDefinition: null })), false);
+  const broken = { ...quick, modules: { checks: { planReview: "sometimes" } } };
+  assert.throws(() => normalizeAdmissionInput(admission({ workflowDefinition: broken })), { code: "invalid-admission" });
+  assert.throws(() => normalizeAdmissionInput(admission({ workflowDefinition: "recommended" })), { code: "invalid-admission" });
+});
+
+test("the stored admission keeps the snapshot so a worker never reads workflows.json", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-job-workflow-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
+  const quick = { schema: 1, id: "my-0a1b2c3d", version: 2, name: "Quick plan", parent: "recommended@1",
+  modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } };
+  const store = createCoordinationJobStore(directory, { bootstrapReady: true });
+  const started = store.startAdmission(admission({ workflowDefinition: quick }));
+  assert.equal(started.ok, true);
+  assert.deepEqual(store.getStatus(started.jobId).admission.workflowDefinition, quick);
+  assert.equal(fs.existsSync(path.join(directory, "workflows.json")), false);
+});

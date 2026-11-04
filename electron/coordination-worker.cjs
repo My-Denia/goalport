@@ -58,6 +58,7 @@ async function runWorker(config, deps = {}) {
     priorReview: admitted.priorReview, avoidInstances: admitted.avoidInstances,
     ...(admitted.executionFeedback ? { executionFeedback: admitted.executionFeedback } : {}), backgroundConsent: true,
     ...(admitted.continuation ? { continuation: admitted.continuation } : {}),
+    ...(admitted.workflowDefinition ? { workflowDefinition: admitted.workflowDefinition } : {}),
     ...(admitted.piCapacity ? { piCapacity: admitted.piCapacity } : {}),
     ...(admitted.nativeCheckTarget ? { nativeCheckTarget: admitted.nativeCheckTarget, nativeCheckMaterial: admitted.nativeCheckMaterial } : {}) };
   const owner = claim.ownerToken;
@@ -339,7 +340,7 @@ async function runWorker(config, deps = {}) {
       ? "unconfirmed"
       : currentStatus.revoked || currentStatus.acknowledgedStuckAt
         ? "stopped"
-        : ["verified", "checked", "revise"].includes(liveResult.verdict)
+        : ["verified", "checked", "revise", "planned"].includes(liveResult.verdict)
           ? "completed"
           : "failed";
     if (accepted) store.updateLiveFollowUpPhase(config.jobId, status === "unconfirmed" ? "unconfirmed" : "completed", owner);
