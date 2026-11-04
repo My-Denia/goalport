@@ -23,8 +23,12 @@ import {
   resolvePermission,
   withConnection,
   type CoreSnapshot,
-  type StopResponsibilitySummary
+  type StopResponsibilitySummary,
+  type WorkflowDefinition,
+  type WorkflowSaveInput
 } from "./types";
+import { RECOMMENDED_V1, planReviewRuns } from "../electron/workflow-checks.mjs";
+import type { WorkflowEditResult } from "./ui/WorkflowEditorDialog";
 import { TitleBar } from "./shell/TitleBar";
 import { CampaignNav } from "./nav/CampaignNav";
 import { ProductConversationView } from "./conversation/ProductConversationView";
@@ -35,7 +39,7 @@ import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
-import { WAIT_SENTENCE } from "./conversation/sendDisabledReason";
+import { WAIT_SENTENCE, NEED_TWO_AGENTS_SENTENCE, NEED_ONE_AGENT_SENTENCE } from "./conversation/sendDisabledReason";
 import { methodLine } from "./coordination/methodLine";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
@@ -208,6 +212,12 @@ interface GoalDraft extends GoalDraftValue {
    * Draft-only, never persisted as harness health.
    */
   avoid?: { instanceId: string; harness: string; startedAt: string | null };
+  /**
+   * The exact workflow a saved result ran under, carried by Revise and Send again so the new
+   * send follows the same method even if the saved workflow was edited or deleted since.
+   * Ignored once the user picks a workflow themselves.
+   */
+  workflowSnapshot?: WorkflowDefinition;
   /** Shown on a fresh draft opened from Use again or an interrupted job. Nothing has been sent. */
   readyNote?: string;
 }
@@ -328,6 +338,8 @@ function App() {
   const [sendBusy, setSendBusy] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
+  // The user's saved workflows; null until the main process has answered (or where it cannot keep any).
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[] | null>(null);
   // A first send with no Runtime chosen only proceeds when this window can assign a harness.
   const linuxRuntimeRequired = "Send uses the Recommended workflow. File changes stay off unless you check the box below.";
   const coordinationAvailable = client.mode === "electron"
@@ -822,6 +834,12 @@ function App() {
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [coreReady, candidateWorkspace, holdRevision]);
   const runtimeLessDraftKey = draftGoal && draftGoal.provider.trim() === "" ? draftGoal.requestId : null;
+  // The workflow this draft will send under: the saved result's own copy, else the user's pick; none means Recommended.
+  const draftWorkflowDefinition: WorkflowDefinition | undefined = draftGoal?.provider.trim() === "" && draftGoal.workflowId
+    ? (draftGoal.workflowSnapshot?.id === draftGoal.workflowId ? draftGoal.workflowSnapshot : workflows?.find((item) => item.id === draftGoal.workflowId))
+    : undefined;
+  // One rule decides whether the plan is reviewed (goals that change files always are), and so how many agents Send needs.
+  const draftAgentsNeeded: 1 | 2 = planReviewRuns((draftWorkflowDefinition ?? RECOMMENDED_V1).modules.checks, writeInstances.length > 0) ? 2 : 1;
   useEffect(() => {
     if (!runtimeLessDraftKey || !scopeBridgeReady) return undefined;
     const bridge = window.goalportCore;
@@ -971,6 +989,42 @@ function App() {
     }
     return () => { mounted = false; };
   }, [client]);
+
+  // The user opens the window and expects the workflows they saved to be in the picker.
+  useEffect(() => {
+    const list = client.mode === "electron" ? window.goalportCore?.workflowsList : undefined;
+    if (!list) return undefined;
+    let mounted = true;
+    void list().then((reply) => {
+      if (!mounted || !Array.isArray(reply?.workflows)) return;
+      setWorkflows(reply.workflows);
+      if (reply.notice) setActiveNotice({ sentence: reply.notice });
+    }).catch(() => undefined);
+    return () => { mounted = false; };
+  }, [client]);
+
+  // Save and delete answer with the whole current list, or one plain sentence.
+  const workflowReply = useCallback((reply: { workflows?: WorkflowDefinition[]; notice?: string | null; saved?: WorkflowDefinition; error?: string } | undefined): WorkflowEditResult => {
+    if (!reply || reply.error || !Array.isArray(reply.workflows)) return { ok: false, error: reply?.error ?? "Your workflows could not be saved right now." };
+    setWorkflows(reply.workflows);
+    if (reply.notice) setActiveNotice({ sentence: reply.notice });
+    return { ok: true, saved: reply.saved };
+  }, []);
+  const saveWorkflow = useCallback(async (input: WorkflowSaveInput): Promise<WorkflowEditResult> => {
+    const save = window.goalportCore?.workflowsSave;
+    if (!save) return { ok: false, error: "Your workflows could not be saved right now." };
+    try {
+      const result = workflowReply(await save(input));
+      // An edit means "as it is now": a draft made from a saved result stops using that result's older copy.
+      if (result.ok && result.saved) setDraftGoal((current) => current && current.workflowSnapshot?.id === result.saved?.id ? { ...current, workflowSnapshot: undefined } : current);
+      return result;
+    } catch { return { ok: false, error: "Your workflows could not be saved right now." }; }
+  }, [workflowReply]);
+  const deleteWorkflow = useCallback(async (id: string): Promise<WorkflowEditResult> => {
+    const remove = window.goalportCore?.workflowsDelete;
+    if (!remove) return { ok: false, error: "Your workflows could not be changed right now." };
+    try { return workflowReply(await remove(id)); } catch { return { ok: false, error: "Your workflows could not be changed right now." }; }
+  }, [workflowReply]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -1358,8 +1412,12 @@ function App() {
         setDraftError({ sentence: "Choose 1 to 8 write turns before allowing workspace changes." });
         return;
       }
-      if (scopedSend && selectedInstances.length < 2) {
-        setDraftError({ sentence: "An independent check needs two agents that can run, so select at least two." });
+      if (draftGoal.workflowId && !draftWorkflowDefinition) {
+        setDraftError({ sentence: "That workflow is no longer saved. Choose how to work." });
+        return;
+      }
+      if (scopedSend && selectedInstances.length < draftAgentsNeeded) {
+        setDraftError({ sentence: draftAgentsNeeded === 2 ? NEED_TWO_AGENTS_SENTENCE : NEED_ONE_AGENT_SENTENCE });
         return;
       }
       setDraftError(null);
@@ -1428,6 +1486,7 @@ function App() {
                 ? { executionFeedback: revisionFeedback, priorPlan: null, priorReview: null }
                 : { priorPlan: draftGoal.revision?.planText, priorReview: draftGoal.revision?.reviewText }),
               ...(draftGoal.avoid ? { avoidInstances: [draftGoal.avoid.instanceId] } : {}),
+              ...(draftWorkflowDefinition ? { workflowDefinition: draftWorkflowDefinition } : {}),
               ...(desktopPiEligible && linuxPiSelection ? { piCapacity: linuxPiSelection } : {}), backgroundConsent: true });
             outcome = backgroundStartOutcome(settledValue);
           } catch (error) {
@@ -1584,6 +1643,7 @@ function App() {
             priorReview: revisionFeedback ? null : draftGoal.revision?.reviewText ?? null,
             executionFeedback: revisionFeedback ?? undefined,
             avoidInstances: draftGoal.avoid ? [draftGoal.avoid.instanceId] : undefined,
+            workflowDefinition: draftWorkflowDefinition,
             allowedInstances: scopedSend ? [...selectedInstances] : undefined,
             writeAuthorization,
             // The one in-window corrective pass and the one pre-write plan
@@ -1899,6 +1959,12 @@ function App() {
     }
   }
 
+  // A saved result that ran under one of the user's workflows: the new draft follows that same method.
+  function savedWorkflowCarrier(plan: { workflowDefinition?: WorkflowDefinition }): Pick<GoalDraft, "workflowId" | "workflowSnapshot"> {
+    const used = plan.workflowDefinition;
+    return used && used.id !== RECOMMENDED_V1.id ? { workflowId: used.id, workflowSnapshot: used } : {};
+  }
+
   function handleRevise(plan: SavedPlan) {
     if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     if (window.innerWidth <= 860) setNavCollapsed(true);
@@ -1915,6 +1981,7 @@ function App() {
       workspace: plan.workspacePath,
       provider: "",
       message: plan.goal,
+      ...savedWorkflowCarrier(plan),
       revision: {
         planText: plan.planText,
         reviewText: plan.reviewText,
@@ -1943,6 +2010,7 @@ function App() {
       workspace: plan.workspacePath,
       provider: "",
       message: plan.goal,
+      ...savedWorkflowCarrier(plan),
       avoid: {
         instanceId: blocked.instanceId,
         harness: blocked.harness ?? blocked.instanceId,
@@ -2034,7 +2102,7 @@ function App() {
   // result card (fromTerminal) must not route into the panel of a finished
   // round's remnant draft, where it would be an invisible no-op: it always
   // takes the fresh change-mode draft path.
-  function handleChangeHarnessAccess(source: { workspacePath: string; goal: string } | null, fromTerminal = false) {
+  function handleChangeHarnessAccess(source: { workspacePath: string; goal: string; workflowDefinition?: WorkflowDefinition } | null, fromTerminal = false) {
     if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     if (draftGoal && !fromTerminal) {
       setPanelChangeMode(true);
@@ -2052,14 +2120,15 @@ function App() {
       workspace: plan.workspacePath,
       provider: "",
       message: plan.goal,
+      ...savedWorkflowCarrier(plan),
     });
   }
 
   async function handleConfirmAccessChange() {
     const bridge = window.goalportCore;
     if (!bridge?.coordinationAuthorize) return;
-    if (selectedInstances.length < 2) {
-      setDraftError({ sentence: "An independent check needs two agents that can run, so select at least two." });
+    if (selectedInstances.length < draftAgentsNeeded) {
+      setDraftError({ sentence: draftAgentsNeeded === 2 ? NEED_TWO_AGENTS_SENTENCE : NEED_ONE_AGENT_SENTENCE });
       return;
     }
     let authorized: { ok: boolean; generation: number; remaining: number; errorText?: string };
@@ -2134,6 +2203,7 @@ function App() {
           requestId: freshRequestId(), goal: parent.goal, workspaceRoot: parent.workspacePath,
           readInstances: ["codex", "pi"], readMaxTurns: 4, backgroundConsent: true as const,
           piCapacity: pair, priorPlan: parent.planText, priorReview: parent.reviewText,
+          ...(parent.workflowDefinition ? { workflowDefinition: parent.workflowDefinition } : {}),
           continuation: { parentRequestId: from, rootRequestId: parent.continuation?.rootRequestId ?? from,
             originalGoal: parent.continuation?.originalGoal ?? parent.goal, followUp },
         },
@@ -3550,6 +3620,8 @@ function App() {
                 : linuxActionBusy ? WAIT_SENTENCE
                 : null,
               grantMissing,
+              agentsUsable: draftGoal?.provider.trim() === "" && scopeBridgeReady && panelRequestId === draftGoal.requestId && panelProviders !== null ? selectedInstances.length : null,
+              agentsNeeded: draftAgentsNeeded,
               grantControlVisible: Boolean(window.goalportCore?.backgroundSendConsent && window.goalportCore.backgroundStart)
                 && draftGoal?.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null && appInfo?.coordinationConfigured !== true,
             } : undefined;
@@ -3923,8 +3995,10 @@ function App() {
                         setDraftGoal({ ...value, requestId: freshRequestId(), baselineCampaignId: snapshot.activeCampaignId });
                         return;
                       }
+                      const workflowChanged = current.workflowId !== value.workflowId;
                       const changed = current.workspace !== value.workspace
                         || current.provider !== value.provider
+                        || workflowChanged
                         || current.message !== value.message;
                       if (current.workspace !== value.workspace) {
                         setWriteInstances([]);
@@ -3935,11 +4009,17 @@ function App() {
                       setDraftGoal({
                         ...current,
                         ...value,
+                        // Picking a workflow (or saving an edit to it) means "this one, as it is now", not the saved result's copy.
+                        ...(workflowChanged ? { workflowSnapshot: undefined } : {}),
                         ...(changed && (current.intent || savedForDraft) ? { requestId: freshRequestId(), intent: undefined } : {})
                       });
                     }}
                     onSubmit={handleDraftSend}
                     onDiscard={handleDiscardDraft}
+                    workflows={electronDraft ? workflows ?? undefined : undefined}
+                    workflowFallbackName={draftGoal?.workflowSnapshot?.name ?? null}
+                    onSaveWorkflow={electronDraft && workflows && window.goalportCore?.workflowsSave ? saveWorkflow : undefined}
+                    onDeleteWorkflow={electronDraft && workflows && window.goalportCore?.workflowsDelete ? deleteWorkflow : undefined}
                   />
             );
             const drafting = !(roundProgress !== null && roundProgress.requestId === draftGoal?.requestId);

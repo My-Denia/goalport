@@ -123,11 +123,11 @@ it("Linux entry exposes exactly coordinated work + qualified Codex, and old Core
   const props = { draft:{workspace:"/fixture", provider:"", message:""}, runtimes:base.runtimes, connected:true, busy:false, blockedFromSending:false, waitingOn:null, error:null, canBrowse:false, coordinationAvailable:false, linuxCanStartCoordination:true, linuxEntry:true, onBrowse:vi.fn(), onChange:vi.fn(), onSubmit:vi.fn(), onDiscard:vi.fn() };
   const view = render(<DraftGoalComposer {...props} />);
   fireEvent.click(screen.getByRole("combobox", { name:"Choose goal mode" }));
-  expect((await screen.findAllByRole("option")).map(el => el.textContent)).toEqual([expect.stringContaining("Codex conversation"), expect.stringContaining("Recommended workflow"), expect.stringContaining("My workflow")]);
+  expect((await screen.findAllByRole("option")).map(el => el.textContent)).toEqual([expect.stringContaining("Codex conversation"), expect.stringContaining("Recommended workflow")]);
   view.unmount();
   render(<DraftGoalComposer {...props} runtimes={base.runtimes.map(item => ({...item, nativeSessionTransport:undefined}))} />);
   fireEvent.click(screen.getByRole("combobox", { name:"Choose goal mode" }));
-  expect((await screen.findAllByRole("option")).length).toBe(2);
+  expect((await screen.findAllByRole("option")).length).toBe(1);
   expect(screen.queryByRole("option", {name:/Claude|Grok|Codex/})).toBeNull();
 });
 

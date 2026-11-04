@@ -334,6 +334,7 @@ function planStateClass(verdict: CoordinationVerdict | null): string {
     case "revise":
     case "stopped":
     case "unconfirmed":
+    case "planned":
     case null:
       return "campaign-state-paused";
     default: {

@@ -1211,7 +1211,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   display: flex; align-items: center; gap: 8px;
   color: var(--ink-soft); font-size: 13px; line-height: 1.4;
 }
-.draft-runtime-picker { margin-bottom: 2px; }
+.draft-runtime-picker { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 2px; }
+.draft-runtime-picker .runtime-picker-copy { max-width: 22ch; }
 /* A fresh goal keeps folder and agent on one line under the message. */
 .draft-composer-form[aria-label="Start a goal"] { grid-template-columns: minmax(0, 1fr) auto; }
 .draft-composer-form[aria-label="Start a goal"] > * { grid-column: 1 / -1; }
@@ -1332,6 +1333,7 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .coordination-result p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .coordination-status .coordination-outcome { margin-bottom: 14px; }
 .coordination-outcome dd:first-of-type { font-size: 18px; font-weight: 600; }
+.coordination-status .coordination-outcome-solo { grid-template-columns: minmax(0, 1fr); }
 
 /* One live job's return surface uses the existing report cards and wrapping. */
 .background-return { padding: 10px 22px 0; }
@@ -1353,3 +1355,23 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 .send-disabled-reason { flex: 1 1 100%; margin: 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; text-align: right; }
 
 .method-line { margin: 2px 0 0; color: var(--ink-muted); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+
+/* ---------- Workflow editor (issue #68) ---------- */
+
+.workflow-editor-dialog { width: min(100%, 520px); }
+.workflow-name-field { margin-bottom: 16px; }
+.workflow-groups { display: grid; gap: 0; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.workflow-group { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 12px; }
+.workflow-group + .workflow-group { border-top: 1px solid var(--line); }
+.workflow-group h3 { margin: 0; color: var(--ink-soft); font-size: 12.5px; font-weight: 650; }
+.workflow-group p { margin: 0; color: var(--ink-faint); font-size: 12px; text-align: right; }
+.workflow-group-open { display: grid; gap: 10px; padding: 12px; background: rgba(255, 255, 255, 0.025); }
+.workflow-group-open h3 { color: var(--ink); font-size: 13.5px; }
+.workflow-option { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.workflow-option input { margin: 3px 0 0; flex: 0 0 auto; }
+.workflow-option span { display: grid; gap: 2px; min-width: 0; }
+.workflow-option strong { font-size: 13px; font-weight: 650; }
+.workflow-option small { color: var(--ink-muted); font-size: 12px; line-height: 1.45; }
+.workflow-actions .workflow-delete { margin-right: auto; }
+.workflow-delete-confirm p { margin: 0 0 10px; color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+@media (max-width: 560px) { .workflow-group { flex-direction: column; gap: 2px; } .workflow-group p { text-align: left; } }

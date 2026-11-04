@@ -266,9 +266,10 @@ export function CoordinationStatus({
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
     <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
-      <dl className="coordination-outcome">
+      <dl className={verdict === "planned" ? "coordination-outcome coordination-outcome-solo" : "coordination-outcome"}>
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
-        <dt>Stop reason</dt><dd>{fact(stopReason)}</dd>
+        {/* A plan whose review was off is not a stop; the outcome and the method line below already say why, once. */}
+        {verdict === "planned" ? null : <><dt>Stop reason</dt><dd>{fact(stopReason)}</dd></>}
       </dl>
       {method ? <p className="method-line">{method}</p> : null}
       {feedbackHistory && feedbackHistory.length > 0 ? (

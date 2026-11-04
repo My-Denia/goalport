@@ -10,6 +10,8 @@ export interface RuntimeChoice {
   group?: string;
   /** Visible as a row, never selectable; `subtitle` is the plain reason. */
   disabled?: boolean;
+  /** One character for the row's round badge when the first letter of the name says nothing. */
+  avatar?: string;
 }
 
 interface RuntimePickerMenuProps {
@@ -95,7 +97,7 @@ export function RuntimePickerMenu({
         disabled={disabled}
         style={disabled ? { opacity: choiceDisabled ? 0.7 : 0.45, cursor: "not-allowed", pointerEvents: "none" } : undefined}
       >
-        <span className={`provider-avatar ${modeOnly ? "provider-unassigned" : `provider-${candidate.id}`}`} aria-hidden="true">{candidate.name[0]}</span>
+        <span className={`provider-avatar ${modeOnly ? "provider-unassigned" : `provider-${candidate.id}`}`} aria-hidden="true">{choice?.avatar ?? candidate.name[0]}</span>
         <span className="runtime-picker-copy">
           <strong>{candidate.id === "scenario" ? "Demo run" : candidate.name}</strong>
           {runtime?.support === "unsupported" ? <small>Not available on this computer</small> : null}

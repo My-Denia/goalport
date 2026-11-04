@@ -2,7 +2,8 @@ import { PiCapacityControl } from './PiCapacityControl';
 import { folderName, readRecentFolders } from "../lib/recentFolders";
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { RuntimeProfile } from "../types";
+import type { RuntimeProfile, WorkflowDefinition, WorkflowSaveInput } from "../types";
+import { WorkflowEditorDialog, type WorkflowEditResult } from "../ui/WorkflowEditorDialog";
 import { RuntimePickerMenu, type RuntimeChoice } from "../ui/RuntimePickerMenu";
 import { useComposerInput } from "./useComposerInput";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
@@ -16,12 +17,27 @@ export interface SendBlockers {
   holdSentence: string | null;
   grantMissing: boolean;
   grantControlVisible: boolean;
+  /** Agents that can run for this goal once the list is in (null while unknown), and how many the chosen workflow needs. */
+  agentsUsable?: number | null;
+  agentsNeeded?: 1 | 2;
 }
 
 export interface GoalDraftValue {
   workspace: string;
+  /** Empty means a workflow (Recommended, or the saved one named by `workflowId`). */
   provider: string;
   message: string;
+  /** A saved user workflow chosen for this goal; absent means Recommended. */
+  workflowId?: string;
+}
+
+const WORKFLOW_ROW = "workflow:";
+const COPY_ROW = "workflow:copy-recommended";
+
+/** One plain line under a saved workflow's name. */
+export function workflowSubtitle(workflow: WorkflowDefinition): string {
+  const checks = workflow.modules.checks;
+  return `Your copy of Recommended · plan review ${checks.planReview === "off" ? "off" : "on"}${checks.reviewerNeeds.readWorkspace === "required" ? " · reviewer reads files" : ""}`;
 }
 
 function capitalize(word: string): string {
@@ -36,46 +52,66 @@ interface DraftRuntimePickerProps {
   connected: boolean;
   coordinationAvailable: boolean;
   runtimeRequiredHint?: string;
-  onSelect: (provider: string) => void;
+  /** Saved user workflows; undefined when this build cannot keep any, which hides their rows. */
+  workflows?: readonly WorkflowDefinition[];
+  workflowId?: string;
+  /** Name to show if the chosen workflow came from a saved result and is no longer in the list. */
+  workflowFallbackName?: string | null;
+  disabled?: boolean;
+  onSelect: (value: Pick<GoalDraftValue, "provider" | "workflowId">) => void;
+  onCopyRecommended: () => void;
+  onEditWorkflow: (id: string) => void;
 }
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
-function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect, linuxEntry = false }: DraftRuntimePickerProps) {
+function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, workflows, workflowId, workflowFallbackName, disabled = false, onSelect, onCopyRecommended, onEditWorkflow, linuxEntry = false }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
+  const savedWorkflow = !provider && workflowId ? workflows?.find((candidate) => candidate.id === workflowId) : undefined;
+  const userWorkflowName = !provider && workflowId ? (savedWorkflow?.name ?? workflowFallbackName ?? "Your workflow") : null;
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
   const recommended = {
     id: "", name: "Recommended workflow", group: "Workflow",
     subtitle: "Plan first, then another agent checks the plan",
     ...(!linuxEntry && !coordinationAvailable ? { disabled: true, subtitle: runtimeRequiredHint ?? "Needs the desktop app with Background Send set up." } : {})
   };
-  const myWorkflow = { id: "my-workflow", name: "My workflow", group: "Workflow", subtitle: "Coming soon: copy Recommended and change what doesn't fit.", disabled: true };
+  const usable = !recommended.disabled;
+  // Saved workflows run on the coordinated path, so they are offered wherever Recommended can run.
+  const mine: RuntimeChoice[] = workflows && !linuxEntry && usable ? [
+    ...workflows.map((workflow) => ({ id: `${WORKFLOW_ROW}${workflow.id}`, name: workflow.name ?? "Your workflow", group: "Workflow", subtitle: workflowSubtitle(workflow) })),
+    { id: COPY_ROW, name: "Copy Recommended…", group: "Workflow", subtitle: "Make your own version and switch off what you don't need.", avatar: "+" },
+  ] : [];
   const choices: RuntimeChoice[] = linuxEntry ? [
     ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", group: "Direct", subtitle: "Use Codex on its own" }] : []),
-    recommended, myWorkflow
+    recommended
   ] : [
     ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, group: "Direct", subtitle: runtime.support === "unsupported" ? "" : `Use ${runtime.name} on its own` })),
-    recommended, myWorkflow
+    recommended, ...mine
   ];
+  const pick = (value: string) => {
+    if (value === COPY_ROW) { onCopyRecommended(); return; }
+    if (value.startsWith(WORKFLOW_ROW)) { onSelect({ provider: "", workflowId: value.slice(WORKFLOW_ROW.length) }); return; }
+    onSelect({ provider: value, workflowId: undefined });
+  };
   return (
     <div className="runtime-picker draft-runtime-picker">
       <RuntimePickerMenu
         runtimes={runtimes}
         choices={choices}
-        selectedId={provider}
+        selectedId={provider || (workflowId ? `${WORKFLOW_ROW}${workflowId}` : "")}
         triggerClassName="runtime-picker-button"
         triggerAriaLabel={linuxEntry ? "Choose goal mode" : "Select agent"}
         emptyText="Agents are still loading."
         blockedHint={!connected ? "Reconnect to select." : linuxEntry && !nativeAvailable ? "Codex conversations are unavailable: Core has not confirmed the app-server adapter." : null}
         isItemDisabled={(candidate) => candidate.support === "unsupported" || !connected}
-        onSelect={onSelect}
+        onSelect={pick}
         triggerContent={(
           <>
-            <span className={`provider-avatar provider-${provider || "none"}`} aria-hidden="true">
-              {selected ? selected.name[0] : coordinationAvailable || linuxEntry ? "R" : "–"}
+            <span className={`provider-avatar provider-${userWorkflowName ? "unassigned" : provider || "none"}`} aria-hidden="true">
+              {userWorkflowName ? userWorkflowName[0] : selected ? selected.name[0] : coordinationAvailable || linuxEntry ? "R" : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Recommended workflow") : selected ? selected.name : coordinationAvailable ? "Recommended workflow" : "Choose how to work"}</strong>
-              <small>{linuxEntry ? (provider === "codex" ? "Direct" : "Plan first, then another agent checks the plan") : selected ? "Direct" : coordinationAvailable
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Recommended workflow") : userWorkflowName ?? (selected ? selected.name : coordinationAvailable ? "Recommended workflow" : "Choose how to work")}</strong>
+              <small>{linuxEntry ? (provider === "codex" ? "Direct" : "Plan first, then another agent checks the plan") : userWorkflowName ? (savedWorkflow ? workflowSubtitle(savedWorkflow) : "Saved with this result") : selected ? "Direct" : coordinationAvailable
                 ? "Plan first, then another agent checks the plan"
                 : (runtimeRequiredHint ?? "Choose how to work before sending.")}</small>
             </span>
@@ -83,6 +119,7 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
           </>
         )}
       />
+      {savedWorkflow && workflowId ? <button className="button button-small button-quiet" type="button" disabled={disabled} onClick={() => onEditWorkflow(workflowId)}>Edit</button> : null}
     </div>
   );
 }
@@ -153,6 +190,12 @@ interface DraftGoalComposerProps {
   onChange: (value: GoalDraftValue) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onDiscard: () => void;
+  /** Saved user workflows; omit where this build cannot keep any (their picker rows then do not exist). */
+  workflows?: readonly WorkflowDefinition[];
+  /** Name of the workflow a saved result ran under, for a draft made from it when that workflow is gone. */
+  workflowFallbackName?: string | null;
+  onSaveWorkflow?: (input: WorkflowSaveInput) => Promise<WorkflowEditResult>;
+  onDeleteWorkflow?: (id: string) => Promise<WorkflowEditResult>;
 }
 
 /**
@@ -211,9 +254,13 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, sendBlockers, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, sendBlockers, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard, workflows, workflowFallbackName, onSaveWorkflow, onDeleteWorkflow
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // null: closed. id null: a new copy of Recommended. Otherwise the saved workflow being edited.
+  const [editor, setEditor] = useState<{ id: string | null } | null>(null);
+  // The picker menu hands focus back to its trigger as it closes; open the dialog after that settles.
+  const openEditor = (id: string | null) => { window.setTimeout(() => setEditor({ id }), 0); };
   const allowanceExplained = useRef(false);
   const [showAllowanceExplanation, setShowAllowanceExplanation] = useState(false);
   // Linux offers the Pi choice with the rest of its entry; Windows passes only the choice itself.
@@ -242,6 +289,7 @@ export function DraftGoalComposer({
         ? "Write the goal, then send."
         : "You can send.";
 
+  const agentsShort = sendBlockers?.agentsUsable != null && sendBlockers.agentsUsable < (sendBlockers.agentsNeeded ?? 2);
   const canSubmit = isLinuxActiveTarget
     ? (!busy && !inputsLocked && !continueDisabled && draft.message.trim().length > 0 && Boolean(onContinueCoordination))
     : (!busy
@@ -251,6 +299,7 @@ export function DraftGoalComposer({
        && connected
        && draft.workspace.trim().length > 0
        && draft.message.trim().length > 0
+       && !agentsShort
        && (coordinationAvailable || linuxCanStartCoordination || draft.provider.trim().length > 0));
 
   // A retry bypasses the held and grant checks (see canSubmit), so it bypasses their reasons too.
@@ -267,6 +316,8 @@ export function DraftGoalComposer({
     workspaceMissing: draft.workspace.trim().length === 0,
     messageMissing: draft.message.trim().length === 0,
     otherBlocked: inputsLocked || (blockedFromSending && !retrying),
+    agentsUsable: sendBlockers.agentsUsable,
+    agentsNeeded: sendBlockers.agentsNeeded,
   }) : null;
   // The picker trigger and the error alert already say these; say each once.
   const pickerSaysChoose = !linuxEntry && !runtimes.some((candidate) => candidate.id === draft.provider)
@@ -371,7 +422,13 @@ export function DraftGoalComposer({
             connected={connected}
             coordinationAvailable={coordinationAvailable || coordinationEntryAvailable}
             runtimeRequiredHint={runtimeRequiredHint}
-            onSelect={(provider) => onChange({ ...draft, provider })}
+            workflows={onSaveWorkflow ? workflows : undefined}
+            workflowId={draft.workflowId}
+            workflowFallbackName={workflowFallbackName}
+            disabled={busy || inputsLocked}
+            onSelect={(value) => onChange({ ...draft, ...value })}
+            onCopyRecommended={() => openEditor(null)}
+            onEditWorkflow={openEditor}
           />
         )}
         {coordinationResult && !activeGoalTitle && !inputsLocked && coordinationResult !== failureHeadline && !coordinationResult.includes("stays unreplayed") ? <p className="draft-hint">{coordinationResult}</p> : null}
@@ -472,6 +529,30 @@ export function DraftGoalComposer({
           )}
         </div>
       </form>
+      {editor && onSaveWorkflow ? (
+        <WorkflowEditorDialog
+          workflow={editor.id ? workflows?.find((candidate) => candidate.id === editor.id) ?? null : null}
+          otherNames={(workflows ?? []).filter((candidate) => candidate.id !== editor.id).map((candidate) => candidate.name ?? "")}
+          onSave={async (input) => {
+            const result = await onSaveWorkflow(input);
+            if (result.ok) {
+              setEditor(null);
+              // The user made or changed it to use it: it is the workflow for this goal now.
+              if (result.saved) onChange({ ...draft, provider: "", workflowId: result.saved.id });
+            }
+            return result;
+          }}
+          onDelete={onDeleteWorkflow ? async (id) => {
+            const result = await onDeleteWorkflow(id);
+            if (result.ok) {
+              setEditor(null);
+              if (draft.workflowId === id) onChange({ ...draft, workflowId: undefined });
+            }
+            return result;
+          } : undefined}
+          onClose={() => setEditor(null)}
+        />
+      ) : null}
     </section>
   );
 }

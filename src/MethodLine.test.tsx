@@ -33,3 +33,14 @@ it("an older result card without method data shows no line", () => {
   render(<CoordinationStatus {...round} />);
   expect(document.querySelector(".method-line")).toBeNull();
 });
+
+// Issue #68: a plan whose review the user switched off says so, plainly, and still names the method.
+it("a plan that was not reviewed reads as ready, not reviewed, and the method line says review did not run", () => {
+  const stopReason = "The plan is ready. Independent review did not run, because it is off in Quick plans.";
+  render(<CoordinationStatus {...round} reviewHarness={null} reviewText={null} verdict="planned" stopReason={stopReason}
+    workflow={{ id: "my-0a1b2c3d", version: 2, name: "Quick plans", planReview: "off" }} checksRan={[]} />);
+  expect(screen.getByText("Plan ready, not reviewed")).toBeTruthy();
+  expect(screen.queryByText(stopReason)).toBeNull(); // said once, by the method line
+  expect(screen.getByText("Quick plans v2 · Independent review: not run (off in Quick plans)")).toBeTruthy();
+  expect(document.body.textContent).not.toMatch(/Stop reason|Can be carried out|Not confirmed/);
+});

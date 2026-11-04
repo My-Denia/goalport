@@ -2176,8 +2176,9 @@ describe("harness access panel and scoped rounds", () => {
     await openDraftWithPanel();
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
     typeMessage("plan the helper");
-    sendMessage();
+    // Issue #68: with one agent Send is held and the reason sits beside it, so nothing can be pressed or authorized.
     expect(await screen.findByText(/An independent check needs two agents that can run, so select at least two\./)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     expect(bridge.order).not.toContain("authorize");
     expect(bridge.order.filter((item) => item === "launch")).toHaveLength(0);
   });
@@ -3551,9 +3552,10 @@ describe("one in-window repair", () => {
       await screen.findByRole("checkbox", { name: "Keep working after closing" });
       fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
       typeMessage("One harness is not a check");
-      sendMessage();
-      expect(await screen.findAllByRole("alert")).toHaveLength(1);
-      expect(screen.getByRole("alert").textContent).toContain("select at least two");
+      // Issue #68: Send is held and says why beside the button (it used to open an alert after the press).
+      expect((await screen.findByRole("status", { name: "" })).textContent).toContain("select at least two");
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryAllByRole("alert")).toHaveLength(0);
       fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
       sendMessage();

@@ -1555,3 +1555,25 @@ export function normalizeTurnReasonCode(value: unknown): TurnReasonCode | undefi
   if ((TURN_STATE_REASON_CODES as readonly string[]).includes(value)) return value as TurnStateReasonCode;
   return "provider-failed";
 }
+
+// ---- Saved workflows (issue #68) ----------------------------------------
+// The main process owns the file; the window only lists, saves and deletes.
+export type { WorkflowDefinition, WorkflowChecks } from "../electron/workflow-checks.mjs";
+import type { WorkflowDefinition as SavedWorkflowDefinition, WorkflowChecks as SavedWorkflowChecks } from "../electron/workflow-checks.mjs";
+
+/** What the editor sends: no id for a new copy, the saved id for an edit. */
+export interface WorkflowSaveInput {
+  id?: string;
+  name: string;
+  parent?: string;
+  modules: { checks: SavedWorkflowChecks };
+}
+
+/** Every workflows call answers with the whole current list, or one plain sentence in `error`. */
+export interface WorkflowsReply {
+  workflows?: SavedWorkflowDefinition[];
+  /** One plain sentence when the saved list could not be read and was set aside. */
+  notice?: string | null;
+  saved?: SavedWorkflowDefinition;
+  error?: string;
+}
