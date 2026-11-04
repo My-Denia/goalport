@@ -45,6 +45,12 @@ export const RESOURCE_LAUNCH = Object.freeze({
     stronger: Object.freeze({ thinking: 'high' }),
   }),
 });
+// Feedback module: for goals that change files, whether a check that asks for
+// changes starts the one automatic round, or the run stops and asks the user.
+// Absent in a saved definition means Recommended: both stay automatic.
+export const FEEDBACK_STAGES = Object.freeze(['planRevision', 'repair']);
+export const FEEDBACK_CHOICES = Object.freeze(['automatic', 'ask']);
+export const DEFAULT_FEEDBACK = Object.freeze({ planRevision: 'automatic', repair: 'automatic' });
 export const RECOMMENDED_PARENT = 'recommended@1';
 export const WORKFLOW_ID = /^[A-Za-z0-9._-]{1,64}$/;
 export const MAX_WORKFLOW_NAME = 60;
@@ -83,6 +89,19 @@ function compileResources(module) {
   });
 }
 
+const FEEDBACK_KEYS = new Set(FEEDBACK_STAGES);
+const FEEDBACK_VALUES = new Set(FEEDBACK_CHOICES);
+// A present module is validated strictly; an absent one is Recommended's.
+function compileFeedback(module) {
+  if (module === undefined) return DEFAULT_FEEDBACK;
+  if (!plainObject(module) || Object.keys(module).length !== FEEDBACK_STAGES.length
+    || Object.keys(module).some(key => !FEEDBACK_KEYS.has(key))
+    || !FEEDBACK_STAGES.every(stage => FEEDBACK_VALUES.has(module[stage]))) {
+    throw new Error('Unsupported workflow definition.');
+  }
+  return Object.freeze({ planRevision: module.planRevision, repair: module.repair });
+}
+
 // Pure: the inputs the one engine runs for a definition. Throws on anything it
 // cannot interpret, so a damaged snapshot never runs as something else.
 export function compileWorkflow(definition) {
@@ -99,11 +118,13 @@ export function compileWorkflow(definition) {
     throw new Error('Unsupported workflow definition.');
   }
   const resources = compileResources(definition.modules.resources);
+  const feedback = compileFeedback(definition.modules.feedback);
   return Object.freeze({
     workflow: Object.freeze({ id: definition.id, version: definition.version }),
     name,
     checks,
     resources,
+    feedback,
     definition,
   });
 }

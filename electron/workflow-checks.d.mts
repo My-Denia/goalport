@@ -9,6 +9,12 @@ export interface WorkflowResources {
   readonly roles: { readonly [role in ResourceRole]: ResourcePreference };
   readonly budget: { readonly readTurns: number; readonly writeTurns: number };
 }
+export type FeedbackStage = 'planRevision' | 'repair';
+export type FeedbackChoice = 'automatic' | 'ask';
+export interface WorkflowFeedback {
+  readonly planRevision: FeedbackChoice;
+  readonly repair: FeedbackChoice;
+}
 export interface WorkflowDefinition {
   readonly schema: 1;
   readonly id: string;
@@ -17,13 +23,14 @@ export interface WorkflowDefinition {
   readonly name?: string;
   /** e.g. "recommended@1" for a copy of Recommended v1. */
   readonly parent?: string;
-  readonly modules: { readonly checks: WorkflowChecks; readonly resources?: WorkflowResources };
+  readonly modules: { readonly checks: WorkflowChecks; readonly resources?: WorkflowResources; readonly feedback?: WorkflowFeedback };
 }
 export interface CompiledWorkflow {
   readonly workflow: { readonly id: string; readonly version: number };
   readonly name: string;
   readonly checks: WorkflowChecks;
   readonly resources: WorkflowResources;
+  readonly feedback: WorkflowFeedback;
   readonly definition: WorkflowDefinition;
 }
 export const RECOMMENDED_V1: WorkflowDefinition;
@@ -36,6 +43,9 @@ export const RESOURCE_LAUNCH: {
   readonly claude: { readonly faster: { readonly model: string }; readonly stronger: { readonly model: string; readonly effort: string } };
   readonly pi: { readonly faster: { readonly thinking: string }; readonly stronger: { readonly thinking: string } };
 };
+export const FEEDBACK_STAGES: readonly FeedbackStage[];
+export const FEEDBACK_CHOICES: readonly FeedbackChoice[];
+export const DEFAULT_FEEDBACK: WorkflowFeedback;
 export const RECOMMENDED_PARENT: string;
 export const WORKFLOW_ID: RegExp;
 export const MAX_WORKFLOW_NAME: number;
