@@ -128,10 +128,15 @@ function piWindowsLaunch(env = process.env, platform = process.platform, fsApi =
   const shim = resolveCommand("pi", env, platform);
   if (!/\.(cmd|bat)$/i.test(shim)) return null;
   const cliJs = path.resolve(path.dirname(shim), "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
-  if (!fsApi.existsSync(cliJs)) return null;
+  // Pi's own installer ships pi.cmd beside a pi-launcher.js that forwards argv
+  // to Pi unchanged. Going through the .cmd would hand the prompt to cmd.exe,
+  // which cuts it at the first newline.
+  const launcherJs = path.resolve(path.dirname(shim), "pi-launcher.js");
+  const entry = fsApi.existsSync(cliJs) ? cliJs : fsApi.existsSync(launcherJs) ? launcherJs : null;
+  if (!entry) return null;
   const nodeExe = resolveCommand("node.exe", env, platform);
   if (nodeExe === "node.exe") return null;
-  return { file: path.resolve(nodeExe), prefixArgs: [cliJs] };
+  return { file: path.resolve(nodeExe), prefixArgs: [entry] };
 }
 
 // Pi's installer puts the launcher in ~/.pi/agent/bin and does not add that

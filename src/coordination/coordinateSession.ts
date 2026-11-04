@@ -201,6 +201,8 @@ function withPlanText(command: CoordinateTurnCommand, planText: string): Coordin
         "",
         "Plan:",
         planText.length > 0 ? planText : "(The planner returned no text.)",
+        "",
+        "Last line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.",
       ].join("\n"),
     },
   };
@@ -608,7 +610,7 @@ async function runRecoveryRound(
                 planText: planText ?? "", reviewText: reviewText ?? "", executionText: executionText ?? "", executionFacts,
                 executionEvidence,
               })
-            : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey);
+            : replacementCommand(role === "planning" ? "plan" : "review", replacement, input, input.sendKey, role === "planning" ? assignments.review?.instanceId : undefined);
         } catch (error) {
           if (!(error instanceof ContinuationPromptLimitError)) throw error;
           return finish({ verdict: "stopped", stopReason: `${error.message} The ${role} was not sent; earlier results and dispatch facts are retained.` });

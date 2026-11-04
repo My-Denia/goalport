@@ -188,7 +188,7 @@ test("the offline staging check covers every required electron module, including
   // explicit staging list; this runs offline, against source, with no
   // packaging run and no Windows.
   const covered = stagedDependenciesCoverGraph();
-  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs", "pi-capacity.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs", "live-read-once.cjs"]) {
+  for (const name of ["coordinate-guard.cjs", "coordination-scope.cjs", "cli-coordinate.cjs", "coordinate-service.cjs", "pi-capacity.mjs", "workflow-checks.mjs", "pi-capacity-admission.cjs", "saved-targets.cjs", "live-read-once.cjs"]) {
     assert.ok(STAGED_APP_MODULES.includes(name), `${name} must stay on the staging list`);
     assert.ok(covered.includes(name), `${name} must be reachable from the staged entry points`);
   }

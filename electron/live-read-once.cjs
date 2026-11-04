@@ -8,10 +8,15 @@ const MAX_CONTROL_BYTES = 8192;
 const id = value => typeof value === "string" && /^[A-Za-z0-9._-]{1,256}$/.test(value);
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, names) => object(value) && Object.keys(value).sort().join(",") === names.slice().sort().join(",");
+// Pi-bound: the worker's context and admission still require a Pi pair. The
+// reviewer must be able to judge, and two reads must remain after plan+review.
 function eligible(input) {
-  return !!input && !!normalizePiCapacity(input.piCapacity) && input.backgroundConsent === true
-    && input.maxTurns === 4 && !input.writeAuthorization
-    && JSON.stringify(input.allowedInstances) === '["codex","pi"]';
+  if (!input || input.backgroundConsent !== true || input.writeAuthorization || !normalizePiCapacity(input.piCapacity)) return false;
+  const ids = input.allowedInstances;
+  if (!Array.isArray(ids) || !ids.every(x => typeof x === "string") || new Set(ids).size !== ids.length || !ids.includes("pi")) return false;
+  const { RECOMMENDED_V1, chooseRoles, reviewerCouldJudge } = require("./workflow-checks.mjs");
+  const roles = chooseRoles(ids, RECOMMENDED_V1.checks);
+  return !!roles && reviewerCouldJudge(roles.reviewer, RECOMMENDED_V1.checks) && Number.isInteger(input.maxTurns) && input.maxTurns >= 4;
 }
 function controlPayload(operation, payload) {
   if (operation === "status" || (operation === "revoke" && payload === undefined)) {
@@ -68,7 +73,7 @@ const LIVE_KEYS = ["mode", "ready", "initialRequestId", "fromRequestId", "rootRe
 function liveStatus(value) {
   if (!keys(value, LIVE_KEYS) || value.mode !== MODE || !id(value.initialRequestId) || value.fromRequestId !== value.initialRequestId || !id(value.rootRequestId)
     || !["ready", "readonly", "pending", "revoked"].every(k => typeof value[k] === "boolean")
-    || !(value.remainingReads === null || (Number.isInteger(value.remainingReads) && value.remainingReads >= 0 && value.remainingReads <= 4))
+    || !(value.remainingReads === null || (Number.isInteger(value.remainingReads) && value.remainingReads >= 0 && value.remainingReads <= 32))
     || !(value.childRequestId === null || (id(value.childRequestId) && value.childRequestId !== value.initialRequestId))
     || !(value.expiresAt === null || (typeof value.expiresAt === "string" && !Number.isNaN(Date.parse(value.expiresAt))))
     || ![null, "busy", "revoked", "expired", "no-live-scope", "not-enough-reads", "unconfirmed", "context-unavailable"].includes(value.reason)
