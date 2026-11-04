@@ -17,6 +17,10 @@ import {
 } from "./coordinateSession";
 import type { CoordinationRoundFact, RoundEvent, SavedTargetContinuation } from "./savedPlan";
 import { WORKFLOW } from "./coordinateGoal";
+import {
+  RECOMMENDED_V1, compileWorkflow, planReviewRuns,
+  type CompiledWorkflow, type WorkflowDefinition,
+} from "../../electron/workflow-checks.mjs";
 import type { CheckRan, WorkflowRef } from "./methodLine";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
@@ -69,6 +73,8 @@ export interface CoordinationView {
   readonly planRevisionHistory?: readonly CoordinationRoundFact[];
   /** The workflow this result ran under; absent only on records from before it existed. */
   readonly workflow?: WorkflowRef;
+  /** The definition this result actually ran under, kept so a follow-up send runs the same one. */
+  readonly workflowDefinition?: WorkflowDefinition;
   /** Checks whose reply came back, across every pass of this send. Empty means none ran. */
   readonly checksRan?: readonly CheckRan[];
 }
@@ -215,19 +221,39 @@ function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: bo
 const checksOf = (...passes: readonly CoordinateSessionState[]): readonly CheckRan[] =>
   passes.flatMap((pass) => pass.checksRan ?? []);
 
-/** Stamps the workflow and what actually ran onto the engine's result. */
+const INVALID_WORKFLOW_SENTENCE = "This workflow could not be read, so nothing was sent.";
+
+/**
+ * Stamps the workflow and what actually ran onto the engine's result. The
+ * definition is the snapshot taken at Send (absent = Recommended v1); one that
+ * does not compile stops with nothing sent rather than running as something else.
+ */
 export async function requestCoordination(
-  input: Parameters<typeof runCoordination>[0],
+  input: Omit<Parameters<typeof runCoordination>[0], "workflow"> & { readonly workflowDefinition?: WorkflowDefinition },
   discovery: CoordinationDiscovery | null,
   transport: CoordinateTransport,
   stillCurrent: () => boolean = () => true,
 ): Promise<CoordinationView> {
-  const view = await runCoordination(input, discovery, transport, stillCurrent);
-  return { ...view, workflow: { id: WORKFLOW.workflow.id, version: WORKFLOW.workflow.version }, checksRan: view.checksRan ?? [] };
+  let workflow: CompiledWorkflow;
+  try {
+    workflow = input.workflowDefinition === undefined ? WORKFLOW : compileWorkflow(input.workflowDefinition);
+  } catch {
+    return { ...unavailable(INVALID_WORKFLOW_SENTENCE), checksRan: [] };
+  }
+  const view = await runCoordination({ ...input, workflow }, discovery, transport, stillCurrent);
+  const reviewRan = planReviewRuns(workflow.checks, input.writeAuthorization !== undefined);
+  return {
+    ...view,
+    workflow: { id: workflow.workflow.id, version: workflow.workflow.version, name: workflow.name, planReview: reviewRan ? "on" : "off" },
+    workflowDefinition: input.workflowDefinition ?? RECOMMENDED_V1,
+    checksRan: view.checksRan ?? [],
+  };
 }
 
 async function runCoordination(
   input: {
+    /** The compiled workflow snapshot; requestCoordination compiles it, nothing else sets it. */
+    readonly workflow: CompiledWorkflow;
     readonly workspacePath: string;
     readonly goal: string;
     readonly sendKey: string;
@@ -289,6 +315,7 @@ async function runCoordination(
   }
   const catalog = catalogFromProviderSnapshots(discovery.providers);
   const goalInput = {
+    workflow: input.workflow,
     catalog,
     auditPromptTransport: input.auditPromptTransport,
     goal: input.goal,
@@ -330,7 +357,9 @@ async function runCoordination(
       reviewText: null,
       result: null,
       verdict: "stopped",
-      stopReason: "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota.",
+      stopReason: planned.roles.length !== 1
+        ? "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota."
+        : "Planning is assigned to an agent. No model turn was sent, because this session is not authorized to spend subscription quota.",
       planningQuota: planned.planningQuota,
       reviewQuota: planned.reviewQuota,
       messageDispatched: false,
@@ -388,6 +417,7 @@ async function runCoordination(
       ...failedInstances(sent),
     ])];
     const revisionInput: CoordinateGoalInput = {
+      workflow: input.workflow,
       catalog,
       auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,
@@ -490,6 +520,7 @@ async function runCoordination(
         .map((command) => command.commandId),
     };
     const correctiveInput: CoordinateGoalInput = {
+      workflow: input.workflow,
       catalog,
       auditPromptTransport: input.auditPromptTransport,
       goal: input.goal,

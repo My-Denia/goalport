@@ -1,4 +1,4 @@
-export type CoordinationVerdict = "verified" | "checked" | "revise" | "stopped" | "failed" | "unconfirmed";
+export type CoordinationVerdict = "verified" | "checked" | "revise" | "stopped" | "failed" | "unconfirmed" | "planned";
 
 /**
  * The check counts as carried out only when its last line says so.
@@ -37,6 +37,8 @@ export function outcomeLabel(verdict: CoordinationVerdict | null): string {
       return "Failed";
     case "unconfirmed":
       return "Not confirmed";
+    case "planned":
+      return "Plan ready, not reviewed";
     case null:
       return "None";
     default: {

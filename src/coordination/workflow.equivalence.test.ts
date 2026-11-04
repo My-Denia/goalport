@@ -44,7 +44,7 @@ const verdictOf = (role: string, revise = false) =>
 describe("what actually ran", () => {
   it("records the workflow and only the checks whose reply came back", async () => {
     const view = await requestCoordination(base, discovery, script((role) => ({ verdict: verdictOf(role) })));
-    expect(view.workflow).toEqual({ id: "recommended", version: 1 });
+    expect(view.workflow).toEqual({ id: "recommended", version: 1, name: "Recommended workflow", planReview: "on" });
     expect(view.checksRan).toEqual([{ kind: "plan-check", harness: "Claude", verdict: "checked" }]);
   });
 
@@ -54,7 +54,7 @@ describe("what actually ran", () => {
     const empty = await requestCoordination(base, discovery, script((role) => role === "review" ? { text: "" } : {}));
     expect(empty.checksRan).toEqual([]);
     const noService = await requestCoordination(base, null, script(() => ({})));
-    expect(noService.workflow).toEqual({ id: "recommended", version: 1 });
+    expect(noService.workflow).toEqual({ id: "recommended", version: 1, name: "Recommended workflow", planReview: "on" });
     expect(noService.checksRan).toEqual([]);
   });
 
