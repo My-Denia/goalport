@@ -46,7 +46,9 @@ function ownedContext(input, mode, value, records) {
     || typeof value.acceptedAt !== "string" || Number.isNaN(Date.parse(value.acceptedAt))
     || !["accepted", "running", "completed", "unconfirmed"].includes(value.phase)) return null;
   if (records !== undefined) {
-    if (!Array.isArray(records) || records.some(record => !object(record))) return null;
+    if (!Array.isArray(records)) return null;
+    // Unsupported raw entries stay on disk; history views already skip them, so Continue must too.
+    records = records.filter(object);
     const initial = records.filter(r => r.requestId === input.requestId);
     const children = records.filter(r => r.requestId === value.requestId);
     const targets = require("./saved-targets.cjs").resolveSavedTargets(records);

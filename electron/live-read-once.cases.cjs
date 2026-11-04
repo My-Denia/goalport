@@ -253,3 +253,28 @@ test('failed revoke during initial save closes unconfirmed without entering foll
  assert.equal(r.capture.closed,1);
  assert.equal(r.counts().closed,1);
 });
+test('raw history with unsupported entries still allows Live Continue, without rewriting the file', t => {
+ const directory=temp(t),s=createCoordinationJobStore(directory,{bootstrapReady:true});
+ const start=s.startAdmission(admission(directory),{followUpMode:codec.MODE}),owner=s.claimWorker(start.jobId).ownerToken;
+ const initial={requestId:'initial',goal:'Explain the fixture boundary',workspacePath:directory,verdict:'checked',stopReason:'Independent check completed.',planningHarness:'Codex',reviewHarness:'Pi',result:'Checked',planningQuota:null,reviewQuota:null,planText:'Plan',reviewText:'Review',piCapacity:pair};
+ saveRecord(directory,initial);
+ const file=path.join(directory,'coordination-records.json'),saved=JSON.parse(fs.readFileSync(file,'utf8'));
+ const junk=[null,3,'x',[]],mixed=[...junk,...saved];
+ const input=admission(directory);
+ const context={requestId:'child',fromRequestId:'initial',rootRequestId:'initial',originalGoal:input.goal,followUp:'More',workspacePath:directory,piCapacity:{...pair},backgroundConsent:true,write:false,initialPlan:'Plan',initialReview:'Review',acceptedAt:'2026-01-01T00:00:00.000Z',phase:'accepted'};
+ assert.equal(codec.ownedContext(input,codec.MODE,context,saved)?.requestId,'child');
+ assert.equal(codec.ownedContext(input,codec.MODE,context,mixed)?.requestId,'child');
+ assert.equal(codec.ownedContext(input,codec.MODE,context,{}),null);
+ assert.equal(codec.ownedContext(input,codec.MODE,context,null),null);
+ assert.equal(codec.ownedContext(input,codec.MODE,context,[null,3]),null);
+ assert.equal(codec.ownedContext(input,codec.MODE,context,[...mixed,{...saved[0]}]),null,'duplicate initial id is still refused');
+ const child={requestId:'child',goal:input.goal,workspacePath:directory,verdict:'checked',piCapacity:pair,continuation:{parentRequestId:'initial',rootRequestId:'initial',originalGoal:input.goal,followUp:'More'}};
+ assert.equal(codec.ownedContext(input,codec.MODE,context,[...junk,saved[0],child])?.requestId,'child');
+ assert.equal(codec.ownedContext(input,codec.MODE,context,[...junk,saved[0],{...child,continuation:{...child.continuation,rootRequestId:'other'}}]),null);
+ assert.equal(codec.ownedContext(input,codec.MODE,context,[...junk,saved[0],{...child,workspacePath:path.join(directory,'other')}]),null);
+ fs.writeFileSync(file,JSON.stringify(mixed));const before=fs.readFileSync(file,'utf8');
+ const status=s.recordLiveFollowUpAccepted(start.jobId,context,owner);
+ assert.equal(status.liveFollowUp.requestId,'child');
+ assert.equal(s.readOwnedLiveFollowUpContext(start.jobId)?.requestId,'child');
+ assert.equal(fs.readFileSync(file,'utf8'),before,'unsupported raw entries stay preserved');
+});

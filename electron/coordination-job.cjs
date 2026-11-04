@@ -903,7 +903,7 @@ function createCoordinationJobStore(profileDirectory, {
       return statusFor(jobId);
     }
     const targets = require("./saved-targets.cjs").resolveSavedTargets(records);
-    if (targets.head(fresh.rootRequestId) !== admission.input.requestId || records.some(record => record.requestId === fresh.requestId)) {
+    if (targets.head(fresh.rootRequestId) !== admission.input.requestId || records.some(record => record?.requestId === fresh.requestId)) {
       throw refusal("invalid-live-context", "The latest initial result changed; nothing was accepted.");
     }
     writeAtomic(fileFor(jobId, PROGRESS_FILE), { ...current, liveFollowUp: cloneJson(fresh, "Accepted follow-up"), phase: "followup-accepted", updatedAt: now() });
