@@ -139,6 +139,12 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
     if (!id) {
       do { id = `my-${idSuffix()}`; } while (list.some((w) => w.id === id));
     }
+    // Resources are optional. Sent by the editor they replace the saved ones;
+    // left out they keep what an existing workflow already had, so an editor
+    // that only knows the checks never erases a resource choice. compileWorkflow
+    // below refuses anything that is not exactly the closed shape.
+    const sentResources = input.modules?.resources;
+    const resources = sentResources !== undefined ? JSON.parse(JSON.stringify(sentResources)) : existing?.modules?.resources;
     const definition = {
       schema: SCHEMA,
       id,
@@ -152,6 +158,7 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
           // Not editable in v1: it follows the reviewer rule above.
           requirementCitation: RECOMMENDED_V1.modules.checks.requirementCitation,
         },
+        ...(resources !== undefined ? { resources } : {}),
       },
     };
     try { compileWorkflow(definition); } catch { throw plain("Those workflow settings are not valid, so nothing was saved."); }

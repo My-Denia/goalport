@@ -23,3 +23,23 @@ test("compileWorkflow names the workflow and rejects what it cannot interpret", 
   assert.throws(() => compileWorkflow({ ...RECOMMENDED_V1, schema: 2 }));
   assert.throws(() => compileWorkflow({ ...RECOMMENDED_V1, modules: {} }));
 });
+test("a definition without resources compiles to the default, and a present module is validated strictly", () => {
+  const { DEFAULT_RESOURCES, RESOURCE_LAUNCH } = require("./workflow-checks.mjs");
+  const compiled = compileWorkflow(RECOMMENDED_V1);
+  assert.equal(compiled.resources, DEFAULT_RESOURCES);
+  assert.deepEqual(DEFAULT_RESOURCES, { roles: { plan: "default", review: "default", execute: "default", audit: "default" }, budget: { readTurns: 4, writeTurns: 2 } });
+  assert.equal("resources" in RECOMMENDED_V1.modules, false);
+  const withResources = (resources) => ({ ...RECOMMENDED_V1, id: "my-1", name: "Mine", modules: { ...RECOMMENDED_V1.modules, resources } });
+  const roles = { plan: "faster", review: "stronger", execute: "default", audit: "faster" };
+  assert.deepEqual(compileWorkflow(withResources({ roles, budget: { readTurns: 8, writeTurns: 3 } })).resources, { roles, budget: { readTurns: 8, writeTurns: 3 } });
+  for (const bad of [
+    { roles: { ...roles, plan: "turbo" }, budget: { readTurns: 4, writeTurns: 2 } },
+    { roles: { ...roles, extra: "faster" }, budget: { readTurns: 4, writeTurns: 2 } },
+    { roles, budget: { readTurns: 1, writeTurns: 2 } },
+    { roles, budget: { readTurns: 4, writeTurns: 9 } },
+    { roles, budget: { readTurns: 4.5, writeTurns: 2 } },
+    { roles },
+    "faster",
+  ]) assert.throws(() => compileWorkflow(withResources(bad)), { message: "Unsupported workflow definition." });
+  assert.deepEqual(RESOURCE_LAUNCH.claude, { faster: { model: "sonnet" }, stronger: { model: "opus", effort: "high" } });
+});

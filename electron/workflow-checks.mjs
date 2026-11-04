@@ -12,6 +12,39 @@ export const RECOMMENDED_V1 = Object.freeze({
     }),
   }),
 });
+// Resources module: which way each role leans on speed and depth, plus how many
+// model turns a run may spend. Absent in a saved definition means "default":
+// every harness launches exactly as it did before this module existed.
+export const RESOURCE_ROLES = Object.freeze(['plan', 'review', 'execute', 'audit']);
+export const RESOURCE_PREFERENCES = Object.freeze(['default', 'faster', 'stronger']);
+export const RESOURCE_BOUNDS = Object.freeze({
+  readTurns: Object.freeze({ min: 2, max: 32 }),
+  writeTurns: Object.freeze({ min: 1, max: 8 }),
+});
+export const DEFAULT_RESOURCES = Object.freeze({
+  roles: Object.freeze({ plan: 'default', review: 'default', execute: 'default', audit: 'default' }),
+  budget: Object.freeze({ readTurns: 4, writeTurns: 2 }),
+});
+// What faster / stronger mean per harness, as data. The launch layer only ever
+// emits these fixed literals; a definition string is never spliced into argv.
+// Claude faster is `--model sonnet` alone, with no `--effort low`: the check
+// must still read carefully, so the model swap is the speed lever. Claude
+// stronger is opus at high effort. Codex and Pi keep their own model and move
+// only the reasoning effort / thinking level.
+export const RESOURCE_LAUNCH = Object.freeze({
+  codex: Object.freeze({
+    faster: Object.freeze({ effort: 'low' }),
+    stronger: Object.freeze({ effort: 'high' }),
+  }),
+  claude: Object.freeze({
+    faster: Object.freeze({ model: 'sonnet' }),
+    stronger: Object.freeze({ model: 'opus', effort: 'high' }),
+  }),
+  pi: Object.freeze({
+    faster: Object.freeze({ thinking: 'low' }),
+    stronger: Object.freeze({ thinking: 'high' }),
+  }),
+});
 export const RECOMMENDED_PARENT = 'recommended@1';
 export const WORKFLOW_ID = /^[A-Za-z0-9._-]{1,64}$/;
 export const MAX_WORKFLOW_NAME = 60;
@@ -24,6 +57,30 @@ function plainName(value) {
   if (typeof value !== 'string') return null;
   const name = value.trim();
   return name.length > 0 && name.length <= MAX_WORKFLOW_NAME && !/[\u0000-\u001f\u007f]/.test(name) ? name : null;
+}
+
+const ROLE_KEYS = new Set(RESOURCE_ROLES);
+const PREFERENCES = new Set(RESOURCE_PREFERENCES);
+const plainObject = value => typeof value === 'object' && value !== null && !Array.isArray(value);
+const inBounds = (value, bounds) => Number.isInteger(value) && value >= bounds.min && value <= bounds.max;
+
+// A present module is validated strictly; an absent one is the default.
+function compileResources(module) {
+  if (module === undefined) return DEFAULT_RESOURCES;
+  if (!plainObject(module) || !plainObject(module.roles) || !plainObject(module.budget)
+    || Object.keys(module).some(key => key !== 'roles' && key !== 'budget')
+    || Object.keys(module.roles).length !== RESOURCE_ROLES.length
+    || Object.keys(module.roles).some(key => !ROLE_KEYS.has(key))
+    || !RESOURCE_ROLES.every(role => PREFERENCES.has(module.roles[role]))
+    || Object.keys(module.budget).some(key => key !== 'readTurns' && key !== 'writeTurns')
+    || !inBounds(module.budget.readTurns, RESOURCE_BOUNDS.readTurns)
+    || !inBounds(module.budget.writeTurns, RESOURCE_BOUNDS.writeTurns)) {
+    throw new Error('Unsupported workflow definition.');
+  }
+  return Object.freeze({
+    roles: Object.freeze(Object.fromEntries(RESOURCE_ROLES.map(role => [role, module.roles[role]]))),
+    budget: Object.freeze({ readTurns: module.budget.readTurns, writeTurns: module.budget.writeTurns }),
+  });
 }
 
 // Pure: the inputs the one engine runs for a definition. Throws on anything it
@@ -41,10 +98,12 @@ export function compileWorkflow(definition) {
   if (definition.parent !== undefined && (typeof definition.parent !== 'string' || !PARENT.test(definition.parent))) {
     throw new Error('Unsupported workflow definition.');
   }
+  const resources = compileResources(definition.modules.resources);
   return Object.freeze({
     workflow: Object.freeze({ id: definition.id, version: definition.version }),
     name,
     checks,
+    resources,
     definition,
   });
 }

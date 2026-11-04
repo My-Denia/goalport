@@ -1118,3 +1118,12 @@ test("the stored admission keeps the snapshot so a worker never reads workflows.
   assert.deepEqual(store.getStatus(started.jobId).admission.workflowDefinition, quick);
   assert.equal(fs.existsSync(path.join(directory, "workflows.json")), false);
 });
+
+test("the admission clone keeps the resources module, and refuses a malformed one", () => {
+  const resources = { roles: { plan: "faster", review: "stronger", execute: "default", audit: "default" }, budget: { readTurns: 6, writeTurns: 2 } };
+  const mine = { schema: 1, id: "my-0a1b2c3d", version: 2, name: "Mine", parent: "recommended@1",
+    modules: { checks: { planReview: "on", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" }, resources } };
+  assert.deepEqual(normalizeAdmissionInput(admission({ workflowDefinition: mine })).workflowDefinition.modules.resources, resources);
+  const broken = { ...mine, modules: { ...mine.modules, resources: { ...resources, roles: { ...resources.roles, plan: "turbo" } } } };
+  assert.throws(() => normalizeAdmissionInput(admission({ workflowDefinition: broken })), { code: "invalid-admission" });
+});
