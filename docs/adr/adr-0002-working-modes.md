@@ -103,17 +103,17 @@ it did not run. It never implies a check that did not happen.
 - Delivery actions such as commit / PR. They need a new authorisation surface.
 - Grok in the coordinated path, Pi as a Direct runtime: new runtime work, tracked separately.
 
-## Slices
+## Slices (tracked in #72)
 
-1. Recommended v1 + mode picker + "what ran" on the result page, with no
+1. #66 Recommended v1 + mode picker + "what ran" on the result page, with no
    behaviour drift (same command ids before and after).
-2. Checks module: reviewer capability and requirement quoting; Live Continue
+2. #67 Checks module: reviewer capability and requirement quoting; Live Continue
    on capability. Accept on the packaged EXE: a Codex + Pi read-only goal reaches
    "checked" and Live Continue appears (#63, and real-app acceptance of #61).
-3. My workflow: copy Recommended, edit grouped modules, save, use.
-4. Resources: per-role fast / strong preference, budget prefill.
-5. Feedback: repair / replan / stop, round counts, what needs the user.
-6. Compare and adopt a newer Recommended.
+3. #68 My workflow: copy Recommended, edit grouped modules, save, use.
+4. #69 Resources: per-role fast / strong preference, budget prefill.
+5. #70 Feedback: repair / replan / stop, round counts, what needs the user.
+6. #71 Compare and adopt a newer Recommended.
 
 Each slice is accepted per AGENTS.md §2 (screenshots at ≤860, ~1020, ≥1440;
 new-user walkthrough; packaged EXE).
