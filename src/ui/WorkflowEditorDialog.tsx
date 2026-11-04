@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { RECOMMENDED_V1, MAX_WORKFLOW_NAME } from "../../electron/workflow-checks.mjs";
+import { RECOMMENDED_V1, MAX_WORKFLOW_NAME, DEFAULT_RESOURCES, RESOURCE_BOUNDS } from "../../electron/workflow-checks.mjs";
+import type { ResourcePreference, ResourceRole, WorkflowResources } from "../../electron/workflow-checks.mjs";
 import type { WorkflowChecks, WorkflowDefinition, WorkflowSaveInput } from "../types";
 import { GoalDialog } from "./GoalDialog";
 
@@ -17,8 +18,19 @@ interface WorkflowEditorDialogProps {
 }
 
 const SAME_AS_RECOMMENDED = "Same as Recommended v1";
-/** Only Checks can be changed in this version; the rest follow Recommended. */
-const FIXED_GROUPS = ["Planning", "Execution", "Resources", "Feedback & continuation", "Delivery"] as const;
+/** Checks and Resources can be changed in this version; the rest follow Recommended. */
+const FIXED_GROUPS = ["Planning", "Execution", "Feedback & continuation", "Delivery"] as const;
+
+const ROLE_ROWS: ReadonlyArray<{ role: ResourceRole; label: string; note?: string }> = [
+  { role: "plan", label: "Writing the plan" },
+  { role: "review", label: "Independent check" },
+  { role: "execute", label: "Making changes", note: "Only for goals that change files" },
+  { role: "audit", label: "Verification", note: "Only for goals that change files" },
+];
+const PREFERENCES: ReadonlyArray<{ value: ResourcePreference; label: string }> = [
+  { value: "default", label: "Default" }, { value: "faster", label: "Faster" }, { value: "stronger", label: "Stronger" },
+];
+const BOUNDS = RESOURCE_BOUNDS;
 
 function freeName(taken: readonly string[]): string {
   const lower = new Set(taken.map((name) => name.toLowerCase()));
@@ -36,6 +48,10 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
   const [name, setName] = useState(workflow?.name ?? freeName(otherNames));
   const [planReview, setPlanReview] = useState(base.planReview === "on");
   const [readsFiles, setReadsFiles] = useState(base.reviewerNeeds.readWorkspace === "required");
+  const baseResources: WorkflowResources = workflow?.modules.resources ?? DEFAULT_RESOURCES;
+  const [roles, setRoles] = useState<Record<ResourceRole, ResourcePreference>>({ ...baseResources.roles });
+  const [readTurns, setReadTurns] = useState(String(baseResources.budget.readTurns));
+  const [writeTurns, setWriteTurns] = useState(String(baseResources.budget.writeTurns));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -45,6 +61,9 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
     if (busy) return;
     const trimmed = name.trim();
     if (!trimmed) { setError("Give it a name."); return; }
+    const reads = Number(readTurns), writes = Number(writeTurns);
+    if (!Number.isInteger(reads) || reads < BOUNDS.readTurns.min || reads > BOUNDS.readTurns.max) { setError(`Turn limit to start with: choose ${BOUNDS.readTurns.min} to ${BOUNDS.readTurns.max}.`); return; }
+    if (!Number.isInteger(writes) || writes < BOUNDS.writeTurns.min || writes > BOUNDS.writeTurns.max) { setError(`File-change turn limit: choose ${BOUNDS.writeTurns.min} to ${BOUNDS.writeTurns.max}.`); return; }
     setBusy(true); setError(null);
     const result = await onSave({
       ...(workflow ? { id: workflow.id } : {}),
@@ -53,7 +72,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
         ...base,
         planReview: planReview ? "on" : "off",
         reviewerNeeds: { readWorkspace: readsFiles ? "required" : "preferred" },
-      } },
+      }, resources: { roles, budget: { readTurns: reads, writeTurns: writes } } },
     });
     // On success the owner closes the dialog; only a refusal keeps it open.
     if (!result.ok) { setError(result.error); setBusy(false); }
@@ -68,7 +87,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
 
   return (
     <GoalDialog label={workflow ? "Edit workflow" : "Copy Recommended workflow"} className="workflow-editor-dialog" onDismiss={onClose}>
-      <form onSubmit={(event) => { void submit(event); }}>
+      <form noValidate onSubmit={(event) => { void submit(event); }}>
         <h2>{workflow ? "Edit workflow" : "Copy Recommended workflow"}</h2>
         <p className="dialog-lead">Start from the recommended method, switch off what you don't need, and give it a name. You can pick it for any new goal.</p>
         <label className="field-label" htmlFor="workflow-name">Name</label>
@@ -94,6 +113,37 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
                 <small>When required, an agent that cannot open files (Pi) is never the reviewer.</small>
               </span>
             </label>
+          </section>
+          <section className="workflow-group workflow-group-open" aria-label="Resources">
+            <h3>Resources</h3>
+            <p className="workflow-resources-lead">Faster or Stronger changes how hard an agent thinks: Codex and Pi use less or more thinking, Claude switches model. Claude with an API key stays as it is.</p>
+            {ROLE_ROWS.map(({ role, label, note }) => (
+              <div key={role} className="resource-row">
+                <span className="resource-label" id={`resource-${role}`}>{label}{note ? <small>{note}</small> : null}</span>
+                <div className="resource-seg" role="radiogroup" aria-labelledby={`resource-${role}`}>
+                  {PREFERENCES.map(({ value, label: text }) => (
+                    <label key={value} className="resource-seg-option">
+                      <input type="radio" name={`resource-${role}`} value={value} checked={roles[role] === value} disabled={busy}
+                        onChange={() => setRoles((current) => ({ ...current, [role]: value }))} />
+                      <span>{text}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="resource-turns">
+              <label className="resource-turn">
+                <span>Turn limit to start with</span>
+                <input id="workflow-read-turns" type="number" inputMode="numeric" min={BOUNDS.readTurns.min} max={BOUNDS.readTurns.max} value={readTurns} disabled={busy}
+                  onChange={(event) => { setReadTurns(event.target.value); setError(null); }} />
+              </label>
+              <label className="resource-turn">
+                <span>File-change turn limit</span>
+                <input id="workflow-write-turns" type="number" inputMode="numeric" min={BOUNDS.writeTurns.min} max={BOUNDS.writeTurns.max} value={writeTurns} disabled={busy}
+                  onChange={(event) => { setWriteTurns(event.target.value); setError(null); }} />
+              </label>
+            </div>
+            <small className="workflow-resources-note">These only fill in the turn limits for a new goal. They never change access you already gave.</small>
           </section>
           {FIXED_GROUPS.map((group) => (
             <section key={group} className="workflow-group" aria-label={group}>
