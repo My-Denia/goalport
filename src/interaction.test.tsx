@@ -3225,6 +3225,11 @@ describe("one in-window repair", () => {
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
       fireEvent.click(choice);
       expect(screen.getByText(/stay open for one follow-up/)).toBeTruthy();
+      // Unticking Keep working drops the Pi tick; ticking both again explains the allowance again.
+      const keep = screen.getByRole("checkbox", { name: "Keep working after closing" });
+      fireEvent.click(keep); fireEvent.click(keep);
+      fireEvent.click(await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" }));
+      expect(screen.getByText(/stay open for one follow-up/)).toBeTruthy();
       sendMessage();
       await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
       expect(start.mock.calls[0]).toMatchObject([{ readInstances: ["codex", "pi"], piCapacity: pair, backgroundConsent: true }]);

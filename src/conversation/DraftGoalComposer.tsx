@@ -200,6 +200,8 @@ export function DraftGoalComposer({
   const piChoiceOffered = linuxCanStartCoordination || Boolean(onPiCapacityChange);
   useEffect(() => {
     const eligible = !isLinuxActiveTarget && piChoiceOffered && piCapacityChecked && backgroundConsent && !linuxWrite;
+    // A dropped Pi choice is a new consent next time, so it is explained again.
+    if (!piCapacityChecked) allowanceExplained.current = false;
     if (eligible && !allowanceExplained.current) { allowanceExplained.current = true; setShowAllowanceExplanation(true); }
     else if (!eligible) setShowAllowanceExplanation(false);
   }, [isLinuxActiveTarget, piChoiceOffered, piCapacityChecked, backgroundConsent, linuxWrite]);
