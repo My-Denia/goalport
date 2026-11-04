@@ -107,6 +107,8 @@ interface DraftGoalComposerProps {
   currentWorkTitle?: string | null;
   currentWorkLine?: string | null;
   savedResultLabel?: string | null;
+  /** One quiet line saying which method ran and which checks came back; null when unknown. */
+  methodLine?: string | null;
   savedResultOutcome?: string | null;
   continueDisabledReason?: string | null;
   continueLabel?: string;
@@ -149,7 +151,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function GoalStatusHeading({
-  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false, savedResultLabel, savedResultOutcome
+  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false, savedResultLabel, savedResultOutcome, methodLine
 }: DraftGoalComposerProps) {
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
@@ -174,6 +176,7 @@ export function GoalStatusHeading({
           {savedResultLabel ? <p className="workspace-evidence-label">{savedResultLabel}</p> : null}
           <h2 title={activeGoalTitle || undefined} aria-label={activeGoalTitle || undefined}>{savedResultLabel ? (activeGoalTitle ? shortGoalTitle(activeGoalTitle) : "Saved goal unavailable") : headingText}</h2>
           <p>{savedResultLabel ? savedResultOutcome : inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ?? allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
+          {methodLine && (savedResultLabel || activeGoalTitle) ? <p className="method-line">{methodLine}</p> : null}
           {!savedResultLabel && activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
             <p className="workspace-evidence-label">Previous saved result; the stop message above describes the current job.</p>
           ) : null}

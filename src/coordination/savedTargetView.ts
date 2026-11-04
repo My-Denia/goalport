@@ -126,7 +126,7 @@ export interface SavedTargetPayload {
 
 export function continuationUnavailable(record: SavedTargetResult | null): string | null {
   if (!record) return "That saved goal is no longer available or cannot be identified.";
-  if (record.recordKind === 'native-workspace-check') return 'Workspace checks do not continue a coordinated goal.';
+  if (record.recordKind === 'native-workspace-check') return 'A workspace check cannot be continued.';
   if (Object.hasOwn(record, "piCapacity") && (!normalizePiCapacity(record.piCapacity) || !normalizePiCapacity(record.rememberedIntent?.piCapacity) || !samePiPair(record.piCapacity, record.rememberedIntent?.piCapacity))) return "This saved Pi route is unavailable. Its result is still shown.";
   if (!record.rootRequestId) return record.relationUnavailableReason || "The saved goal relationship is unavailable.";
   if (!record.rootLatestId) return "The latest result cannot be identified.";

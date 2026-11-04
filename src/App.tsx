@@ -35,6 +35,7 @@ import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
+import { methodLine } from "./coordination/methodLine";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
@@ -3559,6 +3560,7 @@ function App() {
                       coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
                     } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
+                    methodLine={isSavedView ? methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
                     currentWorkTitle={currentWork?.identityConfirmed ? currentWork.goal : null}
