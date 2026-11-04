@@ -29,6 +29,8 @@ export interface GoalDraftValue {
   message: string;
   /** A saved user workflow chosen for this goal; absent means Recommended. */
   workflowId?: string;
+  /** A saved result's own copy of its workflow. Editing or removing the workflow drops it, so Send uses what the picker shows. */
+  workflowSnapshot?: WorkflowDefinition;
 }
 
 const WORKFLOW_ROW = "workflow:";
@@ -538,7 +540,7 @@ export function DraftGoalComposer({
             if (result.ok) {
               setEditor(null);
               // The user made or changed it to use it: it is the workflow for this goal now.
-              if (result.saved) onChange({ ...draft, provider: "", workflowId: result.saved.id });
+              if (result.saved) onChange({ ...draft, provider: "", workflowId: result.saved.id, workflowSnapshot: undefined });
             }
             return result;
           }}
@@ -546,7 +548,7 @@ export function DraftGoalComposer({
             const result = await onDeleteWorkflow(id);
             if (result.ok) {
               setEditor(null);
-              if (draft.workflowId === id) onChange({ ...draft, workflowId: undefined });
+              if (draft.workflowId === id) onChange({ ...draft, workflowId: undefined, workflowSnapshot: undefined });
             }
             return result;
           } : undefined}
