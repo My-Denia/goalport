@@ -1035,3 +1035,17 @@ test("turnsRan round-trips, drops malformed entries, and old records have none",
     assert.equal("turnsRan" in saveRecord(directory, record({ requestId: "nowf", turnsRan: [turn] })), false);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
+
+test("decision round-trips when valid, is dropped when not, and old records have none", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-decision-"));
+  try {
+    const decision = { kind: "limit-reached", stage: "plan" };
+    saveRecord(directory, record({ decision }));
+    assert.deepEqual(readRecords(directory)[0].decision, decision);
+    for (const [requestId, bad] of [["a", { kind: "limit-reached" }], ["b", { kind: "nope", stage: "plan" }], ["d", "plan"]]) {
+      assert.equal("decision" in saveRecord(directory, record({ requestId, decision: bad })), false, requestId);
+    }
+    assert.deepEqual(saveRecord(directory, record({ requestId: "extra", decision: { ...decision, extra: 1 } })).decision, decision);
+    assert.equal("decision" in saveRecord(directory, record({ requestId: "old" })), false);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});

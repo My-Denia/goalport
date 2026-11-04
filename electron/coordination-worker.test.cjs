@@ -24,7 +24,7 @@ async function scenario(t, options = {}) {
   const scopeAdapter = { ...scope, authorize: (...args) => { authorizations++; return scope.authorize(...args); } };
   const store = createCoordinationJobStore(directory, { bootstrapReady: true });
   const roster = (options.providers ?? providers).map(provider => options.piCapacity && provider.instanceId === "pi" ? { ...provider, auth: { status: "unknown", type: "apiKey" }, piCapacity: { offer: options.piCapacity, catalog: [{ provider: options.piCapacity.provider, model: options.piCapacity.model }], workspacePath: directory } } : provider);
-  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), ...(options.piCapacity ? { piCapacity: options.piCapacity } : {}), backgroundConsent: true });
+  const start = store.startAdmission({ requestId: "one-send", goal: "Repair this fixture", workspacePath: directory, allowedInstances: options.allowedInstances ?? ["codex", "claude"], maxTurns: options.reads ?? 6, ...(options.readOnly ? {} : { writeAuthorization: { instances: options.writeInstances ?? ["codex"], workspaceRoot: directory, maxTurns: 2 } }), ...(options.executionFeedback ? { executionFeedback: options.executionFeedback } : {}), ...(options.continuation ? { continuation: options.continuation } : {}), ...(options.piCapacity ? { piCapacity: options.piCapacity } : {}), ...(options.workflowDefinition ? { workflowDefinition: options.workflowDefinition } : {}), backgroundConsent: true });
   if (options.storeDecorator) {
     options.store = options.storeDecorator(options.store ?? store, start);
   }
@@ -327,6 +327,36 @@ test("worker completes a rejected plan and its revised chain with one authorizat
   assert.equal("feedbackHistory" in r.records[0], false);
   assert.equal("authorizedTurnsLeft" in r.records[0], false);
   assert.equal(r.status.active, false);
+});
+
+const askDefinition = feedback => ({ schema: 1, id: "my-0a1b2c3d", version: 1, name: "Mine", parent: "recommended@1", modules: { checks: { planReview: "on", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" }, feedback } });
+function phaseRecorder(phases) {
+  return store => ({ ...store, updateProgress: (jobId, patch, owner) => { if (patch.phase) phases.push(patch.phase); return store.updateProgress(jobId, patch, owner); } });
+}
+test("worker with plan revision on ask stops after the rejected plan, persists no revision phase, and records the decision", async t => {
+  const phases = [];
+  const r = await scenario(t, { reads: 5, workflowDefinition: askDefinition({ planRevision: "ask", repair: "automatic" }), storeDecorator: phaseRecorder(phases), reviewAt: { 2: "The plan ignores a required case.\nVERDICT: revise" } });
+  assert.equal(r.launches.length, 2);
+  assert.ok(!phases.includes("plan-revision"));
+  assert.deepEqual(r.result.report.decision, { kind: "automatic-off", stage: "plan" });
+  assert.equal("planRevisionHistory" in r.records[0], false);
+});
+
+test("worker with repair on ask stops after the first audit, persists no repair phase, and records the decision", async t => {
+  const phases = [];
+  const r = await scenario(t, { workflowDefinition: askDefinition({ planRevision: "automatic", repair: "ask" }), storeDecorator: phaseRecorder(phases) });
+  assert.equal(r.launches.length, 4);
+  assert.ok(!phases.includes("repair"));
+  assert.deepEqual(r.result.report.decision, { kind: "automatic-off", stage: "changes" });
+  assert.equal("feedbackHistory" in r.records[0], false);
+});
+
+test("worker on Recommended still persists the repair phase and carries no decision", async t => {
+  const phases = [];
+  const r = await scenario(t, { storeDecorator: phaseRecorder(phases) });
+  assert.equal(r.launches.length, 8);
+  assert.ok(phases.includes("repair"));
+  assert.equal(r.result.report.decision, undefined);
 });
 
 test("worker stops after a second plan rejection without a third planning pass", async t => {

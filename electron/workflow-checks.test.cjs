@@ -43,3 +43,25 @@ test("a definition without resources compiles to the default, and a present modu
   ]) assert.throws(() => compileWorkflow(withResources(bad)), { message: "Unsupported workflow definition." });
   assert.deepEqual(RESOURCE_LAUNCH.claude, { faster: { model: "sonnet" }, stronger: { model: "opus", effort: "high" } });
 });
+
+test("a definition without feedback compiles to automatic, and a present module is validated strictly", () => {
+  const { DEFAULT_FEEDBACK } = require("./workflow-checks.mjs");
+  assert.equal(compileWorkflow(RECOMMENDED_V1).feedback, DEFAULT_FEEDBACK);
+  assert.deepEqual(DEFAULT_FEEDBACK, { planRevision: "automatic", repair: "automatic" });
+  assert.equal("feedback" in RECOMMENDED_V1.modules, false);
+  const withFeedback = (feedback) => ({ ...RECOMMENDED_V1, id: "my-1", name: "Mine", modules: { ...RECOMMENDED_V1.modules, feedback } });
+  for (const planRevision of ["automatic", "ask"]) for (const repair of ["automatic", "ask"]) {
+    assert.deepEqual(compileWorkflow(withFeedback({ planRevision, repair })).feedback, { planRevision, repair });
+  }
+  for (const bad of [
+    { planRevision: "ask", repair: "automatic", extra: "ask" },
+    { planRevision: "ask" },
+    { repair: "ask" },
+    {},
+    { planRevision: "never", repair: "ask" },
+    { planRevision: "ask", repair: true },
+    { planRevision: "ask", repair: null },
+    "ask",
+    null,
+  ]) assert.throws(() => compileWorkflow(withFeedback(bad)), { message: "Unsupported workflow definition." });
+});

@@ -30,6 +30,8 @@ export interface SavedTargetResult {
   checksRan?: readonly CheckRan[];
   /** The setting each dispatched turn launched with; absent on older records. */
   turnsRan?: readonly TurnRan[];
+  /** Why a revise stopped instead of revising; absent when the run did not stop for a revise. */
+  decision?: import("../../electron/coordination-decision.mjs").CoordinationDecision;
   piCapacity?: PiCapacitySelection;
   rememberedIntent?: { background: boolean; write: boolean; piCapacity?: PiCapacitySelection; legacyPi?: boolean } | null;
 }

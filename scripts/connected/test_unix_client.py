@@ -127,6 +127,18 @@ class CommandRoutingTests(unittest.TestCase):
             (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
             self.assertNotIn("turnsRan", workbench.latest_coordination_record(root, "r1")["record"])
 
+    def test_saved_projection_carries_the_decision_a_run_is_waiting_on(self):
+        with tempfile.TemporaryDirectory(prefix="gp-decision-") as temp:
+            root = Path(temp)
+            decision = {"kind": "limit-reached", "stage": "plan"}
+            record = {"requestId": "r1", "goal": "G", "workspacePath": "/work", "verdict": "revise", "planText": "Plan", "reviewText": "Check", "savedAt": "2026-01-01",
+                      "decision": decision}
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertEqual(workbench.latest_coordination_record(root, "r1")["record"]["decision"], decision)
+            del record["decision"]
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertNotIn("decision", workbench.latest_coordination_record(root, "r1")["record"])
+
     def test_optional_stdin_coverage_stays_with_selected_and_retained_material(self):
         with tempfile.TemporaryDirectory(prefix="gp-stdin-coverage-") as temp:
             root = Path(temp)

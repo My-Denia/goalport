@@ -6,6 +6,7 @@ const path = require("node:path");
 const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
 const { compileWorkflow } = require("./workflow-checks.mjs");
+const { readDecision } = require("./coordination-decision.mjs");
 
 const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified", "planned"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
@@ -413,6 +414,8 @@ function normalize(input) {
   const workflowDefinition = isNativeCheck ? undefined : workflowDefinitionOf(input.workflowDefinition);
   const checksRan = workflow === undefined ? undefined : checksRanOf(input.checksRan);
   const turnsRan = workflow === undefined ? undefined : turnsRanOf(input.turnsRan);
+  // What the run is waiting on the user for; strict reader, absent when invalid.
+  const decision = readDecision(input.decision);
   return {
     requestId,
     workspacePath,
@@ -437,6 +440,7 @@ function normalize(input) {
     ...(workflowDefinition === undefined ? {} : { workflowDefinition }),
     ...(checksRan === undefined ? {} : { checksRan }),
     ...(turnsRan === undefined ? {} : { turnsRan }),
+    ...(decision === undefined ? {} : { decision }),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
     ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),

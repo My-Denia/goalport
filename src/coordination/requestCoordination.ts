@@ -21,6 +21,7 @@ import {
   RECOMMENDED_V1, compileWorkflow, planReviewRuns,
   type CompiledWorkflow, type WorkflowDefinition,
 } from "../../electron/workflow-checks.mjs";
+import type { CoordinationDecision } from "../../electron/coordination-decision.mjs";
 import type { CheckRan, TurnRan, WorkflowRef } from "./methodLine";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
@@ -79,6 +80,8 @@ export interface CoordinationView {
   readonly checksRan?: readonly CheckRan[];
   /** The setting each dispatched turn really launched with, across every pass of this send. */
   readonly turnsRan?: readonly TurnRan[];
+  /** Why a revise stopped here instead of revising; absent when the run did not stop for a revise. */
+  readonly decision?: CoordinationDecision;
 }
 
 /**
@@ -226,6 +229,11 @@ const checksOf = (...passes: readonly CoordinateSessionState[]): readonly CheckR
 
 const turnsOf = (...passes: readonly CoordinateSessionState[]): readonly TurnRan[] =>
   passes.flatMap((pass) => pass.turnsRan ?? []);
+
+/** A finished execution whose independent audit asked for changes. */
+const reviseAudit = (state: CoordinateSessionState): boolean => state.verdict === "revise"
+  && (state.auditText ?? "").trim().length > 0
+  && ((state.executionText ?? "").trim().length > 0 || Boolean(state.executionHarness));
 
 const INVALID_WORKFLOW_SENTENCE = "This workflow could not be read, so nothing was sent.";
 
@@ -408,16 +416,22 @@ async function runCoordination(
   // stays terminal, and the original plan/review evidence is retained
   // either way. This is not recursive: a second plan-review revise stops.
   // -----------------------------------------------------------------------
-  const eligibleForPlanRevision = input.beforePlanRevision !== undefined
-    && hasWriteConsent
-    && sent.verdict === "revise"
+  const planRejected = sent.verdict === "revise"
     && (sent.planText ?? "").trim().length > 0
     && (sent.reviewText ?? "").trim().length > 0
     && sent.commands.every((command) =>
       !command.commandId.startsWith("coordinate-execute-") && !command.commandId.startsWith("coordinate-audit-"));
+  const eligibleForPlanRevision = input.beforePlanRevision !== undefined && hasWriteConsent && planRejected;
+  // The user's setting travels in the compiled snapshot; absent means Recommended = automatic.
+  const feedbackSetting = input.workflow.feedback;
+  if (eligibleForPlanRevision && feedbackSetting?.planRevision === "ask") {
+    // The user asked to decide: no budget or staffing probe, no gate call, nothing launched.
+    return viewFrom({ ...firstRound, decision: { kind: "automatic-off", stage: "plan" } });
+  }
   let latest = sent;
   let planRevisionHistory: readonly CoordinationRoundFact[] | undefined;
   let noPlanRevisionSentence: string | null = null;
+  let planStop: CoordinationDecision["kind"] = "window-refused";
   if (eligibleForPlanRevision) {
     const burned = [...new Set([
       ...(input.avoidInstances ?? []),
@@ -455,8 +469,10 @@ async function runCoordination(
     const staffed = budgetAllows && coordinateGoal(revisionInput).commands.length === 2;
     if (!budgetAllows) {
       noPlanRevisionSentence = PLAN_REVISION_BUDGET_STOP_SENTENCE;
+      planStop = "not-enough-turns";
     } else if (!staffed) {
       noPlanRevisionSentence = UNSTAFFED_PLAN_REVISION_SENTENCE;
+      planStop = "unstaffed";
     } else if (!stillCurrent()) {
       noPlanRevisionSentence = input.planRevisionRefusalSentence ?? REFUSED_PLAN_REVISION_SENTENCE;
     } else {
@@ -488,7 +504,7 @@ async function runCoordination(
     }
   }
   if (noPlanRevisionSentence !== null) {
-    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noPlanRevisionSentence}` });
+    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noPlanRevisionSentence}`, decision: { kind: planStop, stage: "plan" } });
   }
 
   // -----------------------------------------------------------------------
@@ -508,8 +524,12 @@ async function runCoordination(
     && latest.verdict === "revise"
     && (latest.auditText ?? "").trim().length > 0
     && ((latest.executionText ?? "").trim().length > 0 || Boolean(latest.executionHarness));
+  if (eligibleForRepair && feedbackSetting?.repair === "ask") {
+    return viewFrom({ ...repairBase, decision: { kind: "automatic-off", stage: "changes" } });
+  }
   let repaired: CoordinateSessionState | null = null;
   let noRepairSentence: string | null = null;
+  let repairStop: CoordinationDecision["kind"] = "window-refused";
   if (eligibleForRepair) {
     const burned = [...new Set([
       ...(input.avoidInstances ?? []),
@@ -555,8 +575,10 @@ async function runCoordination(
     const staffed = budgetAllows && coordinateGoal(correctiveInput).commands.length === 2;
     if (!budgetAllows) {
       noRepairSentence = BUDGET_STOP_SENTENCE;
+      repairStop = "not-enough-turns";
     } else if (!staffed) {
       noRepairSentence = UNSTAFFED_REPAIR_SENTENCE;
+      repairStop = "unstaffed";
     } else if (!stillCurrent()) {
       noRepairSentence = input.repairRefusalSentence ?? REFUSED_REPAIR_SENTENCE;
     } else {
@@ -588,7 +610,11 @@ async function runCoordination(
   }
   if (repaired === null) {
     if (noRepairSentence === null) {
-      if (planRevisionHistory === undefined) return firstRound;
+      if (planRevisionHistory === undefined) {
+        // No automatic round was available: a plain revise names its stage.
+        if (planRejected) return viewFrom({ ...firstRound, decision: { kind: "revise", stage: "plan" } });
+        return reviseAudit(sent) ? viewFrom({ ...firstRound, decision: { kind: "revise", stage: "changes" } }) : firstRound;
+      }
       // The revised chain is the latest pass. A second plan-review revise is
       // the one-revision ceiling; any other outcome keeps its own honest stop.
       const secondRejection = latest.verdict === "revise"
@@ -601,10 +627,11 @@ async function runCoordination(
         checksRan: checksOf(sent, latest),
         turnsRan: turnsOf(sent, latest),
         planRevisionHistory,
-        ...(secondRejection ? { stopReason: `${latestView.stopReason} ${PLAN_REVISION_CEILING_SENTENCE}` } : {}),
+        ...(secondRejection ? { stopReason: `${latestView.stopReason} ${PLAN_REVISION_CEILING_SENTENCE}`, decision: { kind: "limit-reached", stage: "plan" } as CoordinationDecision }
+          : reviseAudit(latest) ? { decision: { kind: "revise", stage: "changes" } as CoordinationDecision } : {}),
       });
     }
-    return viewFrom({ ...repairBase, stopReason: `${repairBase.stopReason} ${noRepairSentence}` });
+    return viewFrom({ ...repairBase, stopReason: `${repairBase.stopReason} ${noRepairSentence}`, decision: { kind: repairStop, stage: "changes" } });
   }
   // Latest pass on top; the pass it repaired is retained as history. Send-wide
   // dispatch keeps the goal non-retryable even when a later launch provably
@@ -618,6 +645,6 @@ async function runCoordination(
     turnsRan: turnsOf(...(latest === sent ? [sent] : [sent, latest]), repaired),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     feedbackHistory: [roundFactFrom(latest)],
-    ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}` } : {}),
+    ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}`, decision: { kind: "limit-reached", stage: "changes" } as CoordinationDecision } : {}),
   });
 }

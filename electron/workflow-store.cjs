@@ -145,6 +145,9 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
     // below refuses anything that is not exactly the closed shape.
     const sentResources = input.modules?.resources;
     const resources = sentResources !== undefined ? JSON.parse(JSON.stringify(sentResources)) : existing?.modules?.resources;
+    // Feedback is kept the same way: sent replaces, left out preserves.
+    const sentFeedback = input.modules?.feedback;
+    const feedback = sentFeedback !== undefined ? JSON.parse(JSON.stringify(sentFeedback)) : existing?.modules?.feedback;
     const definition = {
       schema: SCHEMA,
       id,
@@ -159,6 +162,7 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
           requirementCitation: RECOMMENDED_V1.modules.checks.requirementCitation,
         },
         ...(resources !== undefined ? { resources } : {}),
+        ...(feedback !== undefined ? { feedback } : {}),
       },
     };
     try { compileWorkflow(definition); } catch { throw plain("Those workflow settings are not valid, so nothing was saved."); }

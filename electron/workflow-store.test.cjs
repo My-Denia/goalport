@@ -226,3 +226,16 @@ test("saving keeps the resources module, keeps it when an edit leaves it out, an
   assert.equal(carryWorkflows(s.directory, target), true);
   assert.deepEqual(createWorkflowStore({ directory: target, backupsDirectory: path.join(target, "backups") }).read().workflows.find((w) => w.id === first.saved.id).modules.resources, changed);
 });
+
+test("saving keeps the feedback module, keeps it when an edit leaves it out, and refuses a bad one", (t) => {
+  const s = sandbox(t);
+  const feedback = { planRevision: "ask", repair: "automatic" };
+  const first = s.store.save({ name: "Ask first", modules: { ...checks("on"), feedback } });
+  assert.deepEqual(first.saved.modules.feedback, feedback);
+  const edited = s.store.save({ id: first.saved.id, name: "Ask first", modules: checks("off") });
+  assert.deepEqual(edited.saved.modules.feedback, feedback);
+  const changed = { planRevision: "automatic", repair: "ask" };
+  assert.deepEqual(s.store.save({ id: first.saved.id, name: "Ask first", modules: { ...checks("on"), feedback: changed } }).saved.modules.feedback, changed);
+  assert.throws(() => s.store.save({ name: "Bad", modules: { ...checks("on"), feedback: { planRevision: "ask" } } }), { message: "Those workflow settings are not valid, so nothing was saved." });
+  assert.equal("feedback" in s.store.save({ name: "Plain", modules: checks("on") }).saved.modules, false);
+});
