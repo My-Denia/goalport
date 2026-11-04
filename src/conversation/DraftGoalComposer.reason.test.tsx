@@ -24,27 +24,25 @@ function mount(over: { connected: boolean; waitingOn: string | null; blocked: bo
 }
 
 describe("Send reason beside a disabled Send", () => {
-  it("never leaves a disabled Send unexplained, and is quiet when Send is on", () => {
-    const flags = [false, true];
-    const holds = [null, "A background goal is still active."];
-    let disabledCases = 0;
-    for (const connected of flags) for (const waiting of [null, "Checking which agents can work on this goal…"])
-      for (const blocked of flags) for (const hold of holds) for (const grantMissing of flags)
-        for (const workspace of ["", "C:\\work"]) for (const message of ["", "plan it"]) for (const available of flags) for (const retry of [undefined, "Check result"]) {
-          const send = mount({ connected, waitingOn: waiting, blocked, workspace, message, available, retry, blockers: { holdSentence: hold, grantMissing, grantControlVisible: true } });
-          const reason = document.getElementById("send-disabled-reason");
-          if (send.disabled) {
-            disabledCases += 1;
-            // The picker's own "Choose how to work before sending." is the other place a reason may live.
-            const pickerSays = screen.queryByText("Choose how to work before sending.") !== null;
-            expect(Boolean(reason) || pickerSays, JSON.stringify({ connected, waiting, blocked, hold, grantMissing, workspace, message, available, retry })).toBe(true);
-            if (reason) expect(send.getAttribute("aria-describedby")).toBe("send-disabled-reason");
-          } else {
-            expect(reason).toBeNull();
-          }
-          cleanup();
-        }
-    expect(disabledCases).toBeGreaterThan(100);
+  // One test per state combination (512), so a failure names its case and no single test carries the whole matrix's render time.
+  const flags = [false, true];
+  const cases = [];
+  for (const connected of flags) for (const waiting of [null, "Checking which agents can work on this goal…"])
+    for (const blocked of flags) for (const hold of [null, "A background goal is still active."]) for (const grantMissing of flags)
+      for (const workspace of ["", "C:\work"]) for (const message of ["", "plan it"]) for (const available of flags) for (const retry of [undefined, "Check result"])
+        cases.push({ connected, waiting, blocked, hold, grantMissing, workspace, message, available, retry });
+
+  it.each(cases.map((c) => [JSON.stringify(c), c] as const))("a disabled Send is explained, an enabled one is quiet: %s", (_name, c) => {
+    const send = mount({ connected: c.connected, waitingOn: c.waiting, blocked: c.blocked, workspace: c.workspace, message: c.message, available: c.available, retry: c.retry, blockers: { holdSentence: c.hold, grantMissing: c.grantMissing, grantControlVisible: true } });
+    const reason = document.getElementById("send-disabled-reason");
+    if (send.disabled) {
+      // The picker's own "Choose how to work before sending." is the other place a reason may live.
+      const pickerSays = screen.queryByText("Choose how to work before sending.") !== null;
+      expect(Boolean(reason) || pickerSays).toBe(true);
+      if (reason) expect(send.getAttribute("aria-describedby")).toBe("send-disabled-reason");
+    } else {
+      expect(reason).toBeNull();
+    }
   });
 
   it("keeps the hold sentence visible during a retry, where Send stays on", () => {
