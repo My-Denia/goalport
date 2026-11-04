@@ -83,6 +83,15 @@ describe("the plan-revision gate honours the feedback setting", () => {
     expect(transport.roles).toEqual(FIRST_CHAIN);
   });
 
+  it("a background job's refusal says so on the decision; a window's does not", async () => {
+    const background = await requestCoordination({ ...base, writeAuthorization: write, beforePlanRevision: async () => false, planRevisionRefusalSentence: "Background refusal." }, discovery, script(planRevise));
+    expect(background.decision).toEqual({ kind: "window-refused", stage: "plan", where: "background" });
+    const window = await requestCoordination({ ...base, writeAuthorization: write, beforePlanRevision: async () => false }, discovery, script(planRevise));
+    expect(window.decision).toEqual({ kind: "window-refused", stage: "plan" });
+    const repair = await requestCoordination({ ...base, writeAuthorization: write, beforeRepair: async () => false, repairRefusalSentence: "Background refusal." }, discovery, script({ reviseAudit: (nth: number) => nth === 1 }));
+    expect(repair.decision).toEqual({ kind: "window-refused", stage: "changes", where: "background" });
+  });
+
   it("window-refused when the gate says no, throws, or the request went stale", async () => {
     for (const beforePlanRevision of [async () => false, async () => { throw new Error("x"); }]) {
       const view = await requestCoordination({ ...base, writeAuthorization: write, beforePlanRevision }, discovery, script(planRevise));

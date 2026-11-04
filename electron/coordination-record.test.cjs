@@ -1047,5 +1047,10 @@ test("decision round-trips when valid, is dropped when not, and old records have
     }
     assert.deepEqual(saveRecord(directory, record({ requestId: "extra", decision: { ...decision, extra: 1 } })).decision, decision);
     assert.equal("decision" in saveRecord(directory, record({ requestId: "old" })), false);
+    // "where" only qualifies a window refusal, and only as "background".
+    const bg = { kind: "window-refused", stage: "plan", where: "background" };
+    assert.deepEqual(saveRecord(directory, record({ requestId: "bg", decision: bg })).decision, bg);
+    assert.deepEqual(saveRecord(directory, record({ requestId: "bg2", decision: { ...bg, where: "elsewhere" } })).decision, { kind: "window-refused", stage: "plan" });
+    assert.deepEqual(saveRecord(directory, record({ requestId: "bg3", decision: { ...decision, where: "background" } })).decision, decision);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

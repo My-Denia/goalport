@@ -8,6 +8,7 @@
 //   limit-reached     the one automatic round already ran and the check asked again
 //   not-enough-turns  not enough authorized turns were left for the automatic round
 //   window-refused    this window could not be confirmed, so the round did not start
+//                     (where: 'background' when a background job's worker gate said no)
 //   unstaffed         the agents you allowed could not staff the automatic round
 //   revise            a plain first-round revise with no automatic round available
 // Stages: plan (the plan check before any write), changes (verification after writes).
@@ -19,7 +20,8 @@ export const DECISION_STAGES = Object.freeze(['plan', 'changes']);
 // Strict reader for stored values: anything else is treated as absent.
 export function readDecision(value) {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const { kind, stage } = value;
+  const { kind, stage, where } = value;
   if (!DECISION_KINDS.includes(kind) || !DECISION_STAGES.includes(stage)) return undefined;
-  return { kind, stage };
+  // `where` only qualifies a window refusal; anywhere else it is dropped.
+  return kind === 'window-refused' && where === 'background' ? { kind, stage, where } : { kind, stage };
 }

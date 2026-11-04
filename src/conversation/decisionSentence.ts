@@ -26,7 +26,7 @@ export function decisionSentence(decision: CoordinationDecision, actions: Decisi
     case "unstaffed":
       return `${asked} The agents you allowed couldn't take on the ${plan ? "revision" : "repair"}.${access} ${next}`;
     case "window-refused":
-      return `${asked} GoalPort couldn't confirm this window, so it didn't start the ${plan ? "revision" : "repair"}. ${next}`;
+      return `${asked} GoalPort couldn't confirm ${decision.where === "background" ? "the background job could continue" : "this window"}, so the ${plan ? "revision" : "repair"} didn't start. ${next}`;
     case "revise":
       return `${asked} ${next}`;
   }

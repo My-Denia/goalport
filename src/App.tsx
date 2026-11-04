@@ -3695,7 +3695,7 @@ function App() {
                       coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
                     } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
-                    methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan, savedTarget?.decision) : methodLine(coordination?.workflow, coordination?.checksRan, coordination?.decision)}
+                    methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
                     resourcesLine={client.mode !== "linux-core" ? null : resourcesLine(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
                     resourcesTitle={client.mode !== "linux-core" ? null : resourcesTitle(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}

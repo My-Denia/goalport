@@ -1,4 +1,3 @@
-import type { CoordinationDecision } from "../../electron/coordination-decision.mjs";
 import type { CoordinationVerdict } from "./verdict";
 
 /** Which workflow definition a coordinated result ran under. */
@@ -39,15 +38,12 @@ const RECOMMENDED_NAME = "Recommended workflow";
 const KIND_WORDS: Readonly<Record<CheckRan["kind"], string>> = { "plan-check": "plan check", audit: "verification" };
 
 /** One honest line of what ran; null when the method is unknown, so nothing is guessed. No verdict words. */
-export function methodLine(workflow: WorkflowRef | null | undefined, checksRan: readonly CheckRan[] | null | undefined, decision?: CoordinationDecision | null): string | null {
+export function methodLine(workflow: WorkflowRef | null | undefined, checksRan: readonly CheckRan[] | null | undefined): string | null {
   const name = workflow ? (workflow.name?.trim() || (workflow.id === "recommended" ? RECOMMENDED_NAME : "")) : "";
   if (!workflow || !name || !checksRan) return null; // absent checksRan is unknown, not "none ran"
   if (workflow.planReview === "off") return `${name} v${workflow.version} · Independent review: not run (off in ${name})`;
   const ran = [...new Set(checksRan.map((check) => `${KIND_WORDS[check.kind]} by ${check.harness}`))];
-  const line = `${name} v${workflow.version} · ${ran.length === 0 ? "No check ran" : `Ran: ${ran.join(", ")}`}`;
-  // Only when the setting itself changed what ran; a stop for any other reason says nothing about it.
-  if (decision?.kind !== "automatic-off") return line;
-  return `${line} · ${decision.stage === "plan" ? "Automatic plan revision" : "Automatic repair"}: off in ${name}`;
+  return `${name} v${workflow.version} · ${ran.length === 0 ? "No check ran" : `Ran: ${ran.join(", ")}`}`;
 }
 
 const ROLE_ORDER: readonly TurnRan["role"][] = ["plan", "review", "execute", "audit"];

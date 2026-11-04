@@ -119,9 +119,10 @@ it("an old record without a decision renders exactly as before", () => {
   expect(screen.getByText("This plan needs changes. Revise keeps it and lets you send an update.")).toBeTruthy();
 });
 
-it("the method line says the setting was off only for an automatic-off stop", () => {
+it("the method line does not repeat the automatic-off setting the decision sentence already says", () => {
   const wf = { id: "my-0a1b2c3d", version: 2, name: "Careful" };
   const ranOne = [{ kind: "plan-check", harness: "Pi", verdict: "revise" }] as const;
   render(<CoordinationStatus {...planStop} workflow={wf} checksRan={ranOne} decision={{ kind: "automatic-off", stage: "plan" }} />);
-  expect(screen.getByText("Careful v2 · Ran: plan check by Pi · Automatic plan revision: off in Careful")).toBeTruthy();
+  expect(screen.getByText("Careful v2 · Ran: plan check by Pi")).toBeTruthy();
+  expect(screen.queryByText(/Automatic plan revision/)).toBeNull();
 });

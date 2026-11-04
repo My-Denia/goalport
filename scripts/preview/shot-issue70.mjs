@@ -196,8 +196,8 @@ try {
   await clickOn('button[aria-label^="Plan: Tidy the audit notes"]', /./);
   await until(`Boolean(document.querySelector('.coordination-decision'))`);
   await sleep(300);
-  await capture({ state: "02-result-decision", needles: ["The check asked for changes to the plan.", "Your workflow stops here, so nothing more was spent.", "Automatic plan revision: off in Careful plans", "Technical details"],
-    absent: ["This plan needs changes.", "Stop reason"],
+  await capture({ state: "02-result-decision", needles: ["The check asked for changes to the plan.", "Your workflow stops here, so nothing more was spent.", "Technical details"],
+    absent: ["This plan needs changes.", "Stop reason", "Automatic plan revision: off in"],
     extra: async () => [
       { name: "the engine sentence is not visible outside Technical details", ok: await evaluate(`(() => { const t = document.querySelector('.coordination-outcome').textContent; return !t.includes('so this stopped'); })()`) },
       { name: "the sentence appears once", ok: (await evaluate(`document.body.innerText.split('Your workflow stops here').length - 1`)) === 1 },

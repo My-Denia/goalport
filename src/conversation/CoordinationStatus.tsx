@@ -267,7 +267,7 @@ export function CoordinationStatus({
   turnsRan,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
-  const method = methodLine(workflow, checksRan, decision);
+  const method = methodLine(workflow, checksRan);
   const decided = decision ? decisionSentence(decision, { canRevise: Boolean(onRevise), canChangeAccess: Boolean(onChangeAccess) }) : null;
   const resources = resourcesLine(turnsRan);
   const resourcesFull = resourcesTitle(turnsRan);

@@ -504,7 +504,7 @@ async function runCoordination(
     }
   }
   if (noPlanRevisionSentence !== null) {
-    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noPlanRevisionSentence}`, decision: { kind: planStop, stage: "plan" } });
+    return viewFrom({ ...firstRound, stopReason: `${firstRound.stopReason} ${noPlanRevisionSentence}`, decision: { kind: planStop, stage: "plan", ...(planStop === "window-refused" && input.planRevisionRefusalSentence ? { where: "background" as const } : {}) } });
   }
 
   // -----------------------------------------------------------------------
@@ -631,7 +631,7 @@ async function runCoordination(
           : reviseAudit(latest) ? { decision: { kind: "revise", stage: "changes" } as CoordinationDecision } : {}),
       });
     }
-    return viewFrom({ ...repairBase, stopReason: `${repairBase.stopReason} ${noRepairSentence}`, decision: { kind: repairStop, stage: "changes" } });
+    return viewFrom({ ...repairBase, stopReason: `${repairBase.stopReason} ${noRepairSentence}`, decision: { kind: repairStop, stage: "changes", ...(repairStop === "window-refused" && input.repairRefusalSentence ? { where: "background" as const } : {}) } });
   }
   // Latest pass on top; the pass it repaired is retained as history. Send-wide
   // dispatch keeps the goal non-retryable even when a later launch provably
