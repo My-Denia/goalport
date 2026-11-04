@@ -7,7 +7,7 @@ import {
 } from "./coordinateGoal";
 import { runCoordinateSession, type CoordinateLaunchResult } from "./coordinateSession";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
-import { resourcesLine, type TurnRan } from "./methodLine";
+import { resourcesLine, resourcesTitle, type TurnRan } from "./methodLine";
 import { requestCoordination } from "./requestCoordination";
 
 const workspace = "/work/goal";
@@ -236,6 +236,18 @@ describe("resourcesLine", () => {
     ])).toBe("Plan: Claude (no change with an API key) · Check: Claude opus (no change)");
     expect(resourcesLine([turn({ harness: "pi", model: "alpha" }), turn({ role: "review", preference: "faster", effort: "low", applied: true })]))
       .toBe("Plan: Pi alpha · Check: Codex, low effort (faster)");
+  });
+  it("shows a supported long or unusual Pi model id, shortened in the line and whole in the hover text", () => {
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/".padEnd(81, "y");
+    const odd = "vendor/model@2025+beta:latest";
+    const line = resourcesLine([turn({ harness: "pi", model: arn }), turn({ role: "review", harness: "pi", model: odd, preference: "faster", applied: false })])!;
+    expect(line).toContain(`${odd} (its own setting)`);
+    expect(line).toContain(`${arn.slice(0, 18)}…${arn.slice(-18)}`);
+    expect(line).not.toContain(arn);
+    const rows = [turn({ harness: "pi", model: arn }), turn({ role: "review", harness: "pi", model: odd, preference: "faster", applied: false })];
+    expect(resourcesLine(rows, true)).toContain(arn);
+    expect(resourcesTitle(rows)).toContain(arn);
+    expect(resourcesTitle([turn({ harness: "pi", model: odd, preference: "faster", applied: false })])).toBeNull();
   });
   it("uses no internal words", () => {
     const line = resourcesLine([turn({ preference: "faster", effort: "low", applied: true })])!;

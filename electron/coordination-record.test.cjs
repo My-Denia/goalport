@@ -1000,6 +1000,23 @@ test("an invalid workflow definition or workflow label is dropped without reject
   assert.equal("workflowDefinition" in normalizeRecord(record({ recordKind: "native-workspace-check", nativeCheckTarget: {}, nativeCheckMaterial: {}, workflowDefinition: QUICK })), false);
 });
 
+test("turnsRan keeps every model id Pi capacity accepts and drops unsafe ones", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-models-"));
+  try {
+    const workflow = { id: "recommended", version: 1 };
+    const turn = { role: "plan", harness: "pi", model: "m", effort: "high", preference: "default", applied: false };
+    const arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/".padEnd(81, "y");
+    assert.equal(arn.length, 81);
+    const odd = "vendor/model@2025+beta:latest";
+    const kept = [{ ...turn, model: arn }, { ...turn, model: odd }, { ...turn, model: "a".repeat(256) }];
+    const saved = saveRecord(directory, record({ workflow, turnsRan: [
+      ...kept, { ...turn, model: "badid" }, { ...turn, model: "a".repeat(257) }, { ...turn, model: "has space" }, { ...turn, model: "" },
+    ] }));
+    assert.deepEqual(saved.turnsRan, kept);
+    assert.deepEqual(readRecords(directory)[0].turnsRan, kept);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("turnsRan round-trips, drops malformed entries, and old records have none", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-turns-"));
   try {

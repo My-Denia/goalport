@@ -50,7 +50,15 @@ const ROLE_ORDER: readonly TurnRan["role"][] = ["plan", "review", "execute", "au
 const ROLE_WORDS: Readonly<Record<TurnRan["role"], string>> = { plan: "Plan", review: "Check", execute: "Changes", audit: "Verification" };
 const HARNESS_WORDS: Readonly<Record<string, string>> = { codex: "Codex", claude: "Claude", pi: "Pi" };
 
-function turnWords(turn: TurnRan): string {
+const MODEL_SHOWN_MAX = 40;
+/** Long ids (ARNs) keep their start and end so they stay recognisable in one line. */
+function shownModel(model: string, full: boolean): string {
+  if (full || model.length <= MODEL_SHOWN_MAX) return model;
+  return `${model.slice(0, 18)}…${model.slice(-18)}`;
+}
+
+function turnWords(source: TurnRan, full: boolean): string {
+  const turn = source.model ? { ...source, model: shownModel(source.model, full) } : source;
   const name = HARNESS_WORDS[turn.harness] ?? turn.harness;
   if (turn.preference !== "default" && turn.applied) {
     if (turn.harness === "claude") {
@@ -74,12 +82,18 @@ function turnWords(turn: TurnRan): string {
  * because a replacement agent is the one that finished the step. It never
  * says faster or stronger unless the launch carried it.
  */
-export function resourcesLine(turnsRan: readonly TurnRan[] | null | undefined): string | null {
+export function resourcesLine(turnsRan: readonly TurnRan[] | null | undefined, full = false): string | null {
   if (!turnsRan || turnsRan.length === 0 || turnsRan.every((turn) => turn.preference === "default")) return null;
   const parts: string[] = [];
   for (const role of ROLE_ORDER) {
     const last = [...turnsRan].reverse().find((turn) => turn.role === role);
-    if (last) parts.push(`${ROLE_WORDS[role]}: ${turnWords(last)}`);
+    if (last) parts.push(`${ROLE_WORDS[role]}: ${turnWords(last, full)}`);
   }
   return parts.length === 0 ? null : parts.join(" · ");
+}
+
+/** Hover text with the untruncated model ids; null when the line already shows everything. */
+export function resourcesTitle(turnsRan: readonly TurnRan[] | null | undefined): string | null {
+  const full = resourcesLine(turnsRan, true);
+  return full !== null && full !== resourcesLine(turnsRan) ? full : null;
 }

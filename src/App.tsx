@@ -40,7 +40,7 @@ import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { WAIT_SENTENCE, NEED_TWO_AGENTS_SENTENCE, NEED_ONE_AGENT_SENTENCE } from "./conversation/sendDisabledReason";
-import { methodLine, resourcesLine } from "./coordination/methodLine";
+import { methodLine, resourcesLine, resourcesTitle } from "./coordination/methodLine";
 import { startingBudget } from "./coordination/startingBudget";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
@@ -3696,6 +3696,7 @@ function App() {
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
                     methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
                     resourcesLine={client.mode !== "linux-core" ? null : resourcesLine(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
+                    resourcesTitle={client.mode !== "linux-core" ? null : resourcesTitle(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
                     currentWorkTitle={currentWork?.identityConfirmed ? currentWork.goal : null}
