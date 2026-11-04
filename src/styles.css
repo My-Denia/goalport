@@ -359,6 +359,9 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   border-radius: 8px;
   background: var(--panel);
 }
+.authorization-background { display: grid; justify-items: start; gap: 6px; margin: 0 0 10px; }
+.authorization-background > p { margin: 0; }
+.authorization-grant-note { color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; }
 .authorization-panel-lead { margin: 0 0 10px; color: var(--ink-muted); font-size: 13px; line-height: 1.5; }
 .authorization-provider-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
 .authorization-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
@@ -1345,5 +1348,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 /* Quiet load hold above the draft actions: harness access is still
    resolving, so Send waits (progress, not an error). */
 .composer-wait { margin: 10px 0 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; }
+
+/* Why Send is off, beside Send. Wraps on its own line so it stays readable on narrow windows. */
+.send-disabled-reason { flex: 1 1 100%; margin: 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; text-align: right; }
 
 .method-line { margin: 2px 0 0; color: var(--ink-muted); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }

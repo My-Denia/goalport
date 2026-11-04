@@ -35,6 +35,7 @@ import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
+import { WAIT_SENTENCE } from "./conversation/sendDisabledReason";
 import { methodLine } from "./coordination/methodLine";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
@@ -1173,7 +1174,7 @@ function App() {
       draftGoalRef.current = reconciled;
       if (nativeDraftRef.current) nativeGoalDraftRef.current = reconciled;
       setDraftGoal(reconciled);
-      setDraftError({ sentence: "The earlier send is still not confirmed. Your original request is kept." });
+      setDraftError({ sentence: EARLIER_SEND_UNCONFIRMED_SENTENCE });
       return;
     }
     const retrying = canExplicitlyRetry(draftGoal.intent);
@@ -1199,12 +1200,12 @@ function App() {
       return;
     }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
-      setDraftError({ sentence: "GoalPort needs to reconnect before starting new work." });
+      setDraftError({ sentence: PROJECTION_UNAVAILABLE_SENTENCE });
       return;
     }
     if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held"
       && snapshot.stopResponsibility.blocksCurrentWorkspace !== false) {
-      setDraftError({ sentence: "A held Stop governs a workspace in this view, so no new goal can start here." });
+      setDraftError({ sentence: HELD_STOP_SENTENCE });
       return;
     }
     if (!provider) {
@@ -3532,6 +3533,22 @@ function App() {
                 <p className="draft-hint">One Codex conversation, without automatic Pi verification. Closing this page does not end the agent session.</p>
               </div><div className="composer-dock">{nativeComposer}</div></>;
             }
+            // Windows only: one plain reason beside a disabled Send. Each cause keeps its own flag.
+            const electronDraft = client.mode === "electron";
+            const grantMissing = electronDraft && ((Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable)
+              || (backgroundConsent && appInfo?.coordinationConfigured !== true));
+            const sendBlockers = electronDraft ? {
+              holdSentence: draftHeldNote ? draftHeldSentence
+                : backgroundSlotBlocked ? backgroundSlotSentence
+                : snapshot.bounds?.projectionUnavailable ? PROJECTION_UNAVAILABLE_SENTENCE
+                : snapshot.stopResponsibility?.writeResponsibility === "held" && snapshot.stopResponsibility.blocksCurrentWorkspace !== false ? HELD_STOP_SENTENCE
+                : draftBlocked ? EARLIER_SEND_UNCONFIRMED_SENTENCE
+                : linuxActionBusy ? WAIT_SENTENCE
+                : null,
+              grantMissing,
+              grantControlVisible: Boolean(window.goalportCore?.backgroundSendConsent && window.goalportCore.backgroundStart)
+                && draftGoal?.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null && appInfo?.coordinationConfigured !== true,
+            } : undefined;
             const draftComposer = (
                   <DraftGoalComposer
                     linuxEntry={client.mode === "linux-core" && (linuxShowingFreshDraft || (coordinatedRoute === null && !linuxCoordinationGoal && !linuxCoordinationRequest && !snapshot.activeCampaignId))}
@@ -3546,7 +3563,8 @@ function App() {
                         : "Checking which agents can work on this goal… Send unlocks once your agent access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
+                    sendBlockers={sendBlockers}
+                    error={electronDraft ? draftError : draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     coordinationEntryAvailable={scopeBridgeReady}
@@ -4310,6 +4328,9 @@ function targetsHeldWorkspace(value: string, held: string): boolean {
 }
 
 const HELD_CONVERSATION_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Return to the background goal to release it; nothing was sent.";
+const EARLIER_SEND_UNCONFIRMED_SENTENCE = "The earlier send is still not confirmed. Your original request is kept.";
+const PROJECTION_UNAVAILABLE_SENTENCE = "GoalPort needs to reconnect before starting new work.";
+const HELD_STOP_SENTENCE = "A held Stop governs a workspace in this view, so no new goal can start here.";
 const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
 const UNIDENTIFIABLE_FOLDER_SENTENCE = "GoalPort needs an absolute folder path (for example C:\\workspace\\your-project) before it can check this folder or start work; nothing was sent.";
 

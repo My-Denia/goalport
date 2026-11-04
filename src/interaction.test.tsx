@@ -3209,6 +3209,27 @@ describe("one in-window repair", () => {
       expect(bridge.authorizations).toHaveLength(0);
       expect(bridge.launchCount()).toBe(0);
     });
+    it("a first-time user sees the grant as a real button and why Send is off, until it is granted", async () => {
+      scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
+      let allowed = false;
+      window.goalportCore!.backgroundSendConsent = async () => { allowed = true; return { allowed }; };
+      window.goalportCore!.appInfo = async () => ({ version: "test", channel: "test", testMode: false, dataPath: "profile", coordinationConfigured: allowed });
+      window.goalportCore!.backgroundStart = vi.fn();
+      render(<App />); await openDraftWithPanel();
+      typeMessage("Plan this helper");
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "C:\\work" } });
+      const grantButton = screen.getByRole("button", { name: sentence });
+      expect(grantButton.className).toContain("button-primary");
+      expect(document.getElementById(grantButton.getAttribute("aria-describedby")!)!.textContent).toMatch(/once per profile/);
+      const reason = document.getElementById("send-disabled-reason")!;
+      expect(reason.textContent).toBe(`Press “${sentence}” above to send.`);
+      expect(screen.getByRole("button", { name: "Send message" }).getAttribute("aria-describedby")).toBe("send-disabled-reason");
+      fireEvent.click(grantButton);
+      await waitFor(() => expect(screen.queryByRole("button", { name: sentence })).toBeNull());
+      expect(document.getElementById("send-disabled-reason")?.textContent ?? "").not.toContain(sentence);
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+      expect(document.getElementById("send-disabled-reason")).toBeNull();
+    });
     it("Windows Codex + Pi background Send keeps Send open and carries the ticked Pi capacity", async () => {
       scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("pi", "Pi")], launch: async command => planOrReview(command) });
       const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
