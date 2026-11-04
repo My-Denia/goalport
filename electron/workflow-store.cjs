@@ -13,6 +13,8 @@ const SCHEMA = 1;
 const KEEP_BACKUPS = 10;
 const BACKUP_NAME = /^workflows-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z(?:-\d+)?\.json$/;
 const UNREADABLE_NOTICE = "Your saved workflows could not be read, so GoalPort set that file aside and started a fresh list.";
+const BUSY_NOTICE = "Your saved workflows could not be read right now.";
+const BUSY_REFUSAL = "Your saved workflows could not be read right now, so nothing was changed. Try again.";
 const DROPPED_NOTICE = "Some saved workflows could not be read and were left out.";
 
 class WorkflowError extends Error {}
@@ -81,13 +83,14 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
     try { fsApi.renameSync(file, target); } catch { /* A file that cannot be moved is still ignored. */ }
   }
 
-  // Never throws: { workflows, notice }.
+  // Never throws: { workflows, notice, busy }. busy means the file exists but could not be
+  // read this time (antivirus lock, permissions); the file is left alone and writes must refuse.
   function read() {
     let text;
     try { text = fsApi.readFileSync(file, "utf8"); }
     catch (error) {
       if (error && error.code === "ENOENT") return { workflows: [], notice: null };
-      return { workflows: [], notice: UNREADABLE_NOTICE };
+      return { workflows: [], notice: BUSY_NOTICE, busy: true };
     }
     const parsed = parseWorkflowsText(text);
     if (!parsed) { setAside(); return { workflows: [], notice: UNREADABLE_NOTICE }; }
@@ -124,6 +127,7 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
     if (input.id === RECOMMENDED_V1.id) throw plain("The Recommended workflow cannot be changed. Copy it to make your own.");
     const checks = input.modules?.checks;
     const current = read();
+    if (current.busy) throw plain(BUSY_REFUSAL);
     const list = current.workflows;
     const hasId = input.id !== undefined && input.id !== null;
     const existing = hasId ? list.find((w) => w.id === input.id) ?? null : null;
@@ -158,6 +162,7 @@ function createWorkflowStore({ directory, backupsDirectory, fsApi = fs, now = ()
 
   function remove(id) {
     const current = read();
+    if (current.busy) throw plain(BUSY_REFUSAL);
     const next = current.workflows.filter((w) => w.id !== id);
     if (next.length === current.workflows.length) return { workflows: current.workflows, notice: current.notice };
     try { persist(next); } catch { throw plain("Your workflow could not be deleted. Nothing was changed."); }

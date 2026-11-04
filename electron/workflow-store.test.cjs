@@ -175,3 +175,38 @@ test("carryWorkflows skips an invalid source and never throws", (t) => {
   assert.equal(carryWorkflows(undefined, s.directory), false);
   assert.equal(fs.existsSync(file(s)), false);
 });
+
+function busyFs(real) {
+  let locked = false;
+  const api = Object.create(real);
+  api.readFileSync = (target, ...rest) => {
+    if (locked && String(target).endsWith(FILE)) throw Object.assign(new Error("resource busy or locked"), { code: "EBUSY" });
+    return real.readFileSync(target, ...rest);
+  };
+  return { api, lock: () => { locked = true; }, unlock: () => { locked = false; } };
+}
+
+test("a file that cannot be read right now is left byte-identical by save and by delete", (t) => {
+  const s = sandbox(t);
+  const busy = busyFs(fs);
+  const store = createWorkflowStore({ directory: s.directory, backupsDirectory: s.backupsDirectory, fsApi: busy.api });
+  const kept = store.save({ name: "Keep me", modules: checks() }).saved;
+  const before = fs.readFileSync(file(s));
+  busy.lock();
+
+  const listed = store.read();
+  assert.deepEqual(listed.workflows, []);
+  assert.equal(listed.notice, "Your saved workflows could not be read right now.");
+  assert.doesNotMatch(listed.notice, /set aside/);
+
+  const refusal = /could not be read right now, so nothing was changed\. Try again\./;
+  assert.match(ipcResult(() => store.save({ name: "Another", modules: checks() })).error, refusal);
+  assert.equal(Buffer.compare(fs.readFileSync(file(s)), before), 0, "save left the file untouched");
+
+  assert.match(ipcResult(() => store.delete(kept.id)).error, refusal);
+  assert.equal(Buffer.compare(fs.readFileSync(file(s)), before), 0, "delete left the file untouched");
+  assert.deepEqual(fs.readdirSync(s.directory).filter((n) => n.includes("unreadable") || n.endsWith(".tmp")), []);
+
+  busy.unlock();
+  assert.deepEqual(store.read().workflows.map((w) => w.id), [kept.id]);
+});
