@@ -378,19 +378,34 @@ function normalize(input) {
   };
 }
 
-function readRecords(directory) {
+function readRawRecordsStrict(directory) {
   const file = recordFile(directory);
-  if (!fs.existsSync(file)) return [];
+  let raw;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((item) => {
-      const record = normalize(item);
-      return record ? [record] : [];
-    });
-  } catch {
-    return [];
+    raw = fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
   }
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Coordination records file is not an array.");
+  }
+  return parsed;
+}
+
+function readRecordsStrict(directory) {
+  const raw = readRawRecordsStrict(directory);
+  return raw.flatMap((item) => {
+    const record = normalize(item);
+    return record ? [record] : [];
+  });
+}
+
+function readRecords(directory) {
+  return readRecordsStrict(directory);
 }
 
 function saveUnlocked(directory, input, clock = () => new Date().toISOString()) {
@@ -411,7 +426,12 @@ function saveUnlocked(directory, input, clock = () => new Date().toISOString()) 
   }
   const stamped = { ...record, savedAt: clock() };
   fs.mkdirSync(directory, { recursive: true });
-  const existing = readRecords(directory).filter((item) => item.requestId !== stamped.requestId);
+  const rawExisting = readRawRecordsStrict(directory);
+  const existing = rawExisting.filter((item) => {
+    const normalized = normalize(item);
+    if (!normalized) return true;
+    return normalized.requestId !== stamped.requestId;
+  });
   const records = [stamped, ...existing];
   const file = recordFile(directory);
   const temporary = `${file}.${process.pid}.${require("node:crypto").randomUUID()}.tmp`;
@@ -454,6 +474,8 @@ async function saveRecordAsync(directory, input, clock) {
 module.exports = {
   normalizeRecord: normalize,
   readRecords,
+  readRecordsStrict,
+  readRawRecordsStrict,
   saveRecord,
   saveRecordAsync,
   isValidContinuationDescriptor,

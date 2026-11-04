@@ -1,7 +1,30 @@
 "use strict";
 const { randomUUID } = require("node:crypto");
+
+const ALLOWED_HISTORY_OMISSIONS = new Set([
+  "timelineItems",
+  "conversationItems",
+  "turnResults",
+]);
+
+function isHistoryOnlyTruncation(bounds) {
+  const omittedCounts = bounds.omittedCounts ?? bounds.omitted_counts;
+  if (!omittedCounts || typeof omittedCounts !== "object" || Array.isArray(omittedCounts)) {
+    return false;
+  }
+  const keys = Object.keys(omittedCounts);
+  if (keys.length === 0) return false;
+  return keys.every(key =>
+    ALLOWED_HISTORY_OMISSIONS.has(key) &&
+    typeof omittedCounts[key] === "number" &&
+    Number.isSafeInteger(omittedCounts[key]) &&
+    omittedCounts[key] > 0
+  );
+}
+
 function coreRefusal(snapshot) {
-  if (!snapshot || !snapshot.bounds || snapshot.bounds.projectionUnavailable === true || snapshot.bounds.projection_unavailable === true || snapshot.bounds.truncated === true) return "Core control progress is unavailable or incomplete; no new turn was sent.";
+  if (!snapshot || !snapshot.bounds || snapshot.bounds.projectionUnavailable === true || snapshot.bounds.projection_unavailable === true) return "Core control progress is unavailable or incomplete; no new turn was sent.";
+  if (snapshot.bounds.truncated === true && !isHistoryOnlyTruncation(snapshot.bounds)) return "Core control progress is unavailable or incomplete; no new turn was sent.";
   const holds = [snapshot.stopResponsibility ?? snapshot.stop_responsibility, ...(snapshot.relatedHolds ?? snapshot.related_holds ?? [])].filter(Boolean);
   if (holds.some(hold => String(hold.writeResponsibility ?? hold.write_responsibility).toLowerCase() === "held")) return "Native work still holds responsibility; no new turn was sent.";
   if (["active", "uncertain"].includes(String(snapshot.attempt?.state).toLowerCase()) || ["starting", "active", "running", "stopping", "uncertain"].includes(String(snapshot.productConversation?.turn?.state).toLowerCase())) return "Native work is active or unconfirmed; no new turn was sent.";

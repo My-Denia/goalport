@@ -49,7 +49,7 @@ export function NativeWorkspaceCheck({campaignId,target,eligible,job,onJob,onBus
     if(cancelled)return;
     const checks=Array.isArray(value?.checks)?value.checks:[];
     setSaved(checks.filter((c:SavedCheck)=>c?.nativeAssociation===true && parseNativeCheckTarget(c.nativeCheckTarget)?.campaignId===campaign && parseNativeCheckMaterial(c.nativeCheckMaterial)));
-  }).catch(()=>{if(!cancelled)setSaved([]);});return()=>{cancelled=true;};},[campaign,job?.state,job?.requestId]);
+  }).catch(()=>{if(!cancelled)setSaved([]);});return()=>{cancelled=true;};},[campaign,job?.state,job?.requestId,job?.active]);
   async function prepare(picked?:PiCapacitySelection) {
     if(!target)return;
     const generation=++revision.current, frozen=target;

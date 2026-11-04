@@ -146,7 +146,7 @@ function createBackgroundHost(options) {
       if (ids[0]) facts = s.getStatus(ids[0]);
     }
     if (!facts) return null;
-    lastJobId = facts.jobId;
+    if (!jobId) lastJobId = facts.jobId;
     const owned = Object.hasOwn(facts, "liveFollowUp") ? s.readOwnedLiveFollowUpContext(facts.jobId) : null;
     if (owned) facts = { ...facts, acceptedRequestId: owned.requestId };
     if (!facts.active || durableTerminal(facts)) return projection(facts);

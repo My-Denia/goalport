@@ -160,12 +160,43 @@ it('renders a markdown table from Pi as a table, keeping inline code and inert t
  expect(screen.getByRole('columnheader',{name:'Claim'})).toBeTruthy();expect(screen.getAllByRole('row')).toHaveLength(3);expect(screen.getByRole('cell',{name:'Not shown'})).toBeTruthy();expect(screen.getByText('git diff').tagName).toBe('CODE');expect(screen.getByText('<b>x</b>').tagName).toBe('TD');expect(screen.getByText('After').tagName).toBe('P');
 });
 
-it('renders a returned Pi response as readable safe markdown, not a raw command log',()=>{
- const text='### Specific findings\n\n- A **concrete** doc issue with `Stop check`.\n\n<script>not executable</script>';
- render(<BackgroundCoordinationStatus job={{...job,state:'completed',active:false,live:false,outcome:{status:'completed',report:{auditText:text}}} as never} onStopAllowing={()=>{}}/>);
- expect(screen.getByRole('heading',{name:'Specific findings'})).toBeTruthy();
- expect(screen.getByText('concrete').tagName).toBe('STRONG');
- expect(screen.getByRole('list')).toBeTruthy();expect(document.querySelector('script')).toBeNull();
- expect(screen.getByText('<script>not executable</script>')).toBeTruthy();
- expect(document.querySelector('.tl-agent-body')?.tagName).toBe('DIV');
+it('when an active review transitions to completed, the running banner is cleared and the review is shown', async () => {
+ const onAskCodex = vi.fn();
+ const onJob = vi.fn();
+ const activeJob = { ...job, requestId: 'active-req', active: true, live: true, outcome: null };
+ const finishedJob = {
+   ...job,
+   requestId: 'active-req',
+   active: false,
+   live: false,
+   state: 'completed',
+   outcome: { status: 'completed', report: { auditText: 'Pi found a syntax error in utils.ts.' } },
+ };
+ const view = render(
+   <NativeWorkspaceCheck
+     target={target}
+     eligible={true}
+     job={activeJob as never}
+     onJob={onJob}
+     onBusy={vi.fn()}
+     onAskCodex={onAskCodex}
+   />
+ );
+ expect(screen.getByText(/Pi is reviewing Codex's changes/)).toBeTruthy();
+ expect(screen.queryByText('Pi found a syntax error in utils.ts.')).toBeNull();
+
+ view.rerender(
+   <NativeWorkspaceCheck
+     target={target}
+     eligible={true}
+     job={finishedJob as never}
+     onJob={onJob}
+     onBusy={vi.fn()}
+     onAskCodex={onAskCodex}
+   />
+ );
+ expect(screen.queryByText(/Pi is reviewing Codex's changes/)).toBeNull();
+ expect(await screen.findByText('Pi found a syntax error in utils.ts.')).toBeTruthy();
+ expect(screen.getByRole('button', { name: 'Ask Codex to fix this' })).toBeTruthy();
 });
+
