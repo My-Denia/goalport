@@ -293,6 +293,8 @@ function App() {
     generation: number;
     write?: { instances: readonly string[]; maxTurns: number; remaining: number | null; workspaceRoot: string };
   } | null>(null);
+  // True once the grant read for this draft finished and said there is none (or one). While it is loading the grant is unknown, and unknown is never "no grant".
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [panelChangeMode, setPanelChangeMode] = useState(false);
   // Transient state of the CURRENT round, keyed by its request id: never
   // persisted, re-attached to the selected plan only while the request ids
@@ -858,6 +860,7 @@ function App() {
     setPanelLoad("loading");
     setPanelFailSentence(null);
     setScopeMirror(null);
+    setScopeConfirmed(false);
     // Each fresh draft starts without file-change consent. Never restore it
     // from history or from another draft's live scope — except across the
     // requestId rotation that a Save-harness-access performs, where the
@@ -874,17 +877,21 @@ function App() {
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
     void (async () => {
-      let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number } | null = null;
+      let scope: Awaited<ReturnType<NonNullable<typeof readScope>>> = null;
+      let scopeRead = true;
       try {
         scope = await readScope();
       } catch {
         scope = null;
+        scopeRead = false; // An unreadable grant is unknown, not absent.
       }
       if (cancelled) return;
       if (scope) {
-        setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation });
+        setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation, ...(scope.write ? { write: scope.write } : {}) });
         setAllowedTurns(scope.maxTurns);
+        if (scope.write) setWriteTurns(scope.write.maxTurns);
       }
+      if (scopeRead) setScopeConfirmed(true);
       let discovery: {
         connected: boolean;
         sendAuthorized: boolean;
@@ -927,12 +934,12 @@ function App() {
   const draftBudget = (draftWorkflowDefinition?.modules.resources ?? DEFAULT_RESOURCES).budget;
   const draftHasScope = scopeMirror !== null;
   useEffect(() => {
-    if (!runtimeLessDraftKey || draftHasScope) return;
+    if (!runtimeLessDraftKey || draftHasScope || !scopeConfirmed) return;
     const next = startingBudget({ workflow: draftBudget, current: { readTurns: allowedTurns, writeTurns }, accessGranted: false, typed: turnsTyped.current });
     setAllowedTurns(next.readTurns);
     setWriteTurns(next.writeTurns);
     // The current numbers are read, not watched: only the workflow, the draft and the grant re-run this.
-  }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt, draftHasScope, draftBudget.readTurns, draftBudget.writeTurns]);
+  }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt, draftHasScope, scopeConfirmed, draftBudget.readTurns, draftBudget.writeTurns]);
   // Send admission for a runtime-less draft in a panel-capable build: the
   // user must see (or retry loading) their harness-access choices before
   // any model turn can be spent. Legacy builds without the scope bridge

@@ -33,7 +33,7 @@ export function parsePiCatalog(stdout) {
        ||!['yes','no'].includes(thinking)||!['yes','no'].includes(images)) return null;
     const key=JSON.stringify([provider.toLowerCase(),model.toLowerCase()]);
     if(seen.has(key)) return null;
-    seen.add(key); pairs.push({provider,model});
+    seen.add(key); pairs.push({provider,model,thinking});
   }
   return pairs.length ? pairs : null;
 }
@@ -64,7 +64,7 @@ export function configuredPiOffer(settings,catalog) {
       if(stripped!==raw) { const matches=catalog.filter(p=>`${p.provider}/${p.model}`===stripped); if(matches.length===1) pair=matches[0]; }
     }
   } else pair=catalog.find(p=>p.provider===m.defaultProvider&&p.model===m.defaultModel);
-  return pair?{offer:{...pair,useExistingCapacity:true},source,...m}: {...unavailable,source};
+  return pair?{offer:{provider:pair.provider,model:pair.model,useExistingCapacity:true},source,...m}: {...unavailable,source};
 }
 export function piCredentialKind(auth) {
   if(['oauth-only','apiKey-only','mixed','unreported'].includes(auth?.credentialKind)) return auth.credentialKind;

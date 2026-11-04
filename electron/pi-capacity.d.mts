@@ -1,4 +1,4 @@
-export interface PiPair { readonly provider:string; readonly model:string }
+export interface PiPair { readonly provider:string; readonly model:string; readonly thinking?:'yes'|'no' }
 export interface PiCapacitySelection extends PiPair { readonly useExistingCapacity:true }
 export interface PiCapacityMetadata {
  readonly catalog:readonly PiPair[];

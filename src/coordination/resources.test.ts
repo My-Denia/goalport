@@ -87,9 +87,26 @@ describe("each role's preference reaches its command", () => {
   });
   it("a replacement uses the role's preference with the snapshot's definition", () => {
     const base = input([codex, claude, pi], { plan: "stronger", review: "faster" });
-    expect(selectionOf(replacementCommand("review", pi, base, "r1"))).toEqual({ instanceId: "pi", model: "default", effort: "faster" });
-    expect(selectionOf(replacementCommand("plan", pi, base, "r2"))).toEqual({ instanceId: "pi", model: "default", effort: "stronger" });
     expect(selectionOf(replacementCommand("review", claude, base, "r3"))).toEqual({ instanceId: "claude", model: "sonnet", effort: "faster" });
+    expect(selectionOf(replacementCommand("review", codex, base, "r4"))).toEqual({ instanceId: "codex", model: "default", effort: "faster" });
+  });
+  describe("Pi thinking follows what the chosen model reports", () => {
+    const route: { provider: string; model: string; useExistingCapacity: true } = { provider: "P", model: "m", useExistingCapacity: true };
+    const withCatalog = (thinking?: "yes" | "no"): SyntheticCatalogInstance =>
+      ({ ...pi, piCapacity: { catalog: [{ provider: "P", model: "m", ...(thinking ? { thinking } : {}) }] } });
+    const selected = (instance: SyntheticCatalogInstance, piCapacity?: typeof route) =>
+      selectionOf(replacementCommand("review", instance, { ...input([codex, instance], { review: "stronger" }), ...(piCapacity ? { piCapacity } : {}) }, "r1"));
+    it("sends the level only for a model that reports thinking yes", () => {
+      expect(selected(withCatalog("yes"), route)).toEqual({ instanceId: "pi", provider: "P", model: "m", effort: "stronger" });
+    });
+    it("sends nothing for no, a missing report, an unlisted model or no chosen model", () => {
+      const plain = { instanceId: "pi", provider: "P", model: "m" };
+      expect(selected(withCatalog("no"), route)).toEqual(plain);
+      expect(selected(withCatalog(), route)).toEqual(plain);
+      expect(selected(withCatalog("yes"), { ...route, model: "other" })).toEqual({ instanceId: "pi", provider: "P", model: "other" });
+      expect(selected(pi)).toEqual({ instanceId: "pi", model: "default" });
+      expect(selected(withCatalog("yes"))).toEqual({ instanceId: "pi", model: "default" });
+    });
   });
   it("a claude swap that cannot happen leaves the command unchanged", () => {
     for (const unavailable of [claudeOpusOnly, claudeSonnetGated]) {
@@ -176,13 +193,13 @@ describe("what actually ran is recorded", () => {
     const reviews = seen.filter((c) => c.commandId.startsWith("coordinate-review-"));
     expect(reviews.map((c) => c.modelSelection)).toEqual([
       { instanceId: "claude", model: "sonnet", effort: "faster" },
-      { instanceId: "pi", model: "m", effort: "faster" },
+      { instanceId: "pi", model: "m" },
     ]);
     expect(state.turnsRan).toEqual([
       { role: "plan", harness: "codex", model: null, effort: null, preference: "default", applied: false },
-      { role: "review", harness: "pi", model: null, effort: "low", preference: "faster", applied: true },
+      { role: "review", harness: "pi", model: null, effort: null, preference: "faster", applied: false },
     ]);
-    expect(resourcesLine(state.turnsRan)).toBe("Plan: Codex (its own setting) · Check: Pi, low thinking (faster)");
+    expect(resourcesLine(state.turnsRan)).toBe("Plan: Codex (its own setting) · Check: Pi (its own setting)");
   });
 
   it("the legacy two-turn round records its turns too", async () => {

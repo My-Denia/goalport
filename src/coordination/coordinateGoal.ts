@@ -1,6 +1,6 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
-import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
+import { samePiPair, selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
 import {
   RECOMMENDED_V1, chooseRoles, choosePlanner, citationMode, compileWorkflow, planReviewRuns,
   RESOURCE_LAUNCH,
@@ -666,13 +666,15 @@ function reviewText(input: CoordinateGoalInput, mode: CitationMode): string {
  * when the swap can really happen. Claude's faster/stronger is a model swap,
  * so it needs that model in the catalog and not behind extra credits; without
  * it (an API-key login lists no models) the command stays exactly as it was
- * and carries no effort key. Codex and Pi keep their model and only move
- * effort / thinking, which the launch layer maps from fixed literals.
+ * and carries no effort key. Codex keeps its model and moves effort. Pi moves
+ * thinking only on a model that reports thinking support. The launch layer maps
+ * both from fixed literals.
  */
 function resourceSelection(
   role: ResourceRole,
   instance: SyntheticCatalogInstance,
   workflow: CompiledWorkflow,
+  piCapacity?: PiCapacitySelection,
 ): { readonly effort: "faster" | "stronger"; readonly model?: string } | null {
   const preference = workflow.resources.roles[role];
   if (preference !== "faster" && preference !== "stronger") return null;
@@ -682,7 +684,13 @@ function resourceSelection(
       choice.slug === wanted && !choice.legacy && !creditGated(choice, instance));
     return found ? { effort: preference, model: found.slug } : null;
   }
-  return instance.instanceId === "codex" || instance.instanceId === "pi" ? { effort: preference } : null;
+  if (instance.instanceId === "pi") {
+    // --thinking only helps a Pi model that reports thinking support. Without a
+    // chosen model, or with "no" or no report, Pi keeps its own setting.
+    const pair = piCapacity && instance.piCapacity?.catalog.find((item) => samePiPair(item, piCapacity));
+    return pair?.thinking === "yes" ? { effort: preference } : null;
+  }
+  return instance.instanceId === "codex" ? { effort: preference } : null;
 }
 
 function turnCommand(input: {
@@ -695,7 +703,7 @@ function turnCommand(input: {
   write?: boolean;
   piCapacity?: PiCapacitySelection;
 }): CoordinateTurnCommand {
-  const resource = resourceSelection(input.role, input.instance, input.workflow);
+  const resource = resourceSelection(input.role, input.instance, input.workflow, input.piCapacity);
   const base = input.instance.instanceId === "pi" && input.piCapacity
     ? { instanceId: "pi", provider: input.piCapacity.provider, model: input.piCapacity.model }
     : { instanceId: input.instance.instanceId, model: publishedModel(input.instance) };

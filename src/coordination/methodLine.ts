@@ -59,6 +59,7 @@ function turnWords(turn: TurnRan): string {
     return `${name}, ${turn.effort ?? ""} ${turn.harness === "pi" ? "thinking" : "effort"} (${turn.preference})`;
   }
   if (turn.preference !== "default") {
+    if (turn.harness === "pi") return `${name}${turn.model ? ` ${turn.model}` : ""} (its own setting)`;
     return turn.harness === "claude" && !turn.model ? `${name} (no change with an API key)` : `${name}${turn.model ? ` ${turn.model}` : ""} (no change)`;
   }
   if (turn.harness === "claude") return `${name}${turn.model ? ` ${turn.model}` : ""}`;

@@ -116,7 +116,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
           </section>
           <section className="workflow-group workflow-group-open" aria-label="Resources">
             <h3>Resources</h3>
-            <p className="workflow-resources-lead">Faster or Stronger changes how hard an agent thinks: Codex and Pi use less or more thinking, Claude switches model. Claude with an API key stays as it is.</p>
+            <p className="workflow-resources-lead">Faster or Stronger changes how hard an agent works: Codex and Pi think less or more; Claude uses Sonnet for Faster and thinks harder on Opus for Stronger. Claude with an API key stays as it is.</p>
             {ROLE_ROWS.map(({ role, label, note }) => (
               <div key={role} className="resource-row">
                 <span className="resource-label" id={`resource-${role}`}>{label}{note ? <small>{note}</small> : null}</span>

@@ -2485,6 +2485,30 @@ describe("harness access panel and scoped rounds", () => {
     expect(bridge.order.filter((step) => step === "authorize").length).toBe(2);
   });
 
+  it("keeps a granted file-change limit when the access panel reloads after a save", async () => {
+    const root = "/tmp/goalport-preview-workspace";
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      scope: { instances: ["codex", "claude"], maxTurns: 4, remaining: 4, generation: 1, write: { instances: ["codex"], maxTurns: 5, remaining: 5, workspaceRoot: root } },
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const limit = async () => (await screen.findByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value;
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Allow changes through Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save agent access" }));
+    await waitFor(() => expect(bridge.authorizations.length).toBe(1));
+    expect(bridge.authorizations[0].write?.maxTurns).toBe(5);
+    // The save rotates the draft and reloads the grant; the workflow default (2) must not replace the granted 5.
+    await waitFor(async () => expect((await screen.findByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(true));
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    typeMessage("Fix the helper.");
+    sendMessage();
+    await waitFor(() => expect(bridge.authorizations.at(-1)?.write?.maxTurns).toBe(5));
+  });
+
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
     const bridge = scopedBridge({
       providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
