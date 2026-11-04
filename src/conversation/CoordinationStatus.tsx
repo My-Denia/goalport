@@ -8,7 +8,7 @@ import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { renderMarkdownBody } from "../lib/markdown";
 import { classifyProviderError } from "../coordination/providerError";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
-import { methodLine, type WorkflowRef, type CheckRan } from "../coordination/methodLine";
+import { methodLine, resourcesLine, resourcesTitle, type WorkflowRef, type CheckRan, type TurnRan } from "../coordination/methodLine";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
 
@@ -19,6 +19,8 @@ export interface CoordinationStatusProps {
   /** Which method ran and which checks came back; absent on older results. */
   workflow?: WorkflowRef;
   checksRan?: readonly CheckRan[];
+  /** What each step was really launched with; absent on older results, which show nothing new. */
+  turnsRan?: readonly TurnRan[];
   planningHarness: string | null;
   reviewHarness: string | null;
   planText: string | null;
@@ -257,9 +259,12 @@ export function CoordinationStatus({
   stoppedOutcome = false,
   workflow,
   checksRan,
+  turnsRan,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
   const method = methodLine(workflow, checksRan);
+  const resources = resourcesLine(turnsRan);
+  const resourcesFull = resourcesTitle(turnsRan);
   // An assigned writer alone is not evidence it launched: the read-budget
   // feasibility stop assigns one before refusing all edits.
   const hasExecutionActivity = Boolean(executionText || auditHarness || auditText || executionEvidence)
@@ -272,6 +277,7 @@ export function CoordinationStatus({
         {verdict === "planned" ? null : <><dt>Stop reason</dt><dd>{fact(stopReason)}</dd></>}
       </dl>
       {method ? <p className="method-line">{method}</p> : null}
+      {resources ? <p className="method-line" title={resourcesFull ?? undefined}>{resources}</p> : null}
       {feedbackHistory && feedbackHistory.length > 0 ? (
         <p className="coordination-repair-note">
           The independent check found unfinished work, so GoalPort organized one checked repair

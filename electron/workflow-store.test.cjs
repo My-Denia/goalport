@@ -210,3 +210,19 @@ test("a file that cannot be read right now is left byte-identical by save and by
   busy.unlock();
   assert.deepEqual(store.read().workflows.map((w) => w.id), [kept.id]);
 });
+
+test("saving keeps the resources module, keeps it when an edit leaves it out, and carries it into a new profile", (t) => {
+  const s = sandbox(t);
+  const resources = { roles: { plan: "faster", review: "stronger", execute: "default", audit: "default" }, budget: { readTurns: 6, writeTurns: 2 } };
+  const first = s.store.save({ name: "Fast plan", modules: { ...checks("on"), resources } });
+  assert.deepEqual(first.saved.modules.resources, resources);
+  const edited = s.store.save({ id: first.saved.id, name: "Fast plan", modules: checks("on") });
+  assert.deepEqual(edited.saved.modules.resources, resources);
+  const changed = { ...resources, roles: { ...resources.roles, plan: "default" } };
+  assert.deepEqual(s.store.save({ id: first.saved.id, name: "Fast plan", modules: { ...checks("on"), resources: changed } }).saved.modules.resources, changed);
+  assert.throws(() => s.store.save({ name: "Bad", modules: { ...checks("on"), resources: { ...resources, roles: { ...resources.roles, plan: "turbo" } } } }), { message: "Those workflow settings are not valid, so nothing was saved." });
+  assert.equal("resources" in s.store.save({ name: "Plain", modules: checks("on") }).saved.modules, false);
+  const target = path.join(s.root, "other");
+  assert.equal(carryWorkflows(s.directory, target), true);
+  assert.deepEqual(createWorkflowStore({ directory: target, backupsDirectory: path.join(target, "backups") }).read().workflows.find((w) => w.id === first.saved.id).modules.resources, changed);
+});

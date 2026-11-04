@@ -2311,6 +2311,24 @@ describe("harness access panel and scoped rounds", () => {
       await waitFor(() => expect(bridge.launchCount()).toBe(2));
     });
 
+    // Issue #69: a new goal starts with the workflow's turn budget until the user types their own.
+    it("starts the turn limit at the saved workflow's budget, and a typed number is kept", async () => {
+      const lean = { ...resultWith("on"), version: 2, modules: { ...resultWith("on").modules, resources: {
+        roles: { plan: "stronger", review: "faster", execute: "default", audit: "default" }, budget: { readTurns: 3, writeTurns: 1 } } } };
+      scopedBridge({
+        providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+        records: [blockedRecord(resultWith("off"))],
+        launch: async (command) => planOrReview(command),
+        workflows: [lean],
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+      const turns = await screen.findByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement;
+      await waitFor(() => expect(turns.value).toBe("3"));
+      fireEvent.change(turns, { target: { value: "6" } });
+      expect((screen.getByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement).value).toBe("6");
+    });
+
     it("a workflow that was deleted: the draft says so in one plain line and uses Recommended", async () => {
       const bridge = scopedBridge({
         providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
@@ -2465,6 +2483,52 @@ describe("harness access panel and scoped rounds", () => {
       expect(((await screen.findByRole("checkbox", { name: "Keep working after closing" })) as HTMLInputElement).checked).toBe(true);
     });
     expect(bridge.order.filter((step) => step === "authorize").length).toBe(2);
+  });
+
+  it("keeps a granted file-change limit when the access panel reloads after a save", async () => {
+    const root = "/tmp/goalport-preview-workspace";
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      scope: { instances: ["codex", "claude"], maxTurns: 4, remaining: 4, generation: 1, write: { instances: ["codex"], maxTurns: 5, remaining: 5, workspaceRoot: root } },
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const limit = async () => (await screen.findByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value;
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Allow changes through Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save agent access" }));
+    await waitFor(() => expect(bridge.authorizations.length).toBe(1));
+    expect(bridge.authorizations[0].write?.maxTurns).toBe(5);
+    // The save rotates the draft and reloads the grant; the workflow default (2) must not replace the granted 5.
+    await waitFor(async () => expect((await screen.findByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(true));
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    typeMessage("Fix the helper.");
+    sendMessage();
+    await waitFor(() => expect(bridge.authorizations.length).toBe(2));
+    expect(bridge.authorizations[1].write?.maxTurns).toBe(5);
+  });
+
+  it("does not replace a granted file-change limit with the workflow default while the grant cannot be read", async () => {
+    const root = "/tmp/goalport-preview-workspace";
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      scope: { instances: ["codex", "claude"], maxTurns: 4, remaining: 4, generation: 1, write: { instances: ["codex"], maxTurns: 5, remaining: 5, workspaceRoot: root } },
+      readScope: (scope, call) => { if (call > 1) throw new Error("grant unreadable"); return scope; },
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const limit = async () => (await screen.findByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value;
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Allow changes through Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save agent access" }));
+    await waitFor(() => expect(bridge.authorizations.length).toBe(1));
+    await waitFor(async () => expect((await screen.findByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(true));
+    // An unknown grant is not "no grant": the number stays what the user saved.
+    expect(await limit()).toBe("5");
   });
 
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {

@@ -466,3 +466,24 @@ test("local CLI discovery surfaces a health record from the runtime state dir", 
     cleanupTemp(directory);
   }
 });
+
+test("the pinned checkout runtime refuses a resource choice it cannot apply, before any child is contacted", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-harness-effort-"));
+  const childPath = path.join(directory, "stub-child.cjs");
+  fs.writeFileSync(childPath, "process.exit(1);\n");
+  const runtime = createHarnessRuntime({ childPath, stateDir: path.join(directory, "state"), serverCwd: directory });
+  const command = { modelSelection: { instanceId: "claude", model: "sonnet", effort: "faster" } };
+  try {
+    const prepared = await runtime.prepare(command);
+    assert.equal(prepared.ok, false);
+    assert.equal(prepared.messageDispatched, false);
+    assert.match(prepared.errorText, /resource choice/);
+    const ran = await runtime.run(command);
+    assert.equal(ran.ok, false);
+    assert.equal(ran.messageDispatched, false);
+    assert.match(ran.errorText, /resource choice/);
+  } finally {
+    runtime.close();
+    cleanupTemp(directory);
+  }
+});

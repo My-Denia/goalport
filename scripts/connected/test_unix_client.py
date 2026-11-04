@@ -115,6 +115,18 @@ class CommandRoutingTests(unittest.TestCase):
             self.assertEqual(result["currentGoal"], {"goal": "Append pong", "workspacePath": "/work"})
             self.assertNotIn("priorPlan", result["currentGoal"])
 
+    def test_saved_projection_carries_what_each_step_ran_with(self):
+        with tempfile.TemporaryDirectory(prefix="gp-turns-ran-") as temp:
+            root = Path(temp)
+            turns = [{"role": "plan", "harness": "pi", "model": None, "effort": None, "preference": "stronger", "applied": False}]
+            record = {"requestId": "r1", "goal": "G", "workspacePath": "/work", "verdict": "checked", "planText": "Plan", "reviewText": "Check", "savedAt": "2026-01-01",
+                      "checksRan": [], "turnsRan": turns}
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertEqual(workbench.latest_coordination_record(root, "r1")["record"]["turnsRan"], turns)
+            del record["turnsRan"]
+            (root / "coordination-records.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertNotIn("turnsRan", workbench.latest_coordination_record(root, "r1")["record"])
+
     def test_optional_stdin_coverage_stays_with_selected_and_retained_material(self):
         with tempfile.TemporaryDirectory(prefix="gp-stdin-coverage-") as temp:
             root = Path(temp)

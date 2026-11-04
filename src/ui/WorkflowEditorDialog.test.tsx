@@ -33,7 +33,7 @@ describe("workflow editor", () => {
     open();
     await screen.findByLabelText("Name");
     expect(screen.getAllByRole("checkbox")).toHaveLength(2);
-    for (const group of ["Planning", "Execution", "Resources", "Feedback & continuation", "Delivery"]) {
+    for (const group of ["Planning", "Execution", "Feedback & continuation", "Delivery"]) {
       const section = screen.getByRole("region", { name: group });
       expect(within(section).getByText("Same as Recommended v1")).toBeTruthy();
       expect(within(section).queryByRole("checkbox")).toBeNull();
@@ -93,6 +93,50 @@ describe("workflow editor", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("You already have a workflow with that name."));
     expect(onClose).not.toHaveBeenCalled();
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // Issue #69: plan with the strong model, check fast, start new goals with fewer turns.
+  it("Resources starts at Default with 4 and 2 turns, and says it only fills in new goals", async () => {
+    open();
+    await screen.findByLabelText("Name");
+    const section = screen.getByRole("region", { name: "Resources" });
+    for (const role of ["Writing the plan", "Independent check", "Making changes", "Verification"]) {
+      expect((within(section).getByRole("radiogroup", { name: new RegExp(`^${role}`) }).querySelector("input:checked") as HTMLInputElement).value).toBe("default");
+    }
+    expect((within(section).getByLabelText("Turn limit to start with") as HTMLInputElement).value).toBe("4");
+    expect((within(section).getByLabelText("File-change turn limit") as HTMLInputElement).value).toBe("2");
+    expect(within(section).getByText(/never change access you already gave/)).toBeTruthy();
+    expect(within(section).getAllByText("Only for goals that change files")).toHaveLength(2);
+  });
+
+  it("saves planning Stronger, the check Faster and 3 turns to start with", async () => {
+    const { onSave } = open();
+    await screen.findByLabelText("Name");
+    const group = (name: RegExp) => screen.getByRole("radiogroup", { name });
+    fireEvent.click(within(group(/^Writing the plan/)).getByRole("radio", { name: "Stronger" }));
+    fireEvent.click(within(group(/^Independent check/)).getByRole("radio", { name: "Faster" }));
+    fireEvent.change(screen.getByLabelText("Turn limit to start with"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const input = (onSave.mock.calls as unknown as [Record<string, any>][])[0][0];
+    expect(input.modules.resources).toEqual({
+      roles: { plan: "stronger", review: "faster", execute: "default", audit: "default" },
+      budget: { readTurns: 3, writeTurns: 2 },
+    });
+  });
+
+  it("opens a saved workflow on its own resources and refuses a turn count outside the allowed range", async () => {
+    const withResources: WorkflowDefinition = { ...saved, modules: { ...saved.modules, resources: {
+      roles: { plan: "stronger", review: "default", execute: "default", audit: "faster" }, budget: { readTurns: 6, writeTurns: 1 } } } };
+    const { onSave } = open({ workflow: withResources });
+    await screen.findByLabelText("Name");
+    expect((within(screen.getByRole("radiogroup", { name: /^Writing the plan/ })).getByRole("radio", { name: "Stronger" }) as HTMLInputElement).checked).toBe(true);
+    expect((within(screen.getByRole("radiogroup", { name: /^Verification/ })).getByRole("radio", { name: "Faster" }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Turn limit to start with") as HTMLInputElement).value).toBe("6");
+    fireEvent.change(screen.getByLabelText("File-change turn limit"), { target: { value: "9" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("File-change turn limit: choose 1 to 8.");
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it("Cancel closes without saving", async () => {

@@ -21,7 +21,7 @@ import {
   RECOMMENDED_V1, compileWorkflow, planReviewRuns,
   type CompiledWorkflow, type WorkflowDefinition,
 } from "../../electron/workflow-checks.mjs";
-import type { CheckRan, WorkflowRef } from "./methodLine";
+import type { CheckRan, TurnRan, WorkflowRef } from "./methodLine";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -77,6 +77,8 @@ export interface CoordinationView {
   readonly workflowDefinition?: WorkflowDefinition;
   /** Checks whose reply came back, across every pass of this send. Empty means none ran. */
   readonly checksRan?: readonly CheckRan[];
+  /** The setting each dispatched turn really launched with, across every pass of this send. */
+  readonly turnsRan?: readonly TurnRan[];
 }
 
 /**
@@ -191,6 +193,7 @@ function roundFactFrom(sent: CoordinateSessionState): CoordinationRoundFact {
 function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: boolean): CoordinationView {
   return viewFrom({
     checksRan: sent.checksRan ?? [],
+    turnsRan: sent.turnsRan ?? [],
     planningHarness: sent.planningHarness,
     reviewHarness: sent.reviewHarness,
     planText: sent.planText,
@@ -221,6 +224,9 @@ function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: bo
 const checksOf = (...passes: readonly CoordinateSessionState[]): readonly CheckRan[] =>
   passes.flatMap((pass) => pass.checksRan ?? []);
 
+const turnsOf = (...passes: readonly CoordinateSessionState[]): readonly TurnRan[] =>
+  passes.flatMap((pass) => pass.turnsRan ?? []);
+
 const INVALID_WORKFLOW_SENTENCE = "This workflow could not be read, so nothing was sent.";
 
 /**
@@ -238,7 +244,7 @@ export async function requestCoordination(
   try {
     workflow = input.workflowDefinition === undefined ? WORKFLOW : compileWorkflow(input.workflowDefinition);
   } catch {
-    return { ...unavailable(INVALID_WORKFLOW_SENTENCE), checksRan: [] };
+    return { ...unavailable(INVALID_WORKFLOW_SENTENCE), checksRan: [], turnsRan: [] };
   }
   const view = await runCoordination({ ...input, workflow }, discovery, transport, stillCurrent);
   const reviewRan = planReviewRuns(workflow.checks, input.writeAuthorization !== undefined);
@@ -247,6 +253,7 @@ export async function requestCoordination(
     workflow: { id: workflow.workflow.id, version: workflow.workflow.version, name: workflow.name, planReview: reviewRan ? "on" : "off" },
     workflowDefinition: input.workflowDefinition ?? RECOMMENDED_V1,
     checksRan: view.checksRan ?? [],
+    turnsRan: view.turnsRan ?? [],
   };
 }
 
@@ -495,7 +502,7 @@ async function runCoordination(
   // -----------------------------------------------------------------------
   const repairBase = planRevisionHistory === undefined
     ? firstRound
-    : viewFrom({ ...scopedViewFromSession(latest, hasWriteConsent), checksRan: checksOf(sent, latest), planRevisionHistory });
+    : viewFrom({ ...scopedViewFromSession(latest, hasWriteConsent), checksRan: checksOf(sent, latest), turnsRan: turnsOf(sent, latest), planRevisionHistory });
   const eligibleForRepair = input.beforeRepair !== undefined
     && hasWriteConsent
     && latest.verdict === "revise"
@@ -592,6 +599,7 @@ async function runCoordination(
         ...latestView,
         messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched),
         checksRan: checksOf(sent, latest),
+        turnsRan: turnsOf(sent, latest),
         planRevisionHistory,
         ...(secondRejection ? { stopReason: `${latestView.stopReason} ${PLAN_REVISION_CEILING_SENTENCE}` } : {}),
       });
@@ -607,6 +615,7 @@ async function runCoordination(
     ...scopedViewFromSession(repaired, hasWriteConsent),
     messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched, repaired.messageDispatched),
     checksRan: checksOf(...(latest === sent ? [sent] : [sent, latest]), repaired),
+    turnsRan: turnsOf(...(latest === sent ? [sent] : [sent, latest]), repaired),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     feedbackHistory: [roundFactFrom(latest)],
     ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}` } : {}),

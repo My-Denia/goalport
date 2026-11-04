@@ -1,9 +1,10 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
-import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
+import { samePiPair, selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
 import {
   RECOMMENDED_V1, chooseRoles, choosePlanner, citationMode, compileWorkflow, planReviewRuns,
-  type CompiledWorkflow,
+  RESOURCE_LAUNCH,
+  type CompiledWorkflow, type ResourceRole,
 } from "../../electron/workflow-checks.mjs";
 
 /** The default workflow: Recommended v1 compiled once. A snapshot taken at Send replaces it per input; hashes never carry it. */
@@ -660,21 +661,59 @@ function reviewText(input: CoordinateGoalInput, mode: CitationMode): string {
   return lines.join("\n");
 }
 
+/**
+ * The role's resource preference, turned into the command's launch hint only
+ * when the swap can really happen. Claude's faster/stronger is a model swap,
+ * so it needs that model in the catalog and not behind extra credits; without
+ * it (an API-key login lists no models) the command stays exactly as it was
+ * and carries no effort key. Codex keeps its model and moves effort. Pi moves
+ * thinking only on a model that reports thinking support. The launch layer maps
+ * both from fixed literals.
+ */
+function resourceSelection(
+  role: ResourceRole,
+  instance: SyntheticCatalogInstance,
+  workflow: CompiledWorkflow,
+  piCapacity?: PiCapacitySelection,
+): { readonly effort: "faster" | "stronger"; readonly model?: string } | null {
+  const preference = workflow.resources.roles[role];
+  if (preference !== "faster" && preference !== "stronger") return null;
+  if (instance.instanceId === "claude") {
+    const wanted = RESOURCE_LAUNCH.claude[preference].model;
+    const found = modelChoices(instance).find((choice) =>
+      choice.slug === wanted && !choice.legacy && !creditGated(choice, instance));
+    return found ? { effort: preference, model: found.slug } : null;
+  }
+  if (instance.instanceId === "pi") {
+    // --thinking only helps a Pi model that reports thinking support. Without a
+    // chosen model, or with "no" or no report, Pi keeps its own setting.
+    const pair = piCapacity && instance.piCapacity?.catalog.find((item) => samePiPair(item, piCapacity));
+    return pair?.thinking === "yes" ? { effort: preference } : null;
+  }
+  return instance.instanceId === "codex" ? { effort: preference } : null;
+}
+
 function turnCommand(input: {
   commandId: string;
   instance: SyntheticCatalogInstance;
   workspacePath: string;
   text: string;
+  role: ResourceRole;
+  workflow: CompiledWorkflow;
   write?: boolean;
   piCapacity?: PiCapacitySelection;
 }): CoordinateTurnCommand {
+  const resource = resourceSelection(input.role, input.instance, input.workflow, input.piCapacity);
+  const base = input.instance.instanceId === "pi" && input.piCapacity
+    ? { instanceId: "pi", provider: input.piCapacity.provider, model: input.piCapacity.model }
+    : { instanceId: input.instance.instanceId, model: publishedModel(input.instance) };
   return {
     type: "goalport.coordinateTurn",
     commandId: input.commandId,
     projectId: "coordinate-project",
-    modelSelection: input.instance.instanceId === "pi" && input.piCapacity
-      ? { instanceId: "pi", provider: input.piCapacity.provider, model: input.piCapacity.model }
-      : { instanceId: input.instance.instanceId, model: publishedModel(input.instance) },
+    modelSelection: resource
+      ? { ...base, ...(resource.model === undefined ? {} : { model: resource.model }), effort: resource.effort }
+      : base,
     runtimeMode: "approval-required",
     approvalPolicy: "never",
     sandboxPolicy: { type: input.write ? "workspaceWrite" : "readOnly" },
@@ -707,6 +746,8 @@ export function replacementCommand(
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey), input.piCapacity),
     piCapacity: input.piCapacity,
     instance,
+    role,
+    workflow: input.workflow ?? WORKFLOW,
     workspacePath: input.workspacePath,
     text,
   });
@@ -757,7 +798,7 @@ export function evidenceCommand(
     const command = turnCommand({
       commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
       piCapacity: input.piCapacity,
-      instance, workspacePath: input.workspacePath, text, write: true,
+      instance, role: "execute", workflow: input.workflow ?? WORKFLOW, workspacePath: input.workspacePath, text, write: true,
     });
     if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
       throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
@@ -830,7 +871,7 @@ export function evidenceCommand(
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
     piCapacity: input.piCapacity,
-    instance, workspacePath: input.workspacePath, text, write: false,
+    instance, role: "audit", workflow: input.workflow ?? WORKFLOW, workspacePath: input.workspacePath, text, write: false,
   });
   if (authorizeCoordinateWriteTurn(command).outcome !== "write-authorized") {
     throw new Error("The evidence turn did not pass the role/sandbox pairing gate.");
@@ -879,7 +920,7 @@ function planningOnlyState(
   }
   const command = turnCommand({
     commandId: commandKey("plan", planner.instanceId, planMessage, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
-    piCapacity: input.piCapacity, instance: planner, workspacePath: input.workspacePath, text: planMessage,
+    piCapacity: input.piCapacity, instance: planner, role: "plan", workflow: input.workflow ?? WORKFLOW, workspacePath: input.workspacePath, text: planMessage,
   });
   if (authorizeCoordinateTurn(command).outcome !== "write-denied") {
     return stopped(quotaLabels, "Stopped. The edit disposition was not deny, so no role was assigned.");
@@ -1006,8 +1047,8 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
 
   const identitySendKey = commandIdentitySendKey(input, input.sendKey);
   const commands = [
-    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: planner, workspacePath: input.workspacePath, text: planMessage }),
-    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: reviewer, workspacePath: input.workspacePath, text: reviewMessage }),
+    turnCommand({ commandId: commandKey("plan", planner.instanceId, planMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: planner, role: "plan", workflow, workspacePath: input.workspacePath, text: planMessage }),
+    turnCommand({ commandId: commandKey("review", reviewer.instanceId, reviewMessage, identitySendKey, input.piCapacity), piCapacity: input.piCapacity, instance: reviewer, role: "review", workflow, workspacePath: input.workspacePath, text: reviewMessage }),
   ] as const;
 
   for (const command of commands) {

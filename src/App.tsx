@@ -27,7 +27,7 @@ import {
   type WorkflowDefinition,
   type WorkflowSaveInput
 } from "./types";
-import { RECOMMENDED_V1, planReviewRuns } from "../electron/workflow-checks.mjs";
+import { RECOMMENDED_V1, DEFAULT_RESOURCES, planReviewRuns } from "../electron/workflow-checks.mjs";
 import type { WorkflowEditResult } from "./ui/WorkflowEditorDialog";
 import { TitleBar } from "./shell/TitleBar";
 import { CampaignNav } from "./nav/CampaignNav";
@@ -40,7 +40,8 @@ import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
 import { WAIT_SENTENCE, NEED_TWO_AGENTS_SENTENCE, NEED_ONE_AGENT_SENTENCE } from "./conversation/sendDisabledReason";
-import { methodLine } from "./coordination/methodLine";
+import { methodLine, resourcesLine, resourcesTitle } from "./coordination/methodLine";
+import { startingBudget } from "./coordination/startingBudget";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
@@ -265,6 +266,8 @@ function App() {
   const [allowedTurns, setAllowedTurns] = useState(4);
   const [writeInstances, setWriteInstances] = useState<readonly string[]>([]);
   const [writeTurns, setWriteTurns] = useState(2);
+  // A number the user typed in the panel is theirs; the workflow's starting budget never overwrites it.
+  const turnsTyped = useRef({ read: false, write: false });
   const [backgroundConsent, setBackgroundConsent] = useState(false);
   const [backgroundJob, setBackgroundJob] = useState<BackgroundStatus | null>(null);
   const [nativeCheckJob, setNativeCheckJob] = useState<BackgroundStatus | null>(null);
@@ -290,6 +293,8 @@ function App() {
     generation: number;
     write?: { instances: readonly string[]; maxTurns: number; remaining: number | null; workspaceRoot: string };
   } | null>(null);
+  // True once the grant read for this draft finished and said there is none (or one). While it is loading the grant is unknown, and unknown is never "no grant".
+  const [scopeConfirmed, setScopeConfirmed] = useState(false);
   const [panelChangeMode, setPanelChangeMode] = useState(false);
   // Transient state of the CURRENT round, keyed by its request id: never
   // persisted, re-attached to the selected plan only while the request ids
@@ -855,6 +860,7 @@ function App() {
     setPanelLoad("loading");
     setPanelFailSentence(null);
     setScopeMirror(null);
+    setScopeConfirmed(false);
     // Each fresh draft starts without file-change consent. Never restore it
     // from history or from another draft's live scope — except across the
     // requestId rotation that a Save-harness-access performs, where the
@@ -864,23 +870,28 @@ function App() {
     if (!preserveSelections) {
       setWriteInstances([]);
       setWriteTurns(2);
+      turnsTyped.current = { read: false, write: false };
       setBackgroundConsent(false);
     }
     setPanelRequestId(runtimeLessDraftKey);
     setPanelChangeMode(openPanelInChangeMode.current);
     openPanelInChangeMode.current = false;
     void (async () => {
-      let scope: { instances: string[]; maxTurns: number; remaining: number; generation: number } | null = null;
+      let scope: Awaited<ReturnType<NonNullable<typeof readScope>>> = null;
+      let scopeRead = true;
       try {
         scope = await readScope();
       } catch {
         scope = null;
+        scopeRead = false; // An unreadable grant is unknown, not absent.
       }
       if (cancelled) return;
       if (scope) {
         setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation });
         setAllowedTurns(scope.maxTurns);
+        if (scope.write) setWriteTurns(scope.write.maxTurns);
       }
+      if (scopeRead) setScopeConfirmed(true);
       let discovery: {
         connected: boolean;
         sendAuthorized: boolean;
@@ -918,6 +929,17 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt]);
+  // A new goal starts with the turn budget of the workflow it will use (the live saved one, so editing it is followed too).
+  // Once access is granted, or the user typed a number, the number is theirs. Choosing a workflow never grants anything.
+  const draftBudget = (draftWorkflowDefinition?.modules.resources ?? DEFAULT_RESOURCES).budget;
+  const draftHasScope = scopeMirror !== null;
+  useEffect(() => {
+    if (!runtimeLessDraftKey || draftHasScope || !scopeConfirmed) return;
+    const next = startingBudget({ workflow: draftBudget, current: { readTurns: allowedTurns, writeTurns }, accessGranted: false, typed: turnsTyped.current });
+    setAllowedTurns(next.readTurns);
+    setWriteTurns(next.writeTurns);
+    // The current numbers are read, not watched: only the workflow, the draft and the grant re-run this.
+  }, [runtimeLessDraftKey, scopeBridgeReady, panelAttempt, draftHasScope, scopeConfirmed, draftBudget.readTurns, draftBudget.writeTurns]);
   // Send admission for a runtime-less draft in a panel-capable build: the
   // user must see (or retry loading) their harness-access choices before
   // any model turn can be spent. Legacy builds without the scope bridge
@@ -3556,6 +3578,7 @@ function App() {
                 goal={selectedPlan.goal}
                 workflow={selectedPlan.workflow}
                 checksRan={selectedPlan.checksRan}
+                turnsRan={selectedPlan.turnsRan}
                 planningHarness={selectedPlan.planningHarness}
                 reviewHarness={selectedPlan.reviewHarness}
                 planText={selectedPlan.planText}
@@ -3672,6 +3695,8 @@ function App() {
                     } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
                     methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
+                    resourcesLine={client.mode !== "linux-core" ? null : resourcesLine(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
+                    resourcesTitle={client.mode !== "linux-core" ? null : resourcesTitle(isSavedView ? savedTarget?.turnsRan : coordination?.turnsRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
                     currentWorkTitle={currentWork?.identityConfirmed ? currentWork.goal : null}
@@ -4045,6 +4070,7 @@ function App() {
                   goal={draftGoal?.message}
                   workflow={coordination.workflow}
                   checksRan={coordination.checksRan}
+                  turnsRan={coordination.turnsRan}
                   planningHarness={coordination.planningHarness}
                   reviewHarness={coordination.reviewHarness}
                   planText={coordination.planText}
@@ -4151,13 +4177,13 @@ function App() {
                           : current.filter((id) => id !== instanceId));
                       }}
                       maxTurns={allowedTurns}
-                      onMaxTurnsChange={(raw) => setAllowedTurns(clampTurns(raw))}
+                      onMaxTurnsChange={(raw) => { turnsTyped.current.read = true; setAllowedTurns(clampTurns(raw)); }}
                       workspaceRoot={draftGoal.workspace.trim()}
                       writeSelected={writeInstances}
                       onWriteToggle={(id, selected) => setWriteInstances((current) => selected
                         ? (current.includes(id) ? current : [...current, id]) : current.filter((item) => item !== id))}
                       writeTurns={writeTurns}
-                      onWriteTurnsChange={(raw) => setWriteTurns(raw === "" ? NaN : Number(raw))}
+                      onWriteTurnsChange={(raw) => { turnsTyped.current.write = true; setWriteTurns(raw === "" ? NaN : Number(raw)); }}
                       writeScope={scopeMirror?.write ?? null}
                       scope={scopeMirror ? { remaining: scopeMirror.remaining, maxTurns: scopeMirror.maxTurns } : null}
                       changeMode={panelChangeMode}

@@ -33,6 +33,10 @@ test('six-column grammar rejects duplicates, case collisions, wrapped/extra/malf
  assert.equal(catalog.length,3);
  for(const bad of ['',table.replace('provider model','model provider'),table+table.split('\n')[1]+'\n',table+'fixture ALPHA 1K 2K yes no\n',table+'wrapped\n',table.replace('128K','0K'),table.replace('16K','-16'),table.replace('yes yes','true yes'),table.replace('Fixture alpha','Fixture alpha extra'),table.replace('Fixture alpha','\u001b[0mFixture alpha'),'x'.repeat(262145)]) assert.equal(parsePiCatalog(bad),null,bad.slice(0,80));
 });
+test('the catalog carries the thinking column of each model and the offer stays a bare route',()=>{
+ assert.deepEqual(catalog.map(p=>p.thinking),['yes','yes','no']);
+ assert.deepEqual(configuredPiOffer({defaultProvider:'Other',defaultModel:'omega'},catalog).offer,{provider:'Other',model:'omega',useExistingCapacity:true});
+});
 test('scope-first exact selection, one suffix, literal colon wins, empty/default unknown auth, no fallback',()=>{
  assert.deepEqual(configuredPiOffer({enabledModels:['Fixture/alpha:high','Other/omega'],defaultProvider:'Other',defaultModel:'omega'},catalog).offer,pair);
  assert.equal(configuredPiOffer({enabledModels:['Fixture/beta:high']},catalog).offer.model,'beta:high');

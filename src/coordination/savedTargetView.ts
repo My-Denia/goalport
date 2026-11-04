@@ -2,7 +2,7 @@ import { normalizePiCapacity, samePiPair, type PiCapacitySelection } from "../..
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "./coordinateGoal";
 import type { SavedTargetContinuation, SavedTargetRelationStatus } from "./continuation";
 import type { LiveReadStatus } from "./liveRead";
-import type { CheckRan, WorkflowRef } from "./methodLine";
+import type { CheckRan, TurnRan, WorkflowRef } from "./methodLine";
 
 /** Public workbench projection only. No admission/scope/control material. */
 export interface SavedTargetResult {
@@ -28,6 +28,8 @@ export interface SavedTargetResult {
   /** Which method produced this result and which checks actually returned; absent on older records. */
   workflow?: WorkflowRef;
   checksRan?: readonly CheckRan[];
+  /** The setting each dispatched turn launched with; absent on older records. */
+  turnsRan?: readonly TurnRan[];
   piCapacity?: PiCapacitySelection;
   rememberedIntent?: { background: boolean; write: boolean; piCapacity?: PiCapacitySelection; legacyPi?: boolean } | null;
 }
