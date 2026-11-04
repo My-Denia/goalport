@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld("goalportCore", {
   backgroundAcknowledge: (jobId) => ipcRenderer.invoke("goalport:background-acknowledge", jobId),
   backgroundReleaseTerminal: (jobId) => ipcRenderer.invoke("goalport:background-release-terminal", jobId),
   coordinationAuthorize: (scope) => ipcRenderer.invoke("goalport:coordination-authorize", scope),
+  piCapacityOffer: (workspaceRoot) => ipcRenderer.invoke("goalport:pi-capacity-offer", workspaceRoot),
   coordinationScope: () => ipcRenderer.invoke("goalport:coordination-scope"),
   coordinationRevoke: () => ipcRenderer.invoke("goalport:coordination-revoke"),
   coordinationRecords: () => ipcRenderer.invoke("goalport:coordination-records"),

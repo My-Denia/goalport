@@ -952,6 +952,20 @@ test("a Windows pi installer shim with pi-launcher.js launches node.exe on the l
   assert.deepEqual(piWindowsLaunch(env, "win32", fsApi), { file: nodeExe, prefixArgs: [launcher] });
 });
 
+test("a Windows pi installer shim runs a pinned Pi pair through node on pi-launcher.js, keeping a multi-line prompt as one argument", (t) => {
+  const { env, cliJs, nodeExe } = piLaunchFixture(t, { cli: false });
+  const launcher = path.join(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(cliJs)))))), "pi-launcher.js");
+  fs.writeFileSync(launcher, "// fixture only\n");
+  const input = command("pi", "alpha");
+  input.modelSelection.provider = "Fixture";
+  input.initialMessage.text = "Check this plan.\nStep one\nStep two";
+  const expected = turnSpec(input, {}, "linux");
+  const spec = turnSpec(input, env, "win32");
+  assert.equal(spec.file, nodeExe);
+  assert.deepEqual(spec.args, [launcher, ...expected.args]);
+  assert.match(spec.args.at(-1), /Step one\nStep two/);
+});
+
 test("a Windows pi shim without node.exe keeps the exact legacy fallback", (t) => {
   const { env } = piLaunchFixture(t, { node: false });
   const input = command("pi", "default");

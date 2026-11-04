@@ -196,11 +196,15 @@ export function DraftGoalComposer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const allowanceExplained = useRef(false);
   const [showAllowanceExplanation, setShowAllowanceExplanation] = useState(false);
+  // Linux offers the Pi choice with the rest of its entry; Windows passes only the choice itself.
+  const piChoiceOffered = linuxCanStartCoordination || Boolean(onPiCapacityChange);
   useEffect(() => {
-    const eligible = !isLinuxActiveTarget && linuxCanStartCoordination && piCapacityChecked && backgroundConsent && !linuxWrite;
+    const eligible = !isLinuxActiveTarget && piChoiceOffered && piCapacityChecked && backgroundConsent && !linuxWrite;
+    // A dropped Pi choice is a new consent next time, so it is explained again.
+    if (!piCapacityChecked) allowanceExplained.current = false;
     if (eligible && !allowanceExplained.current) { allowanceExplained.current = true; setShowAllowanceExplanation(true); }
     else if (!eligible) setShowAllowanceExplanation(false);
-  }, [isLinuxActiveTarget, linuxCanStartCoordination, piCapacityChecked, backgroundConsent, linuxWrite]);
+  }, [isLinuxActiveTarget, piChoiceOffered, piCapacityChecked, backgroundConsent, linuxWrite]);
 
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const addressGone = coordinationResult === "That goal is no longer available." || Boolean(coordinationResult?.startsWith("That address is no longer available."));
@@ -331,7 +335,7 @@ export function DraftGoalComposer({
         {coordinationResult && !activeGoalTitle && !inputsLocked && coordinationResult !== failureHeadline && !coordinationResult.includes("stays unreplayed") ? <p className="draft-hint">{coordinationResult}</p> : null}
 
 
-        {linuxCanStartCoordination && (piCapacity || piCapacityReason || piLegacy) ? <div className="draft-hint" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+        {piChoiceOffered && (piCapacity || piCapacityReason || piLegacy) ? <div className="draft-hint" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
           <span>{piCapacityChecked
             ? (discoveredHarnesses.includes("codex") ? `Selected roles: Codex plans${linuxWrite ? " / writes" : ""} · Pi independently checks` : "Codex is needed to plan with this Pi capacity.")
             : piLegacy ? "Legacy agent selection" : "Available choice: Codex + Pi"}</span>

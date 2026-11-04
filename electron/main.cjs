@@ -21,6 +21,7 @@ const { controlEndpointFor } = require("./coordination-job.cjs");
 const { readRecords, saveRecordAsync } = require("./coordination-record.cjs");
 const { clearBlocked } = require("./harness-health.cjs");
 const { discoverCliProviders } = require("./cli-coordinate.cjs");
+const { piCapacityOffer } = require("./pi-capacity-admission.cjs");
 const { createHarnessRuntime, harnessLaunchConfigured } = require("./harness-runtime.cjs");
 
 const appRoot = fs.existsSync(path.join(__dirname, "dist")) ? __dirname : path.join(__dirname, "..");
@@ -1425,6 +1426,7 @@ app.whenReady().then(() => {
     // and subscription/API-key refusals run before the scope can be minted.
     () => discoverCliProviders({ stateDir: coordinationRuntime().stateDir })
   ); });
+  handleTrusted("goalport:pi-capacity-offer", (_event, workspaceRoot) => piCapacityOffer(workspaceRoot, (workspace) => discoverCliProviders({ stateDir: coordinationRuntime().stateDir, cwd: workspace, routeAwarePi: true })));
   handleTrusted("goalport:coordination-scope", () => coordinationScope.current());
   handleTrusted("goalport:coordination-revoke", () => {
     coordinationScope.revoke();

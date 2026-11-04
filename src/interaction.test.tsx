@@ -3209,6 +3209,31 @@ describe("one in-window repair", () => {
       expect(bridge.authorizations).toHaveLength(0);
       expect(bridge.launchCount()).toBe(0);
     });
+    it("Windows Codex + Pi background Send keeps Send open and carries the ticked Pi capacity", async () => {
+      scopedBridge({ providers: [usableHarness("codex", "Codex"), usableHarness("pi", "Pi")], launch: async command => planOrReview(command) });
+      const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+      const offer = vi.fn(async () => ({ ...usableHarness("pi", "Pi"), piCapacity: { offer: pair, catalog: [{ provider: "Fixture", model: "alpha" }], workspacePath: "C:\\work" } }));
+      const start = vi.fn(async () => liveJob);
+      Object.assign(window.goalportCore!, { piCapacityOffer: offer, backgroundStart: start, backgroundStatus: async () => null });
+      render(<App />);
+      await openDraftWithPanel();
+      fireEvent.change(screen.getByRole("textbox", { name: "Project folder" }), { target: { value: "C:\\work" } });
+      typeMessage("Plan this helper");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
+      const choice = await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" });
+      expect(offer).toHaveBeenCalledWith("C:\\work");
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+      fireEvent.click(choice);
+      expect(screen.getByText(/stay open for one follow-up/)).toBeTruthy();
+      // Unticking Keep working drops the Pi tick; ticking both again explains the allowance again.
+      const keep = screen.getByRole("checkbox", { name: "Keep working after closing" });
+      fireEvent.click(keep); fireEvent.click(keep);
+      fireEvent.click(await screen.findByRole("checkbox", { name: "Use Pi's configured capacity for this goal" }));
+      expect(screen.getByText(/stay open for one follow-up/)).toBeTruthy();
+      sendMessage();
+      await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+      expect(start.mock.calls[0]).toMatchObject([{ readInstances: ["codex", "pi"], piCapacity: pair, backgroundConsent: true }]);
+    });
     it("a pending profile grant never restores per-goal consent that was unchecked", async () => {
       scopedBridge({ providers: repairProviders(), launch: async command => planOrReview(command) });
       let allowed = false;

@@ -558,7 +558,13 @@ function App() {
     ? [...(linuxBaseHarnesses.includes("codex") ? ["codex"] : []), ...(piAvailable ? ["pi"] : [])]
     : [...new Set([...linuxBaseHarnesses, ...(piAvailable && linuxLegacyPi ? ["pi"] : [])])];
   const linuxPiProblem = linuxPiSelection && (!piAvailable || (!piOwnGoal && !samePiPair(linuxPiSelection, linuxPiSnapshot?.piCapacity?.offer))) ? "This goal\u0027s requested Pi route is unavailable; its choice is kept." : null;
-  const linuxHarnessSentence = linuxHarnessProblem || linuxPiProblem || (linuxPiSelection && !linuxSignedIn.includes("codex") ? "Codex is needed to plan with this Pi capacity; nothing was sent." : null) || (linuxPiSnapshot && linuxSignedIn.length < 2 ? "Use Pi\u0027s configured capacity to add independent checking, or recheck the folder if unavailable." : null);
+  const linuxHarnessSentence = client.mode !== "linux-core" ? null : linuxHarnessProblem || linuxPiProblem || (linuxPiSelection && !linuxSignedIn.includes("codex") ? "Codex is needed to plan with this Pi capacity; nothing was sent." : null) || (linuxPiSnapshot && linuxSignedIn.length < 2 ? "Use Pi\u0027s configured capacity to add independent checking, or recheck the folder if unavailable." : null);
+  // Windows offers the same Pi choice only where it can end in Live Continue:
+  // Codex plans, Pi checks, read-only, kept working after closing, 4+ turns.
+  const desktopPiEligible = client.mode === "electron" && Boolean(window.goalportCore?.piCapacityOffer) && backgroundConsent
+    && writeInstances.length === 0 && allowedTurns >= 4 && !draftGoal?.provider.trim()
+    && selectedInstances.length === 2 && selectedInstances.includes("codex") && selectedInstances.includes("pi");
+  const desktopPiWorkspace = desktopPiEligible ? draftGoal?.workspace.trim() ?? "" : "";
   const matchingLiveReady = matchingAcknowledgedLiveReady(hostCurrent, savedTarget, linuxPiSelection) && !linuxWrite && !linuxActionBusy && !admissionUnsaid.current && !liveIntent.current?.unknown;
   const idleNewGoalReady = matchingLiveReady && !liveIntent.current?.unknown;
   const desktopLiveNewGoalBlocked = client.mode !== "linux-core" && backgroundJob?.followUpMode === "live-read-once" && backgroundJob.active
@@ -1417,7 +1423,8 @@ function App() {
               ...(revisionFeedback
                 ? { executionFeedback: revisionFeedback, priorPlan: null, priorReview: null }
                 : { priorPlan: draftGoal.revision?.planText, priorReview: draftGoal.revision?.reviewText }),
-              ...(draftGoal.avoid ? { avoidInstances: [draftGoal.avoid.instanceId] } : {}), backgroundConsent: true });
+              ...(draftGoal.avoid ? { avoidInstances: [draftGoal.avoid.instanceId] } : {}),
+              ...(desktopPiEligible && linuxPiSelection ? { piCapacity: linuxPiSelection } : {}), backgroundConsent: true });
             outcome = backgroundStartOutcome(settledValue);
           } catch (error) {
             await admissionUnconfirmed(error instanceof Error && error.message ? error.message : "The reply about this background start never arrived.");
@@ -3057,6 +3064,23 @@ function App() {
     return () => { document.title = previous; };
   }, [client.mode, nativeDraft, linuxNativeView, linuxShowingFreshDraft, linuxCoordinationGoal, linuxCoordinationLive, linuxCoordinationLine, linuxCoordinationRequest, linuxHoldLine, sidebarUnconfirmed, linuxHarnessSentence, linuxConsentMissing, linuxLeftoverHeld, linuxActionBusy, leftUnreplayed, backgroundConsent, linuxDiscoverChecked, activeNotice, snapshot, selectedPlan]);
 
+  // Windows: ask which Pi route this exact folder would use, only while the
+  // choice can show. A folder or eligibility change drops the old consent.
+  const desktopPiRequest = useRef(0);
+  useEffect(() => {
+    if (client.mode !== "electron") return undefined;
+    const request = ++desktopPiRequest.current;
+    setLinuxPiSelection(undefined);
+    setLinuxPiSnapshot(null);
+    const offer = window.goalportCore?.piCapacityOffer;
+    if (!desktopPiEligible || !offer || !/^(?:[A-Za-z]:[\\/]|[\\/])/.test(desktopPiWorkspace)) return undefined;
+    const timer = window.setTimeout(() => {
+      offer(desktopPiWorkspace).then(
+        (pi) => { if (request === desktopPiRequest.current) setLinuxPiSnapshot(pi ?? null); },
+        () => { if (request === desktopPiRequest.current) setLinuxPiSnapshot(null); });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [desktopPiEligible, desktopPiWorkspace]);
   useEffect(() => {
     if (client.mode !== "linux-core") return undefined;
     let cancelled = false;
@@ -3525,15 +3549,15 @@ function App() {
                     coordinationEntryAvailable={scopeBridgeReady}
                     runtimeRequiredHint={client.mode === "linux-core" ? linuxRuntimeRequired : undefined}
                     linuxCanStartCoordination={client.mode === "linux-core"}
-                    piCapacity={client.mode === "linux-core" ? (linuxPiSelection ?? (piOwnGoal ? normalizePiCapacity(savedTarget?.piCapacity) ?? undefined : linuxPiSnapshot?.piCapacity?.offer)) : undefined}
+                    piCapacity={client.mode === "linux-core" ? (linuxPiSelection ?? (piOwnGoal ? normalizePiCapacity(savedTarget?.piCapacity) ?? undefined : linuxPiSnapshot?.piCapacity?.offer)) : desktopPiEligible ? linuxPiSelection ?? normalizePiCapacity(linuxPiSnapshot?.piCapacity?.offer) ?? undefined : undefined}
                     piCapacityChecked={Boolean(linuxPiSelection)}
-                    piCapacityReason={linuxPiProblem || (piOwnGoal && savedTarget?.piCapacity && !linuxPiSelection ? savedContinueReason : null) || linuxPiSnapshot?.piCapacity?.reason}
+                    piCapacityReason={client.mode !== "linux-core" ? (desktopPiEligible ? linuxPiSnapshot?.piCapacity?.reason : undefined) : linuxPiProblem || (piOwnGoal && savedTarget?.piCapacity && !linuxPiSelection ? savedContinueReason : null) || linuxPiSnapshot?.piCapacity?.reason}
                     piLegacy={Boolean(linuxLegacyPi)}
                     onPiCapacityChange={client.mode === "linux-core" && !piOwnGoal && !linuxCoordinationLive && !currentWorkReason ? (enabled) => {
                       const selection = enabled ? normalizePiCapacity(linuxPiSnapshot?.piCapacity?.offer) ?? undefined : undefined;
                       setLinuxPiSelection(selection);
                       coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
-                    } : undefined}
+                    } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
@@ -3564,7 +3588,7 @@ function App() {
                       || linuxActionBusy
                     )}
                     optionsRestored={optionsRestored && !currentWorkReason && client.mode === "linux-core" && !linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest) && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine)}
-                    discoveredHarnesses={linuxSignedIn}
+                    discoveredHarnesses={client.mode === "electron" ? selectedInstances : linuxSignedIn}
                     linuxWrite={client.mode === "linux-core" ? linuxWrite : false}
                     onLinuxWriteChange={client.mode === "linux-core" && !currentWorkReason && !linuxCoordinationLive && !sidebarUnconfirmed && !lineSaysAdmissionUnsaid(linuxCoordinationLine) ? (enabled) => { setOptionsRestored(false); setLinuxWrite(enabled); coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: enabled, piCapacity: linuxPiSelection, restored: false, dirty: true, sourceRequestId: savedTarget?.requestId ?? null }); } : undefined}
                     inputsLocked={client.mode === "linux-core" && (linuxActionBusy || linuxGranting || liveIntent.current?.unknown === true || admissionUnsaid.current)}

@@ -9,7 +9,7 @@ const { normalizeAdmissionInput, createCoordinationJobStore } = require('./coord
 const { normalizeRecord, saveRecord } = require('./coordination-record.cjs');
 const { authorizeMembershipError } = require('./coordinate-service.cjs');
 const { createHarnessRuntime } = require('./harness-runtime.cjs');
-const { piAdmissionContext } = require('./pi-capacity-admission.cjs');
+const { piAdmissionContext, piCapacityOffer } = require('./pi-capacity-admission.cjs');
 const engine = require('../dist/coordination-engine.cjs');
 const table='provider model context max-out thinking images\nFixture alpha 128K 16K yes yes\nFixture beta:high 1M 128K yes no\nOther omega 1000 200 no no\n';
 const pair={provider:'Fixture',model:'alpha',useExistingCapacity:true};
@@ -190,4 +190,12 @@ test('built engine freezes b0c literal legacy Pi ID; admitted pair changes only 
  assert.equal(selected[0].commandId,old[0].commandId);assert.notEqual(selected[1].commandId,old[1].commandId);assert.notEqual(changed[1].commandId,selected[1].commandId);
  assert.deepEqual(selected[1].modelSelection,{instanceId:'pi',provider:'Fixture',model:'alpha'});
  assert.equal((await capture(undefined,true)).length,0);
+});
+test('the desktop Pi offer checks only an absolute existing folder and returns just the Pi snapshot', async t => {
+ const root=temp(t), file=path.join(root,'file.txt'); fs.writeFileSync(file,'x'); let calls=0;
+ const discover=async cwd=>{calls++;assert.equal(cwd,root);return {ok:true,providers:[{instanceId:'codex'},snapshot(root)]};};
+ for (const bad of [undefined,7,'','relative/folder',path.join(root,'missing'),file]) await assert.rejects(()=>piCapacityOffer(bad,discover));
+ assert.equal(calls,0);
+ assert.equal((await piCapacityOffer(root,discover)).instanceId,'pi');
+ assert.equal(await piCapacityOffer(root,async()=>({ok:false})),null);
 });

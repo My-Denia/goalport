@@ -125,6 +125,7 @@ async function mainWiring(customModules = {}) {
     "./coordination-record.cjs": require("../../electron/coordination-record.cjs"),
     "./harness-health.cjs": {},
     "./cli-coordinate.cjs": require("../../electron/cli-coordinate.cjs"),
+    "./pi-capacity-admission.cjs": require("../../electron/pi-capacity-admission.cjs"),
     "./harness-runtime.cjs": { createHarnessRuntime: () => ({ stateDir: "/injected/state", cancel: () => {} }) },
     ...customModules,
   };
