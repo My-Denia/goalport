@@ -35,6 +35,7 @@ import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
+import { WAIT_SENTENCE } from "./conversation/sendDisabledReason";
 import { methodLine } from "./coordination/methodLine";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
@@ -318,6 +319,8 @@ function App() {
   const [draftBusy, setDraftBusy] = useState(false);
   const [draftError, setDraftError] = useState<ActiveNotice | null>(null);
   const [draftBlocked, setDraftBlocked] = useState(false);
+  // A window-path round ended with the message dispatched: Send is off because it was sent, not because the outcome is unknown.
+  const [draftSentDone, setDraftSentDone] = useState(false);
   const [draftDismissed, setDraftDismissed] = useState(false);
   const [activeNotice, setActiveNotice] = useState<ActiveNotice | null>(null);
   const [targetNotices, setTargetNotices] = useState<Record<string, ActiveNotice>>({});
@@ -595,7 +598,7 @@ function App() {
     setBackgroundView(false);
     setDraftDismissed(false);
     setDraftError(null);
-    setDraftBlocked(false);
+    setDraftBlocked(false); setDraftSentDone(false);
     client.pinView?.(""); // Fence late native mutations without selecting another Core goal.
     const retained = nativeGoalDraftRef.current;
     setDraftGoal(retained?.intent ? retained : { workspace: value?.workspace ?? retained?.workspace ?? draftGoalRef.current?.workspace ?? "",
@@ -1173,7 +1176,7 @@ function App() {
       draftGoalRef.current = reconciled;
       if (nativeDraftRef.current) nativeGoalDraftRef.current = reconciled;
       setDraftGoal(reconciled);
-      setDraftError({ sentence: "The earlier send is still not confirmed. Your original request is kept." });
+      setDraftError({ sentence: EARLIER_SEND_UNCONFIRMED_SENTENCE });
       return;
     }
     const retrying = canExplicitlyRetry(draftGoal.intent);
@@ -1199,12 +1202,12 @@ function App() {
       return;
     }
     if (!retrying && snapshot.bounds?.projectionUnavailable) {
-      setDraftError({ sentence: "GoalPort needs to reconnect before starting new work." });
+      setDraftError({ sentence: PROJECTION_UNAVAILABLE_SENTENCE });
       return;
     }
     if (!retrying && snapshot.stopResponsibility?.writeResponsibility === "held"
       && snapshot.stopResponsibility.blocksCurrentWorkspace !== false) {
-      setDraftError({ sentence: "A held Stop governs a workspace in this view, so no new goal can start here." });
+      setDraftError({ sentence: HELD_STOP_SENTENCE });
       return;
     }
     if (!provider) {
@@ -1389,7 +1392,7 @@ function App() {
           // Admission is this job's single Send, never a retryable draft or
           // an ordinary main-process record write. Even a lost Start reply
           // cannot authorize another owner or a window-only resend.
-          setDraftBlocked(true);
+          setDraftBlocked(true); setDraftSentDone(false);
           const submittedRequestId = draftGoal.requestId;
           // One honest unknown-outcome settlement: the draft stays blocked,
           // and a single read-only probe may reattach this request's job.
@@ -1437,7 +1440,7 @@ function App() {
             if (isDefiniteBackgroundStartRefusal(outcome)) {
               // Definite refusal: nothing was admitted, so the draft becomes
               // usable again; a corrected send re-opts into background.
-              setDraftBlocked(false);
+              setDraftBlocked(false); setDraftSentDone(false);
               const lead = outcome.message.trim() || "Background Send was refused.";
               setDraftError({ sentence: `${lead} Nothing was started, so this draft is still yours to change and send.`, technical: outcome.code });
             } else {
@@ -1714,6 +1717,7 @@ function App() {
         completedReport = report;
         setCoordination(report);
         setDraftBlocked(report.messageDispatched !== false);
+        setDraftSentDone(report.messageDispatched === true);
         setLiveRound({
           requestId: draftGoal.requestId,
           scoped: scopedSend,
@@ -1735,6 +1739,7 @@ function App() {
         if (completedReport) {
           setCoordination(completedReport);
           setDraftBlocked(completedReport.messageDispatched !== false);
+          setDraftSentDone(completedReport.messageDispatched === true);
           setActiveNotice({ sentence: "The result is on screen, but it could not be saved. Do not resend without inspecting the workspace." });
           return;
         }
@@ -1796,7 +1801,7 @@ function App() {
       if (failure) {
         setDraftError(failure);
         const retained = settleNativeSendIntent(intent, matches ? outcome : undefined, priorIntent);
-        setDraftBlocked(false);
+        setDraftBlocked(false); setDraftSentDone(false);
         const current = draftGoalRef.current;
         const settledDraft = {
           ...current,
@@ -1831,7 +1836,7 @@ function App() {
       const detail = error instanceof Error ? error.message : String(error);
       if (coded === "background-job-outstanding") {
         setDraftError({ sentence: detail.trim() ? detail : BACKGROUND_JOB_OUTSTANDING_SENTENCE, technical: detail });
-        setDraftBlocked(false);
+        setDraftBlocked(false); setDraftSentDone(false);
         setDraftGoal((current) => current ? { ...current, requestId: freshRequestId(), intent: undefined } : current);
       } else {
         setDraftError({ sentence: "GoalPort did not confirm it could start the conversation.", technical: detail });
@@ -1852,7 +1857,7 @@ function App() {
   function closeDraft(dismissed?: boolean) {
     setDraftGoal(null);
     setDraftError(null);
-    setDraftBlocked(false);
+    setDraftBlocked(false); setDraftSentDone(false);
     if (dismissed !== undefined) setDraftDismissed(dismissed);
     abandonCoordination();
   }
@@ -3532,6 +3537,22 @@ function App() {
                 <p className="draft-hint">One Codex conversation, without automatic Pi verification. Closing this page does not end the agent session.</p>
               </div><div className="composer-dock">{nativeComposer}</div></>;
             }
+            // Windows only: one plain reason beside a disabled Send. Each cause keeps its own flag.
+            const electronDraft = client.mode === "electron";
+            const grantMissing = electronDraft && ((Boolean(window.goalportCore?.backgroundSendConsent) && draftGoal?.provider.trim() === "" && !coordinationAvailable)
+              || (backgroundConsent && appInfo?.coordinationConfigured !== true));
+            const sendBlockers = electronDraft ? {
+              holdSentence: draftHeldNote ? draftHeldSentence
+                : backgroundSlotBlocked ? backgroundSlotSentence
+                : snapshot.bounds?.projectionUnavailable ? PROJECTION_UNAVAILABLE_SENTENCE
+                : snapshot.stopResponsibility?.writeResponsibility === "held" && snapshot.stopResponsibility.blocksCurrentWorkspace !== false ? HELD_STOP_SENTENCE
+                : draftBlocked ? (draftSentDone ? GOAL_SENT_SENTENCE : draftError?.sentence ?? EARLIER_SEND_UNCONFIRMED_SENTENCE)
+                : linuxActionBusy ? WAIT_SENTENCE
+                : null,
+              grantMissing,
+              grantControlVisible: Boolean(window.goalportCore?.backgroundSendConsent && window.goalportCore.backgroundStart)
+                && draftGoal?.provider.trim() === "" && panelRequestId === draftGoal.requestId && panelProviders !== null && appInfo?.coordinationConfigured !== true,
+            } : undefined;
             const draftComposer = (
                   <DraftGoalComposer
                     linuxEntry={client.mode === "linux-core" && (linuxShowingFreshDraft || (coordinatedRoute === null && !linuxCoordinationGoal && !linuxCoordinationRequest && !snapshot.activeCampaignId))}
@@ -3546,7 +3567,8 @@ function App() {
                         : "Checking which agents can work on this goal… Send unlocks once your agent access choices are ready.")
                       : null}
                     retryLabel={draftRetryLabel}
-                    error={draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
+                    sendBlockers={sendBlockers}
+                    error={electronDraft ? draftError : draftHeldNote ? { sentence: draftHeldSentence } : backgroundSlotBlocked ? { sentence: backgroundSlotSentence } : draftError}
                     canBrowse={client.mode === "electron" && Boolean(client.chooseWorkspace)}
                     coordinationAvailable={coordinationAvailable}
                     coordinationEntryAvailable={scopeBridgeReady}
@@ -4310,6 +4332,10 @@ function targetsHeldWorkspace(value: string, held: string): boolean {
 }
 
 const HELD_CONVERSATION_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Return to the background goal to release it; nothing was sent.";
+const GOAL_SENT_SENTENCE = "This goal was sent. Use New goal to start another.";
+const EARLIER_SEND_UNCONFIRMED_SENTENCE = "The earlier send is still not confirmed. Your original request is kept.";
+const PROJECTION_UNAVAILABLE_SENTENCE = "GoalPort needs to reconnect before starting new work.";
+const HELD_STOP_SENTENCE = "A held Stop governs a workspace in this view, so no new goal can start here.";
 const HELD_FOLDER_SENTENCE = "This folder is still reserved while the interrupted goal's exit is unconfirmed. Choose a different folder; nothing was sent.";
 const UNIDENTIFIABLE_FOLDER_SENTENCE = "GoalPort needs an absolute folder path (for example C:\\workspace\\your-project) before it can check this folder or start work; nothing was sent.";
 

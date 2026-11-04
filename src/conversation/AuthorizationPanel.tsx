@@ -9,6 +9,9 @@ import type { SyntheticCatalogInstance } from "../coordination/coordinateGoal";
  * user-facing: harnesses, model turns, blocked on this machine.
  */
 
+/** The one-time grant control's label; the Send reason points at it by this text. */
+export const GRANT_BUTTON_LABEL = "Allow GoalPort to run agent turns on this profile";
+
 export interface AuthorizationScopeLine {
   readonly remaining: number;
   readonly maxTurns: number;
@@ -125,7 +128,8 @@ export function AuthorizationPanel({
       </p>
       {onBackgroundConsentChange ? <div className="authorization-background">
         {!backgroundConfigured ? <>
-          <button type="button" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>Allow GoalPort to run agent turns on this profile</button>
+          <button type="button" className="button button-primary" aria-describedby="authorization-grant-note" disabled={grantBusy || !onAllowBackgroundSend} onClick={() => { void allowBackgroundSend(); }}>{GRANT_BUTTON_LABEL}</button>
+          <p id="authorization-grant-note" className="authorization-grant-note">GoalPort asks once per profile. After that, the agents you choose below can run turns here.</p>
           {grantError ? <p role="alert">{grantError}</p> : null}
         </> : null}
       </div> : null}

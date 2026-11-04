@@ -8,6 +8,15 @@ import { useComposerInput } from "./useComposerInput";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { shortGoalTitle } from "./shortGoalTitle";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
+import { sendDisabledReason, CHOOSE_WAY_SENTENCE } from "./sendDisabledReason";
+
+/** What the app knows about why Send may be held; only the coordinated Windows draft passes it. */
+export interface SendBlockers {
+  /** The existing sentence for a folder, profile, reconnect or held-Stop block. */
+  holdSentence: string | null;
+  grantMissing: boolean;
+  grantControlVisible: boolean;
+}
 
 export interface GoalDraftValue {
   workspace: string;
@@ -85,6 +94,8 @@ interface DraftGoalComposerProps {
   connected: boolean;
   busy: boolean;
   blockedFromSending: boolean;
+  /** When given, one plain reason sits beside a disabled Send and replaces the waiting line. */
+  sendBlockers?: SendBlockers;
   /** Non-null holds Send (quiet progress, not an error): harness access for this draft is still resolving. */
   waitingOn: string | null;
   retryLabel?: string;
@@ -200,7 +211,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
+  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, sendBlockers, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const allowanceExplained = useRef(false);
@@ -241,6 +252,28 @@ export function DraftGoalComposer({
        && draft.workspace.trim().length > 0
        && draft.message.trim().length > 0
        && (coordinationAvailable || linuxCanStartCoordination || draft.provider.trim().length > 0));
+
+  // A retry bypasses the held and grant checks (see canSubmit), so it bypasses their reasons too.
+  const retrying = Boolean(retryLabel);
+  const sendDisabled = !canSubmit || coordinationResult === "Sending.";
+  let disabledReason = sendBlockers && sendDisabled ? sendDisabledReason({
+    inFlight: busy || inFlightLine,
+    connected,
+    holdSentence: retrying ? null : sendBlockers.holdSentence,
+    waitingOn,
+    grantMissing: !retrying && sendBlockers.grantMissing,
+    grantControlVisible: sendBlockers.grantControlVisible,
+    wayToWorkMissing: !coordinationAvailable && !linuxCanStartCoordination && draft.provider.trim().length === 0,
+    workspaceMissing: draft.workspace.trim().length === 0,
+    messageMissing: draft.message.trim().length === 0,
+    otherBlocked: inputsLocked || (blockedFromSending && !retrying),
+  }) : null;
+  // The picker trigger and the error alert already say these; say each once.
+  const pickerSaysChoose = !linuxEntry && !runtimes.some((candidate) => candidate.id === draft.provider)
+    && !(coordinationAvailable || coordinationEntryAvailable) && !runtimeRequiredHint;
+  // A retry stays sendable, but the folder or slot hold is still worth saying in advance.
+  const retryHold = retrying && sendBlockers?.holdSentence && sendBlockers.holdSentence !== error?.sentence ? sendBlockers.holdSentence : null;
+  if (disabledReason === error?.sentence || (disabledReason === CHOOSE_WAY_SENTENCE && pickerSaysChoose)) disabledReason = null;
 
   // One input layer, one copy: auto-grow, IME-safe Enter and the draft's
   // ready-for-typing focus live in useComposerInput, shared with the
@@ -351,11 +384,12 @@ export function DraftGoalComposer({
           {piCapacity ? <PiCapacityControl capacity={piCapacity} checked={piCapacityChecked === true} disabled={Boolean(busy || inputsLocked || piCapacityReason)} onChange={onPiCapacityChange} /> : piLegacy ? <div>Pi route not recorded · Continue is unpinned</div> : null}
           {piCapacityReason ? <div role="status">{piCapacityReason}</div> : null}
         </div> : null}
-        {waitingOn ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
+        {waitingOn && !sendBlockers ? <p className="composer-wait" role="status">{waitingOn}</p> : null}
         {showAllowanceExplanation ? <p className="draft-hint">After a checked read-only result, this allowance can stay open for one follow-up, for up to 15 minutes.</p> : null}
         {liveAllowanceHint ? <p className="draft-hint" role="status">{liveAllowanceHint}</p> : null}
         {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome && continueDisabledReason !== liveAllowanceHint ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
 
+        {retryHold ? <p className="send-disabled-reason" role="alert">{retryHold}</p> : null}
         {error ? (
           <div className="dialog-note" role="alert">
             <span aria-hidden="true">!</span>
@@ -402,6 +436,7 @@ export function DraftGoalComposer({
         ) : null}
         {keepRunningHint ? <p className="draft-hint">{keepRunningHint}</p> : null}
         <div className="dialog-actions">
+          {disabledReason ? <p className="send-disabled-reason" role="status" id="send-disabled-reason">{disabledReason}</p> : null}
           {onStopCoordination && !currentWorkLine ? <button className="button button-small button-outline" type="button" title={stopLabel} aria-label={stopLabel} disabled={coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop."} onClick={onStopCoordination}>{coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." ? coordinationResult : currentWorkTitle ? shortGoalTitle(stopLabel, 64) : stopLabel}</button> : null}
           {onLeaveGoal && !currentWorkLine ? <button className="button button-small button-outline" type="button" disabled={inFlightLine} onClick={onLeaveGoal}>{coordinationResult === "Leaving this unreplayed." ? coordinationResult : "Leave it unreplayed"}</button> : null}
           {isLinuxActiveTarget ? (
@@ -429,7 +464,7 @@ export function DraftGoalComposer({
               ) : (
                 draft.message.trim() || draft.workspace.trim() || inputsLocked ? <button className="button button-quiet" type="button" aria-label="Discard draft" onClick={onDiscard} disabled={busy || inputsLocked}>Discard draft</button> : null
               )}
-              <button className="button button-primary" type="submit" aria-label={coordinationResult === "Sending." ? "Sending." : admissionUnsaidResult ? "Send not confirmed" : addressGone ? "Send a new goal" : retryLabel ?? "Send message"} disabled={!canSubmit || coordinationResult === "Sending."}>
+              <button className="button button-primary" type="submit" aria-describedby={disabledReason ? "send-disabled-reason" : undefined} aria-label={coordinationResult === "Sending." ? "Sending." : admissionUnsaidResult ? "Send not confirmed" : addressGone ? "Send a new goal" : retryLabel ?? "Send message"} disabled={sendDisabled}>
                 {coordinationResult === "Sending." ? "Sending." : busy ? "Starting…" : admissionUnsaidResult ? "Not confirmed" : addressGone ? "Send a new goal" : (retryLabel ?? "Send")}
                 <span aria-hidden="true">↗</span>
               </button>
