@@ -833,6 +833,8 @@ function App() {
     ? workflows?.find((item) => item.id === draftGoal.workflowId)
     : undefined;
   // One rule decides whether the plan is reviewed (goals that change files always are), and so how many agents Send needs.
+  // Only the desktop app has saved workflows; elsewhere a draft always starts on Recommended.
+  const workflowsCanLoad = client.mode === "electron" && !!window.goalportCore?.workflowsList;
   const draftAgentsNeeded: 1 | 2 = planReviewRuns((draftWorkflowDefinition ?? RECOMMENDED_V1).modules.checks, writeInstances.length > 0) ? 2 : 1;
   // A draft that points at a workflow that is no longer saved goes back to Recommended and says so once.
   const draftWorkflowGone = workflows !== null && draftGoal?.provider.trim() === "" && !!draftGoal.workflowId && !draftWorkflowDefinition;
@@ -1023,7 +1025,12 @@ function App() {
   const deleteWorkflow = useCallback(async (id: string): Promise<WorkflowEditResult> => {
     const remove = window.goalportCore?.workflowsDelete;
     if (!remove) return { ok: false, error: "Your workflows could not be changed right now." };
-    try { return workflowReply(await remove(id)); } catch { return { ok: false, error: "Your workflows could not be changed right now." }; }
+    try {
+      const result = workflowReply(await remove(id));
+      // The user deleted it themselves: the draft goes back to Recommended without the "no longer saved" line.
+      if (result.ok) setDraftGoal((current) => current && current.workflowId === id ? { ...current, workflowId: undefined } : current);
+      return result;
+    } catch { return { ok: false, error: "Your workflows could not be changed right now." }; }
   }, [workflowReply]);
 
   useEffect(() => {
@@ -1412,7 +1419,7 @@ function App() {
         setDraftError({ sentence: "Choose 1 to 8 write turns before allowing workspace changes." });
         return;
       }
-      if (draftGoal.workflowId && draftGoal.provider.trim() === "" && workflows === null) {
+      if (draftGoal.workflowId && draftGoal.provider.trim() === "" && workflows === null && workflowsCanLoad) {
         setDraftError({ sentence: "Your workflows are still loading, so nothing was sent. Try again in a moment." });
         return;
       }
@@ -1966,7 +1973,7 @@ function App() {
   // A saved result that ran under one of the user's workflows: the new draft picks that workflow as it is saved now.
   function savedWorkflowCarrier(plan: { workflowDefinition?: WorkflowDefinition }): Pick<GoalDraft, "workflowId"> {
     const used = plan.workflowDefinition;
-    return used && used.id !== RECOMMENDED_V1.id ? { workflowId: used.id } : {};
+    return used && used.id !== RECOMMENDED_V1.id && workflowsCanLoad ? { workflowId: used.id } : {};
   }
 
   function handleRevise(plan: SavedPlan) {
