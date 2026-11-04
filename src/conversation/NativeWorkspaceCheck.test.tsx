@@ -15,7 +15,7 @@ function server(consent=true){const calls:{messageType:string;payload:Record<str
 it('pure purpose exports preserve exact UTF8 bytes and no plan/execution promise; readers refuse check continuation',()=>{
  expect(parseNativeCheckMaterial(material)).toEqual(material);expect(parseNativeCheckMaterial({...material,exactPrompt:material.exactPrompt+' '})).toBeNull();expect(parseNativeCheckTarget({...target,workspacePath:'/forged'})).toBeNull();
  const command=buildNativeWorkspaceCheckCommand({requestId:'one',workspaceRoot:'/fixture',nativeCheckTarget:target,nativeCheckMaterial:material,piCapacity:pair});expect(command.initialMessage.text).toBe(material.exactPrompt);expect(command.promptDelivery).toBe('stdin');expect(command.sandboxPolicy.type).toBe('readOnly');expect(material.exactPrompt).not.toMatch(/VERDICT: verified|approved plan/);
- expect(continuationUnavailable({recordKind:'native-workspace-check'} as never)).toMatch(/do not continue/);
+ expect(continuationUnavailable({recordKind:'native-workspace-check'} as never)).toBe('A workspace check cannot be continued.');
 });
 const sendReady=async()=>{fireEvent.click(screen.getByRole('button',{name:'Ask Pi to review'}));return await screen.findByRole('button',{name:'Send to Pi'});};
 it('one step: opening reads the changes, says what goes where in plain words, and sends once with no renderer bytes',async()=>{
