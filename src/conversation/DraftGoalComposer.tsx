@@ -271,6 +271,8 @@ export function DraftGoalComposer({
   // The picker trigger and the error alert already say these; say each once.
   const pickerSaysChoose = !linuxEntry && !runtimes.some((candidate) => candidate.id === draft.provider)
     && !(coordinationAvailable || coordinationEntryAvailable) && !runtimeRequiredHint;
+  // A retry stays sendable, but the folder or slot hold is still worth saying in advance.
+  const retryHold = retrying && sendBlockers?.holdSentence && sendBlockers.holdSentence !== error?.sentence ? sendBlockers.holdSentence : null;
   if (disabledReason === error?.sentence || (disabledReason === CHOOSE_WAY_SENTENCE && pickerSaysChoose)) disabledReason = null;
 
   // One input layer, one copy: auto-grow, IME-safe Enter and the draft's
@@ -387,6 +389,7 @@ export function DraftGoalComposer({
         {liveAllowanceHint ? <p className="draft-hint" role="status">{liveAllowanceHint}</p> : null}
         {isLinuxActiveTarget && continueDisabledReason && continueDisabledReason !== currentWorkLine && continueDisabledReason !== savedResultOutcome && continueDisabledReason !== liveAllowanceHint ? <p className="draft-hint" role="status">{continueDisabledReason}</p> : null}
 
+        {retryHold ? <p className="send-disabled-reason" role="alert">{retryHold}</p> : null}
         {error ? (
           <div className="dialog-note" role="alert">
             <span aria-hidden="true">!</span>

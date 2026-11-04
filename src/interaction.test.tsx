@@ -2604,6 +2604,7 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     expect(bridge.launchCount()).toBe(4);
+    expect(document.getElementById("send-disabled-reason")?.textContent).toBe("This goal was sent. Use New goal to start another.");
   });
 
   it("stops a write-authorized read-budget-2 round before edits with write budget untouched", async () => {
@@ -2841,6 +2842,7 @@ describe("one in-window repair", () => {
     expect(screen.getByText("Before automatic repair")).toBeTruthy();
     expect(bridge.launchCount()).toBe(8);
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById("send-disabled-reason")?.textContent).toBe("This goal was sent. Use New goal to start another.");
   });
 
   it("reloads a repaired record as facts only: retained first pass, no live controls, write consent off", async () => {

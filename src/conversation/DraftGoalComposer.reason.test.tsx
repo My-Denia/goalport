@@ -47,6 +47,12 @@ describe("Send reason beside a disabled Send", () => {
     expect(disabledCases).toBeGreaterThan(100);
   });
 
+  it("keeps the hold sentence visible during a retry, where Send stays on", () => {
+    const send = mount({ connected: true, waitingOn: null, blocked: true, workspace: "C:\w", message: "x", available: true, retry: "Retry", blockers: { holdSentence: "A background goal is still active.", grantMissing: false, grantControlVisible: true } });
+    expect(send.disabled).toBe(false);
+    expect(screen.getByRole("alert").textContent).toBe("A background goal is still active.");
+  });
+
   it("is absent without sendBlockers, so Linux and native composers render as before", () => {
     const send = mount({ connected: false, waitingOn: "Checking…", blocked: true, workspace: "", message: "", available: false, sendBlockers: false });
     expect(send.disabled).toBe(true);
