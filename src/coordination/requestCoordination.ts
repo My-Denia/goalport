@@ -638,6 +638,10 @@ async function runCoordination(
   // dispatched nothing. A second revise is terminal: one repair per Send, and
   // retained plan-revision facts survive every later pass.
   const secondRevise = repaired.verdict === "revise";
+  // The repair chain can stop at its own plan check, before anything is executed or audited.
+  const repairStoppedAtPlan = (repaired.checksRan ?? []).every((check) => check.kind !== "audit")
+    && (repaired.auditText ?? "").trim().length === 0
+    && (repaired.executionText ?? "").trim().length === 0 && !repaired.executionHarness;
   return viewFrom({
     ...scopedViewFromSession(repaired, hasWriteConsent),
     messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched, repaired.messageDispatched),
@@ -645,6 +649,6 @@ async function runCoordination(
     turnsRan: turnsOf(...(latest === sent ? [sent] : [sent, latest]), repaired),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     feedbackHistory: [roundFactFrom(latest)],
-    ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}`, decision: { kind: "limit-reached", stage: "changes" } as CoordinationDecision } : {}),
+    ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}`, decision: (repairStoppedAtPlan ? { kind: "repair-plan-revise", stage: "plan" } : { kind: "limit-reached", stage: "changes" }) as CoordinationDecision } : {}),
   });
 }

@@ -1042,6 +1042,8 @@ test("decision round-trips when valid, is dropped when not, and old records have
     const decision = { kind: "limit-reached", stage: "plan" };
     saveRecord(directory, record({ decision }));
     assert.deepEqual(readRecords(directory)[0].decision, decision);
+    const repairPlan = { kind: "repair-plan-revise", stage: "plan" };
+    assert.deepEqual(saveRecord(directory, record({ requestId: "rp", decision: repairPlan })).decision, repairPlan);
     for (const [requestId, bad] of [["a", { kind: "limit-reached" }], ["b", { kind: "nope", stage: "plan" }], ["d", "plan"]]) {
       assert.equal("decision" in saveRecord(directory, record({ requestId, decision: bad })), false, requestId);
     }

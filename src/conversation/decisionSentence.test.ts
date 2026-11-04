@@ -16,3 +16,11 @@ describe("decisionSentence window-refused", () => {
     expect(repair).toContain("couldn't confirm the background job could continue, so the repair didn't start.");
   });
 });
+
+describe("decisionSentence repair-plan-revise", () => {
+  it("says the repair plan was rejected after the one automatic repair, not that verification asked again", () => {
+    const sentence = decisionSentence({ kind: "repair-plan-revise", stage: "plan" }, actions);
+    expect(sentence).toBe("The check asked for changes to the repair plan. GoalPort already used its one automatic repair, so nothing more was spent. Revise to update it, or send a new goal.");
+    expect(sentence).not.toContain("Verification");
+  });
+});

@@ -1,4 +1,4 @@
-export type DecisionKind = 'automatic-off' | 'limit-reached' | 'not-enough-turns' | 'window-refused' | 'unstaffed' | 'revise';
+export type DecisionKind = 'automatic-off' | 'limit-reached' | 'repair-plan-revise' | 'not-enough-turns' | 'window-refused' | 'unstaffed' | 'revise';
 export type DecisionStage = 'plan' | 'changes';
 export interface CoordinationDecision {
   readonly kind: DecisionKind;

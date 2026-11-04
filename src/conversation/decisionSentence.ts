@@ -21,6 +21,8 @@ export function decisionSentence(decision: CoordinationDecision, actions: Decisi
       return `${asked} Your workflow stops here, so nothing more was spent. ${next}`;
     case "limit-reached":
       return `${plan ? "The check asked for changes again after GoalPort's one automatic revision" : "Verification asked for changes again after GoalPort's one automatic repair"}, so it stopped. ${next}`;
+    case "repair-plan-revise":
+      return `The check asked for changes to the repair plan. GoalPort already used its one automatic repair, so nothing more was spent. ${next}`;
     case "not-enough-turns":
       return `${asked} Not enough turns were left to ${revision} automatically, so nothing extra was added.${access} ${next}`;
     case "unstaffed":

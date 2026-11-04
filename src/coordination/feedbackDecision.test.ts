@@ -186,6 +186,16 @@ describe("the repair gate honours the feedback setting", () => {
       { ...base, writeAuthorization: write, beforeRepair: async () => true }, discovery, script({ reviseAudit: () => true }));
     expect(view.decision).toEqual({ kind: "limit-reached", stage: "changes" });
     expect(view.stopReason).toContain("This send already used its one automatic repair.");
+    expect(view.checksRan?.at(-1)?.kind).toBe("audit");
+    expect(view.checksRan?.at(-1)?.kind).toBe("audit");
+  });
+
+  it("repair-plan-revise when the repair's own plan check asks for changes", async () => {
+    const view = await requestCoordination(
+      { ...base, writeAuthorization: write, beforeRepair: async () => true },
+      discovery, script({ reviseAudit: (nth) => nth === 1, reviseReview: (nth) => nth === 2 }));
+    expect(view.decision).toEqual({ kind: "repair-plan-revise", stage: "plan" });
+    expect(view.stopReason).toContain("This send already used its one automatic repair.");
   });
 
   it("revise when there is no repair hook", async () => {

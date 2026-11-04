@@ -6,6 +6,7 @@
 // Kinds:
 //   automatic-off     the workflow says stop and ask instead of revising automatically
 //   limit-reached     the one automatic round already ran and the check asked again
+//   repair-plan-revise the one automatic repair started and its own plan check asked for changes
 //   not-enough-turns  not enough authorized turns were left for the automatic round
 //   window-refused    this window could not be confirmed, so the round did not start
 //                     (where: 'background' when a background job's worker gate said no)
@@ -13,7 +14,7 @@
 //   revise            a plain first-round revise with no automatic round available
 // Stages: plan (the plan check before any write), changes (verification after writes).
 export const DECISION_KINDS = Object.freeze([
-  'automatic-off', 'limit-reached', 'not-enough-turns', 'window-refused', 'unstaffed', 'revise',
+  'automatic-off', 'limit-reached', 'repair-plan-revise', 'not-enough-turns', 'window-refused', 'unstaffed', 'revise',
 ]);
 export const DECISION_STAGES = Object.freeze(['plan', 'changes']);
 
