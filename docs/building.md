@@ -1,6 +1,6 @@
 # Building and running
 
-GoalPort has no downloadable release yet. You build the Windows x64 RC package from source, and the result is a self-contained folder you can run and move. See [releasing](releasing.md) for how a verified package becomes a downloadable release candidate.
+The earlier public release is published as [v1.0.0-rc.1](https://github.com/My-Denia/goalport/releases/tag/v1.0.0-rc.1). GoalPort rc.2 is the current development candidate built from source; it is not yet published as a downloadable release. You build the Windows x64 RC package from source, and the result is a self-contained folder you can run and move. See [releasing](releasing.md) for how a verified package becomes a downloadable release candidate.
 
 ## Prerequisites
 
@@ -19,9 +19,9 @@ From a fresh clone:
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm electron:package --out artifacts/electron-rc/rc1
-pnpm electron:verify --package artifacts/electron-rc/rc1/GoalPort-win32-x64
-pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
+pnpm electron:package --distribution dev-candidate --out artifacts/electron-rc/rc2-dev
+pnpm electron:verify --package artifacts/electron-rc/rc2-dev/GoalPort-win32-x64
+pnpm electron:start --package artifacts/electron-rc/rc2-dev/GoalPort-win32-x64
 ```
 
 `electron:package` builds the frontend, Core and launcher, then packages Electron. It needs no previous `target`, `dist`, local EXE, asar, acceptance database or historical run folder.
@@ -37,7 +37,7 @@ Options for `electron:start`:
 
 | Option | Effect |
 | --- | --- |
-| *(none)* | Normal data in `%APPDATA%\GoalPort\rc` |
+| *(none)* | Dev candidate data in `%APPDATA%\GoalPort\dev` (release packages use `%APPDATA%\GoalPort\rc`) |
 | `--data-dir <absolute path>` | A separate normal profile |
 | `--test-profile <absolute path>` | A synthetic test profile that allows only the Scenario Runtime |
 
@@ -64,4 +64,4 @@ To use a Runtime, install its CLI and sign in with that CLI first. GoalPort does
 
 A source revision plus a dirty source digest identifies a local candidate build. It does not claim that those changes were ever committed.
 
-A profile is bound to the Core binary hash of the build that created it, so a different build refuses an existing profile. Use a new `--data-dir` when you switch builds.
+The profile marker (marker v2) records provenance metadata (`createdBy`, `lastOpenedBy`). A differently-built candidate reopens compatible data in the dev channel (`%APPDATA%\GoalPort\dev`) without refusing on Core binary hash differences: format compatibility is governed by schema migrations and SQLite integrity checks (`quick_check`), and a verified consistency backup is automatically created on first open by a new build before Core launches. Legacy rc.1-era profiles with a v1 marker are adopted in place with a verified backup when explicitly targeted with `--data-dir`.

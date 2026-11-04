@@ -24,6 +24,46 @@ test('target requires itself newest/completed/current task and retains whole-inv
  snapshot=base;pending=[{}];await assert.rejects(purpose.resolveTarget(core,base,target),/permission/);pending=[];snapshot={...base,attempt:{...base.attempt,state:'completed'}};assert.equal((await purpose.resolveTarget(core,snapshot,target)).target.attemptId,'attempt');
 });
 
+test('completed target resolves with history-only omitted bounds and rejects control omissions', async t => {
+ const { p } = repo(t); const target = { campaignId: 'campaign', attemptId: 'attempt', turnRequestId: 'turn' };
+ const base = {
+  bounds: { projectionUnavailable: false, truncated: true, omittedCounts: { timelineItems: 1 } },
+  activeCampaignId: 'campaign',
+  attempt: { id: 'attempt', taskId: 'task', provider: 'codex', state: 'waiting' },
+  activeTask: { id: 'task', title: 'fixture' },
+  project: { workspaceRoot: p },
+  decisions: [],
+  productConversation: { runtime: { provider: 'codex' }, turn: { state: 'completed', canStop: false } },
+  turnResults: [{ requestId: 'turn', replyState: 'completed', replyText: 'reported', commands: [] }],
+ };
+ let snapshot = base;
+ const core = { exchangeVerified: async q => ({ ok: true, requestId: q.requestId, payload: { requestId: q.requestId, accepted: true, ...(q.messageType === 'goal_overview' ? { overview: { truncated: false, goals: [{ campaignId: 'campaign', attention: 'completed' }], pending: [] } } : { snapshot }) } }) };
+
+ // Real producer shape: truncated: true with timelineItems: 1 resolves completed target
+ assert.equal((await purpose.resolveTarget(core, base, target)).target.turnRequestId, 'turn');
+
+ // Other history omissions (conversationItems, turnResults) also resolve
+ for (const counts of [{ conversationItems: 5 }, { turnResults: 2 }, { timelineItems: 1, turnResults: 2 }]) {
+  snapshot = { ...base, bounds: { projectionUnavailable: false, truncated: true, omittedCounts: counts } };
+  assert.equal((await purpose.resolveTarget(core, snapshot, target)).target.turnRequestId, 'turn');
+ }
+
+ // Mixed control, unknown category, empty, or invalid counts reject
+ for (const counts of [
+  { timelineItems: 1, decisions: 1 },
+  { timelineItems: 1, controlProjection: 1 },
+  { timelineItems: 1, notices: 1 },
+  {},
+  { timelineItems: 0 },
+  { timelineItems: -1 },
+  { timelineItems: '1' },
+  { timelineItems: 1.5 },
+ ]) {
+  snapshot = { ...base, bounds: { projectionUnavailable: false, truncated: true, omittedCounts: counts } };
+  await assert.rejects(purpose.resolveTarget(core, snapshot, target), /Core control progress is unavailable or incomplete/);
+ }
+});
+
 test('metadata policy is literal, strict, deterministic and body-free',()=>{
  assert.equal(purpose.classifyMetadata('D\0.ENV.secret\0M\0:(glob)*\0')[0].classification,'excluded');
  assert.throws(()=>purpose.classifyMetadata('M\0bad\ufffd\0'.slice(0,-1)),/Malformed/);

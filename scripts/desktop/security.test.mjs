@@ -45,7 +45,7 @@ function fixture() {
 // Execute the actual main entrypoint through registration and the first window
 // load. The boundary stubs prevent profile writes, process launches, and network
 // access; they do not replace the production security policy or its wiring.
-async function mainWiring() {
+async function mainWiring(customModules = {}) {
   const handlers = new Map(), externalUrls = [], effects = [];
   let ready, loaded;
   const loadStarted = new Promise((resolve) => { loaded = resolve; });
@@ -110,18 +110,23 @@ async function mainWiring() {
       createPendingDecisionNotifier: () => () => {},
     },
     "./window-state.cjs": { loadWindowState: () => ({ bounds: {}, maximized: false }), STATE_FILE: "window-state.json" },
-    "./coordinate-service.cjs": {},
-    "./coordination-scope.cjs": {},
+    "./coordinate-service.cjs": require("../../electron/coordinate-service.cjs"),
+    "./coordination-scope.cjs": require("../../electron/coordination-scope.cjs"),
     "./coordination-background.cjs": { createBackgroundHost: () => ({
       status: (jobId) => { effects.push(["status", jobId]); return { jobId }; },
+      outstanding: (workspaceRoot) => {
+        effects.push(["outstanding", workspaceRoot]);
+        return false;
+      },
     }) },
     "./native-check-host.cjs": { createNativeCheckHost: () => ({}) },
-    "./background-send-consent.cjs": {},
+    "./background-send-consent.cjs": { backgroundSendConsent: () => ({ read: () => false }) },
     "./coordination-job.cjs": {},
-    "./coordination-record.cjs": {},
+    "./coordination-record.cjs": require("../../electron/coordination-record.cjs"),
     "./harness-health.cjs": {},
-    "./cli-coordinate.cjs": {},
-    "./harness-runtime.cjs": {},
+    "./cli-coordinate.cjs": require("../../electron/cli-coordinate.cjs"),
+    "./harness-runtime.cjs": { createHarnessRuntime: () => ({ stateDir: "/injected/state", cancel: () => {} }) },
+    ...customModules,
   };
   const mainFile = fileURLToPath(new URL("../../electron/main.cjs", import.meta.url));
   const source = readFileSync(mainFile, "utf8");
@@ -243,27 +248,25 @@ test("preload exposes bridge only to exact main app document, never external/sub
 });
 
 test("trusted authorization handler validates optional write through the tested fresh-discovery bridge", async () => {
-  const { authorizeCoordination } = require("../../electron/coordinate-service.cjs");
   const coordinationScope = require("../../electron/coordination-scope.cjs");
-  const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
-  const start = source.indexOf('  handleTrusted("goalport:coordination-authorize"');
-  const end = source.indexOf('  handleTrusted("goalport:coordination-records"', start);
-  assert.ok(start > 0 && end > start);
-  const f = fixture();
   let probes = 0;
   let outstanding = false;
-  vm.runInNewContext(source.slice(start, end), {
-    handleTrusted: f.handle,
-    authorizeCoordination,
-    refuseCompetingCoordination: () => { if (outstanding) throw new Error("Background job outstanding"); },
-    coordinationScope,
-    coordinationRuntime: () => ({ stateDir: "/injected/state" }),
-    discoverCliProviders: async (options) => {
-      probes += 1;
-      assert.equal(options.stateDir, "/injected/state");
-      return { ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] };
+  const f = await mainWiring({
+    "./cli-coordinate.cjs": {
+      discoverCliProviders: async (options) => {
+        probes += 1;
+        assert.equal(options.stateDir, "/injected/state");
+        return { ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] };
+      },
+    },
+    "./coordination-background.cjs": {
+      createBackgroundHost: () => ({
+        status: (jobId) => ({ jobId }),
+        outstanding: () => outstanding,
+      }),
     },
   });
+
   const authorize = f.handlers.get("goalport:coordination-authorize");
   const query = f.handlers.get("goalport:coordination-scope");
   const revoke = f.handlers.get("goalport:coordination-revoke");
@@ -288,7 +291,7 @@ test("trusted authorization handler validates optional write through the tested 
     assert.equal(probes, 2);
     assert.deepEqual(query(f.event), before);
     outstanding = true;
-    assert.throws(() => authorize(f.event, payload), /Background job outstanding/);
+    assert.throws(() => authorize(f.event, payload), /outstanding background goal/);
     assert.equal(probes, 2);
     assert.equal(revoke(f.event).ok, true);
     assert.equal(query(f.event), null);
@@ -320,46 +323,35 @@ test("trusted preload forwards read-only and explicit-write requests on the same
 });
 
 test("coordination launch, authorize and save hand the draft workspace to the outstanding-job guard", async () => {
-  const source = readFileSync(new URL("../../electron/main.cjs", import.meta.url), "utf8");
-  const slice = (fromChannel, toChannel) => {
-    const start = source.indexOf(`  handleTrusted("${fromChannel}"`);
-    const end = source.indexOf(`  handleTrusted("${toChannel}"`, start);
-    assert.ok(start > 0 && end > start, `${fromChannel} handler block exists in main.cjs`);
-    return source.slice(start, end);
-  };
-  const f = fixture();
   const guarded = [];
-  let guardHold = null;
-  const refuseCompetingCoordination = (workspaceRoot) => {
-    guarded.push(workspaceRoot);
-    if (guardHold) guardHold(workspaceRoot);
-  };
-  const coordinationScope = { current: () => null };
+  let outstanding = false;
   let authorizeCalls = 0;
   let launchCalls = 0;
   let saveCalls = 0;
-  const shared = {
-    handleTrusted: f.handle,
-    coordinationScope,
-    coordinationRuntime: () => ({ stateDir: "/injected/state" }),
-    refuseCompetingCoordination,
-  };
-  vm.runInNewContext(slice("goalport:coordinate-launch", "goalport:coordinate-cancel"), {
-    ...shared,
-    process: { env: {} },
-    launchOne: (...args) => { launchCalls += 1; return { launched: true, args }; },
-    backgroundSendConsent: () => ({ allowed: false }),
+
+  const f = await mainWiring({
+    "./coordinate-service.cjs": {
+      launchOne: (...args) => { launchCalls += 1; return { launched: true, args }; },
+      authorizeCoordination: (...args) => { authorizeCalls += 1; return { ok: true, args }; },
+    },
+    "./cli-coordinate.cjs": {
+      discoverCliProviders: async () => ({ ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] }),
+    },
+    "./coordination-record.cjs": {
+      saveRecordAsync: async (...args) => { saveCalls += 1; return { saved: true, args }; },
+      readRecords: () => [],
+    },
+    "./coordination-background.cjs": {
+      createBackgroundHost: () => ({
+        status: (jobId) => ({ jobId }),
+        outstanding: (workspaceRoot) => {
+          guarded.push(workspaceRoot);
+          return outstanding;
+        },
+      }),
+    },
   });
-  vm.runInNewContext(slice("goalport:coordination-authorize", "goalport:coordination-scope"), {
-    ...shared,
-    authorizeCoordination: (...args) => { authorizeCalls += 1; return { ok: true, args }; },
-    discoverCliProviders: async () => ({ ok: true, providers: [{ instanceId: "codex", auth: { type: "chatgpt" } }] }),
-  });
-  vm.runInNewContext(slice("goalport:coordination-save", "goalport:coordination-unblock"), {
-    ...shared,
-    saveRecordAsync: async (...args) => { saveCalls += 1; return { saved: true, args }; },
-    coordinationDirectory: () => "/injected/profile",
-  });
+
   const launch = f.handlers.get("goalport:coordinate-launch");
   const authorize = f.handlers.get("goalport:coordination-authorize");
   const save = f.handlers.get("goalport:coordination-save");
@@ -392,10 +384,10 @@ test("coordination launch, authorize and save hand the draft workspace to the ou
   assert.equal(saveCalls, 1);
 
   // A raised guard refuses BEFORE any authorization, launch or save happens.
-  guardHold = () => { throw new Error("background-job-outstanding"); };
-  assert.throws(() => launch(f.event, command, "generation-1", 7, "/work/draft-goal"), /background-job-outstanding/);
-  assert.throws(() => authorize(f.event, { instances: ["codex"], maxTurns: 4, workspaceRoot: "/work/draft-goal" }), /background-job-outstanding/);
-  assert.throws(() => save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" }), /background-job-outstanding/);
+  outstanding = true;
+  assert.throws(() => launch(f.event, command, "generation-1", 7, "/work/draft-goal"), /outstanding background goal/);
+  assert.throws(() => authorize(f.event, { instances: ["codex"], maxTurns: 4, workspaceRoot: "/work/draft-goal" }), /outstanding background goal/);
+  assert.throws(() => save(f.event, { requestId: "r1", workspacePath: "/work/draft-goal", goal: "g" }), /outstanding background goal/);
   assert.equal(launchCalls, 2);
   assert.equal(authorizeCalls, 3);
   assert.equal(saveCalls, 1);

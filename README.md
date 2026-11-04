@@ -5,7 +5,7 @@
 GoalPort drives Codex, Claude Code and Grok through their installed CLIs. Start a goal, answer permission requests, and return to see what happened. Your CLI login and configuration stay with the Runtime; GoalPort stores conversation history locally.
 
 [![CI](https://github.com/My-Denia/goalport/actions/workflows/ci.yml/badge.svg)](https://github.com/My-Denia/goalport/actions/workflows/ci.yml)
-![Version](https://img.shields.io/badge/version-1.0.0--rc.1-blue)
+![Version](https://img.shields.io/badge/version-1.0.0--rc.2-blue)
 ![Status](https://img.shields.io/badge/status-Stable%20V1%20RC-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20desktop%20%7C%20Linux%20source-lightgrey)
 
@@ -46,20 +46,20 @@ Agent CLIs work well inside one terminal session. Long tasks outgrow it: the ter
 
 ## Quick start
 
-There is no downloadable release yet. Build the RC from source on Windows x64 ([prerequisites](docs/building.md#prerequisites)):
+The earlier public release is published as [v1.0.0-rc.1](https://github.com/My-Denia/goalport/releases/tag/v1.0.0-rc.1). To run or test the current development candidate, build from source on Windows x64 ([prerequisites](docs/building.md#prerequisites)):
 
 ```powershell
 pnpm install --frozen-lockfile
-pnpm electron:package --out artifacts/electron-rc/rc1
-pnpm electron:verify --package artifacts/electron-rc/rc1/GoalPort-win32-x64
-pnpm electron:start --package artifacts/electron-rc/rc1/GoalPort-win32-x64
+pnpm electron:package --distribution dev-candidate --out artifacts/electron-rc/rc2-dev
+pnpm electron:verify --package artifacts/electron-rc/rc2-dev/GoalPort-win32-x64
+pnpm electron:start --package artifacts/electron-rc/rc2-dev/GoalPort-win32-x64
 ```
 
 1. Install and sign in to a Runtime CLI: Codex, Claude Code or Grok.
 2. Choose **New goal**, select a workspace folder and a Runtime, then describe the task.
 3. Send the message. Permission requests appear in the conversation; Stop is beside the composer. These controls work in narrow windows too.
 
-Data lives in `%APPDATA%\GoalPort\rc` (browser shell state under `%APPDATA%\GoalPort\electron\<profile key>`). The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
+Development candidate packages keep their default profile in `%APPDATA%\GoalPort\dev` (release packages use `%APPDATA%\GoalPort\rc`; browser shell state under `%APPDATA%\GoalPort\electron\<profile key>`). The package folder is unsigned and can be moved. To try GoalPort without an agent account, add `--test-profile <new absolute folder>`; it runs only the synthetic Scenario runtime. Contributors: see [development](docs/development.md).
 
 Linux developers can run the real local [browser workbench and Unix command client](docs/linux-development.md) from source, including coordinated goals, saved file-change evidence and explicit Continue/Stop. This is separate from the synthetic browser preview and is not a Linux installer.
 
@@ -73,7 +73,7 @@ GoalPort Core (Rust) ── SQLite
 codex app-server · claude -p stream-json · grok agent stdio
 ```
 
-The window only presents. Core owns all GoalPort state and supervises each Runtime through its native protocol. Read more in [Architecture](docs/architecture.md) and [Safety](docs/safety.md).
+The window only presents. Core keeps native session state in SQLite and supervises each Runtime through its native protocol. Coordination history and background jobs are stored as JSON records in the profile. Read more in [Architecture](docs/architecture.md) and [Safety](docs/safety.md).
 
 ## Native, not reimplemented
 
@@ -85,7 +85,7 @@ Details: [runtime integration](docs/runtimes.md).
 
 ## Status
 
-GoalPort is at **1.0.0-rc.1**, a release candidate.
+GoalPort is at **1.0.0-rc.2**, a release candidate (development candidate).
 
 - The desktop package targets Windows x64 and is built from source, unsigned. Linux source includes Core's Unix socket entry and a real local browser workbench.
 - Compatible profiles reopen, and supported imports make a backup first ([profile continuity](docs/profile-continuity.md)).
