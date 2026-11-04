@@ -81,7 +81,8 @@ export function RuntimePickerMenu({
   }
   const renderRow = (candidate: RuntimeProfile | RuntimeChoice) => {
     const runtime = runtimes.find(item => item.id === candidate.id);
-    const choice = "subtitle" in candidate ? candidate : undefined;
+    // Only rows from `choices` carry UI copy; a Runtime profile's own subtitle is Core-internal text.
+    const choice = choices?.find(item => item.id === candidate.id);
     const choiceDisabled = choice !== undefined && "disabled" in choice && choice.disabled === true;
     const disabled = choiceDisabled || (runtime && isItemDisabled ? isItemDisabled(runtime) : false);
     const modeOnly = choice !== undefined && !runtime;
@@ -133,7 +134,7 @@ export function RuntimePickerMenu({
                   : rows;
               })}
             </Select.List>
-            {items.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
+            {!items.some(item => runtimes.some(runtime => runtime.id === item.id)) ? <p className="runtime-picker-empty">{emptyText}</p> : null}
             {blockedHint ? <p className="runtime-picker-hint">{blockedHint}</p> : null}
           </Select.Popup>
         </Select.Positioner>

@@ -76,6 +76,21 @@ describe("shared Runtime picker keyboard contract", () => {
   });
 });
 
+describe("picker copy", () => {
+  it("shows no Core-internal subtitle when rendered without choices", async () => {
+    render(<Picker />);
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
+    await screen.findByRole("option", { name: /Claude Code/ });
+    for (const runtime of DEMO_SNAPSHOT.runtimes) expect(screen.queryByText(runtime.subtitle)).toBeNull();
+  });
+
+  it("still says agents are loading when only workflow rows exist", async () => {
+    render(<RuntimePickerMenu runtimes={[]} choices={[{ id: "", name: "Recommended workflow", group: "Workflow", subtitle: "x" }]} selectedId="" triggerContent="x" triggerAriaLabel="Select agent" emptyText="Agents are still loading." onSelect={vi.fn()} />);
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
+    expect(await screen.findByText("Agents are still loading.")).toBeTruthy();
+  });
+});
+
 describe("working-mode choices", () => {
   const choices = [
     { id: "codex", name: "Codex", group: "Direct", subtitle: "Use Codex on its own" },
