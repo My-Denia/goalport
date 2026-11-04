@@ -120,10 +120,10 @@ describe("Synthetic path", () => {
     expect(state.commands[0]?.initialMessage.text).toContain(goal);
     expect(state.commands[0]?.initialMessage.text).toContain(workspacePath);
     expect(state.commands[0]?.initialMessage.text).toContain("without claiming the review passed");
-    expect(state.commands[0]?.initialMessage.text).toContain("Find the product contract in this workspace");
+    expect(state.commands[0]?.initialMessage.text).toContain("Find the product contract or requirement in this workspace");
     expect(state.commands[0]?.initialMessage.text).toContain("If you cannot confirm one, say so.");
     expect(state.commands[1]?.initialMessage.text).toContain("done-claim is not a pass");
-    expect(state.commands[1]?.initialMessage.text).toContain("where that contract is");
+    expect(state.commands[1]?.initialMessage.text).toContain("You cannot open files in this workspace");
     expect(state.commands).toHaveLength(2);
   });
 
@@ -980,7 +980,7 @@ describe("explicit write assembly and phase verdicts", () => {
       expect(planningText).toContain("Original goal:\nRoot original goal with CJK 中文 and Emoji 🚀");
       expect(planningText).toContain("Current follow-up:\nCurrent follow-up with Japanese 日本語 and Emoji 🎯");
       expect(planningText).toContain(workspacePath);
-      expect(planningText).toContain("Find the product contract in this workspace");
+      expect(planningText).toContain("Find the product contract or requirement in this workspace");
 
       // All four prior feedback labels and exact texts must be present
       expect(planningText).toContain("Previous plan:\nExact previous plan text: 方案详情");
@@ -1127,4 +1127,37 @@ it("the approved nav type seam renders verified with the existing complete class
   expect(html).toContain('aria-label="Plan: Verified type seam, Changes verified"');
   expect(html).toContain('class="campaign-state campaign-state-complete"');
   expect(html).toContain('<small>Changes verified</small>');
+});
+
+describe("plan check wording follows what the checker can read", () => {
+  const codex: SyntheticCatalogInstance = { instanceId: "codex", name: "Codex", billing: "subscription", models: ["default"] };
+  const claude: SyntheticCatalogInstance = { instanceId: "claude", name: "Claude", billing: "subscription", models: ["default"] };
+  const pi: SyntheticCatalogInstance = { instanceId: "pi", name: "Pi", billing: "unknown", piCredentialKind: "apiKey-only", models: ["m"] };
+  const selection = { provider: "Fixture", model: "alpha", useExistingCapacity: true as const };
+  const base = { goal: "Read docs/contract.md and list its requirements.", workspacePath: "C:\\ws", sendKey: "k" };
+  const piInput = { ...base, catalog: [codex, { ...pi, piCapacity: { catalog: [selection], offer: selection } }], allowedInstances: ["codex", "pi"], piCapacity: selection };
+
+  it("keeps Codex as planner and asks Pi to judge a quoted requirement", () => {
+    const state = coordinateGoal(piInput);
+    expect(state.commands.map((c) => c.modelSelection.instanceId)).toEqual(["codex", "pi"]);
+    const [plan, review] = state.commands.map((c) => c.initialMessage.text);
+    expect(plan).toContain("Quoted from <path>:");
+    expect(review?.startsWith("You are checking a plan another agent wrote.")).toBe(true);
+    expect(review).toContain("You cannot open files in this workspace.");
+    expect(review?.split("\n").at(-1)).toMatch(/^End with exactly one of these lines, as plain text.*VERDICT: stop\.$/);
+  });
+
+  it("keeps the file-citation wording when the checker can read files", () => {
+    const [plan, review] = coordinateGoal({ ...base, catalog: [codex, claude] }).commands.map((c) => c.initialMessage.text);
+    expect(plan).not.toContain("Quoted from");
+    expect(review).toContain("where that contract is");
+    expect(review).not.toContain("cannot open files");
+  });
+
+  it("prefers a reading checker over Pi, and a replacement planner keeps quote mode for Pi", () => {
+    const state = coordinateGoal({ ...base, catalog: [codex, pi, claude], allowedInstances: ["codex", "pi", "claude"] });
+    expect(state.commands.map((c) => c.modelSelection.instanceId)).toEqual(["codex", "claude"]);
+    expect(replacementCommand("plan", codex, piInput, "r", "pi").initialMessage.text).toContain("Quoted from <path>:");
+    expect(replacementCommand("plan", codex, piInput, "r", "claude").initialMessage.text).not.toContain("Quoted from");
+  });
 });

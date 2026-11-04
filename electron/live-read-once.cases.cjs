@@ -278,3 +278,14 @@ test('raw history with unsupported entries still allows Live Continue, without r
  assert.equal(s.readOwnedLiveFollowUpContext(start.jobId)?.requestId,'child');
  assert.equal(fs.readFileSync(file,'utf8'),before,'unsupported raw entries stay preserved');
 });
+test('live follow-up eligibility is a capability check, not an exact pair or budget', () => {
+ const ok = { ...admission('C:/ws'), maxTurns: 6, allowedInstances: ['pi', 'codex'] };
+ assert.equal(codec.eligible(ok), true);
+ assert.equal(codec.eligible({ ...ok, maxTurns: 3 }), false);
+ assert.equal(codec.eligible({ ...ok, writeAuthorization: { instances: ['codex'], workspaceRoot: 'C:/ws', remaining: 1 } }), false);
+ assert.equal(codec.eligible({ ...ok, backgroundConsent: false }), false);
+ assert.equal(codec.eligible({ ...ok, piCapacity: undefined }), false);
+ assert.equal(codec.eligible({ ...ok, allowedInstances: ['codex', 'claude'] }), false);
+ const live = { mode: codec.MODE, ready: true, initialRequestId: 'a', fromRequestId: 'a', rootRequestId: 'a', remainingReads: 6, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: '2026-01-01T00:00:00Z', reason: null };
+ assert.equal(codec.liveStatus(live)?.remainingReads, 6);
+});

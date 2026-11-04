@@ -23,7 +23,7 @@ export function parseLiveRead(value: unknown): LiveReadStatus | null {
   const v = value as LiveReadStatus;
   if (v.mode !== "live-read-once" || !id(v.initialRequestId) || v.fromRequestId !== v.initialRequestId || !id(v.rootRequestId)
     || ![v.ready, v.readonly, v.pending, v.revoked].every(x => typeof x === "boolean")
-    || !(v.remainingReads === null || (Number.isInteger(v.remainingReads) && v.remainingReads >= 0 && v.remainingReads <= 4))
+    || !(v.remainingReads === null || (Number.isInteger(v.remainingReads) && v.remainingReads >= 0 && v.remainingReads <= 32))
     || !(v.childRequestId === null || (id(v.childRequestId) && v.childRequestId !== v.initialRequestId))
     || !(v.expiresAt === null || (typeof v.expiresAt === "string" && Number.isFinite(Date.parse(v.expiresAt))))
     || ![null, "busy", "revoked", "expired", "no-live-scope", "not-enough-reads", "unconfirmed", "context-unavailable"].includes(v.reason)

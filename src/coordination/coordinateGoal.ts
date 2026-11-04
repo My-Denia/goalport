@@ -1,6 +1,10 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
 import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
+import { RECOMMENDED_V1, chooseRoles, citationMode } from "../../electron/workflow-checks.mjs";
+
+type CitationMode = "read" | "quote";
+const VERDICT_LINE = "End with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.";
 
 export const MAX_CONTINUATION_PROMPT_BYTES = 100_000;
 export const MAX_CONTINUATION_CHARS = 100_000;
@@ -558,7 +562,7 @@ function commandIdentitySendKey(input: CoordinateGoalInput, sendKey: string): st
   return input.executionFeedback ? `${sendKey}:repair-1` : sendKey;
 }
 
-function plannerText(input: CoordinateGoalInput): string {
+function plannerText(input: CoordinateGoalInput, mode: CitationMode): string {
   const lines: string[] = [];
   if (input.continuation) {
     const followUp = input.continuation.followUp.trim();
@@ -573,7 +577,9 @@ function plannerText(input: CoordinateGoalInput): string {
   }
   lines.push(
     input.workspacePath,
-    "Find the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.",
+    mode === "quote"
+      ? "Find the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract."
+      : "Find the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.",
     "Hand back a bounded plan without claiming the review passed.",
   );
   const priorPlan = present(input.priorPlan);
@@ -601,8 +607,10 @@ function plannerText(input: CoordinateGoalInput): string {
   return lines.join("\n");
 }
 
-function reviewText(input: CoordinateGoalInput): string {
-  const lines: string[] = [];
+function reviewText(input: CoordinateGoalInput, mode: CitationMode): string {
+  const lines: string[] = [
+    "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.",
+  ];
   if (input.continuation) {
     const followUp = input.continuation.followUp.trim();
     lines.push(
@@ -612,12 +620,13 @@ function reviewText(input: CoordinateGoalInput): string {
       followUp.length > 0 ? followUp : "(no additional instruction)",
     );
   } else {
-    lines.push(input.goal);
+    lines.push("Goal under review:", input.goal);
   }
   lines.push(
-    "The planner's done-claim is not a pass. Judge only whether the plan can be carried out.",
-    "The plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.",
-    "End with exactly one of these lines: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.",
+    mode === "quote"
+      ? "You cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access."
+      : "The plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.",
+    "The planner's done-claim is not a pass.",
   );
   const priorReview = present(input.priorReview);
   if (priorReview) {
@@ -631,6 +640,7 @@ function reviewText(input: CoordinateGoalInput): string {
       ...executionFeedbackLines(input.executionFeedback),
     );
   }
+  lines.push(VERDICT_LINE);
   return lines.join("\n");
 }
 
@@ -667,8 +677,14 @@ export function replacementCommand(
   instance: SyntheticCatalogInstance,
   input: CoordinateGoalInput,
   sendKey: string,
+  counterpartInstanceId?: string,
 ): CoordinateTurnCommand {
-  const text = role === "plan" ? plannerText(input) : reviewText(input);
+  // A review's citation mode follows its own instance; a plan's follows the
+  // reviewer it will be checked by. With no known reviewer we default to
+  // "read" (today's wording) rather than guessing.
+  const text = role === "plan"
+    ? plannerText(input, counterpartInstanceId === undefined ? "read" : citationMode(counterpartInstanceId, RECOMMENDED_V1.checks))
+    : reviewText(input, citationMode(instance.instanceId, RECOMMENDED_V1.checks));
   assertContinuationPrompt(input, text);
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey), input.piCapacity),
@@ -873,8 +889,9 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const planner = usable[0];
-  const reviewer = usable[1];
+  const pair = chooseRoles(usable.map((instance) => instance.instanceId), RECOMMENDED_V1.checks);
+  const planner = usable.find((instance) => instance.instanceId === pair?.planner);
+  const reviewer = usable.find((instance) => instance.instanceId === pair?.reviewer);
   if (!planner || !reviewer || planner.instanceId === reviewer.instanceId) {
     return stopped(
       quotaLabels,
@@ -891,8 +908,9 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const planMessage = plannerText(input);
-  const reviewMessage = reviewText(input);
+  const mode = citationMode(reviewer.instanceId, RECOMMENDED_V1.checks);
+  const planMessage = plannerText(input, mode);
+  const reviewMessage = reviewText(input, mode);
 
   if (input.continuation) {
     if (utf8Bytes(planMessage) > MAX_CONTINUATION_PROMPT_BYTES || utf8Bytes(reviewMessage) > MAX_CONTINUATION_PROMPT_BYTES) {

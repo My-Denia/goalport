@@ -185,7 +185,7 @@ test('runtime captures a closed copy of admitted route rather than mutable defau
 test('built engine freezes b0c literal legacy Pi ID; admitted pair changes only Pi identity; all commands derive own pair',async()=>{
  const providers=[{instanceId:'codex',displayName:'codex',auth:{status:'authenticated',type:'subscription'},models:[{slug:'default',isDefault:true}]},{instanceId:'pi',displayName:'pi',auth:{status:'authenticated',type:'subscription'},models:[{slug:'default',isDefault:true}]}];
  async function capture(selection,routeAware=false){const commands=[];await engine.requestCoordination({goal:'Inspect the fixture only.',workspacePath:'/fixture/workspace',sendKey:'golden-pi-capacity',allowedInstances:['codex','pi'],...(selection?{piCapacity:selection}:{})},{connected:true,sendAuthorized:true,providers:routeAware?[providers[0],snapshot('/fixture/workspace')]:providers,stopReason:null},{launch:async c=>{commands.push(c);return {launched:true,dispatched:true,text:c.commandId.includes('plan')?'Fixture plan.':'VERDICT: carry-out',errorText:''};}},()=>true);return commands;}
- const old=await capture();assert.equal(old[1].commandId,'coordinate-review-2211be4a');assert.equal(old[0].commandId,'coordinate-plan-66d2898a');
+ const old=await capture();assert.equal(old[1].commandId,'coordinate-review-1a0a9c5b');assert.equal(old[0].commandId,'coordinate-plan-382749e7');
  const selected=await capture(pair,true),changed=await capture({...pair,model:'beta:high'},true);
  assert.equal(selected[0].commandId,old[0].commandId);assert.notEqual(selected[1].commandId,old[1].commandId);assert.notEqual(changed[1].commandId,selected[1].commandId);
  assert.deepEqual(selected[1].modelSelection,{instanceId:'pi',provider:'Fixture',model:'alpha'});
