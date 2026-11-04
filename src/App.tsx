@@ -887,7 +887,7 @@ function App() {
       }
       if (cancelled) return;
       if (scope) {
-        setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation, ...(scope.write ? { write: scope.write } : {}) });
+        setScopeMirror({ instances: scope.instances, maxTurns: scope.maxTurns, remaining: scope.remaining, generation: scope.generation });
         setAllowedTurns(scope.maxTurns);
         if (scope.write) setWriteTurns(scope.write.maxTurns);
       }

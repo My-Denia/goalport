@@ -2506,7 +2506,29 @@ describe("harness access panel and scoped rounds", () => {
     await waitFor(async () => expect(await limit()).toBe("5"));
     typeMessage("Fix the helper.");
     sendMessage();
-    await waitFor(() => expect(bridge.authorizations.at(-1)?.write?.maxTurns).toBe(5));
+    await waitFor(() => expect(bridge.authorizations.length).toBe(2));
+    expect(bridge.authorizations[1].write?.maxTurns).toBe(5);
+  });
+
+  it("does not replace a granted file-change limit with the workflow default while the grant cannot be read", async () => {
+    const root = "/tmp/goalport-preview-workspace";
+    const bridge = scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      scope: { instances: ["codex", "claude"], maxTurns: 4, remaining: 4, generation: 1, write: { instances: ["codex"], maxTurns: 5, remaining: 5, workspaceRoot: root } },
+      readScope: (scope, call) => { if (call > 1) throw new Error("grant unreadable"); return scope; },
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /new goal/i }));
+    const limit = async () => (await screen.findByRole("spinbutton", { name: "Write turns to allow" }) as HTMLInputElement).value;
+    await waitFor(async () => expect(await limit()).toBe("5"));
+    fireEvent.click(await screen.findByRole("button", { name: "Change" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Allow changes through Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save agent access" }));
+    await waitFor(() => expect(bridge.authorizations.length).toBe(1));
+    await waitFor(async () => expect((await screen.findByRole("checkbox", { name: "Allow changes through Codex" }) as HTMLInputElement).checked).toBe(true));
+    // An unknown grant is not "no grant": the number stays what the user saved.
+    expect(await limit()).toBe("5");
   });
 
   it("keeps the exhaustion controls after save and reselect via the realistic normalizer", async () => {
