@@ -57,6 +57,26 @@ function environmentBlockedOf(value) {
   };
 }
 
+// Which workflow produced a result and which checks actually returned. Both
+// degrade to absent when malformed, so an old or damaged field never rejects
+// the saved record; a half-valid list keeps only its well-formed entries.
+function workflowOf(value) {
+  if (typeof value !== "object" || value === null) return undefined;
+  const id = typeof value.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(value.id) ? value.id : null;
+  if (!id || !Number.isInteger(value.version) || value.version < 1) return undefined;
+  return { id, version: value.version };
+}
+
+function checksRanOf(value) {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const harness = typeof entry.harness === "string" ? entry.harness.trim() : "";
+    if ((entry.kind !== "plan-check" && entry.kind !== "audit") || !harness) return [];
+    return [{ kind: entry.kind, harness, verdict: VERDICTS.has(entry.verdict) ? entry.verdict : null }];
+  });
+}
+
 function roundEventOf(value) {
   if (typeof value !== "object" || value === null) return null;
   const kind = value.kind === "failed" || value.kind === "continued" ? value.kind : null;
@@ -345,6 +365,10 @@ function normalize(input) {
       continuation = input.continuation;
     }
   }
+  // A native workspace check is not a Recommended run: it carries no method.
+  const isNativeCheck = input.recordKind === 'native-workspace-check';
+  const workflow = isNativeCheck ? undefined : workflowOf(input.workflow);
+  const checksRan = workflow === undefined ? undefined : checksRanOf(input.checksRan);
   return {
     requestId,
     workspacePath,
@@ -365,6 +389,8 @@ function normalize(input) {
     reviewQuota,
     messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory, planRevisionHistory),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
+    ...(workflow === undefined ? {} : { workflow }),
+    ...(checksRan === undefined ? {} : { checksRan }),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
     ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),

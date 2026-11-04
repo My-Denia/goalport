@@ -2,10 +2,20 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import { Select } from "@base-ui/react/select";
 import type { RuntimeProfile } from "../types";
 
+export interface RuntimeChoice {
+  id: string;
+  name: string;
+  subtitle: string;
+  /** Heading shown above the first row of each run of choices that share it. */
+  group?: string;
+  /** Visible as a row, never selectable; `subtitle` is the plain reason. */
+  disabled?: boolean;
+}
+
 interface RuntimePickerMenuProps {
   runtimes: RuntimeProfile[];
   /** UI-only mode choices; not invented Core Runtime profiles. */
-  choices?: { id: string; name: string; subtitle: string }[];
+  choices?: RuntimeChoice[];
   /** Selected provider id; empty when nothing is chosen yet. */
   selectedId: string;
   /** Content of the trigger button (avatar, labels, chevron). */
@@ -53,7 +63,9 @@ export function RuntimePickerMenu({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const items = choices ?? runtimes;
-  const selectedValue = items.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase())?.id ?? null;
+  const selectedItem = items.find((runtime) => runtime.id.toLowerCase() === selectedId.trim().toLowerCase());
+  // A disabled row is never "the current choice"; otherwise the menu would open focused on a row that cannot be used.
+  const selectedValue = selectedItem && !("disabled" in selectedItem && selectedItem.disabled) ? selectedItem.id : null;
 
   useEffect(() => {
     if (!focusSignal || focusSignal <= 0) return;
@@ -61,9 +73,45 @@ export function RuntimePickerMenu({
     triggerRef.current?.focus();
   }, [focusSignal]);
 
+  const sections: { label?: string; items: (RuntimeProfile | RuntimeChoice)[] }[] = [];
+  for (const item of items) {
+    const label = "group" in item ? item.group : undefined;
+    const last = sections[sections.length - 1];
+    if (last && last.label === label) last.items.push(item); else sections.push({ label, items: [item] });
+  }
+  const renderRow = (candidate: RuntimeProfile | RuntimeChoice) => {
+    const runtime = runtimes.find(item => item.id === candidate.id);
+    // Only rows from `choices` carry UI copy; a Runtime profile's own subtitle is Core-internal text.
+    const choice = choices?.find(item => item.id === candidate.id);
+    const choiceDisabled = choice !== undefined && "disabled" in choice && choice.disabled === true;
+    const disabled = choiceDisabled || (runtime && isItemDisabled ? isItemDisabled(runtime) : false);
+    const modeOnly = choice !== undefined && !runtime;
+    return (
+      <Select.Item
+        key={candidate.id}
+        value={candidate.id}
+        label={candidate.name}
+        className="runtime-picker-item"
+        disabled={disabled}
+        style={disabled ? { opacity: choiceDisabled ? 0.7 : 0.45, cursor: "not-allowed", pointerEvents: "none" } : undefined}
+      >
+        <span className={`provider-avatar ${modeOnly ? "provider-unassigned" : `provider-${candidate.id}`}`} aria-hidden="true">{candidate.name[0]}</span>
+        <span className="runtime-picker-copy">
+          <strong>{candidate.id === "scenario" ? "Demo run" : candidate.name}</strong>
+          {runtime?.support === "unsupported" ? <small>Not available on this computer</small> : null}
+          {candidate.id === "scenario" ? <small>No AI, changes nothing</small> : choice?.subtitle ? <small className={choiceDisabled ? "runtime-picker-reason" : undefined}>{choice.subtitle}</small> : null}
+        </span>
+      </Select.Item>
+    );
+  };
+
   return (
     <Select.Root value={selectedValue} open={open} onOpenChange={setOpen}
-      onValueChange={(value) => { if (value !== null) onSelect(value); }}>
+      onValueChange={(value) => {
+        if (value === null) return;
+        if (choices?.find((choice) => choice.id === value)?.disabled) return;
+        onSelect(value);
+      }}>
       <Select.Trigger
         ref={triggerRef}
         className={triggerClassName}
@@ -76,29 +124,17 @@ export function RuntimePickerMenu({
         <Select.Positioner className={positionerClassName} sideOffset={6} collisionPadding={10} alignItemWithTrigger={false}>
           <Select.Popup className="runtime-picker-list">
             <Select.List aria-label="Runtimes" style={{ display: "grid", gap: 2 }}>
-              {items.map((candidate) => {
-                const runtime = runtimes.find(item => item.id === candidate.id);
-                const disabled = runtime && isItemDisabled ? isItemDisabled(runtime) : false;
-                return (
-                  <Select.Item
-                    key={candidate.id}
-                    value={candidate.id}
-                    label={candidate.name}
-                    className="runtime-picker-item"
-                    disabled={disabled}
-                    style={disabled ? { opacity: 0.45, cursor: "not-allowed", pointerEvents: "none" } : undefined}
-                  >
-                    <span className={`provider-avatar provider-${candidate.id}`} aria-hidden="true">{candidate.name[0]}</span>
-                    <span className="runtime-picker-copy">
-                      <strong>{candidate.id === "scenario" ? "Demo run" : candidate.name}</strong>
-                      {runtime?.support === "unsupported" ? <small>Not available on this computer</small> : null}
-                      {candidate.id === "scenario" ? <small>No AI, changes nothing</small> : candidate.subtitle && choices ? <small>{candidate.subtitle}</small> : null}
-                    </span>
-                  </Select.Item>
-                );
+              {sections.map((section, index) => {
+                const rows = section.items.map((candidate) => renderRow(candidate));
+                return section.label
+                  ? <Select.Group key={`${section.label}-${index}`} style={{ display: "grid", gap: 2 }}>
+                      <Select.GroupLabel className="runtime-picker-group">{section.label}</Select.GroupLabel>
+                      {rows}
+                    </Select.Group>
+                  : rows;
               })}
             </Select.List>
-            {items.length === 0 ? <p className="runtime-picker-empty">{emptyText}</p> : null}
+            {!items.some(item => runtimes.some(runtime => runtime.id === item.id)) ? <p className="runtime-picker-empty">{emptyText}</p> : null}
             {blockedHint ? <p className="runtime-picker-hint">{blockedHint}</p> : null}
           </Select.Popup>
         </Select.Positioner>

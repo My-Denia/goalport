@@ -195,7 +195,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByLabelText("Project folder")).toHaveProperty("readOnly", true);
     expect(screen.getByLabelText("Project folder").getAttribute("title")).toBe("/home/you/project");
     expect(screen.queryByText("Workspace")).toBeNull();
-    expect(screen.queryByText("Choose an agent before sending.")).toBeNull();
+    expect(screen.queryByText("Choose how to work before sending.")).toBeNull();
     expect(screen.queryByText("Choose an agent")).toBeNull();
     expect(screen.queryByRole("button", { name: "Select agent" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Plan the check" } });
@@ -211,7 +211,7 @@ describe("Linux Core bridge", () => {
     expect(screen.getByRole("button", { name: "Clear follow-up" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Name the two files" })).toBeTruthy();
-    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.queryByText("Send uses the Recommended workflow. File changes stay off unless you check the box below.")).toBeNull();
     expect(screen.getAllByRole("region", { name: "Name the two files" }).length).toBeGreaterThan(0);
     expect(screen.queryByRole("heading", { name: "Start a goal" })).toBeNull();
     expect(document.title).toBe("Name the two files");
@@ -222,7 +222,7 @@ describe("Linux Core bridge", () => {
     missingHarness = true;
     fireEvent.click(screen.getByRole("button", { name: "New goal" }));
     expect(screen.getByRole("heading", { name: "Start a goal" })).toBeTruthy();
-    expect(screen.queryByText("Send starts a coordinated goal. File changes stay off unless you check the box below.")).toBeNull();
+    expect(screen.queryByText("Send uses the Recommended workflow. File changes stay off unless you check the box below.")).toBeNull();
     expect(screen.getByText("Use a full path. A leading ~ is your home folder.")).toBeTruthy();
     expect(await screen.findByText("An independent check needs a second logged-in agent, so nothing will be sent.")).toBeTruthy();
     fireEvent.change(screen.getByRole("textbox", { name: /message/i }), { target: { value: "Try anyway" } });

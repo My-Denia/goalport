@@ -3,7 +3,7 @@ import { folderName, readRecentFolders } from "../lib/recentFolders";
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
-import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
+import { RuntimePickerMenu, type RuntimeChoice } from "../ui/RuntimePickerMenu";
 import { useComposerInput } from "./useComposerInput";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { shortGoalTitle } from "./shortGoalTitle";
@@ -34,13 +34,19 @@ interface DraftRuntimePickerProps {
 function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect, linuxEntry = false }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
-  const choices = linuxEntry ? [
-    { id: "", name: "Several agents", subtitle: "Plan and work with an independent check" },
-    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no automatic Pi verification" }] : [])
-  ] : coordinationAvailable ? [
-    ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, subtitle: "" })),
-    { id: "", name: "Several agents", subtitle: "Plan, build and check with more than one agent" }
-  ] : undefined;
+  const recommended = {
+    id: "", name: "Recommended workflow", group: "Workflow",
+    subtitle: "Plan first, then another agent checks the plan",
+    ...(!linuxEntry && !coordinationAvailable ? { disabled: true, subtitle: runtimeRequiredHint ?? "Needs the desktop app with Background Send set up." } : {})
+  };
+  const myWorkflow = { id: "my-workflow", name: "My workflow", group: "Workflow", subtitle: "Coming soon: copy Recommended and change what doesn't fit.", disabled: true };
+  const choices: RuntimeChoice[] = linuxEntry ? [
+    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", group: "Direct", subtitle: "Use Codex on its own" }] : []),
+    recommended, myWorkflow
+  ] : [
+    ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, group: "Direct", subtitle: runtime.support === "unsupported" ? "" : `Use ${runtime.name} on its own` })),
+    recommended, myWorkflow
+  ];
   return (
     <div className="runtime-picker draft-runtime-picker">
       <RuntimePickerMenu
@@ -56,13 +62,13 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
         triggerContent={(
           <>
             <span className={`provider-avatar provider-${provider || "none"}`} aria-hidden="true">
-              {selected ? selected.name[0] : "–"}
+              {selected ? selected.name[0] : coordinationAvailable || linuxEntry ? "R" : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Several agents") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Several agents" : "Choose an agent")}</strong>
-              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "Change agent" : coordinationAvailable
-                ? "Plan, build and check"
-                : (runtimeRequiredHint ?? "Choose an agent before sending.")}</small>
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Recommended workflow") : selected ? selected.name : coordinationAvailable ? "Recommended workflow" : "Choose how to work"}</strong>
+              <small>{linuxEntry ? (provider === "codex" ? "Direct" : "Plan first, then another agent checks the plan") : selected ? "Direct" : coordinationAvailable
+                ? "Plan first, then another agent checks the plan"
+                : (runtimeRequiredHint ?? "Choose how to work before sending.")}</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
@@ -101,6 +107,8 @@ interface DraftGoalComposerProps {
   currentWorkTitle?: string | null;
   currentWorkLine?: string | null;
   savedResultLabel?: string | null;
+  /** One quiet line saying which method ran and which checks came back; null when unknown. */
+  methodLine?: string | null;
   savedResultOutcome?: string | null;
   continueDisabledReason?: string | null;
   continueLabel?: string;
@@ -143,7 +151,7 @@ interface DraftGoalComposerProps {
  * possible before a Runtime is chosen.
  */
 export function GoalStatusHeading({
-  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false, savedResultLabel, savedResultOutcome
+  draft, busy, blockedFromSending, coordinationResult, failureHeadline = null, goalDetail, goalChange, goalEvidence, auditInputEvidenceCoverage, auditInputEvidenceText, activeGoalTitle, onContinueCoordination, inputsLocked = false, harnessWarning, discoverHint, consentWarning, leftoverHint, backgroundConsent = false, linuxCanStartCoordination = false, savedResultLabel, savedResultOutcome, methodLine
 }: DraftGoalComposerProps) {
   const inFlightLine = coordinationResult === "Sending." || coordinationResult === "Stopping this goal." || coordinationResult === "Recording the stop." || coordinationResult === "Continuing." || coordinationResult === "Leaving this unreplayed." || coordinationResult === "Allowing Background Send.";
   const missingGoalLabel = coordinationResult === "That goal is no longer available." ? "That goal is no longer available. New goal can still start." : coordinationResult;
@@ -168,6 +176,7 @@ export function GoalStatusHeading({
           {savedResultLabel ? <p className="workspace-evidence-label">{savedResultLabel}</p> : null}
           <h2 title={activeGoalTitle || undefined} aria-label={activeGoalTitle || undefined}>{savedResultLabel ? (activeGoalTitle ? shortGoalTitle(activeGoalTitle) : "Saved goal unavailable") : headingText}</h2>
           <p>{savedResultLabel ? savedResultOutcome : inFlightLine ? "Wait for this to finish." : coordinationResult === "Background Send is allowed." ? (harnessWarning ?? allowedFollow) : coordinationResult === "That goal is no longer available." ? "The draft is still here." : stoppedResult ? (activeGoalTitle ? coordinationResult : onContinueCoordination ? "Continue starts the next step." : "No further turn was sent.") : admissionUnsaidResult ? (coordinationResult?.includes("exit is not confirmed") ? "Another goal cannot start yet." : "The send is not confirmed. Your draft is kept; check current work before sending again.") : coordinationResult?.startsWith("That address is no longer available.") ? (activeGoalTitle || "The draft is still here.") : activeGoalTitle ? (failureHeadline || coordinationResult === leftoverHint ? activeGoalTitle : coordinationResult || "This goal stays on screen.") : (inputsLocked ? "This send has not returned." : harnessWarning && harnessWarning !== failureHeadline ? signInFollow : failureHeadline ? "The draft is still here." : consentWarning ? (linuxCanStartCoordination ? "Write your goal, then allow the agents below." : "Allow Background Send before sending.") : leftoverHint ? "You can still write the next goal." : coordinationResult?.includes("stays unreplayed") ? coordinationResult : "What would you like to work on?")}</p>
+          {methodLine && (savedResultLabel || activeGoalTitle) ? <p className="method-line">{methodLine}</p> : null}
           {!savedResultLabel && activeGoalTitle && stoppedResult && (goalChange || goalEvidence) ? (
             <p className="workspace-evidence-label">Previous saved result; the stop message above describes the current job.</p>
           ) : null}

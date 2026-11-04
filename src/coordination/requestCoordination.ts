@@ -16,6 +16,8 @@ import {
   type EnvironmentBlockedInfo,
 } from "./coordinateSession";
 import type { CoordinationRoundFact, RoundEvent, SavedTargetContinuation } from "./savedPlan";
+import { WORKFLOW } from "./coordinateGoal";
+import type { CheckRan, WorkflowRef } from "./methodLine";
 import type { CoordinationQuotaWord } from "../conversation/CoordinationStatus";
 import type { CoordinationVerdict } from "./verdict";
 
@@ -65,6 +67,10 @@ export interface CoordinationView {
    * history never carries budgets, scope generations or permission state.
    */
   readonly planRevisionHistory?: readonly CoordinationRoundFact[];
+  /** The workflow this result ran under; absent only on records from before it existed. */
+  readonly workflow?: WorkflowRef;
+  /** Checks whose reply came back, across every pass of this send. Empty means none ran. */
+  readonly checksRan?: readonly CheckRan[];
 }
 
 /**
@@ -178,6 +184,7 @@ function roundFactFrom(sent: CoordinateSessionState): CoordinationRoundFact {
 
 function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: boolean): CoordinationView {
   return viewFrom({
+    checksRan: sent.checksRan ?? [],
     planningHarness: sent.planningHarness,
     reviewHarness: sent.reviewHarness,
     planText: sent.planText,
@@ -204,7 +211,22 @@ function scopedViewFromSession(sent: CoordinateSessionState, hasWriteConsent: bo
   });
 }
 
+/** Every returned check of the passes this send ran, oldest first. */
+const checksOf = (...passes: readonly CoordinateSessionState[]): readonly CheckRan[] =>
+  passes.flatMap((pass) => pass.checksRan ?? []);
+
+/** Stamps the workflow and what actually ran onto the engine's result. */
 export async function requestCoordination(
+  input: Parameters<typeof runCoordination>[0],
+  discovery: CoordinationDiscovery | null,
+  transport: CoordinateTransport,
+  stillCurrent: () => boolean = () => true,
+): Promise<CoordinationView> {
+  const view = await runCoordination(input, discovery, transport, stillCurrent);
+  return { ...view, workflow: { id: WORKFLOW.workflow.id, version: WORKFLOW.workflow.version }, checksRan: view.checksRan ?? [] };
+}
+
+async function runCoordination(
   input: {
     readonly workspacePath: string;
     readonly goal: string;
@@ -443,7 +465,7 @@ export async function requestCoordination(
   // -----------------------------------------------------------------------
   const repairBase = planRevisionHistory === undefined
     ? firstRound
-    : viewFrom({ ...scopedViewFromSession(latest, hasWriteConsent), planRevisionHistory });
+    : viewFrom({ ...scopedViewFromSession(latest, hasWriteConsent), checksRan: checksOf(sent, latest), planRevisionHistory });
   const eligibleForRepair = input.beforeRepair !== undefined
     && hasWriteConsent
     && latest.verdict === "revise"
@@ -538,6 +560,7 @@ export async function requestCoordination(
       return viewFrom({
         ...latestView,
         messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched),
+        checksRan: checksOf(sent, latest),
         planRevisionHistory,
         ...(secondRejection ? { stopReason: `${latestView.stopReason} ${PLAN_REVISION_CEILING_SENTENCE}` } : {}),
       });
@@ -552,6 +575,7 @@ export async function requestCoordination(
   return viewFrom({
     ...scopedViewFromSession(repaired, hasWriteConsent),
     messageDispatched: sendWideDispatched(sent.messageDispatched, latest.messageDispatched, repaired.messageDispatched),
+    checksRan: checksOf(...(latest === sent ? [sent] : [sent, latest]), repaired),
     ...(planRevisionHistory === undefined ? {} : { planRevisionHistory }),
     feedbackHistory: [roundFactFrom(latest)],
     ...(secondRevise ? { stopReason: `${repaired.stopReason} ${REPAIR_CEILING_SENTENCE}` } : {}),

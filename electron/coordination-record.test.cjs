@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { readRecords, saveRecord, validatedContinuationOf } = require("./coordination-record.cjs");
+const { normalizeRecord, readRecords, saveRecord, validatedContinuationOf } = require("./coordination-record.cjs");
 
 function record(overrides = {}) {
   return {
@@ -944,3 +944,25 @@ test("save preserves unsupported raw items, unknown same-id items, and primitive
   assert.equal(reloaded.find(r => r.requestId === "valid-a").goal, "goal a updated");
 });
 
+test("the workflow and the checks that ran survive a reload; damaged or absent ones degrade to absent", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-method-"));
+  try {
+    const checksRan = [{ kind: "plan-check", harness: "Pi", verdict: "checked" }, { kind: "audit", harness: "Codex", verdict: null }];
+    saveRecord(directory, record({ workflow: { id: "recommended", version: 1 }, checksRan }));
+    assert.deepEqual(readRecords(directory)[0].workflow, { id: "recommended", version: 1 });
+    assert.deepEqual(readRecords(directory)[0].checksRan, checksRan);
+    const has = (saved) => "workflow" in saved || "checksRan" in saved;
+    assert.equal(has(saveRecord(directory, record({ requestId: "old" }))), false);
+    assert.equal(has(saveRecord(directory, record({ requestId: "bad", workflow: { id: "", version: 1.5 }, checksRan: [{ kind: "audit", harness: "Pi" }] }))), false);
+    const half = saveRecord(directory, record({ requestId: "half", workflow: { id: "recommended", version: 1 }, checksRan: [{ kind: "nope", harness: "Pi" }, { kind: "audit", harness: "Pi", verdict: "gibberish" }, "x"] }));
+    assert.deepEqual(half.checksRan, [{ kind: "audit", harness: "Pi", verdict: null }]);
+    assert.equal("checksRan" in saveRecord(directory, record({ requestId: "nolist", workflow: { id: "recommended", version: 1 }, checksRan: "all" })), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a native workspace check is not a Recommended run and carries no workflow", () => {
+  const normalized = normalizeRecord(record({ recordKind: "native-workspace-check", workflow: { id: "recommended", version: 1 }, checksRan: [] }));
+  assert.equal("workflow" in normalized || "checksRan" in normalized, false);
+});

@@ -775,6 +775,8 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   min-height: 44px; padding: 6px 9px;
   border: 0; border-radius: 7px; background: transparent; text-align: left;
 }
+.runtime-picker-group { padding: 6px 9px 2px; color: var(--ink-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+.runtime-picker-copy small.runtime-picker-reason { white-space: normal; overflow: visible; line-height: 1.35; }
 .runtime-picker-item:hover:not(:disabled) { background: rgba(255, 255, 255, 0.055); }
 .runtime-picker-item[aria-selected="true"] { background: var(--accent-soft); }
 .runtime-picker-item .support-chip { margin-left: auto; }
@@ -1343,3 +1345,5 @@ select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
 /* Quiet load hold above the draft actions: harness access is still
    resolving, so Send waits (progress, not an error). */
 .composer-wait { margin: 10px 0 0; color: var(--ink-muted); font-size: 12.5px; line-height: 1.45; }
+
+.method-line { margin: 2px 0 0; color: var(--ink-muted); font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }

@@ -35,6 +35,7 @@ import { shortGoalTitle } from "./conversation/shortGoalTitle";
 import { NativeWorkspaceCheck } from './conversation/NativeWorkspaceCheck';
 import { CoordinationStatus, CoordinationProgress, BackgroundCoordinationStatus } from "./conversation/CoordinationStatus";
 import { AuthorizationPanel } from "./conversation/AuthorizationPanel";
+import { methodLine } from "./coordination/methodLine";
 import { requestCoordination, type CoordinationView } from "./coordination/requestCoordination";
 import { coordinationReplyLine, coordinationStartAdmitted, signedInLine } from "./coordination/replyLine";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./coordination/catalogFromProviders";
@@ -325,7 +326,7 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   // A first send with no Runtime chosen only proceeds when this window can assign a harness.
-  const linuxRuntimeRequired = "Send starts a coordinated goal. File changes stay off unless you check the box below.";
+  const linuxRuntimeRequired = "Send uses the Recommended workflow. File changes stay off unless you check the box below.";
   const coordinationAvailable = client.mode === "electron"
     && appInfo?.coordinationConfigured === true
     && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
@@ -1264,7 +1265,7 @@ function App() {
           if (admissionIntent.current?.requestId === submittedId) admissionIntent.current.unknown = admissionUnsaid.current;
           rememberAdmissionUnsaid(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : null);
           if (admissionUnsaid.current) clearFailure();
-          const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
+          const text = coordinationReplyLine(body, failedSend ? "The goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : shown);
           const failed = failedSend && !admissionUnsaid.current;
@@ -1325,7 +1326,7 @@ function App() {
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
-        setDraftError({ sentence: "Choose an agent before sending." });
+        setDraftError({ sentence: "Choose how to work before sending." });
         return;
       }
       const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);
@@ -3464,6 +3465,8 @@ function App() {
               ) : null}
               <CoordinationStatus
                 goal={selectedPlan.goal}
+                workflow={selectedPlan.workflow}
+                checksRan={selectedPlan.checksRan}
                 planningHarness={selectedPlan.planningHarness}
                 reviewHarness={selectedPlan.reviewHarness}
                 planText={selectedPlan.planText}
@@ -3559,6 +3562,7 @@ function App() {
                       coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
                     } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
+                    methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
                     currentWorkTitle={currentWork?.identityConfirmed ? currentWork.goal : null}
@@ -3926,6 +3930,8 @@ function App() {
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}
+                  workflow={coordination.workflow}
+                  checksRan={coordination.checksRan}
                   planningHarness={coordination.planningHarness}
                   reviewHarness={coordination.reviewHarness}
                   planText={coordination.planText}

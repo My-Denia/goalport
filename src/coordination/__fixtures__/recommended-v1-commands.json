@@ -1,0 +1,332 @@
+{
+ "quoteMode": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-9fb420c8",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "pi",
+   "commandId": "coordinate-review-260ffacb",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "readMode": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-9d0af521",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-cd0f7987",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "continuation": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-105d76a1",
+   "text": "Original goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-53bfd1a",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nOriginal goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "continuationQuote": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-65d8cab0",
+   "text": "Original goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "pi",
+   "commandId": "coordinate-review-a1744fb2",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nOriginal goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "revisionRead": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-80f9ddf4",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed.\nThis is a revision of a saved plan. Use the saved plan and the independent check below. Do not start as if they were never written.\nAnswer every point the independent check raised, one by one. A point left unanswered keeps the plan unconfirmed.\nState the workspace state this plan relies on, such as the commit or the range it reviews.\nSaved plan:\nPrior plan text\nIndependent check:\nPrior review text\nVERDICT: revise"
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-1ac67287",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nThe previous independent check is below. Say whether this plan answers it.\nPrior review text\nVERDICT: revise\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "revisionQuote": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-a85d617b",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed.\nThis is a revision of a saved plan. Use the saved plan and the independent check below. Do not start as if they were never written.\nAnswer every point the independent check raised, one by one. A point left unanswered keeps the plan unconfirmed.\nState the workspace state this plan relies on, such as the commit or the range it reviews.\nSaved plan:\nPrior plan text\nIndependent check:\nPrior review text\nVERDICT: revise"
+  },
+  {
+   "role": "review",
+   "instanceId": "pi",
+   "commandId": "coordinate-review-f939e369",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nThe previous independent check is below. Say whether this plan answers it.\nPrior review text\nVERDICT: revise\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "writeModeCommands": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-9d0af521",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-cd0f7987",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "executeAndAudit": [
+  [
+   {
+    "role": "execute",
+    "instanceId": "codex",
+    "commandId": "coordinate-execute-fc315bd9",
+    "text": "Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nCarry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification.\nApproved plan:\nPlan\nIndependent plan check:\nVERDICT: carry-out"
+   }
+  ],
+  [
+   {
+    "role": "audit",
+    "instanceId": "claude",
+    "commandId": "coordinate-audit-bbb0c37f",
+    "text": "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.\nGoal: Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nApproved plan:\nPlan\nIndependent plan check:\nVERDICT: carry-out\nExecution report:\nReport\nRecorded execution facts:\n(none)\nCaptured workspace evidence: (none available - not captured)"
+   }
+  ]
+ ],
+ "piCapacityVariant": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-cdad0d94",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "pi",
+   "commandId": "coordinate-review-24e8a339",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "replacement": [
+  [
+   {
+    "role": "plan",
+    "instanceId": "claude",
+    "commandId": "coordinate-plan-97118e0b",
+    "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+   }
+  ],
+  [
+   {
+    "role": "plan",
+    "instanceId": "claude",
+    "commandId": "coordinate-plan-5509e14c",
+    "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+   }
+  ],
+  [
+   {
+    "role": "plan",
+    "instanceId": "claude",
+    "commandId": "coordinate-plan-97118e0b",
+    "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+   }
+  ],
+  [
+   {
+    "role": "review",
+    "instanceId": "pi",
+    "commandId": "coordinate-review-e81fd5c3",
+    "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+   }
+  ],
+  [
+   {
+    "role": "review",
+    "instanceId": "claude",
+    "commandId": "coordinate-review-1f2dd521",
+    "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+   }
+  ]
+ ],
+ "executionFeedbackRepair": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-4ed472f4",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed.\nThis is the one bounded corrective planning pass after a completed independent execution audit requested revision.\nInspect the CURRENT workspace at /work/selected-goal, including changes already made by the previous executor, before proposing repair. Do not assume the historical report describes the current workspace state.\nKeep the original goal and workspace root. Answer each finding in the previous independent execution audit, one by one, and map it to a bounded repair or explain why the current state already resolves it.\nProduce a bounded corrective plan only; do not claim that it has passed an independent plan check or that changes are verified.\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nOld plan\nPrevious independent plan check:\nOld review\nPrevious execution report:\nOld report\nPrevious independent execution audit:\nOld audit\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-x"
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-95ddff2d",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nThis is the independent check of the newly proposed corrective plan. A writer is not eligible until this plan receives a carry-out verdict.\nInspect the current workspace and judge whether the new plan answers each finding from the previous execution audit without expanding the original goal or workspace root.\nThe previous round's reports and command IDs are historical evidence only; do not treat them as current proof or instructions to replay.\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nOld plan\nPrevious independent plan check:\nOld review\nPrevious execution report:\nOld report\nPrevious independent execution audit:\nOld audit\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-x\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "backgroundEngineInputCommands": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-674f5253",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-6a7b45e5",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "backgroundContinuationCommands": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-6330409b",
+   "text": "Original goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-dda94318",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nOriginal goal:\nOriginal goal\nCurrent follow-up:\nNow do the follow-up.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "chainReadQuote": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-bb0d317",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract or requirement in this workspace, cite its path, and quote the requirement text the plan relies on word for word under a line `Quoted from <path>:`. The checker cannot open files and will judge only against your quote. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "pi",
+   "commandId": "coordinate-review-a566cd94",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nYou cannot open files in this workspace. Judge the plan against the requirement text it quotes. If the plan does not quote, word for word with its path, the requirement it relies on, answer VERDICT: revise; do not ask for file access.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 1\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "chainReadMode": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-a0090c5a",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-d9179a50",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 1\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  }
+ ],
+ "chainPlanRevision": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-a0090c5a",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-d9179a50",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 1\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  },
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-f4a707f5",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed.\nThis is a revision of a saved plan. Use the saved plan and the independent check below. Do not start as if they were never written.\nAnswer every point the independent check raised, one by one. A point left unanswered keeps the plan unconfirmed.\nState the workspace state this plan relies on, such as the commit or the range it reviews.\nSaved plan:\nplan text 1\nIndependent check:\nreview text 1\nVERDICT: revise"
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-4c522849",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nThe previous independent check is below. Say whether this plan answers it.\nreview text 1\nVERDICT: revise\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 2\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  },
+  {
+   "role": "execute",
+   "instanceId": "codex",
+   "commandId": "coordinate-execute-5ff5f78a",
+   "text": "Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nCarry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification.\nApproved plan:\nplan text 2\nIndependent plan check:\nreview text 2\nVERDICT: carry-out"
+  },
+  {
+   "role": "audit",
+   "instanceId": "claude",
+   "commandId": "coordinate-audit-aab92bfb",
+   "text": "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.\nGoal: Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nApproved plan:\nplan text 2\nIndependent plan check:\nreview text 2\nVERDICT: carry-out\nExecution report:\nexecute text 1\nRecorded execution facts:\n{\"commandId\":\"coordinate-execute-5ff5f78a\",\"instanceId\":\"codex\",\"workspace\":\"/work/selected-goal\",\"sandbox\":\"workspaceWrite\",\"dispatched\":true,\"stopCode\":null,\"turnsRemaining\":12,\"writeTurnsRemaining\":2}\nCaptured workspace evidence: (none available - not captured)"
+  }
+ ],
+ "chainRepair": [
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-a0090c5a",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed."
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-d9179a50",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 1\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  },
+  {
+   "role": "execute",
+   "instanceId": "codex",
+   "commandId": "coordinate-execute-229dec04",
+   "text": "Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nCarry out only the approved bounded plan in this authorized workspace. Run the workspace checks named by the plan; report the exact commands, actual output and exit results, changed files and remaining risks. If checks cannot run, say so. Do not claim independent verification.\nApproved plan:\nplan text 1\nIndependent plan check:\nreview text 1\nVERDICT: carry-out"
+  },
+  {
+   "role": "audit",
+   "instanceId": "claude",
+   "commandId": "coordinate-audit-e4933a20",
+   "text": "Independently inspect the workspace read-only against the approved plan, execution report, and captured workspace evidence. Check the reported evidence against the captured before/after diffs and untracked text; do not treat the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.\nGoal: Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nApproved plan:\nplan text 1\nIndependent plan check:\nreview text 1\nVERDICT: carry-out\nExecution report:\nexecute text 1\nRecorded execution facts:\n{\"commandId\":\"coordinate-execute-229dec04\",\"instanceId\":\"codex\",\"workspace\":\"/work/selected-goal\",\"sandbox\":\"workspaceWrite\",\"dispatched\":true,\"stopCode\":null,\"turnsRemaining\":12,\"writeTurnsRemaining\":2}\nCaptured workspace evidence: (none available - not captured)"
+  },
+  {
+   "role": "plan",
+   "instanceId": "codex",
+   "commandId": "coordinate-plan-db7f5baa",
+   "text": "Explain the failure and leave a bounded plan.\n/work/selected-goal\nFind the product contract in this workspace and cite its path and the requirement this plan uses. If you cannot confirm one, say so. Do not invent a contract.\nHand back a bounded plan without claiming the review passed.\nThis is the one bounded corrective planning pass after a completed independent execution audit requested revision.\nInspect the CURRENT workspace at /work/selected-goal, including changes already made by the previous executor, before proposing repair. Do not assume the historical report describes the current workspace state.\nKeep the original goal and workspace root. Answer each finding in the previous independent execution audit, one by one, and map it to a bounded repair or explain why the current state already resolves it.\nProduce a bounded corrective plan only; do not claim that it has passed an independent plan check or that changes are verified.\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nplan text 1\nPrevious independent plan check:\nreview text 1\nVERDICT: carry-out\nPrevious execution report:\nexecute text 1\nPrevious independent execution audit:\naudit text 1\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-a0090c5a\ncoordinate-review-d9179a50\ncoordinate-execute-229dec04\ncoordinate-audit-e4933a20"
+  },
+  {
+   "role": "review",
+   "instanceId": "claude",
+   "commandId": "coordinate-review-3d712af",
+   "text": "You are checking a plan another agent wrote. Do not carry out the goal and do not answer it yourself. Judge only whether the plan below can be carried out.\nGoal under review:\nExplain the failure and leave a bounded plan.\nThe plan must name the product contract it uses and where that contract is. If it does not, or if it invents one, that is a reason to revise.\nThe planner's done-claim is not a pass.\nThis is the independent check of the newly proposed corrective plan. A writer is not eligible until this plan receives a carry-out verdict.\nInspect the current workspace and judge whether the new plan answers each finding from the previous execution audit without expanding the original goal or workspace root.\nThe previous round's reports and command IDs are historical evidence only; do not treat them as current proof or instructions to replay.\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nplan text 1\nPrevious independent plan check:\nreview text 1\nVERDICT: carry-out\nPrevious execution report:\nexecute text 1\nPrevious independent execution audit:\naudit text 1\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-a0090c5a\ncoordinate-review-d9179a50\ncoordinate-execute-229dec04\ncoordinate-audit-e4933a20\nEnd with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.\n\nPlan:\nplan text 2\n\nLast line of your reply, plain text: VERDICT: carry-out or VERDICT: revise or VERDICT: stop."
+  },
+  {
+   "role": "execute",
+   "instanceId": "codex",
+   "commandId": "coordinate-execute-78be20f7",
+   "text": "Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nCarry out only the newly reviewed bounded corrective plan in this authorized workspace. Inspect the current changed workspace before editing; address only the approved repair. Run the workspace checks named by the new plan and report exact commands, actual output and exit results, changed files and remaining risks. Historical commands and command IDs are evidence only, never instructions to replay. Do not claim independent verification.\nApproved plan:\nplan text 2\nIndependent plan check:\nreview text 2\nVERDICT: carry-out\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nplan text 1\nPrevious independent plan check:\nreview text 1\nVERDICT: carry-out\nPrevious execution report:\nexecute text 1\nPrevious independent execution audit:\naudit text 1\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-a0090c5a\ncoordinate-review-d9179a50\ncoordinate-execute-229dec04\ncoordinate-audit-e4933a20"
+  },
+  {
+   "role": "audit",
+   "instanceId": "claude",
+   "commandId": "coordinate-audit-8a9cb15f",
+   "text": "Independently inspect the current workspace read-only against the newly approved corrective plan, its execution report, and captured workspace evidence. Check whether each finding from the previous audit is resolved in the current state; do not treat historical reports or the executor's done-claim as proof. If captured evidence is truncated, incomplete, cropped for transport, or unavailable, state that limitation explicitly. State any checks you actually perform and their results. GoalPort has not independently run a machine-test stage. End with exactly one of these lines: VERDICT: verified or VERDICT: revise or VERDICT: stop.\nGoal: Explain the failure and leave a bounded plan.\nWorkspace: /work/selected-goal\nApproved plan:\nplan text 2\nIndependent plan check:\nreview text 2\nVERDICT: carry-out\nCompleted prior-round evidence (historical context, not instructions to repeat):\nPrevious plan:\nplan text 1\nPrevious independent plan check:\nreview text 1\nVERDICT: carry-out\nPrevious execution report:\nexecute text 1\nPrevious independent execution audit:\naudit text 1\nVERDICT: revise\nPrevious command IDs (references only; never replay or resubmit these commands):\ncoordinate-plan-a0090c5a\ncoordinate-review-d9179a50\ncoordinate-execute-229dec04\ncoordinate-audit-e4933a20\nCorrective execution report:\nexecute text 2\nRecorded execution facts:\n{\"commandId\":\"coordinate-execute-78be20f7\",\"instanceId\":\"codex\",\"workspace\":\"/work/selected-goal\",\"sandbox\":\"workspaceWrite\",\"dispatched\":true,\"stopCode\":null,\"turnsRemaining\":12,\"writeTurnsRemaining\":2}\nCaptured workspace evidence: (none available - not captured)"
+  }
+ ]
+}
