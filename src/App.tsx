@@ -3465,6 +3465,8 @@ function App() {
               ) : null}
               <CoordinationStatus
                 goal={selectedPlan.goal}
+                workflow={selectedPlan.workflow}
+                checksRan={selectedPlan.checksRan}
                 planningHarness={selectedPlan.planningHarness}
                 reviewHarness={selectedPlan.reviewHarness}
                 planText={selectedPlan.planText}
@@ -3560,7 +3562,7 @@ function App() {
                       coordinatedOptions.current.set(coordinatedDraftKey.current, { background: backgroundConsent, write: linuxWrite, piCapacity: selection, restored: false, dirty: true, sourceRequestId: null });
                     } : desktopPiEligible && linuxPiSnapshot ? (enabled) => setLinuxPiSelection(enabled ? normalizePiCapacity(linuxPiSnapshot.piCapacity?.offer) ?? undefined : undefined) : undefined}
                     isLinuxActiveTarget={client.mode === "linux-core" && (isSavedView || (!linuxShowingFreshDraft && Boolean(linuxCoordinationGoal || linuxCoordinationRequest)))}
-                    methodLine={isSavedView ? methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
+                    methodLine={client.mode !== "linux-core" ? null : isSavedView ?methodLine(savedTarget?.workflow, savedTarget?.checksRan) : methodLine(coordination?.workflow, coordination?.checksRan)}
                     savedResultLabel={isSavedView ? (currentWork?.rootRequestId && currentWork.rootRequestId === savedTarget?.rootRequestId ? "Previous result" : "Saved result") : null}
                     savedResultOutcome={isSavedView ? savedReadError || savedTarget?.statusLabel || savedTarget?.outcome || savedTarget?.verdict || "Loading the selected result…" : null}
                     currentWorkTitle={currentWork?.identityConfirmed ? currentWork.goal : null}
@@ -3928,6 +3930,8 @@ function App() {
               {coordination ? (
                 <CoordinationStatus
                   goal={draftGoal?.message}
+                  workflow={coordination.workflow}
+                  checksRan={coordination.checksRan}
                   planningHarness={coordination.planningHarness}
                   reviewHarness={coordination.reviewHarness}
                   planText={coordination.planText}
