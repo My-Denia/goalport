@@ -29,8 +29,6 @@ export interface GoalDraftValue {
   message: string;
   /** A saved user workflow chosen for this goal; absent means Recommended. */
   workflowId?: string;
-  /** A saved result's own copy of its workflow. Editing or removing the workflow drops it, so Send uses what the picker shows. */
-  workflowSnapshot?: WorkflowDefinition;
 }
 
 const WORKFLOW_ROW = "workflow:";
@@ -57,8 +55,6 @@ interface DraftRuntimePickerProps {
   /** Saved user workflows; undefined when this build cannot keep any, which hides their rows. */
   workflows?: readonly WorkflowDefinition[];
   workflowId?: string;
-  /** Name to show if the chosen workflow came from a saved result and is no longer in the list. */
-  workflowFallbackName?: string | null;
   disabled?: boolean;
   onSelect: (value: Pick<GoalDraftValue, "provider" | "workflowId">) => void;
   onCopyRecommended: () => void;
@@ -66,10 +62,10 @@ interface DraftRuntimePickerProps {
 }
 
 /** Local draft Runtime choice — no Core command runs until the first Send. */
-function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, workflows, workflowId, workflowFallbackName, disabled = false, onSelect, onCopyRecommended, onEditWorkflow, linuxEntry = false }: DraftRuntimePickerProps) {
+function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, workflows, workflowId, disabled = false, onSelect, onCopyRecommended, onEditWorkflow, linuxEntry = false }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
   const savedWorkflow = !provider && workflowId ? workflows?.find((candidate) => candidate.id === workflowId) : undefined;
-  const userWorkflowName = !provider && workflowId ? (savedWorkflow?.name ?? workflowFallbackName ?? "Your workflow") : null;
+  const userWorkflowName = !provider && workflowId ? (savedWorkflow?.name ?? "Your workflow") : null;
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
   const recommended = {
     id: "", name: "Recommended workflow", group: "Workflow",
@@ -195,7 +191,6 @@ interface DraftGoalComposerProps {
   /** Saved user workflows; omit where this build cannot keep any (their picker rows then do not exist). */
   workflows?: readonly WorkflowDefinition[];
   /** Name of the workflow a saved result ran under, for a draft made from it when that workflow is gone. */
-  workflowFallbackName?: string | null;
   onSaveWorkflow?: (input: WorkflowSaveInput) => Promise<WorkflowEditResult>;
   onDeleteWorkflow?: (id: string) => Promise<WorkflowEditResult>;
 }
@@ -256,7 +251,7 @@ export function GoalStatusHeading({
 }
 
 export function DraftGoalComposer({
-  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, sendBlockers, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard, workflows, workflowFallbackName, onSaveWorkflow, onDeleteWorkflow
+  linuxEntry = false, draft, runtimes, connected, busy, blockedFromSending, sendBlockers, waitingOn, retryLabel, error, canBrowse, coordinationAvailable, coordinationEntryAvailable = false, runtimeRequiredHint, coordinationResult, failureHeadline = null, goalDetail, goalChange, activeGoalTitle, onContinueCoordination, onStopCoordination, stopLabel = "Stop this goal", currentWorkTitle, currentWorkLine, continueDisabledReason, continueLabel, liveAllowanceHint, savedResultOutcome, onLeaveGoal, linuxCanStartCoordination = false, linuxWrite = false, piCapacity, piCapacityChecked = false, piCapacityReason, piLegacy = false, onPiCapacityChange, onLinuxWriteChange, inputsLocked = false, workspacePlaceholder, workspaceHint, harnessWarning, signedInHint, discoverHint, consentWarning, leftoverHint, onGrantConsent, keepRunningHint, backgroundConsent = false, onBackgroundConsentChange, optionsRestored = false, discoveredHarnesses = [], isLinuxActiveTarget = false, continueDisabled = false, onBrowse, onChange, onSubmit, onDiscard, workflows, onSaveWorkflow, onDeleteWorkflow
 }: DraftGoalComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // null: closed. id null: a new copy of Recommended. Otherwise the saved workflow being edited.
@@ -426,7 +421,6 @@ export function DraftGoalComposer({
             runtimeRequiredHint={runtimeRequiredHint}
             workflows={onSaveWorkflow ? workflows : undefined}
             workflowId={draft.workflowId}
-            workflowFallbackName={workflowFallbackName}
             disabled={busy || inputsLocked}
             onSelect={(value) => onChange({ ...draft, ...value })}
             onCopyRecommended={() => openEditor(null)}
@@ -540,7 +534,7 @@ export function DraftGoalComposer({
             if (result.ok) {
               setEditor(null);
               // The user made or changed it to use it: it is the workflow for this goal now.
-              if (result.saved) onChange({ ...draft, provider: "", workflowId: result.saved.id, workflowSnapshot: undefined });
+              if (result.saved) onChange({ ...draft, provider: "", workflowId: result.saved.id });
             }
             return result;
           }}
@@ -548,7 +542,7 @@ export function DraftGoalComposer({
             const result = await onDeleteWorkflow(id);
             if (result.ok) {
               setEditor(null);
-              if (draft.workflowId === id) onChange({ ...draft, workflowId: undefined, workflowSnapshot: undefined });
+              if (draft.workflowId === id) onChange({ ...draft, workflowId: undefined });
             }
             return result;
           } : undefined}

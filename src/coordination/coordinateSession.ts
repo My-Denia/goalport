@@ -1,3 +1,4 @@
+import { reviewerCouldJudge } from "../../electron/workflow-checks.mjs";
 import { normalizeRequestedPiCapacity, type PiPair } from "../../electron/pi-capacity.mjs";
 import {
   coordinateGoal,
@@ -545,7 +546,9 @@ async function runRecoveryRound(
     piCapacity: input.piCapacity,
     legacyPiContinuation: input.legacyPiContinuation,
     exclude: [...failed],
-  }).filter((item) => !used.has(usedKey(role, item.instanceId)));
+  }).filter((item) => !used.has(usedKey(role, item.instanceId)))
+    // A replacement reviewer must meet the run's own reviewer requirement, as the first one did.
+    .filter((item) => role !== "review" || reviewerCouldJudge(item.instanceId, (input.workflow ?? WORKFLOW).checks));
   const counterpart = (role: CoordinationRole): CoordinationRole | null =>
     role === "review" ? "planning" : role === "audit" ? "execution" : null;
   // Assignment feasibility, not all-read-roles-distinct. The legacy two-role

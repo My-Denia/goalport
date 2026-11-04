@@ -137,6 +137,16 @@ describe("the definition chosen at Send drives role and citation choices", () =>
     expect(coordinateGoal({ ...input, workflow: strict }).commands).toEqual([]);
   });
 
+  it("never replaces a failed reviewer with an agent that cannot read files when reading is required", async () => {
+    const codex: SyntheticCatalogInstance = { ...grok, instanceId: "codex", name: "Codex" };
+    const strict = compileWorkflow(definition("on", {}, { reviewerNeeds: { readWorkspace: "required" } }) as never);
+    const transport = script((role) => role === "review" ? { text: "", errorText: "", stopCode: "no-text" } : {});
+    const state = await runCoordinateSession({ ...base, catalog: [codex, claude, grok], workflow: strict }, { sendAuthorized: true, allowedInstances: ["codex", "claude", "grok"] }, transport);
+    expect(state.commands.map((c) => c.modelSelection.instanceId)).not.toContain("grok");
+    expect(transport.roles).toEqual(["plan", "review"]);
+    expect(state.verdict).not.toBe("checked");
+  });
+
   it("replacementCommand words the plan by the definition's citation rule", () => {
     const quoting = replacementCommand("plan", claude, input, "k", "grok");
     expect(quoting.initialMessage.text).toContain("Quoted from");

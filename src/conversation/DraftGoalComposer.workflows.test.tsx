@@ -111,17 +111,16 @@ describe("workflow rows in the picker", () => {
 });
 
 describe("editing the workflow a Use again draft carries", () => {
-  it("Send follows the edited workflow, not the saved result's older copy", async () => {
+  it("Send follows the edited workflow: the draft carries only the id, and the list is the one source", async () => {
     const edited: WorkflowDefinition = { ...quick, version: 2, modules: { checks: { ...RECOMMENDED_V1.modules.checks, planReview: "on" } } };
-    let draft: GoalDraftValue = { workspace: "C:\work", provider: "", message: "plan it", workflowId: quick.id, workflowSnapshot: quick };
-    // Same merge App applies, and the same rule for which definition Send runs.
+    let draft: GoalDraftValue = { workspace: "C:\work", provider: "", message: "plan it", workflowId: quick.id };
     const onChange = vi.fn((value: GoalDraftValue) => { draft = { ...draft, ...value }; });
     mount({ draft, workflows: [quick], onChange, save: async () => ({ ok: true as const, saved: edited }) });
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     await screen.findByLabelText("Name");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onChange).toHaveBeenCalled());
-    const sendUses = draft.workflowSnapshot?.id === draft.workflowId ? draft.workflowSnapshot : [edited].find((item) => item.id === draft.workflowId);
-    expect(sendUses?.modules.checks.planReview).toBe("on");
+    expect(draft).not.toHaveProperty("workflowSnapshot");
+    expect([edited].find((item) => item.id === draft.workflowId)?.modules.checks.planReview).toBe("on");
   });
 });
