@@ -8,6 +8,8 @@ import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { renderMarkdownBody } from "../lib/markdown";
 import { classifyProviderError } from "../coordination/providerError";
 import type { ExecutionWorkspaceEvidence, AuditInputEvidenceCoverage } from "../coordination/coordinateGoal";
+import type { CoordinationDecision } from "../../electron/coordination-decision.mjs";
+import { decisionSentence } from "./decisionSentence";
 import { methodLine, resourcesLine, resourcesTitle, type WorkflowRef, type CheckRan, type TurnRan } from "../coordination/methodLine";
 
 // The user types a goal and sends, and should see the plan and the check separately, plus why it stopped, without picking a runtime or writing a handoff.
@@ -36,6 +38,8 @@ export interface CoordinationStatusProps {
   /** Presentation only: a background Stop with a proven settled outcome. */
   stoppedOutcome?: boolean;
   stopReason: string;
+  /** What the run is waiting on the user for; absent on older results, which render as before. */
+  decision?: CoordinationDecision;
   planningQuota: CoordinationQuotaWord | null;
   reviewQuota: CoordinationQuotaWord | null;
   savedAt?: string | null;
@@ -237,6 +241,7 @@ export function CoordinationStatus({
   auditInputEvidenceText,
   verdict,
   stopReason,
+  decision,
   planningQuota,
   reviewQuota,
   savedAt,
@@ -262,7 +267,8 @@ export function CoordinationStatus({
   turnsRan,
 }: CoordinationStatusProps) {
   const saved = savedLabel(savedAt);
-  const method = methodLine(workflow, checksRan);
+  const method = methodLine(workflow, checksRan, decision);
+  const decided = decision ? decisionSentence(decision, { canRevise: Boolean(onRevise), canChangeAccess: Boolean(onChangeAccess) }) : null;
   const resources = resourcesLine(turnsRan);
   const resourcesFull = resourcesTitle(turnsRan);
   // An assigned writer alone is not evidence it launched: the read-budget
@@ -271,11 +277,21 @@ export function CoordinationStatus({
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
     <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : verdict === "planned" ? "Plan" : "Plan and check"}>
-      <dl className={verdict === "planned" ? "coordination-outcome coordination-outcome-solo" : "coordination-outcome"}>
+      <dl className={verdict === "planned" || decided ? "coordination-outcome coordination-outcome-solo" : "coordination-outcome"}>
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         {/* A plan whose review was off is not a stop; the outcome and the method line below already say why, once. */}
-        {verdict === "planned" ? null : <><dt>Stop reason</dt><dd>{fact(stopReason)}</dd></>}
+        {verdict === "planned" || decided ? null : <><dt>Stop reason</dt><dd>{fact(stopReason)}</dd></>}
       </dl>
+      {/* The sentence says what it needs from the user; the engine's own stop sentence stays one click away. */}
+      {decided ? (
+        <div className="coordination-decision" role="status">
+          <p>{decided}</p>
+          <details className="technical-details">
+            <summary>Technical details</summary>
+            <pre className="technical-details-pre">{stopReason}</pre>
+          </details>
+        </div>
+      ) : null}
       {method ? <p className="method-line">{method}</p> : null}
       {resources ? <p className="method-line" title={resourcesFull ?? undefined}>{resources}</p> : null}
       {feedbackHistory && feedbackHistory.length > 0 ? (
@@ -332,7 +348,7 @@ export function CoordinationStatus({
         : null}
       {onRevise ? (
         <div className="coordination-revise">
-          <p>This plan needs changes. Revise keeps it and lets you send an update.</p>
+          {decided ? null : <p>This plan needs changes. Revise keeps it and lets you send an update.</p>}
           <button type="button" onClick={onRevise}>Revise</button>
         </div>
       ) : null}

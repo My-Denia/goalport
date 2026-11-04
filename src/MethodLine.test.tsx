@@ -87,3 +87,41 @@ it("the Linux saved-result heading shows the resources line too", () => {
   render(<GoalStatusHeading {...base} resourcesLine="Plan: Claude opus, high effort (stronger)" />);
   expect(screen.getByText("Plan: Claude opus, high effort (stronger)")).toBeTruthy();
 });
+
+// Issue #70: a stop the user has to decide says what it needs, once, and keeps the engine's sentence in the details.
+const gate = "The check asked for changes to the plan. The workflow has automatic plan revision switched off.";
+const planStop = { ...round, verdict: "revise", stopReason: gate } as const;
+
+it("an automatic-off plan stop shows one plain sentence, with the engine's sentence only in Technical details", () => {
+  render(<CoordinationStatus {...planStop} decision={{ kind: "automatic-off", stage: "plan" }} onRevise={() => {}} />);
+  expect(screen.getByRole("status").textContent).toContain("Your workflow stops here, so nothing more was spent. Revise to update it, or send a new goal.");
+  expect(screen.getAllByText(/asked for changes to the plan/)).toHaveLength(1 + 1); // the sentence and the details copy
+  const details = document.querySelector(".coordination-decision details") as HTMLElement;
+  expect(details.textContent).toContain(gate);
+  expect(document.querySelector(".coordination-outcome")?.textContent).not.toContain(gate);
+  expect(screen.getAllByRole("button", { name: "Revise" })).toHaveLength(1);
+  expect(document.body.textContent).not.toContain("This plan needs changes.");
+});
+
+it("the sentence names Revise and Agent access only when those buttons are there", () => {
+  render(<CoordinationStatus {...planStop} decision={{ kind: "not-enough-turns", stage: "changes" }} />);
+  expect(screen.getByRole("status").textContent).not.toMatch(/Revise|Agent access/);
+  expect(screen.queryByRole("button", { name: "Revise" })).toBeNull();
+  cleanup();
+  render(<CoordinationStatus {...planStop} decision={{ kind: "not-enough-turns", stage: "changes" }} onRevise={() => {}} onChangeAccess={() => {}} />);
+  expect(screen.getByRole("status").textContent).toMatch(/Agent access below.*Revise to update it/);
+});
+
+it("an old record without a decision renders exactly as before", () => {
+  render(<CoordinationStatus {...planStop} onRevise={() => {}} />);
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(document.querySelector(".coordination-outcome")?.textContent).toContain(gate);
+  expect(screen.getByText("This plan needs changes. Revise keeps it and lets you send an update.")).toBeTruthy();
+});
+
+it("the method line says the setting was off only for an automatic-off stop", () => {
+  const wf = { id: "my-0a1b2c3d", version: 2, name: "Careful" };
+  const ranOne = [{ kind: "plan-check", harness: "Pi", verdict: "revise" }] as const;
+  render(<CoordinationStatus {...planStop} workflow={wf} checksRan={ranOne} decision={{ kind: "automatic-off", stage: "plan" }} />);
+  expect(screen.getByText("Careful v2 · Ran: plan check by Pi · Automatic plan revision: off in Careful")).toBeTruthy();
+});

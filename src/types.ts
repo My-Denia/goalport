@@ -1559,14 +1559,14 @@ export function normalizeTurnReasonCode(value: unknown): TurnReasonCode | undefi
 // ---- Saved workflows (issue #68) ----------------------------------------
 // The main process owns the file; the window only lists, saves and deletes.
 export type { WorkflowDefinition, WorkflowChecks } from "../electron/workflow-checks.mjs";
-import type { WorkflowDefinition as SavedWorkflowDefinition, WorkflowChecks as SavedWorkflowChecks, WorkflowResources as SavedWorkflowResources } from "../electron/workflow-checks.mjs";
+import type { WorkflowDefinition as SavedWorkflowDefinition, WorkflowChecks as SavedWorkflowChecks, WorkflowResources as SavedWorkflowResources, WorkflowFeedback as SavedWorkflowFeedback } from "../electron/workflow-checks.mjs";
 
 /** What the editor sends: no id for a new copy, the saved id for an edit. */
 export interface WorkflowSaveInput {
   id?: string;
   name: string;
   parent?: string;
-  modules: { checks: SavedWorkflowChecks; resources?: SavedWorkflowResources };
+  modules: { checks: SavedWorkflowChecks; resources?: SavedWorkflowResources; feedback?: SavedWorkflowFeedback };
 }
 
 /** Every workflows call answers with the whole current list, or one plain sentence in `error`. */

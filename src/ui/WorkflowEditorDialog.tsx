@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from "react";
-import { RECOMMENDED_V1, MAX_WORKFLOW_NAME, DEFAULT_RESOURCES, RESOURCE_BOUNDS } from "../../electron/workflow-checks.mjs";
-import type { ResourcePreference, ResourceRole, WorkflowResources } from "../../electron/workflow-checks.mjs";
+import { RECOMMENDED_V1, MAX_WORKFLOW_NAME, DEFAULT_RESOURCES, DEFAULT_FEEDBACK, RESOURCE_BOUNDS } from "../../electron/workflow-checks.mjs";
+import type { FeedbackChoice, FeedbackStage, ResourcePreference, ResourceRole, WorkflowFeedback, WorkflowResources } from "../../electron/workflow-checks.mjs";
 import type { WorkflowChecks, WorkflowDefinition, WorkflowSaveInput } from "../types";
 import { GoalDialog } from "./GoalDialog";
+import { SegmentedRow } from "./SegmentedRow";
 
 /** What a save or delete did, in the words the dialog can show. */
 export type WorkflowEditResult = { ok: true; saved?: WorkflowDefinition } | { ok: false; error: string };
@@ -18,8 +19,13 @@ interface WorkflowEditorDialogProps {
 }
 
 const SAME_AS_RECOMMENDED = "Same as Recommended v1";
-/** Checks and Resources can be changed in this version; the rest follow Recommended. */
-const FIXED_GROUPS = ["Planning", "Execution", "Feedback & continuation", "Delivery"] as const;
+/** Checks, Resources and Feedback can be changed in this version; the rest follow Recommended. */
+const FIXED_GROUPS = ["Planning", "Execution", "Delivery"] as const;
+
+const FEEDBACK_ROWS: ReadonlyArray<{ stage: FeedbackStage; label: string; automatic: string }> = [
+  { stage: "planRevision", label: "When the plan check asks for changes", automatic: "Revise the plan automatically" },
+  { stage: "repair", label: "When verification asks for changes", automatic: "Repair automatically" },
+];
 
 const ROLE_ROWS: ReadonlyArray<{ role: ResourceRole; label: string; note?: string }> = [
   { role: "plan", label: "Writing the plan" },
@@ -40,8 +46,8 @@ function freeName(taken: readonly string[]): string {
 
 /**
  * The user has the recommended method in front of them and wants to switch off what they
- * don't need and call it their own. One dialog on the shared modal card; only the Checks
- * group has controls, every other group says it follows Recommended.
+ * don't need and call it their own. One dialog on the shared modal card; Checks, Resources and
+ * Feedback have controls, every other group says it follows Recommended.
  */
 export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, onClose }: WorkflowEditorDialogProps) {
   const base: WorkflowChecks = workflow?.modules.checks ?? RECOMMENDED_V1.modules.checks;
@@ -52,6 +58,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
   const [roles, setRoles] = useState<Record<ResourceRole, ResourcePreference>>({ ...baseResources.roles });
   const [readTurns, setReadTurns] = useState(String(baseResources.budget.readTurns));
   const [writeTurns, setWriteTurns] = useState(String(baseResources.budget.writeTurns));
+  const [feedback, setFeedback] = useState<WorkflowFeedback>({ ...(workflow?.modules.feedback ?? DEFAULT_FEEDBACK) });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -72,7 +79,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
         ...base,
         planReview: planReview ? "on" : "off",
         reviewerNeeds: { readWorkspace: readsFiles ? "required" : "preferred" },
-      }, resources: { roles, budget: { readTurns: reads, writeTurns: writes } } },
+      }, resources: { roles, budget: { readTurns: reads, writeTurns: writes } }, feedback },
     });
     // On success the owner closes the dialog; only a refusal keeps it open.
     if (!result.ok) { setError(result.error); setBusy(false); }
@@ -118,18 +125,8 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
             <h3>Resources</h3>
             <p className="workflow-resources-lead">Faster or Stronger changes how hard an agent works: Codex and Pi think less or more; Claude uses Sonnet for Faster and thinks harder on Opus for Stronger. Claude with an API key stays as it is.</p>
             {ROLE_ROWS.map(({ role, label, note }) => (
-              <div key={role} className="resource-row">
-                <span className="resource-label" id={`resource-${role}`}>{label}{note ? <small>{note}</small> : null}</span>
-                <div className="resource-seg" role="radiogroup" aria-labelledby={`resource-${role}`}>
-                  {PREFERENCES.map(({ value, label: text }) => (
-                    <label key={value} className="resource-seg-option">
-                      <input type="radio" name={`resource-${role}`} value={value} checked={roles[role] === value} disabled={busy}
-                        onChange={() => setRoles((current) => ({ ...current, [role]: value }))} />
-                      <span>{text}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
+              <SegmentedRow key={role} name={role} label={label} note={note} options={PREFERENCES} value={roles[role]} disabled={busy}
+                onChange={(value) => setRoles((current) => ({ ...current, [role]: value }))} />
             ))}
             <div className="resource-turns">
               <label className="resource-turn">
@@ -144,6 +141,15 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
               </label>
             </div>
             <small className="workflow-resources-note">These only fill in the turn limits for a new goal. They never change access you already gave.</small>
+          </section>
+          <section className="workflow-group workflow-group-open" aria-label="Feedback & continuation">
+            <h3>Feedback &amp; continuation</h3>
+            <p className="workflow-resources-lead">Stop and ask me keeps GoalPort from spending another round until you decide.</p>
+            {FEEDBACK_ROWS.map(({ stage, label, automatic }) => (
+              <SegmentedRow<FeedbackChoice> key={stage} stacked name={stage} label={label} note="Only for goals that change files" disabled={busy}
+                options={[{ value: "automatic", label: <>{automatic} <em className="resource-recommended">Recommended</em></> }, { value: "ask", label: "Stop and ask me" }]}
+                value={feedback[stage]} onChange={(value) => setFeedback((current) => ({ ...current, [stage]: value }))} />
+            ))}
           </section>
           {FIXED_GROUPS.map((group) => (
             <section key={group} className="workflow-group" aria-label={group}>

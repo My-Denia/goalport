@@ -29,11 +29,11 @@ describe("workflow editor", () => {
     expect(screen.queryByRole("button", { name: /Delete/ })).toBeNull();
   });
 
-  it("only Checks has controls; every other group says it follows Recommended", async () => {
+  it("only Checks, Resources and Feedback have controls; every other group says it follows Recommended", async () => {
     open();
     await screen.findByLabelText("Name");
     expect(screen.getAllByRole("checkbox")).toHaveLength(2);
-    for (const group of ["Planning", "Execution", "Feedback & continuation", "Delivery"]) {
+    for (const group of ["Planning", "Execution", "Delivery"]) {
       const section = screen.getByRole("region", { name: group });
       expect(within(section).getByText("Same as Recommended v1")).toBeTruthy();
       expect(within(section).queryByRole("checkbox")).toBeNull();
@@ -137,6 +137,41 @@ describe("workflow editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByRole("alert")).textContent).toContain("File-change turn limit: choose 1 to 8.");
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  // Issue #70: decide myself instead of GoalPort spending another round.
+  it("Feedback starts on automatic for both stops, in the same segmented control as Resources", async () => {
+    open();
+    await screen.findByLabelText("Name");
+    const section = screen.getByRole("region", { name: "Feedback & continuation" });
+    expect(within(section).queryByText("Same as Recommended v1")).toBeNull();
+    for (const label of [/^When the plan check asks for changes/, /^When verification asks for changes/]) {
+      const group = within(section).getByRole("radiogroup", { name: label });
+      expect(group.classList.contains("resource-seg")).toBe(true);
+      expect((group.querySelector("input:checked") as HTMLInputElement).value).toBe("automatic");
+    }
+    expect(within(section).getAllByText("Only for goals that change files")).toHaveLength(2);
+    expect(within(section).getByRole("radio", { name: /Revise the plan automatically/ })).toBeTruthy();
+    expect(within(section).getByRole("radio", { name: /Repair automatically/ })).toBeTruthy();
+  });
+
+  it("saves Stop and ask me for the plan check and leaves verification automatic", async () => {
+    const { onSave } = open();
+    await screen.findByLabelText("Name");
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: /^When the plan check asks/ })).getByRole("radio", { name: "Stop and ask me" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect((onSave.mock.calls as unknown as [Record<string, any>][])[0][0].modules.feedback).toEqual({ planRevision: "ask", repair: "automatic" });
+  });
+
+  it("editing starts from the saved feedback", async () => {
+    const asking: WorkflowDefinition = { ...saved, modules: { ...saved.modules, feedback: { planRevision: "automatic", repair: "ask" } } };
+    const { onSave } = open({ workflow: asking });
+    await screen.findByLabelText("Name");
+    expect((within(screen.getByRole("radiogroup", { name: /^When verification asks/ })).getByRole("radio", { name: "Stop and ask me" }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect((onSave.mock.calls as unknown as [Record<string, any>][])[0][0].modules.feedback).toEqual({ planRevision: "automatic", repair: "ask" });
   });
 
   it("Cancel closes without saving", async () => {
