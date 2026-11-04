@@ -7,6 +7,7 @@ const path = require("node:path");
 const { guardCoordinateCommand, guardCoordinateWriteCommand, roleOfCommandId } = require("./coordinate-guard.cjs");
 const { markBlocked, clearBlocked, readHealth } = require("./harness-health.cjs");
 
+const { RESOURCE_LAUNCH } = require("./workflow-checks.mjs");
 const { normalizePiCapacity, samePiPair, parsePiCatalog, projectPiSettings, configuredPiOffer } = require("./pi-capacity.mjs");
 const PI_RESOURCE_ARGS = ["--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-context-files", "-na"];
 
@@ -313,8 +314,13 @@ async function claudeProvider(io) {
     },
     // The CLI's own default can be the credit model. Subscription logins use
     // the documented opus alias. An API-key login is not given a model.
+    // sonnet is listed only so a workflow can ask for "faster"; opus stays the
+    // default every plain turn publishes.
     models: subscription
-      ? [{ slug: "opus", name: "opus", isDefault: true, isLegacy: false }]
+      ? [
+          { slug: "opus", name: "opus", isDefault: true, isLegacy: false },
+          { slug: "sonnet", name: "sonnet", isDefault: false, isLegacy: false },
+        ]
       : [],
   });
 }
@@ -491,9 +497,17 @@ function promptDeliveryProblem(command, platform = process.platform) {
   return null;
 }
 
+const RESOURCE_EFFORTS = new Set(["faster", "stronger"]);
+const RESOURCE_REFUSED = "The resource choice for this step could not be applied, so nothing was sent.";
+
 function turnSpec(command, env = process.env, platform = process.platform) {
   const deliveryProblem = promptDeliveryProblem(command, platform);
   if (deliveryProblem) return { errorText: deliveryProblem };
+  // Optional resource preference. Only the two closed words are accepted and
+  // only fixed literals from RESOURCE_LAUNCH reach argv; a stored definition
+  // string is never spliced into a command line.
+  const effort = command?.modelSelection?.effort;
+  if (effort !== undefined && !RESOURCE_EFFORTS.has(effort)) return { errorText: RESOURCE_REFUSED };
   const model = modelOf(command);
   const worktree = worktreeOf(command);
   const prompt = promptOf(command);
@@ -512,20 +526,32 @@ function turnSpec(command, env = process.env, platform = process.platform) {
   // owner-gated residual.
   const writes = command?.sandboxPolicy?.type === "workspaceWrite";
   if (instanceOf(command) === "codex") {
+    // Source: https://learn.chatgpt.com/docs/config-file/config-reference
+    // (key model_reasoning_effort; the -c value is parsed as TOML).
+    const effortArgs = effort === undefined ? [] : ["-c", `model_reasoning_effort="${RESOURCE_LAUNCH.codex[effort].effort}"`];
     return {
       file: "codex",
       cwd: worktree,
-      args: ["exec", "--json", "--ephemeral", "--sandbox", writes ? "workspace-write" : "read-only", "--skip-git-repo-check", "--cd", worktree, prompt],
+      args: ["exec", "--json", "--ephemeral", "--sandbox", writes ? "workspace-write" : "read-only", "--skip-git-repo-check", "--cd", worktree, ...effortArgs, prompt],
     };
   }
   if (instanceOf(command) === "claude") {
+    // A claude preference is a model swap, so the command must already carry
+    // exactly the model the table names; anything else is refused unsent.
+    let modelArgs = ["--model", model];
+    if (effort !== undefined) {
+      const launch = RESOURCE_LAUNCH.claude[effort];
+      if (model !== launch.model) return { errorText: RESOURCE_REFUSED };
+      modelArgs = ["--model", launch.model, ...(launch.effort === undefined ? [] : ["--effort", launch.effort])];
+    }
     return {
       file: "claude",
       cwd: worktree,
-      args: ["-p", "--output-format", "json", "--permission-mode", writes ? "acceptEdits" : "plan", "--permission-prompts", "none", "--model", model, prompt],
+      args: ["-p", "--output-format", "json", "--permission-mode", writes ? "acceptEdits" : "plan", "--permission-prompts", "none", ...modelArgs, prompt],
     };
   }
   if (instanceOf(command) === "pi") {
+    const thinking = effort === undefined ? [] : ["--thinking", RESOURCE_LAUNCH.pi[effort].thinking];
     // Pi has no write sandbox in this build, so the explicitly-write branch
     // refuses (the CREDITS refusal shape) instead of launching pi with its
     // default, unconstrained tools.
@@ -533,7 +559,7 @@ function turnSpec(command, env = process.env, platform = process.platform) {
       return { errorText: "Pi runs read-only turns in this build; workspace changes need a harness with a write sandbox." };
     }
     if (command.modelSelection?.provider !== undefined) {
-      const launch = piLaunch(["-p", "--no-session", ...PI_RESOURCE_ARGS, "--no-tools", "--mode", "text", "--provider", command.modelSelection.provider, "--model", model, ...(stdinBody ? [] : [prompt])], env, platform);
+      const launch = piLaunch(["-p", "--no-session", ...PI_RESOURCE_ARGS, "--no-tools", "--mode", "text", "--provider", command.modelSelection.provider, "--model", model, ...thinking, ...(stdinBody ? [] : [prompt])], env, platform);
       return { ...launch, cwd: worktree, ...(stdinBody ? { stdinBody } : {}) };
     }
     // Read-only flags from the documented CLI surface only, with --no-tools
@@ -544,14 +570,14 @@ function turnSpec(command, env = process.env, platform = process.platform) {
       return {
         file: launch.file,
         cwd: worktree,
-        args: [...launch.prefixArgs, "-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...(stdinBody ? [] : [prompt])],
+        args: [...launch.prefixArgs, "-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...thinking, ...(stdinBody ? [] : [prompt])],
         ...(stdinBody ? { stdinBody } : {}),
       };
     }
     return {
       file: "pi",
       cwd: worktree,
-      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...(stdinBody ? [] : [prompt])],
+      args: ["-p", "--no-session", "--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "-na", "--no-tools", "--mode", "text", ...thinking, ...(stdinBody ? [] : [prompt])],
       ...(stdinBody ? { stdinBody } : {}),
     };
   }

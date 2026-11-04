@@ -1381,3 +1381,29 @@ test("extended role ids cannot substitute for per-turn authorization grants", as
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
+
+test("a Windows pi launch carries the thinking level after the mode flags and before the prompt", (t) => {
+  const { env, cliJs, nodeExe } = piLaunchFixture(t);
+  const base = command("pi", "default");
+  const asked = { ...base, modelSelection: { ...base.modelSelection, effort: "faster" } };
+  const plain = turnSpec(base, env, "win32");
+  assert.deepEqual(turnSpec(asked, env, "win32"), { ...plain, args: [...plain.args.slice(0, -1), "--thinking", "low", "Plan only."] });
+  assert.equal(turnSpec(asked, env, "win32").file, nodeExe);
+  assert.equal(turnSpec(asked, env, "win32").args[0], cliJs);
+});
+
+test("a subscription Claude login lists sonnet after opus, and opus stays the default", async () => {
+  const discovered = await discoverCliProviders({
+    home: "/home/person",
+    readFile() { return ""; },
+    execFile(file) {
+      if (file === "claude") return { stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "pro" }) };
+      return { stdout: "" };
+    },
+  });
+  const claude = discovered.providers.find((item) => item.instanceId === "claude");
+  assert.deepEqual(claude.models, [
+    { slug: "opus", name: "opus", isDefault: true, isLegacy: false },
+    { slug: "sonnet", name: "sonnet", isDefault: false, isLegacy: false },
+  ]);
+});

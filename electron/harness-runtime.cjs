@@ -6,6 +6,9 @@ const path = require("node:path");
 const { discoverCliProviders, runCliTurn, killProcessTree } = require("./cli-coordinate.cjs");
 
 const STOPPED = "The coordination service stopped, so nothing was sent.";
+// The pinned checkout rebuilds its own model selection and would drop a resource
+// choice silently; refusing keeps "applied" honest. Only the local CLI path applies it.
+const EFFORT_UNSUPPORTED = "This runtime cannot apply the resource choice for this step, so nothing was sent.";
 const UNCONFIGURED = "The pinned checkout is not configured, so no harness was assigned.";
 const CANCELLED = "The coordination request was replaced, so nothing was sent.";
 
@@ -241,6 +244,7 @@ function createHarnessRuntime(options = {}) {
       return request("discover", {}, 120000, "The harness list could not be read, so no harness was assigned.", generation);
     },
     prepare(command, generation) {
+      if (!localCli && command?.modelSelection?.effort !== undefined) return Promise.resolve({ ok: false, messageDispatched: false, errorText: EFFORT_UNSUPPORTED });
       if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, messageDispatched: false, errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       const safe = command && typeof command === "object" ? { ...command } : {};
       delete safe.initialMessage;
@@ -258,6 +262,7 @@ function createHarnessRuntime(options = {}) {
     },
     run(command, generation) {
       const body = command && typeof command === "object" ? command : {};
+      if (!localCli && body.modelSelection?.effort !== undefined) return Promise.resolve({ ok: false, text: "", messageDispatched: false, errorText: EFFORT_UNSUPPORTED });
       if (admittedPiCapacity !== undefined && !localCli) return Promise.resolve({ ok: false, text: "", messageDispatched: false, errorText: "This runtime cannot retain a requested Pi provider; nothing was sent." });
       if (localCli) return localRun(body, generation);
       return request("run", { command: body }, 660000, "The agent did not finish, so this stopped.", generation);
