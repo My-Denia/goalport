@@ -14,6 +14,7 @@ import {
 } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
 import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
+import type { CheckRan } from "./methodLine";
 import { verdictFromAudit, verdictFromReview, type CoordinationVerdict } from "./verdict";
 import type { RoundEvent } from "./savedPlan";
 
@@ -110,6 +111,8 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly auditHarness?: string | null;
   readonly authorizedWriteTurnsLeft?: number | null;
   readonly verdict: CoordinationVerdict | null;
+  /** Checks whose reply came back in this pass; never inferred from an assigned harness. */
+  readonly checksRan?: readonly CheckRan[];
   readonly messageDispatched: boolean | null;
   readonly environmentBlocked?: EnvironmentBlockedInfo | null;
   /** Completed failure and takeover facts only — started is never persisted. */
@@ -135,6 +138,7 @@ function reportFromPlan(
     messageDispatched?: boolean | null;
     environmentBlocked?: EnvironmentBlockedInfo | null;
     roundEvents?: readonly RoundEvent[];
+    checksRan?: readonly CheckRan[];
   } = {},
 ): CoordinateSessionState {
   return {
@@ -149,6 +153,7 @@ function reportFromPlan(
     messageDispatched: fields.messageDispatched === undefined ? false : fields.messageDispatched,
     environmentBlocked: fields.environmentBlocked ?? null,
     roundEvents: fields.roundEvents ?? [],
+    ...(fields.checksRan ? { checksRan: fields.checksRan } : {}),
   };
 }
 
@@ -292,6 +297,8 @@ async function runLegacyRound(
       reviewText: reviewText.length > 0 ? reviewText : null,
       stopReason,
       messageDispatched: true,
+      checksRan: reviewText.length > 0 && checked.dispatched === true && plan.reviewHarness
+        ? [{ kind: "plan-check", harness: plan.reviewHarness, verdict }] : [],
     },
   );
 }
@@ -507,6 +514,7 @@ async function runRecoveryRound(
   let writeTurnsRemaining: number | null | undefined = write?.remaining;
   let dispatchState: "unsent" | "sent" | "unknown" = "unsent";
   let requestedPiCapacity: PiPair | undefined;
+  const checksRan: CheckRan[] = [];
 
   const mergeDispatch = (value: boolean | null | undefined) => {
     if (value === true) dispatchState = "sent";
@@ -558,6 +566,7 @@ async function runRecoveryRound(
       commands: launched, quotaLabels: plan.quotaLabels, planText, reviewText,
       ...(requestedPiCapacity ? { requestedPiCapacity } : {}),
       verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
+      checksRan: [...checksRan],
       ...(write ? {
         executionText, auditText,
         executionHarness: assignments.execution ? harnessOf(assignments.execution) : null,
@@ -698,6 +707,11 @@ async function runRecoveryRound(
       const failure = failureFromLaunch(result, role, instance, write !== undefined);
       if (failure === null) {
         saveText(role, result.text.trim());
+        // A check counts only when its reply came back: text (success implies it)
+        // and a dispatch fact of true. Unknown or unsent dispatch records nothing.
+        const returned = result.dispatched === true;
+        if (role === "review" && returned) checksRan.push({ kind: "plan-check", harness, verdict: verdictFromReview(result.text.trim()) });
+        if (role === "audit" && returned) checksRan.push({ kind: "audit", harness, verdict: verdictFromAudit(result.text.trim()) });
         used.add(usedKey(role, instance.instanceId));
         break;
       }

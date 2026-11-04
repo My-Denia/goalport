@@ -576,6 +576,7 @@ def project_saved_record(data_dir: Path, entry: dict, records: list, targets: Sa
         "rememberedIntent": project_remembered_intent(admission, last.get("workspacePath")),
         **({"piCapacity": last["piCapacity"]} if "piCapacity" in last else {}),
         **({"requestedPiCapacity": last["requestedPiCapacity"]} if "requestedPiCapacity" in last else {}),
+        **{key: last[key] for key in ("workflow", "checksRan") if key in last},
     })
     if last.get("recordKind") == "native-workspace-check":
         projected.update(native_check_record(data_dir, last))

@@ -1,7 +1,10 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
 import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
-import { RECOMMENDED_V1, chooseRoles, citationMode } from "../../electron/workflow-checks.mjs";
+import { RECOMMENDED_V1, chooseRoles, citationMode, compileWorkflow } from "../../electron/workflow-checks.mjs";
+
+/** The workflow the engine runs: Recommended v1 compiled once; inputs and hashes never carry it. */
+export const WORKFLOW = compileWorkflow(RECOMMENDED_V1);
 
 type CitationMode = "read" | "quote";
 const VERDICT_LINE = "End with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.";
@@ -683,8 +686,8 @@ export function replacementCommand(
   // reviewer it will be checked by. With no known reviewer we default to
   // "read" (today's wording) rather than guessing.
   const text = role === "plan"
-    ? plannerText(input, counterpartInstanceId === undefined ? "read" : citationMode(counterpartInstanceId, RECOMMENDED_V1.checks))
-    : reviewText(input, citationMode(instance.instanceId, RECOMMENDED_V1.checks));
+    ? plannerText(input, counterpartInstanceId === undefined ? "read" : citationMode(counterpartInstanceId, WORKFLOW.checks))
+    : reviewText(input, citationMode(instance.instanceId, WORKFLOW.checks));
   assertContinuationPrompt(input, text);
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey), input.piCapacity),
@@ -889,7 +892,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const pair = chooseRoles(usable.map((instance) => instance.instanceId), RECOMMENDED_V1.checks);
+  const pair = chooseRoles(usable.map((instance) => instance.instanceId), WORKFLOW.checks);
   const planner = usable.find((instance) => instance.instanceId === pair?.planner);
   const reviewer = usable.find((instance) => instance.instanceId === pair?.reviewer);
   if (!planner || !reviewer || planner.instanceId === reviewer.instanceId) {
@@ -908,7 +911,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const mode = citationMode(reviewer.instanceId, RECOMMENDED_V1.checks);
+  const mode = citationMode(reviewer.instanceId, WORKFLOW.checks);
   const planMessage = plannerText(input, mode);
   const reviewMessage = reviewText(input, mode);
 

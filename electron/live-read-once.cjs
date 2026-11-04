@@ -14,9 +14,10 @@ function eligible(input) {
   if (!input || input.backgroundConsent !== true || input.writeAuthorization || !normalizePiCapacity(input.piCapacity)) return false;
   const ids = input.allowedInstances;
   if (!Array.isArray(ids) || !ids.every(x => typeof x === "string") || new Set(ids).size !== ids.length || !ids.includes("pi")) return false;
-  const { RECOMMENDED_V1, chooseRoles, reviewerCouldJudge } = require("./workflow-checks.mjs");
-  const roles = chooseRoles(ids, RECOMMENDED_V1.checks);
-  return !!roles && reviewerCouldJudge(roles.reviewer, RECOMMENDED_V1.checks) && Number.isInteger(input.maxTurns) && input.maxTurns >= 4;
+  const { RECOMMENDED_V1, compileWorkflow, chooseRoles, reviewerCouldJudge } = require("./workflow-checks.mjs");
+  const { checks } = compileWorkflow(RECOMMENDED_V1);
+  const roles = chooseRoles(ids, checks);
+  return !!roles && reviewerCouldJudge(roles.reviewer, checks) && Number.isInteger(input.maxTurns) && input.maxTurns >= 4;
 }
 function controlPayload(operation, payload) {
   if (operation === "status" || (operation === "revoke" && payload === undefined)) {
