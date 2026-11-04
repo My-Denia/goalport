@@ -142,6 +142,10 @@ async function runScenario(id, opts) {
       result.workflowSave = saved;
       workflowId = saved?.saved?.id ?? saved?.value?.saved?.id ?? saved?.data?.saved?.id ?? null;
       check('workflowSaved', !!workflowId, JSON.stringify(saved).slice(0, 300));
+      // The renderer reads the saved list when it loads; reload so the picker shows the new workflow.
+      await app.cdp('Page.reload');
+      await sleep(1500);
+      await app.until('(async () => !!window.goalportCore && (await window.goalportCore.bootstrapCurrent()).phase === "done")()', 60000);
     }
 
     // New goal -> workspace, goal, workflow.
