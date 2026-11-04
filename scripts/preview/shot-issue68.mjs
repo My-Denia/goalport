@@ -42,7 +42,17 @@ window.__GOALPORT_ELECTRON__ = true;
 (function () {
   var CONFIG = ${configJson};
   window.__shot = { launches: 0, launchedCommands: [], saves: [], deletes: 0 };
-  var records = [];
+  // ?gone=1 seeds one saved result that ran under a user workflow which is not in the (empty) workflows list.
+  var records = /[?&]gone=1/.test(location.search) ? [{
+    requestId: "blocked-quick", workspacePath: "C:\\\\work\\\\demo-project", goal: "Explain the failure.",
+    planningHarness: "Codex", reviewHarness: null, planText: null, reviewText: null, result: null,
+    verdict: "failed", stopReason: "Codex cannot run its tools on this machine right now, so the plan was not completed.",
+    planningQuota: null, reviewQuota: null, savedAt: "2026-10-16T02:00:00.000Z",
+    workflow: { id: "my-0a1b2c3d", version: 1, name: "Quick plans", planReview: "off" },
+    workflowDefinition: { schema: 1, id: "my-0a1b2c3d", version: 1, name: "Quick plans", parent: "recommended@1",
+      modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } },
+    environmentBlocked: { role: "planning", instanceId: "codex", harness: "Codex", detail: "helper crashed" },
+  }] : [];
   var workflows = [];
   function clone(v) { return JSON.parse(JSON.stringify(v)); }
   function reply(extra) { return Object.assign({ workflows: clone(workflows), notice: null }, extra || {}); }
@@ -200,6 +210,20 @@ try {
   const launched = await evaluate("window.__shot.launchedCommands.length");
   await capture({ state: "07-result-review-off", needles: ["Plan ready, not reviewed", "Independent review: not run (off in Quick plans)"], absent: ["Can be carried out", "Stop reason"],
     extra: async () => [{ name: "exactly one agent turn ran (no review turn)", ok: launched === 1, detail: `launches ${launched}` }] });
+
+  // 8. A draft made from a saved result whose user workflow has since been deleted: one plain line, Recommended selected.
+  await page.cdp("Page.navigate", { url: `${new URL(preview.url).origin}/shot-issue68.html?preview=empty&gone=1` });
+  await until("Boolean(document.querySelector('.goalport-shell'))");
+  await viewport(1440, 900);
+  await until(`Array.from(document.querySelectorAll('button')).some((b) => /use again/i.test(b.getAttribute('aria-label') || b.textContent || ''))`, 20_000);
+  await clickOn('button', /use again/i);
+  await until(`(document.body.innerText||"").includes('no longer saved')`, 20_000);
+  await sleep(500);
+  await capture({ state: "08-workflow-gone", needles: ["The workflow this goal used is no longer saved, so Recommended workflow is selected."],
+    extra: async (dom) => [
+      { name: "picker shows Recommended workflow", ok: dom.trigger.includes("Recommended workflow"), detail: dom.trigger },
+      { name: "note is one fully visible line group", ok: await evaluate(`(() => { const e = document.querySelector('.revision-note, .ready-note, [class*="note"]'); const t = Array.from(document.querySelectorAll('body *')).filter((x) => x.children.length === 0 && /no longer saved/.test(x.textContent)).pop(); if (!t) return false; const r = t.getBoundingClientRect(); const s = getComputedStyle(t); return r.width > 0 && r.right <= innerWidth && r.left >= 0 && r.bottom <= innerHeight && s.overflow !== 'hidden' && t.scrollWidth <= t.clientWidth + 1; })()`) },
+    ] });
 } catch (e) {
   failures.push({ state: "driver", width: null, failed: [{ name: "driver threw", ok: false, detail: String((e && e.stack) || e) }] });
   try { await screenshot(resolve(outDir, "driver-error.png")); } catch { /* best effort */ }
