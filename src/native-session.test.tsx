@@ -61,6 +61,21 @@ it("the consent button names agents only when it can name exactly the two that w
   expect(screen.getByRole("button", {name:"Allow background work"})).toBeTruthy();
 });
 
+it("Windows shows the Pi capacity choice and its follow-up line without Linux's goal entry", () => {
+  const base = packet(); const onPiCapacityChange = vi.fn();
+  const props = { draft:{workspace:"C:\\fixture", provider:"", message:""}, runtimes:base.runtimes, connected:true, busy:false, blockedFromSending:false, waitingOn:null, error:null, canBrowse:true, coordinationAvailable:true, backgroundConsent:true, discoveredHarnesses:["codex","pi"], piCapacity:{provider:"Fixture", model:"alpha", useExistingCapacity:true as const}, onPiCapacityChange, onBrowse:() => {}, onChange:() => {}, onSubmit:() => {}, onDiscard:() => {} };
+  const view = render(<DraftGoalComposer {...props} />);
+  fireEvent.click(screen.getByRole("checkbox", { name:"Use Pi's configured capacity for this goal" }));
+  expect(onPiCapacityChange).toHaveBeenCalledWith(true);
+  expect(screen.queryByText(/follow-up, for up to 15 minutes/)).toBeNull();
+  view.rerender(<DraftGoalComposer {...props} piCapacityChecked />);
+  expect(screen.getByText("Selected roles: Codex plans · Pi independently checks")).toBeTruthy();
+  expect(screen.getByText("After a checked read-only result, this allowance can stay open for one follow-up, for up to 15 minutes.")).toBeTruthy();
+  expect(screen.getByRole("textbox", { name:"Message composer" }).getAttribute("placeholder")).not.toBe("What would you like to accomplish?");
+  view.rerender(<DraftGoalComposer {...props} piCapacity={undefined} onPiCapacityChange={undefined} />);
+  expect(screen.queryByRole("checkbox", { name:"Use Pi's configured capacity for this goal" })).toBeNull();
+});
+
 it("keeps native chat primary by folding saved workspace results without discarding them", async () => {
   window.__GOALPORT_LINUX_CORE__ = true; window.history.replaceState(null,"","/goals/campaign-native");
   server({active:true, results:[{requestId:"synthetic",replyState:"completed",replyText:"Saved native turn reply",baselineRecorded:true,filesTruncated:true,before:[],during:[],unattributed:[],commands:[]}]});

@@ -66,4 +66,15 @@ function piAdmissionContext(input, directory, discovered, platform=process.platf
       || workspaceIdentity(pi.piCapacity?.workspacePath,platform)!==workspaceIdentity(input.workspacePath??input.workspaceRoot,platform))) throw new Error('The configured Pi choice changed or belongs to another folder. Recheck this folder; nothing was admitted.');
   return { ...(selection?{piCapacity:{...selection}}:{}), legacyPiContinuation:legacy };
 }
-module.exports={piAdmissionContext,ownAdmissionForRequest};
+// The desktop draft asks which Pi route this folder would use before the user
+// opts in. Only an absolute path to an existing folder is checked; the answer is
+// the same Pi provider snapshot piAdmissionContext later compares against.
+async function piCapacityOffer(workspaceRoot, discover) {
+  if (typeof workspaceRoot !== 'string' || !workspaceRoot.trim() || !path.isAbsolute(workspaceRoot)) throw new Error('Choose an absolute project folder before checking Pi.');
+  let stat=null;
+  try { stat=fs.statSync(workspaceRoot); } catch { /* missing folder */ }
+  if (!stat?.isDirectory()) throw new Error('That project folder does not exist, so Pi was not checked.');
+  const discovered=await discover(workspaceRoot);
+  return discovered?.ok === false ? null : discovered?.providers?.find(p=>p.instanceId==='pi') ?? null;
+}
+module.exports={piAdmissionContext,ownAdmissionForRequest,piCapacityOffer};

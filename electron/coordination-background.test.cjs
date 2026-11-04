@@ -364,6 +364,20 @@ test('POSIX identity retains case-sensitive physical folder comparison', { skip:
   assert.equal(posixHost.outstanding(path.join(posixDirectory, 'goal')), false);
 });
 
+test('a Windows read-only Codex + Pi start with the chosen Pi pair is admitted for Live Continue; without it is not', { skip: process.platform !== 'win32' }, async t => {
+  const pair = { provider: 'Fixture', model: 'alpha', useExistingCapacity: true };
+  const pi = directory => ({ instanceId: 'pi', enabled: true, installed: true, availability: 'available', status: 'ready', auth: { status: 'unknown', type: 'apiKey' }, models: [],
+    piCapacity: { offer: pair, catalog: [{ provider: 'Fixture', model: 'alpha' }], workspacePath: directory } });
+  for (const chosen of [true, false]) {
+    const r = setup(t, { platform: 'win32' });
+    r.options.discover = async () => ({ ok: true, providers: [pi(r.directory)] });
+    const started = await createBackgroundHost(r.options).start({ ...r.input, readInstances: ['codex', 'pi'], ...(chosen ? { piCapacity: pair } : {}) });
+    const stored = createCoordinationJobStore(r.directory, { bootstrapReady: true, platform: 'win32' }).getStatus(started.jobId);
+    assert.equal(stored.followUpMode, chosen ? 'live-read-once' : undefined);
+    assert.deepEqual(stored.admission.piCapacity, chosen ? pair : undefined);
+  }
+});
+
 test('a read-only check never holds back the user; anything that can write still does', () => {
   const { readOnlyCheck } = require('./coordination-background.cjs');
   assert.equal(readOnlyCheck({ admission: { nativeCheckTarget: {}, writeAuthorization: null } }), true);

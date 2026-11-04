@@ -3,6 +3,7 @@ import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/
 import { invoke } from "@tauri-apps/api/core";
 import type { RoundEvent, SavedPlan, SavedTargetContinuation, SavedTargetRelationStatus } from "./coordination/savedPlan";
 import type { CoordinateTurnCommand } from "./coordination/coordinateTurn";
+import type { ProviderSnapshot } from "./coordination/catalogFromProviders";
 
 export type { SavedTargetContinuation, SavedTargetRelationStatus };
 
@@ -359,6 +360,8 @@ declare global {
         workspaceRoot?: string;
         write?: { instances: string[]; maxTurns: number; workspaceRoot: string };
       }) => Promise<{ ok: boolean; generation: number; remaining: number; writeTurnsRemaining?: number; errorText?: string }>;
+      // The Pi provider snapshot route-aware discovery reports for this folder, or null.
+      piCapacityOffer?: (workspaceRoot: string) => Promise<ProviderSnapshot | null>;
       coordinationScope?: () => Promise<{
         instances: string[]; maxTurns: number; remaining: number; generation: number;
         write?: { instances: string[]; maxTurns: number; remaining: number; workspaceRoot: string };
