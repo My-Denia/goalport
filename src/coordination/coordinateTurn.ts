@@ -10,7 +10,8 @@ export interface CoordinateTurnCommand {
   readonly type: "goalport.coordinateTurn";
   readonly commandId: string;
   readonly projectId: string;
-  readonly modelSelection: { readonly instanceId: string; readonly model: string; readonly provider?: string };
+  /** `effort` is the workflow's resource preference; absent means the harness's own setting. */
+  readonly modelSelection: { readonly instanceId: string; readonly model: string; readonly provider?: string; readonly effort?: "faster" | "stronger" };
   readonly runtimeMode: "approval-required";
   readonly approvalPolicy: "never";
   readonly sandboxPolicy: { readonly type: "readOnly" | "workspaceWrite" };

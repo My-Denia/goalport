@@ -1,4 +1,4 @@
-import { reviewerCouldJudge } from "../../electron/workflow-checks.mjs";
+import { reviewerCouldJudge, RESOURCE_LAUNCH } from "../../electron/workflow-checks.mjs";
 import { normalizeRequestedPiCapacity, type PiPair } from "../../electron/pi-capacity.mjs";
 import {
   coordinateGoal,
@@ -17,7 +17,7 @@ import {
 } from "./coordinateGoal";
 import type { CoordinateTurnCommand } from "./coordinateTurn";
 import { classifyProviderError, environmentSignature, providerErrorSentence } from "./providerError";
-import type { CheckRan } from "./methodLine";
+import type { CheckRan, TurnRan } from "./methodLine";
 import { verdictFromAudit, verdictFromReview, type CoordinationVerdict } from "./verdict";
 import type { RoundEvent } from "./savedPlan";
 
@@ -116,6 +116,8 @@ export interface CoordinateSessionState extends CoordinateGoalState {
   readonly verdict: CoordinationVerdict | null;
   /** Checks whose reply came back in this pass; never inferred from an assigned harness. */
   readonly checksRan?: readonly CheckRan[];
+  /** Every dispatched turn with the setting its launch really carried; replacements included. */
+  readonly turnsRan?: readonly TurnRan[];
   readonly messageDispatched: boolean | null;
   readonly environmentBlocked?: EnvironmentBlockedInfo | null;
   /** Completed failure and takeover facts only — started is never persisted. */
@@ -142,6 +144,7 @@ function reportFromPlan(
     environmentBlocked?: EnvironmentBlockedInfo | null;
     roundEvents?: readonly RoundEvent[];
     checksRan?: readonly CheckRan[];
+    turnsRan?: readonly TurnRan[];
   } = {},
 ): CoordinateSessionState {
   return {
@@ -157,6 +160,28 @@ function reportFromPlan(
     environmentBlocked: fields.environmentBlocked ?? null,
     roundEvents: fields.roundEvents ?? [],
     ...(fields.checksRan ? { checksRan: fields.checksRan } : {}),
+    ...(fields.turnsRan ? { turnsRan: fields.turnsRan } : {}),
+  };
+}
+
+const TURN_ROLES = { planning: "plan", review: "review", execution: "execute", audit: "audit" } as const;
+
+/** What a dispatched command actually carried, read from the command itself. */
+function turnRanOf(role: CoordinationRole, command: CoordinateTurnCommand, input: CoordinateGoalInput): TurnRan {
+  const selection = command.modelSelection;
+  const turnRole = TURN_ROLES[role];
+  const launch = selection.effort === undefined
+    ? undefined
+    : (RESOURCE_LAUNCH as unknown as Record<string, Record<string, { effort?: string; thinking?: string }>>)[selection.instanceId]?.[selection.effort];
+  // The argv passes a model for claude and for Pi's provider route only; codex never.
+  const passesModel = selection.instanceId === "claude" || (selection.instanceId === "pi" && selection.provider !== undefined);
+  return {
+    role: turnRole,
+    harness: selection.instanceId,
+    model: passesModel ? selection.model : null,
+    effort: launch?.effort ?? launch?.thinking ?? null,
+    preference: (input.workflow ?? WORKFLOW).resources.roles[turnRole],
+    applied: selection.effort !== undefined,
   };
 }
 
@@ -233,6 +258,9 @@ async function runLegacyRound(
 ): Promise<CoordinateSessionState> {
   assertContinuationPrompt(input, planning.initialMessage.text);
   const planned = await transport.launch(planning);
+  const turnsRan: TurnRan[] = [];
+  if (planned.dispatched === true) turnsRan.push(turnRanOf("planning", planning, input));
+  const report: typeof reportFromPlan = (state, fields) => reportFromPlan(state, { ...fields, turnsRan: [...turnsRan] });
   const planError = classifyProviderError(planned.errorText);
   const planEnvironment = environmentFromLaunch(planned, "planning", planning.modelSelection.instanceId, plan.planningHarness);
   const planText = planned.text.trim();
@@ -242,7 +270,7 @@ async function runLegacyRound(
     planError === "authentication" ||
     planned.errorText.trim().length > 0
   ) {
-    return reportFromPlan(
+    return report(
       { ...plan, commands: [planning], result: null },
       {
         verdict: "failed",
@@ -260,7 +288,7 @@ async function runLegacyRound(
     );
   }
   if (planText.length === 0) {
-    return reportFromPlan(
+    return report(
       { ...plan, result: null },
       { verdict: "failed", stopReason: "The planner returned no text, so the check was not sent.", messageDispatched: true },
     );
@@ -268,7 +296,7 @@ async function runLegacyRound(
 
   if (review === null) {
     // Review is off in this definition: the plan is the whole chain.
-    return reportFromPlan({ ...plan, result: planText }, {
+    return report({ ...plan, result: planText }, {
       verdict: "planned", planText, stopReason: plannedStopReason(input),
       messageDispatched: planned.dispatched ?? null, checksRan: [],
     });
@@ -278,16 +306,17 @@ async function runLegacyRound(
     assertContinuationPrompt(input, reviewCommand.initialMessage.text);
   } catch (error) {
     if (!(error instanceof ContinuationPromptLimitError)) throw error;
-    return reportFromPlan({ ...plan, commands: [planning] }, {
+    return report({ ...plan, commands: [planning] }, {
       verdict: "stopped", planText, messageDispatched: planned.dispatched ?? null,
       stopReason: `${error.message} The review was not sent; the earlier planning result is retained.`,
     });
   }
   const checked = await transport.launch(reviewCommand);
+  if (checked.dispatched === true) turnsRan.push(turnRanOf("review", review, input));
   const reviewText = checked.text.trim();
   const reviewEnvironment = environmentFromLaunch(checked, "review", review.modelSelection.instanceId, plan.reviewHarness);
   if (reviewEnvironment !== null || checked.errorText.trim().length > 0) {
-    return reportFromPlan(
+    return report(
       { ...plan, result: null },
       {
         verdict: "failed",
@@ -306,7 +335,7 @@ async function runLegacyRound(
   }
   const verdict = verdictFromReview(reviewText);
   const stopReason = checkStopReason(verdict);
-  return reportFromPlan(
+  return report(
     { ...plan, result: reviewText.length > 0 ? reviewText : null },
     {
       verdict,
@@ -533,6 +562,7 @@ async function runRecoveryRound(
   let dispatchState: "unsent" | "sent" | "unknown" = "unsent";
   let requestedPiCapacity: PiPair | undefined;
   const checksRan: CheckRan[] = [];
+  const turnsRan: TurnRan[] = [];
 
   const mergeDispatch = (value: boolean | null | undefined) => {
     if (value === true) dispatchState = "sent";
@@ -587,6 +617,7 @@ async function runRecoveryRound(
       ...(requestedPiCapacity ? { requestedPiCapacity } : {}),
       verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
       checksRan: [...checksRan],
+      turnsRan: [...turnsRan],
       ...(write ? {
         executionText, auditText,
         executionHarness: assignments.execution ? harnessOf(assignments.execution) : null,
@@ -704,6 +735,7 @@ async function runRecoveryRound(
       const requested = normalizeRequestedPiCapacity(result.requestedPiCapacity);
       if (requested && instance.instanceId === "pi") requestedPiCapacity = requested;
       mergeDispatch(result.dispatched);
+      if (result.dispatched === true) turnsRan.push(turnRanOf(role, launchCommand, input));
       turnsRemaining = result.turnsRemaining ?? null;
       if (write) writeTurnsRemaining = result.writeTurnsRemaining ?? null;
       // Partial execution/audit text is retained even on scope terminal stops.

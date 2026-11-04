@@ -999,3 +999,22 @@ test("an invalid workflow definition or workflow label is dropped without reject
   assert.equal("workflowDefinition" in normalizeRecord(record()), false, "an old record behaves as Recommended");
   assert.equal("workflowDefinition" in normalizeRecord(record({ recordKind: "native-workspace-check", nativeCheckTarget: {}, nativeCheckMaterial: {}, workflowDefinition: QUICK })), false);
 });
+
+test("turnsRan round-trips, drops malformed entries, and old records have none", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-coordination-turns-"));
+  try {
+    const workflow = { id: "recommended", version: 1 };
+    const turn = { role: "review", harness: "claude", model: "sonnet", effort: null, preference: "faster", applied: true };
+    const codexTurn = { role: "plan", harness: "codex", model: null, effort: "low", preference: "faster", applied: true };
+    saveRecord(directory, record({ workflow, turnsRan: [codexTurn, turn] }));
+    assert.deepEqual(readRecords(directory)[0].turnsRan, [codexTurn, turn]);
+    const half = saveRecord(directory, record({ requestId: "half", workflow, turnsRan: [
+      turn, "x", { ...turn, role: "think" }, { ...turn, preference: "turbo" }, { ...turn, applied: "yes" },
+      { ...turn, model: 3 }, { ...turn, effort: "high; rm" }, { ...turn, harness: "" }, codexTurn,
+    ] }));
+    assert.deepEqual(half.turnsRan, [turn, codexTurn]);
+    assert.equal("turnsRan" in saveRecord(directory, record({ requestId: "old", workflow })), false);
+    assert.equal("turnsRan" in saveRecord(directory, record({ requestId: "str", workflow, turnsRan: "all" })), false);
+    assert.equal("turnsRan" in saveRecord(directory, record({ requestId: "nowf", turnsRan: [turn] })), false);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});

@@ -98,6 +98,24 @@ function checksRanOf(value) {
   });
 }
 
+// Which setting each dispatched turn really launched with. Strict: an entry
+// that is not exactly this shape is dropped, so the saved line never claims a
+// change the launch did not carry.
+const TURN_ROLES = new Set(["plan", "review", "execute", "audit"]);
+const TURN_PREFERENCES = new Set(["default", "faster", "stronger"]);
+const shortWord = (value) => typeof value === "string" && /^[A-Za-z0-9._:/-]{1,64}$/.test(value);
+
+function turnsRanOf(value) {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const { role, harness, model, effort, preference, applied } = entry;
+    if (!TURN_ROLES.has(role) || !shortWord(harness) || !TURN_PREFERENCES.has(preference) || typeof applied !== "boolean") return [];
+    if (!(model === null || shortWord(model)) || !(effort === null || shortWord(effort))) return [];
+    return [{ role, harness, model, effort, preference, applied }];
+  });
+}
+
 function roundEventOf(value) {
   if (typeof value !== "object" || value === null) return null;
   const kind = value.kind === "failed" || value.kind === "continued" ? value.kind : null;
@@ -391,6 +409,7 @@ function normalize(input) {
   const workflow = isNativeCheck ? undefined : workflowOf(input.workflow);
   const workflowDefinition = isNativeCheck ? undefined : workflowDefinitionOf(input.workflowDefinition);
   const checksRan = workflow === undefined ? undefined : checksRanOf(input.checksRan);
+  const turnsRan = workflow === undefined ? undefined : turnsRanOf(input.turnsRan);
   return {
     requestId,
     workspacePath,
@@ -414,6 +433,7 @@ function normalize(input) {
     ...(workflow === undefined ? {} : { workflow }),
     ...(workflowDefinition === undefined ? {} : { workflowDefinition }),
     ...(checksRan === undefined ? {} : { checksRan }),
+    ...(turnsRan === undefined ? {} : { turnsRan }),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),
     ...(auditInputEvidenceText === undefined ? {} : { auditInputEvidenceText }),
