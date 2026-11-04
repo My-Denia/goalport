@@ -943,6 +943,15 @@ test("a Windows pi shim without the npm-layout cli.js keeps the exact legacy fal
   assert.equal(turnSpec(input, env, "win32").file, "pi");
 });
 
+test("a Windows pi installer shim with pi-launcher.js launches node.exe on the launcher, so a multi-line prompt is not cut by cmd.exe", (t) => {
+  const { env, cliJs, nodeExe } = piLaunchFixture(t, { cli: false });
+  const launcher = path.join(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(cliJs)))))), "pi-launcher.js");
+  const real = fs.existsSync;
+  const fsApi = { existsSync: (p) => p === launcher || real(p) };
+  assert.equal(piWindowsLaunch(env, "win32"), null);
+  assert.deepEqual(piWindowsLaunch(env, "win32", fsApi), { file: nodeExe, prefixArgs: [launcher] });
+});
+
 test("a Windows pi shim without node.exe keeps the exact legacy fallback", (t) => {
   const { env } = piLaunchFixture(t, { node: false });
   const input = command("pi", "default");
