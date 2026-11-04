@@ -2311,6 +2311,24 @@ describe("harness access panel and scoped rounds", () => {
       await waitFor(() => expect(bridge.launchCount()).toBe(2));
     });
 
+    // Issue #69: a new goal starts with the workflow's turn budget until the user types their own.
+    it("starts the turn limit at the saved workflow's budget, and a typed number is kept", async () => {
+      const lean = { ...resultWith("on"), version: 2, modules: { ...resultWith("on").modules, resources: {
+        roles: { plan: "stronger", review: "faster", execute: "default", audit: "default" }, budget: { readTurns: 3, writeTurns: 1 } } } };
+      scopedBridge({
+        providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+        records: [blockedRecord(resultWith("off"))],
+        launch: async (command) => planOrReview(command),
+        workflows: [lean],
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+      const turns = await screen.findByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement;
+      await waitFor(() => expect(turns.value).toBe("3"));
+      fireEvent.change(turns, { target: { value: "6" } });
+      expect((screen.getByRole("spinbutton", { name: "Model turns to allow" }) as HTMLInputElement).value).toBe("6");
+    });
+
     it("a workflow that was deleted: the draft says so in one plain line and uses Recommended", async () => {
       const bridge = scopedBridge({
         providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],

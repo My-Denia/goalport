@@ -62,3 +62,28 @@ it("a checked result keeps the check wording", () => {
   expect(screen.getByText("Plan, check and details")).toBeTruthy();
   expect(screen.getByText("Checked by")).toBeTruthy();
 });
+
+// Issue #69: the result says which model setting each step really ran with, and says nothing new for older records.
+const ran = [
+  { role: "plan", harness: "claude", model: "opus", effort: "high", preference: "stronger", applied: true },
+  { role: "review", harness: "codex", model: null, effort: "low", preference: "faster", applied: true },
+] as const;
+
+it("the result card shows what each step ran with under the method line", () => {
+  render(<CoordinationStatus {...round} workflow={{ id: "recommended", version: 1 }} checksRan={[{ kind: "plan-check", harness: "Codex", verdict: "checked" }]} turnsRan={ran} />);
+  expect(screen.getByText("Plan: Claude opus, high effort (stronger) · Check: Codex, low effort (faster)")).toBeTruthy();
+  expect(document.querySelectorAll(".method-line")).toHaveLength(2);
+});
+
+it("a result with no recorded launches, or only default ones, shows no resources line", () => {
+  render(<CoordinationStatus {...round} turnsRan={[{ ...ran[0], preference: "default", applied: false }]} />);
+  expect(document.querySelector(".method-line")).toBeNull();
+  cleanup();
+  render(<CoordinationStatus {...round} />);
+  expect(document.querySelector(".method-line")).toBeNull();
+});
+
+it("the Linux saved-result heading shows the resources line too", () => {
+  render(<GoalStatusHeading {...base} resourcesLine="Plan: Claude opus, high effort (stronger)" />);
+  expect(screen.getByText("Plan: Claude opus, high effort (stronger)")).toBeTruthy();
+});
