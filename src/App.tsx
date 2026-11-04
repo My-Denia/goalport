@@ -325,7 +325,7 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   // A first send with no Runtime chosen only proceeds when this window can assign a harness.
-  const linuxRuntimeRequired = "Send starts a coordinated goal. File changes stay off unless you check the box below.";
+  const linuxRuntimeRequired = "Send uses the Recommended workflow. File changes stay off unless you check the box below.";
   const coordinationAvailable = client.mode === "electron"
     && appInfo?.coordinationConfigured === true
     && Boolean(window.goalportCore?.coordinateDiscover && window.goalportCore?.coordinateLaunch);
@@ -1264,7 +1264,7 @@ function App() {
           if (admissionIntent.current?.requestId === submittedId) admissionIntent.current.unknown = admissionUnsaid.current;
           rememberAdmissionUnsaid(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : null);
           if (admissionUnsaid.current) clearFailure();
-          const text = coordinationReplyLine(body, failedSend ? "The coordinated goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
+          const text = coordinationReplyLine(body, failedSend ? "The goal could not be sent." : admitted ? "The goal was admitted." : "The send returned without saying the goal was admitted.");
           const shown = text.includes("Run acknowledge before starting another") ? "The left goal could not be released, so nothing was sent." : text;
           setLinuxCoordinationLine(admissionUnsaid.current ? "The send returned without saying the goal was admitted." : shown);
           const failed = failedSend && !admissionUnsaid.current;
@@ -1325,7 +1325,7 @@ function App() {
         return;
       }
       if (!coordinationAvailable || !discover || !launch) {
-        setDraftError({ sentence: "Choose an agent before sending." });
+        setDraftError({ sentence: "Choose how to work before sending." });
         return;
       }
       const remembered = plans.find((plan) => plan.requestId === draftGoal.requestId);

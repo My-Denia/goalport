@@ -987,18 +987,18 @@ describe("send without a Runtime", () => {
     const bridge = mountCoordination(false);
     await openDraft("plan the helper");
     await waitFor(() => expect(bridge.appInfoSeen()).toBe(true));
-    expect(screen.queryByText("Plan, build and check")).toBeNull();
-    expect(screen.getByText("Choose an agent before sending.")).toBeTruthy();
+    expect(screen.queryByText("Plan first, then another agent checks the plan")).toBeNull();
+    expect(screen.getByText("Choose how to work before sending.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send message" }).hasAttribute("disabled")).toBe(true);
     fireEvent.submit(screen.getByRole("form", { name: "Start a goal" }));
     expect(bridge.discoverCalls()).toBe(0);
-    expect(screen.getByRole("alert").textContent).toContain("Choose an agent before sending.");
+    expect(screen.getByRole("alert").textContent).toContain("Choose how to work before sending.");
   });
 
   it("allows send without a Runtime once the checkout is configured", async () => {
     const bridge = mountCoordination(true);
     await openDraft("plan the helper");
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(bridge.discoverCalls()).toBe(1));
     expect(await screen.findByText("No model turn was sent.")).toBeTruthy();
@@ -1192,7 +1192,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(order).toContain("launch"));
     expect(order[0]).toBe("save:unconfirmed");
@@ -1274,7 +1274,7 @@ describe("send without a Runtime", () => {
       fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
         target: { value: "the same words" },
       });
-      await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+      await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
       fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     };
 
@@ -1349,7 +1349,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(await screen.findByText(/could not be recorded, so nothing was sent/i)).toBeTruthy();
@@ -1419,7 +1419,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     // The catch path leaves the draft mounted with the failure on it.
     expect(await screen.findByText(/harness list could not be read/i)).toBeTruthy();
@@ -1496,7 +1496,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     // No launch may happen while the record count — which keys the command
     // identity — cannot be read from disk.
@@ -1567,7 +1567,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText(/coordination service stopped/i)).toBeTruthy();
     expect(launches).toBe(1);
@@ -1642,7 +1642,7 @@ describe("send without a Runtime", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     expect(await screen.findByText("Bounded plan.")).toBeTruthy();
 
@@ -1698,7 +1698,7 @@ describe("send without a Runtime", () => {
 
     const first = mountCoordination(true);
     await openDraft("plan the helper");
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(first.discoverCalls()).toBe(1));
 
@@ -1708,7 +1708,7 @@ describe("send without a Runtime", () => {
 
     const second = mountCoordination(true);
     await openDraft("plan the helper again");
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(second.discoverCalls()).toBe(1));
 
@@ -1769,7 +1769,7 @@ describe("leaving a draft during coordination", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "Message composer" }), {
       target: { value: "plan the helper" },
     });
-    await waitFor(() => expect(screen.getByText("Plan, build and check")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Plan first, then another agent checks the plan")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() => expect(generations).toHaveLength(1));
 
@@ -3262,7 +3262,7 @@ describe("one in-window repair", () => {
       clickRuntimeOption(await screen.findByRole("option", { name: /Codex/ }));
       await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Keep working after closing" })).toBeNull());
       fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
-      clickRuntimeOption(await screen.findByRole("option", { name: /Several agents/ }));
+      clickRuntimeOption(await screen.findByRole("option", { name: /Recommended workflow/ }));
       expect(await screen.findByRole("button", { name: "Allow GoalPort to run agent turns on this profile" })).toBeTruthy();
       expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
       expect(window.goalportCore!.backgroundStart).not.toHaveBeenCalled();

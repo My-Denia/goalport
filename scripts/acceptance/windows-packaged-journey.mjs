@@ -356,9 +356,9 @@ export async function runPackagedJourney(options) {
     // coordination, so choose that mode through the same picker as a user.
     if (!await session.app.evaluate('!!document.querySelector(".draft-background-consent input")')) {
       await session.app.click('.draft-runtime-picker button[aria-label="Select agent"]');
-      await session.app.until(`[...document.querySelectorAll('[role="option"]')].some(e=>e.querySelector('strong')?.textContent.trim()==='Several agents')`, 15000);
+      await session.app.until(`[...document.querySelectorAll('[role="option"]')].some(e=>e.querySelector('strong')?.textContent.trim()==='Recommended workflow')`, 15000);
       const point = await waitFor(() => session.app.evaluate(`(() => {
-        const e=[...document.querySelectorAll('[role="option"]')].find(e=>e.querySelector('strong')?.textContent.trim()==='Several agents');
+        const e=[...document.querySelectorAll('[role="option"]')].find(e=>e.querySelector('strong')?.textContent.trim()==='Recommended workflow');
         e.scrollIntoView({block:'center'});
         const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,top=document.elementFromPoint(x,y);
         return {x,y,hit:!!r.width&&!!r.height&&(top===e||e.contains(top)),rect:r.toJSON(),visibility:document.visibilityState,occluder:top?.tagName};

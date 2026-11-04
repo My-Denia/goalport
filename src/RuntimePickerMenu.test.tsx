@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { RuntimePickerMenu } from "./ui/RuntimePickerMenu";
 import { DEMO_SNAPSHOT } from "./types";
+import { clickRuntimeOption } from "./runtime-picker.test-helpers";
 
 afterEach(cleanup);
 
@@ -72,5 +73,27 @@ describe("shared Runtime picker keyboard contract", () => {
     await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("false"));
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(selected).not.toHaveBeenCalled();
+  });
+});
+
+describe("working-mode choices", () => {
+  const choices = [
+    { id: "codex", name: "Codex", group: "Direct", subtitle: "Use Codex on its own" },
+    { id: "", name: "Recommended workflow", group: "Workflow", subtitle: "Plan first, then another agent checks the plan" },
+    { id: "my-workflow", name: "My workflow", group: "Workflow", subtitle: "Coming soon: copy Recommended and change what doesn't fit.", disabled: true }
+  ];
+  it("shows My workflow as a disabled row with its sentence, and never selects it", async () => {
+    const onSelect = vi.fn();
+    render(<RuntimePickerMenu runtimes={DEMO_SNAPSHOT.runtimes} choices={choices} selectedId="codex" triggerContent="x" triggerAriaLabel="Select agent" emptyText="none" onSelect={onSelect} />);
+    fireEvent.click(screen.getByRole("combobox", { name: "Select agent" }));
+    expect(await screen.findByText("Direct")).toBeTruthy();
+    expect(screen.getByText("Workflow")).toBeTruthy();
+    const mine = screen.getByRole("option", { name: /My workflow/ });
+    expect(mine.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByText("Coming soon: copy Recommended and change what doesn't fit.")).toBeTruthy();
+    fireEvent.keyDown(mine, { key: "Enter" }); fireEvent.click(mine);
+    expect(onSelect).not.toHaveBeenCalled();
+    clickRuntimeOption(screen.getByRole("option", { name: /Recommended workflow/ }));
+    expect(onSelect).toHaveBeenCalledWith("");
   });
 });

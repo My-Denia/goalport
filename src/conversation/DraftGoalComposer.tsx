@@ -3,7 +3,7 @@ import { folderName, readRecentFolders } from "../lib/recentFolders";
 import type { PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { RuntimeProfile } from "../types";
-import { RuntimePickerMenu } from "../ui/RuntimePickerMenu";
+import { RuntimePickerMenu, type RuntimeChoice } from "../ui/RuntimePickerMenu";
 import { useComposerInput } from "./useComposerInput";
 import { WorkspaceEvidenceDetails } from "./WorkspaceEvidenceDetails";
 import { shortGoalTitle } from "./shortGoalTitle";
@@ -34,13 +34,19 @@ interface DraftRuntimePickerProps {
 function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailable, runtimeRequiredHint, onSelect, linuxEntry = false }: DraftRuntimePickerProps) {
   const selected = runtimes.find((candidate) => candidate.id === provider);
   const nativeAvailable = runtimes.some(item => item.id === "codex" && item.nativeSessionTransport === "app-server");
-  const choices = linuxEntry ? [
-    { id: "", name: "Several agents", subtitle: "Plan and work with an independent check" },
-    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", subtitle: "One Codex conversation; no automatic Pi verification" }] : [])
-  ] : coordinationAvailable ? [
-    ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, subtitle: "" })),
-    { id: "", name: "Several agents", subtitle: "Plan, build and check with more than one agent" }
-  ] : undefined;
+  const recommended = {
+    id: "", name: "Recommended workflow", group: "Workflow",
+    subtitle: "Plan first, then another agent checks the plan",
+    ...(!linuxEntry && !coordinationAvailable ? { disabled: true, subtitle: runtimeRequiredHint ?? "Needs the desktop app with Background Send set up." } : {})
+  };
+  const myWorkflow = { id: "my-workflow", name: "My workflow", group: "Workflow", subtitle: "Coming soon: copy Recommended and change what doesn't fit.", disabled: true };
+  const choices: RuntimeChoice[] = linuxEntry ? [
+    ...(nativeAvailable ? [{ id: "codex", name: "Codex conversation", group: "Direct", subtitle: "Use Codex on its own" }] : []),
+    recommended, myWorkflow
+  ] : [
+    ...runtimes.map(runtime => ({ id: runtime.id, name: runtime.name, group: "Direct", subtitle: runtime.support === "unsupported" ? "" : `Use ${runtime.name} on its own` })),
+    recommended, myWorkflow
+  ];
   return (
     <div className="runtime-picker draft-runtime-picker">
       <RuntimePickerMenu
@@ -56,13 +62,13 @@ function DraftRuntimePicker({ runtimes, provider, connected, coordinationAvailab
         triggerContent={(
           <>
             <span className={`provider-avatar provider-${provider || "none"}`} aria-hidden="true">
-              {selected ? selected.name[0] : "–"}
+              {selected ? selected.name[0] : coordinationAvailable || linuxEntry ? "R" : "–"}
             </span>
             <span className="runtime-picker-copy">
-              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Several agents") : selected ? selected.name : coordinationAvailable ? "Several agents" : (runtimeRequiredHint ? "Several agents" : "Choose an agent")}</strong>
-              <small>{linuxEntry ? (provider === "codex" ? "Continue the same Codex context after returning." : "Multiple agents with an independent check.") : selected ? "Change agent" : coordinationAvailable
-                ? "Plan, build and check"
-                : (runtimeRequiredHint ?? "Choose an agent before sending.")}</small>
+              <strong>{linuxEntry ? (provider === "codex" ? "Codex conversation" : "Recommended workflow") : selected ? selected.name : coordinationAvailable ? "Recommended workflow" : "Choose how to work"}</strong>
+              <small>{linuxEntry ? (provider === "codex" ? "Direct" : "Plan first, then another agent checks the plan") : selected ? "Direct" : coordinationAvailable
+                ? "Plan first, then another agent checks the plan"
+                : (runtimeRequiredHint ?? "Choose how to work before sending.")}</small>
             </span>
             <span aria-hidden="true">⌄</span>
           </>
