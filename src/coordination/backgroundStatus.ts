@@ -17,6 +17,8 @@ export interface BackgroundStatus {
   readonly nativeCheckTarget?: import('./nativeWorkspaceCheck').NativeCheckTarget;
   readonly nativeCheckMaterial?: import('./nativeWorkspaceCheck').NativeCheckMaterial;
   readonly piCapacity?: PiCapacitySelection;
+  /** The workflow taken at Send, so "use again" keeps the same method. */
+  readonly workflowDefinition?: import("../../electron/workflow-checks.mjs").WorkflowDefinition;
   jobId: string;
   requestId: string;
   followUpMode?: "live-read-once";

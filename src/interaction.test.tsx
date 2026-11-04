@@ -2258,6 +2258,27 @@ describe("harness access panel and scoped rounds", () => {
     expect(screen.queryByText(/This send will not use Codex/)).toBeNull();
   });
 
+  it("Use again keeps the workflow the result ran under, and the access panel says the plan is not reviewed", async () => {
+    const quick = { schema: 1, id: "my-0a1b2c3d", version: 1, name: "Quick plans", parent: "recommended@1",
+      modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } };
+    scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      records: [{
+        requestId: "blocked-quick", workspacePath: "/work/goal", goal: "Explain the failure.",
+        planningHarness: "Codex", reviewHarness: null, planText: null, reviewText: null, result: null,
+        verdict: "failed", stopReason: "Codex cannot run its tools on this machine right now, so the plan was not completed.",
+        planningQuota: null, reviewQuota: null, savedAt: "2026-10-16T02:00:00.000Z",
+        workflow: { id: "my-0a1b2c3d", version: 1, name: "Quick plans", planReview: "off" }, workflowDefinition: quick,
+        environmentBlocked: { role: "planning", instanceId: "codex", harness: "Codex", detail: "helper crashed" },
+      }],
+      launch: async (command) => planOrReview(command),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+    expect(await screen.findByText("One of Codex and Claude will plan this goal. Independent review is off in Quick plans. Nothing runs until you press Send.")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/plan and check this goal/);
+  });
+
   it("runs an environment failure through a takeover to the terminal view", async () => {
     const bridge = scopedBridge({
       providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude"), usableHarness("grok", "Grok")],

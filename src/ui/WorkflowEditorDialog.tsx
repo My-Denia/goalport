@@ -88,7 +88,7 @@ export function WorkflowEditorDialog({ workflow, otherNames, onSave, onDelete, o
               </span>
             </label>
             <label className="workflow-option">
-              <input type="checkbox" checked={readsFiles} disabled={busy} onChange={(event) => setReadsFiles(event.target.checked)} />
+              <input type="checkbox" checked={readsFiles} disabled={busy || !planReview} onChange={(event) => setReadsFiles(event.target.checked)} />
               <span>
                 <strong>Reviewer must be able to read your files</strong>
                 <small>When required, an agent that cannot open files (Pi) is never the reviewer.</small>

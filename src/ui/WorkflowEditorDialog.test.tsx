@@ -45,8 +45,8 @@ describe("workflow editor", () => {
   it("saves the switched-off review under the chosen name, without an id for a new copy", async () => {
     const { onSave } = open();
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "  Quick plans " } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Independent plan review/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Reviewer must be able to read your files/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Independent plan review/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     const input = (onSave.mock.calls as unknown as [Record<string, any>][])[0][0];
@@ -54,6 +54,20 @@ describe("workflow editor", () => {
     expect(input.name).toBe("Quick plans");
     expect(input.modules.checks.planReview).toBe("off");
     expect(input.modules.checks.reviewerNeeds.readWorkspace).toBe("required");
+  });
+
+  it("with review off the reviewer-reads-files control is disabled but keeps its value", async () => {
+    open();
+    await screen.findByLabelText("Name");
+    const reads = screen.getByRole("checkbox", { name: /Reviewer must be able to read your files/ }) as HTMLInputElement;
+    fireEvent.click(reads);
+    expect(reads.checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Independent plan review/ }));
+    expect(reads.disabled).toBe(true);
+    expect(reads.checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Independent plan review/ }));
+    expect(reads.disabled).toBe(false);
+    expect(reads.checked).toBe(true);
   });
 
   it("editing keeps the id, shows the saved choices and renames in place", async () => {

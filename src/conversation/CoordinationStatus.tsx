@@ -265,7 +265,7 @@ export function CoordinationStatus({
   const hasExecutionActivity = Boolean(executionText || auditHarness || auditText || executionEvidence)
     || roundEvents?.some((event) => event.role === "execution") === true;
   return (
-    <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : "Plan and check"}>
+    <section className="coordination-status" aria-label={verdict === "stopped" ? "Stopped. No further turn was sent." : verdict === "planned" ? "Plan" : "Plan and check"}>
       <dl className={verdict === "planned" ? "coordination-outcome coordination-outcome-solo" : "coordination-outcome"}>
         <dt>Outcome</dt><dd>{stoppedOutcome ? "Stopped" : outcomeLabel(verdict)}</dd>
         {/* A plan whose review was off is not a stop; the outcome and the method line below already say why, once. */}
@@ -343,7 +343,7 @@ export function CoordinationStatus({
         </article>
       ) : null}
       {plain ? null : (
-      <details className="coordination-facts"><summary>Plan, check and details</summary><dl>
+      <details className="coordination-facts"><summary>{verdict === "planned" ? "Plan and details" : "Plan, check and details"}</summary><dl>
         <dt>Goal</dt>
         <dd>{fact(goal ?? null)}</dd>
         {saved && savedAt ? (
@@ -356,14 +356,22 @@ export function CoordinationStatus({
         <dd>{fact(planningHarness)}</dd>
         <dt>Planning quota</dt>
         <dd>{fact(planningQuota)}</dd>
-        <dt>Checked by</dt>
-        <dd>{fact(reviewHarness)}</dd>
-        <dt>Review quota</dt>
-        <dd>{fact(reviewQuota)}</dd>
+        {verdict === "planned" ? null : (
+          <>
+            <dt>Checked by</dt>
+            <dd>{fact(reviewHarness)}</dd>
+            <dt>Review quota</dt>
+            <dd>{fact(reviewQuota)}</dd>
+          </>
+        )}
         <dt>Plan</dt>
         <dd>{fact(planText)}</dd>
-        <dt>Check</dt>
-        <dd>{fact(reviewText)}</dd>
+        {verdict === "planned" ? null : (
+          <>
+            <dt>Check</dt>
+            <dd>{fact(reviewText)}</dd>
+          </>
+        )}
       </dl></details>
       )}
       {scopeExhausted ? (

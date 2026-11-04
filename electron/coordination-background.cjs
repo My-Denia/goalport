@@ -64,6 +64,7 @@ function projection(status, live = false) {
     workerPid: status.startupClaim?.pid ?? null,
     ...(status.admission.continuation ? { continuation: status.admission.continuation } : {}),
     ...(status.admission.piCapacity ? { piCapacity: status.admission.piCapacity } : {}),
+    ...(status.admission.workflowDefinition ? { workflowDefinition: status.admission.workflowDefinition } : {}),
     ...(status.admission.nativeCheckTarget ? { nativeCheckTarget: status.admission.nativeCheckTarget, nativeCheckMaterial: status.admission.nativeCheckMaterial, recordKind: 'native-workspace-check' } : {}) };
 }
 function createBackgroundHost(options) {

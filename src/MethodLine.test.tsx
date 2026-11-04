@@ -44,3 +44,21 @@ it("a plan that was not reviewed reads as ready, not reviewed, and the method li
   expect(screen.getByText("Quick plans v2 · Independent review: not run (off in Quick plans)")).toBeTruthy();
   expect(document.body.textContent).not.toMatch(/Stop reason|Can be carried out|Not confirmed/);
 });
+
+// A plan nobody reviewed does not claim a check anywhere in the result.
+it("a planned result's disclosure says Plan and details and carries no check rows", () => {
+  render(<CoordinationStatus {...round} reviewHarness={null} reviewText={null} verdict="planned" stopReason="x"
+    workflow={{ id: "my-0a1b2c3d", version: 2, name: "Quick plans", planReview: "off" }} checksRan={[]} />);
+  expect(screen.getByText("Plan and details")).toBeTruthy();
+  expect(screen.queryByText("Plan, check and details")).toBeNull();
+  expect(screen.queryByText("Check")).toBeNull();
+  expect(screen.queryByText("Checked by")).toBeNull();
+  expect(screen.queryByText("Review quota")).toBeNull();
+  expect(screen.getByRole("region", { name: "Plan" })).toBeTruthy();
+});
+
+it("a checked result keeps the check wording", () => {
+  render(<CoordinationStatus {...round} checksRan={[{ kind: "plan-check", harness: "Pi", verdict: "checked" }]} />);
+  expect(screen.getByText("Plan, check and details")).toBeTruthy();
+  expect(screen.getByText("Checked by")).toBeTruthy();
+});

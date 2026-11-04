@@ -24,6 +24,9 @@ export interface AuthorizationPanelProps {
   readonly onAllowBackgroundSend?: () => Promise<void>;
   readonly onBackgroundConsentChange?: (enabled: boolean) => void;
   readonly providers: readonly ProviderSnapshot[];
+  /** The picked workflow plans only: review is off and no agent may write. */
+  readonly planOnly?: boolean;
+  readonly workflowName?: string;
   readonly selected: readonly string[];
   readonly onToggle: (instanceId: string, selected: boolean) => void;
   readonly workspaceRoot: string;
@@ -98,6 +101,8 @@ export function AuthorizationPanel({
   onStopAllowing,
   onConfirmChange,
   onUseAgain,
+  planOnly = false,
+  workflowName,
   backgroundConsent = false,
   backgroundConfigured = true,
   onAllowBackgroundSend,
@@ -122,7 +127,9 @@ export function AuthorizationPanel({
   return (
     <section className="authorization-panel" aria-label="Agent access">
       <p className="authorization-panel-lead">
-        {selectedNames.length > 0
+        {selectedNames.length > 0 && planOnly
+          ? `${selectedNames.length > 1 ? `One of ${joinNames(selectedNames)}` : selectedNames[0]} will plan this goal. Independent review is off${workflowName ? ` in ${workflowName}` : ""}. Nothing runs until you press Send.`
+          : selectedNames.length > 0
           ? `${joinNames(selectedNames)} will plan and check this goal. They change files only if you allow it below. Nothing runs until you press Send.`
           : "Choose which agents can work on this goal. Nothing runs until you press Send."}
       </p>

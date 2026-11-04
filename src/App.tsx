@@ -2019,7 +2019,7 @@ function App() {
     });
   }
 
-  function openReadyDraft(source: { workspace: string; message: string; note: string }) {
+  function openReadyDraft(source: { workspace: string; message: string; note: string; workflowDefinition?: WorkflowDefinition }) {
     if (window.innerWidth <= 860) setNavCollapsed(true);
     setSelectedPlanId(null);
     closeDraft(false);
@@ -2030,6 +2030,7 @@ function App() {
       workspace: source.workspace,
       provider: "",
       message: source.message,
+      ...savedWorkflowCarrier(source),
       readyNote: source.note,
     });
   }
@@ -2038,7 +2039,7 @@ function App() {
   // result this also opens a new draft of the same goal; the failed round is
   // not replayed, and nothing is sent until Send. From the access panel the
   // draft already open stays put and the row becomes selectable.
-  async function handleUseAgain(instanceId: string, continueFrom?: { workspacePath: string; goal: string; harness: string }) {
+  async function handleUseAgain(instanceId: string, continueFrom?: { workspacePath: string; goal: string; harness: string; workflowDefinition?: WorkflowDefinition }) {
     if (client.mode === "linux-core" && (linuxActionBusy || linuxGranting)) return;
     const bridge = window.goalportCore;
     if (!bridge?.coordinationUnblock) return;
@@ -2052,6 +2053,7 @@ function App() {
       openReadyDraft({
         workspace: continueFrom.workspacePath,
         message: continueFrom.goal,
+        workflowDefinition: continueFrom.workflowDefinition,
         note: `${continueFrom.harness} can be used again. Nothing is sent until you press Send.`,
       });
       return;
@@ -2314,6 +2316,7 @@ function App() {
     openReadyDraft({
       workspace: heldFolder ? "" : (current.workspacePath ?? ""),
       message: current.goal,
+      workflowDefinition: current.workflowDefinition,
       note: heldFolder
         ? `The interrupted turn was not replayed. ${workspaceFolder(heldFolder)} stays reserved until its exit is confirmed, so choose a different folder for this new send. Nothing goes out until you press Send.`
         : interrupted
@@ -3569,6 +3572,7 @@ function App() {
                   ? () => { void handleUseAgain(selectedPlan.environmentBlocked!.instanceId, {
                     workspacePath: selectedPlan.workspacePath,
                     goal: selectedPlan.goal,
+                    workflowDefinition: selectedPlan.workflowDefinition,
                     harness: selectedPlan.environmentBlocked!.harness ?? selectedPlan.environmentBlocked!.instanceId,
                   }); }
                   : undefined}
@@ -4065,6 +4069,7 @@ function App() {
                     ? () => { void handleUseAgain(coordination.environmentBlocked!.instanceId, {
                       workspacePath: draftGoal?.workspace ?? "",
                       goal: draftGoal?.message ?? "",
+                      workflowDefinition: coordination.workflowDefinition ?? draftWorkflowDefinition,
                       harness: coordination.environmentBlocked!.harness ?? coordination.environmentBlocked!.instanceId,
                     }); }
                     : undefined}
@@ -4130,6 +4135,8 @@ function App() {
                       } : undefined}
                       onBackgroundConsentChange={window.goalportCore?.backgroundStart ? setBackgroundConsent : undefined}
                       providers={panelProviders}
+                      planOnly={draftAgentsNeeded === 1}
+                      workflowName={draftWorkflowDefinition?.name}
                       selected={selectedInstances}
                       onToggle={(instanceId, selected) => {
                         setSelectedInstances((current) => selected
