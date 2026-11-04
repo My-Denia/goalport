@@ -1,6 +1,9 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { turnSpec } = require("./cli-coordinate.cjs");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { turnSpec, runCliTurn } = require("./cli-coordinate.cjs");
 
 // Today's Recommended launch commands (no resource preference), recorded as
 // literals. A later change that adds optional launch flags must not move any
@@ -77,4 +80,38 @@ test("an unknown preference, or a claude swap that does not match its model, is 
   assert.ok(turnSpec(withEffort(turn("claude", "sonnet"), "stronger"), {}, "linux").errorText);
   assert.ok(turnSpec(withEffort(turn("claude", "fable-1"), "faster"), {}, "linux").errorText);
   assert.equal(turnSpec({ ...turn("codex", "gpt-6.1-sol"), modelSelection: { instanceId: "codex", model: "gpt-6.1-sol", effort: undefined } }, {}, "linux").args.includes("-c"), false);
+});
+
+// The send gate itself, not just turnSpec: the grant, the guards, the claim and
+// the admitted Pi route all see a command that carries the extra key.
+async function sentArgv(command, options = {}) {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "goalport-effort-gate-"));
+  try {
+    fs.writeFileSync(path.join(stateDir, "send-authorization"), `${command.commandId}\n`);
+    let spawned = null;
+    const result = await runCliTurn(command, {
+      stateDir, ...options,
+      spawnTurn: async (spec) => { spawned = spec; return { code: 0, stdout: options.stdout ?? "Plan text" }; },
+    });
+    return { result, spawned };
+  } finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
+}
+
+test("a preference goes through the send gate for Codex and Claude and lands in the launched argv", async () => {
+  const codex = await sentArgv(withEffort(turn("codex", "gpt-6.1-sol"), "faster"), { stdout: JSON.stringify({ item: { type: "agent_message", text: "Plan text" } }) });
+  assert.equal(codex.result.messageDispatched, true);
+  assert.deepEqual(codex.spawned.args.slice(-3), ["-c", 'model_reasoning_effort="low"', "Do it."]);
+  const claude = await sentArgv(withEffort(turn("claude", "opus"), "stronger"), { stdout: JSON.stringify({ result: "Plan text", is_error: false }) });
+  assert.equal(claude.result.messageDispatched, true);
+  assert.deepEqual(claude.spawned.args.slice(-5), ["--model", "opus", "--effort", "high", "Do it."]);
+});
+
+test("a Pi turn on the admitted route accepts a preference and launches with the thinking level", async () => {
+  const pair = { provider: "Fixture", model: "alpha", useExistingCapacity: true };
+  const table = "provider model context max-out thinking images\nFixture alpha 128K 16K yes yes\n";
+  const command = withEffort(turn("pi", "alpha", { provider: "Fixture" }), "faster");
+  const { result, spawned } = await sentArgv(command, { piCapacity: pair, env: { PATH: "" }, metadataExec: async () => ({ code: 0, stdout: table }), stdout: "Checked" });
+  assert.equal(result.errorText, "");
+  assert.equal(result.messageDispatched, true);
+  assert.deepEqual(spawned.args.slice(-7), ["--provider", "Fixture", "--model", "alpha", "--thinking", "low", "Do it."]);
 });
