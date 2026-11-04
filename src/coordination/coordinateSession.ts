@@ -1,3 +1,4 @@
+import { reviewerCouldJudge } from "../../electron/workflow-checks.mjs";
 import { normalizeRequestedPiCapacity, type PiPair } from "../../electron/pi-capacity.mjs";
 import {
   coordinateGoal,
@@ -5,7 +6,9 @@ import {
   ContinuationPromptLimitError,
   evidenceCommand,
   eligibleInstances,
+  expectedCommandCount,
   replacementCommand,
+  WORKFLOW,
   type CoordinateGoalInput,
   type CoordinateGoalState,
   type SyntheticCatalogInstance,
@@ -186,6 +189,8 @@ function checkStopReason(verdict: CoordinationVerdict): string {
       return "The independent check says the plan needs revision, so this stopped.";
     case "stopped":
       return "The independent check says to stop, so this stopped.";
+    case "planned":
+      return "The plan is ready. Independent review did not run, so this stopped.";
     case "verified":
     case "failed":
     case "unconfirmed":
@@ -195,6 +200,11 @@ function checkStopReason(verdict: CoordinationVerdict): string {
       return unreachable;
     }
   }
+}
+
+/** The honest ending of a chain whose definition turned the independent review off. */
+function plannedStopReason(input: CoordinateGoalInput): string {
+  return `The plan is ready. Independent review did not run, because it is off in ${(input.workflow ?? WORKFLOW).name}.`;
 }
 
 function withPlanText(command: CoordinateTurnCommand, planText: string): CoordinateTurnCommand {
@@ -219,7 +229,7 @@ async function runLegacyRound(
   transport: CoordinateTransport,
   plan: CoordinateGoalState,
   planning: CoordinateTurnCommand,
-  review: CoordinateTurnCommand,
+  review: CoordinateTurnCommand | null,
 ): Promise<CoordinateSessionState> {
   assertContinuationPrompt(input, planning.initialMessage.text);
   const planned = await transport.launch(planning);
@@ -233,7 +243,7 @@ async function runLegacyRound(
     planned.errorText.trim().length > 0
   ) {
     return reportFromPlan(
-      { ...plan, commands: [planning], roles: ["planning", "review"], result: null },
+      { ...plan, commands: [planning], result: null },
       {
         verdict: "failed",
         planText: planText.length > 0 ? planText : null,
@@ -256,6 +266,13 @@ async function runLegacyRound(
     );
   }
 
+  if (review === null) {
+    // Review is off in this definition: the plan is the whole chain.
+    return reportFromPlan({ ...plan, result: planText }, {
+      verdict: "planned", planText, stopReason: plannedStopReason(input),
+      messageDispatched: planned.dispatched ?? null, checksRan: [],
+    });
+  }
   const reviewCommand = withPlanText(review, planText);
   try {
     assertContinuationPrompt(input, reviewCommand.initialMessage.text);
@@ -486,7 +503,8 @@ async function runRecoveryRound(
   plan: CoordinateGoalState,
 ): Promise<CoordinateSessionState> {
   const write = input.writeAuthorization;
-  const roles: readonly CoordinationRole[] = write ? ["planning", "review", "execution", "audit"] : ROLES;
+  const reviews = expectedCommandCount(input) === 2;
+  const roles: readonly CoordinationRole[] = write ? ["planning", "review", "execution", "audit"] : reviews ? ROLES : ["planning"];
   const emitEvent = options.onEvent;
   const failed = new Set<string>(); // Instance-global: a burned harness never returns in any role.
   const used = new Set<string>();
@@ -528,7 +546,9 @@ async function runRecoveryRound(
     piCapacity: input.piCapacity,
     legacyPiContinuation: input.legacyPiContinuation,
     exclude: [...failed],
-  }).filter((item) => !used.has(usedKey(role, item.instanceId)));
+  }).filter((item) => !used.has(usedKey(role, item.instanceId)))
+    // A replacement reviewer must meet the run's own reviewer requirement, as the first one did.
+    .filter((item) => role !== "review" || reviewerCouldJudge(item.instanceId, (input.workflow ?? WORKFLOW).checks));
   const counterpart = (role: CoordinationRole): CoordinationRole | null =>
     role === "review" ? "planning" : role === "audit" ? "execution" : null;
   // Assignment feasibility, not all-read-roles-distinct. The legacy two-role
@@ -562,7 +582,7 @@ async function runRecoveryRound(
       stopReason: fields.stopReason,
       planningQuota: planning ? plan.quotaLabels[planning.instanceId] ?? null : null,
       reviewQuota: review ? plan.quotaLabels[review.instanceId] ?? null : null,
-      roles: planning && review ? plan.roles : [],
+      roles: planning && (review || !reviews) ? plan.roles : [],
       commands: launched, quotaLabels: plan.quotaLabels, planText, reviewText,
       ...(requestedPiCapacity ? { requestedPiCapacity } : {}),
       verdict: fields.verdict, messageDispatched: messageDispatched(), environmentBlocked, roundEvents,
@@ -605,7 +625,11 @@ async function runRecoveryRound(
         const replacement = candidatesFor(roleIndex)[0];
         if (!replacement) {
           return finish({
-            stopReason: lastFailure?.environment
+            stopReason: !reviews
+              ? (lastFailure?.environment
+                ? `Stopped. ${lastFailure.harness} cannot run on this machine right now, and no other agent you allowed can plan.`
+                : lastFailure?.stopReason ?? "Stopped. No other eligible agent can plan, so nothing further was sent.")
+              : lastFailure?.environment
               ? `Stopped. ${lastFailure.harness} cannot run on this machine right now, and an independent check needs two agents that can run.`
               : lastFailure?.stopReason ?? "Stopped. An independent verification needs another eligible agent, so no further role was sent.",
             verdict: "failed",
@@ -735,6 +759,10 @@ async function runRecoveryRound(
         ? `${failure.stopReason} Workspace changes were not retried; inspect any partial changes before sending again.`
         : failure.stopReason, verdict: "failed" });
     } while (recovering);
+    if (role === "planning" && !reviews && !write) {
+      // Review is off in this definition: the plan is the whole chain.
+      return finish({ verdict: "planned", result: planText, stopReason: plannedStopReason(input) });
+    }
     if (role === "review") {
       const verdict = verdictFromReview(reviewText ?? "");
       if (!write || verdict !== "checked") return finish({
@@ -766,10 +794,11 @@ export async function runCoordinateSession(
     ? input
     : { ...input, allowedInstances: options.allowedInstances };
   const plan = coordinateGoal(plannedInput);
-  if (plan.commands.length !== 2) return reportFromPlan(plan, { verdict: "stopped" });
+  const commandCount = expectedCommandCount(plannedInput);
+  if (plan.commands.length !== commandCount) return reportFromPlan(plan, { verdict: "stopped" });
   const planning = plan.commands[0];
-  const review = plan.commands[1];
-  if (!planning || !review || planning.modelSelection.instanceId === review.modelSelection.instanceId) {
+  const review = commandCount === 2 ? plan.commands[1] : null;
+  if (!planning || (commandCount === 2 && (!review || planning.modelSelection.instanceId === review.modelSelection.instanceId))) {
     return reportFromPlan(
       { ...plan, commands: [], roles: [], result: null, planningHarness: null, reviewHarness: null },
       {
@@ -781,7 +810,9 @@ export async function runCoordinateSession(
   if (!options.sendAuthorized) {
     return reportFromPlan(plan, {
       verdict: "stopped",
-      stopReason: "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota.",
+      stopReason: commandCount === 2
+        ? "Planning and review are assigned to two different agents. No model turn was sent, because this session is not authorized to spend subscription quota."
+        : "Planning is assigned to an agent. No model turn was sent, because this session is not authorized to spend subscription quota.",
     });
   }
   if (plannedInput.writeAuthorization !== undefined || options.allowedInstances !== undefined) {

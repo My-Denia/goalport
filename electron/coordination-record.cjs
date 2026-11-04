@@ -5,7 +5,9 @@ const { normalizePiCapacity, normalizeRequestedPiCapacity } = require("./pi-capa
 const path = require("node:path");
 const { isValidContinuationDescriptor, normalizeContinuationDescriptor, validatedContinuationOf } = require("./coordination-continuation.cjs");
 
-const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified"]);
+const { compileWorkflow } = require("./workflow-checks.mjs");
+
+const VERDICTS = new Set(["checked", "revise", "stopped", "failed", "unconfirmed", "verified", "planned"]);
 const ROLES = new Set(["planning", "review", "execution", "audit"]);
 const QUOTAS = new Set(["unknown", "available", "exhausted"]);
 
@@ -64,7 +66,26 @@ function workflowOf(value) {
   if (typeof value !== "object" || value === null) return undefined;
   const id = typeof value.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(value.id) ? value.id : null;
   if (!id || !Number.isInteger(value.version) || value.version < 1) return undefined;
-  return { id, version: value.version };
+  const name = typeof value.name === "string" ? value.name.trim() : "";
+  return {
+    id,
+    version: value.version,
+    ...(name.length > 0 && name.length <= 60 && !/[\u0000-\u001f\u007f]/.test(name) ? { name } : {}),
+    ...(value.planReview === "on" || value.planReview === "off" ? { planReview: value.planReview } : {}),
+  };
+}
+
+// The definition snapshot taken at Send. Kept only when the engine would accept
+// it; anything else is dropped so the record still reads (it then behaves as
+// Recommended).
+function workflowDefinitionOf(value) {
+  if (typeof value !== "object" || value === null) return undefined;
+  try {
+    compileWorkflow(value);
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return undefined;
+  }
 }
 
 function checksRanOf(value) {
@@ -368,6 +389,7 @@ function normalize(input) {
   // A native workspace check is not a Recommended run: it carries no method.
   const isNativeCheck = input.recordKind === 'native-workspace-check';
   const workflow = isNativeCheck ? undefined : workflowOf(input.workflow);
+  const workflowDefinition = isNativeCheck ? undefined : workflowDefinitionOf(input.workflowDefinition);
   const checksRan = workflow === undefined ? undefined : checksRanOf(input.checksRan);
   return {
     requestId,
@@ -390,6 +412,7 @@ function normalize(input) {
     messageDispatched: sendWideDispatched(input.messageDispatched, feedbackHistory, planRevisionHistory),
     environmentBlocked: environmentBlockedOf(input.environmentBlocked),
     ...(workflow === undefined ? {} : { workflow }),
+    ...(workflowDefinition === undefined ? {} : { workflowDefinition }),
     ...(checksRan === undefined ? {} : { checksRan }),
     ...(executionEvidence === undefined ? {} : { executionEvidence }),
     ...(auditInputEvidenceCoverage === undefined ? {} : { auditInputEvidenceCoverage }),

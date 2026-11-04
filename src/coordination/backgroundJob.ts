@@ -1,5 +1,6 @@
 import { normalizePiCapacity, type PiCapacitySelection } from "../../electron/pi-capacity.mjs";
 import type { CoordinationWriteAuthorization, ExecutionFeedback } from "./coordinateGoal";
+import { compileWorkflow, type WorkflowDefinition } from "../../electron/workflow-checks.mjs";
 import type { BackgroundStatus } from "./backgroundStatus";
 import {
   type SavedTargetContinuation,
@@ -92,6 +93,11 @@ export interface BackgroundJobStartInput {
    * scope, remaining budget, or native session handles.
    */
   readonly continuation?: SavedTargetContinuation;
+  /**
+   * The workflow definition snapshotted at Send. Absent means Recommended v1.
+   * It selects which checks run and grants nothing.
+   */
+  readonly workflowDefinition?: WorkflowDefinition;
   /**
    * Literal `true`: the type forces call sites to write the consent out, and
    * the runtime gate re-checks it because IPC data carries no types. This is
@@ -191,6 +197,11 @@ export function backgroundStartRefusal(start: BackgroundJobStartInput): string |
       return "The background continuation descriptor is malformed, so nothing was admitted.";
     }
   }
+  if (start.workflowDefinition !== undefined) {
+    try { compileWorkflow(start.workflowDefinition); } catch {
+      return "The background workflow could not be read, so nothing was admitted.";
+    }
+  }
   return null;
 }
 
@@ -222,6 +233,8 @@ export interface BackgroundEngineInput {
   /** Completed execution context, forwarded to the SAME engine a window Send uses. */
   readonly executionFeedback?: ExecutionFeedback;
   readonly continuation?: SavedTargetContinuation;
+  /** Compiled by requestCoordination; invalid stops there with nothing sent. */
+  readonly workflowDefinition?: WorkflowDefinition;
   readonly repairRefusalSentence: string;
   /** Distinct background wording for the one plan-revision refusal. */
   readonly planRevisionRefusalSentence: string;
@@ -276,6 +289,7 @@ export function backgroundEngineInput(start: BackgroundJobStartInput): Backgroun
           },
         }
       : {}),
+    ...(start.workflowDefinition === undefined ? {} : { workflowDefinition: start.workflowDefinition }),
     repairRefusalSentence: BACKGROUND_REPAIR_REFUSAL_SENTENCE,
     planRevisionRefusalSentence: BACKGROUND_PLAN_REVISION_REFUSAL_SENTENCE,
   };

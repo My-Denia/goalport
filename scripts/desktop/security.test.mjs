@@ -123,6 +123,7 @@ async function mainWiring(customModules = {}) {
     "./background-send-consent.cjs": { backgroundSendConsent: () => ({ read: () => false }) },
     "./coordination-job.cjs": {},
     "./coordination-record.cjs": require("../../electron/coordination-record.cjs"),
+    "./workflow-store.cjs": require("../../electron/workflow-store.cjs"),
     "./harness-health.cjs": {},
     "./cli-coordinate.cjs": require("../../electron/cli-coordinate.cjs"),
     "./pi-capacity-admission.cjs": require("../../electron/pi-capacity-admission.cjs"),

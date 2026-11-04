@@ -10,14 +10,23 @@
  * code stay external because the worker runs in Node.
  */
 export { requestCoordination } from "./requestCoordination";
+export { expectedCommandCount } from "./coordinateGoal";
 export { prepareNativeWorkspaceCheckMaterial, buildNativeWorkspaceCheckCommand } from "./nativeWorkspaceCheck";
-import { coordinateGoal } from "./coordinateGoal";
+import { coordinateGoal, expectedCommandCount } from "./coordinateGoal";
+// expectedCommandCount is also re-exported above for the native host's preflights.
+import { compileWorkflow } from "../../electron/workflow-checks.mjs";
 import { catalogFromProviderSnapshots, type ProviderSnapshot } from "./catalogFromProviders";
 import { backgroundEngineInput, type BackgroundJobStartInput } from "./backgroundJob";
 /** Pure assembly of the SAME engine input; does not launch or authorize. */
 export function preflightBackgroundContinuation(input: BackgroundJobStartInput, providers: readonly ProviderSnapshot[]): void {
-  const assembled = coordinateGoal({ ...backgroundEngineInput(input), catalog: catalogFromProviderSnapshots(providers) });
-  if (assembled.commands.length !== 2) throw new Error(assembled.stopReason);
+  const { workflowDefinition, ...engine } = backgroundEngineInput(input);
+  const assembledInput = {
+    ...engine,
+    ...(workflowDefinition === undefined ? {} : { workflow: compileWorkflow(workflowDefinition) }),
+    catalog: catalogFromProviderSnapshots(providers),
+  };
+  const assembled = coordinateGoal(assembledInput);
+  if (assembled.commands.length !== expectedCommandCount(assembledInput)) throw new Error(assembled.stopReason);
 }
 export type {
   CoordinationDiscovery,

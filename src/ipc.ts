@@ -1,4 +1,5 @@
 import type { BackgroundJobStartInput } from "./coordination/backgroundJob";
+import type { WorkflowSaveInput, WorkflowsReply } from "./types";
 import type { BackgroundHeldWorkspaces, BackgroundStatus } from "./coordination/backgroundStatus";
 import { invoke } from "@tauri-apps/api/core";
 import type { RoundEvent, SavedPlan, SavedTargetContinuation, SavedTargetRelationStatus } from "./coordination/savedPlan";
@@ -346,6 +347,9 @@ declare global {
       backgroundSendConsent?: (action: "read" | "grant" | "revoke") => Promise<{ allowed: boolean; grantedAt?: string }>;
       nativeCheck?: (messageType: string, payload: unknown) => Promise<{ ok: boolean; payload?: any; error?: string; previewAgain?: boolean }>;
       backgroundStart?: (input: BackgroundJobStartInput) => Promise<BackgroundStatus>;
+      workflowsList?: () => Promise<WorkflowsReply>;
+      workflowsSave?: (input: WorkflowSaveInput) => Promise<WorkflowsReply>;
+      workflowsDelete?: (id: string) => Promise<WorkflowsReply>;
       backgroundStatus?: (jobId?: string) => Promise<BackgroundStatus | null>;
       backgroundHeldWorkspaces?: (candidate?: string) => Promise<BackgroundHeldWorkspaces>;
       backgroundRevoke?: (jobId: string, payload?: { onlyIfReadyFromRequestId: string }) => Promise<BackgroundStatus>;

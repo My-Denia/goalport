@@ -14,8 +14,11 @@ function eligible(input) {
   if (!input || input.backgroundConsent !== true || input.writeAuthorization || !normalizePiCapacity(input.piCapacity)) return false;
   const ids = input.allowedInstances;
   if (!Array.isArray(ids) || !ids.every(x => typeof x === "string") || new Set(ids).size !== ids.length || !ids.includes("pi")) return false;
-  const { RECOMMENDED_V1, compileWorkflow, chooseRoles, reviewerCouldJudge } = require("./workflow-checks.mjs");
-  const { checks } = compileWorkflow(RECOMMENDED_V1);
+  const { RECOMMENDED_V1, compileWorkflow, chooseRoles, reviewerCouldJudge, planReviewRuns } = require("./workflow-checks.mjs");
+  let checks;
+  try { ({ checks } = compileWorkflow(input.workflowDefinition ?? RECOMMENDED_V1)); } catch { return false; }
+  // Without a review no reviewer could judge the plan, so there is nothing to continue from.
+  if (!planReviewRuns(checks, false)) return false;
   const roles = chooseRoles(ids, checks);
   return !!roles && reviewerCouldJudge(roles.reviewer, checks) && Number.isInteger(input.maxTurns) && input.maxTurns >= 4;
 }

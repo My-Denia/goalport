@@ -7,6 +7,7 @@
 const fs = require("node:fs");
 const { normalizePiCapacity } = require("./pi-capacity.mjs");
 const liveRead = require("./live-read-once.cjs");
+const { compileWorkflow } = require("./workflow-checks.mjs");
 const net = require("node:net");
 const path = require("node:path");
 const { createHash, randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
@@ -270,6 +271,13 @@ function normalizeAdmissionInput(input, platform = process.platform) {
   if (executionFeedback !== undefined) normalized.executionFeedback = executionFeedback;
   const continuation = normalizeContinuation(input.continuation);
   if (continuation !== undefined) normalized.continuation = continuation;
+  if (input.workflowDefinition !== undefined && input.workflowDefinition !== null) {
+    // The snapshot taken at Send. It must be one the engine can compile, so a
+    // damaged definition is refused here instead of running as something else.
+    try { compileWorkflow(input.workflowDefinition); }
+    catch { throw refusal("invalid-admission", "This workflow could not be read, so nothing was started."); }
+    normalized.workflowDefinition = JSON.parse(JSON.stringify(input.workflowDefinition));
+  }
   if (Object.hasOwn(input, "piCapacity")) {
     const selection = normalizePiCapacity(input.piCapacity);
     if (!selection || !allowedInstances.includes("pi")) throw refusal("invalid-admission", "The requested Pi capacity is malformed or Pi is not selected.");

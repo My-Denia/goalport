@@ -1,10 +1,18 @@
 import { authorizeCoordinateWriteTurn, authorizeCoordinateTurn, type CoordinateTurnCommand } from "./coordinateTurn";
 import type { SavedTargetContinuation } from "./continuation";
 import { selectedPiEligible, type PiCapacitySelection, type PiCapacityMetadata } from "../../electron/pi-capacity.mjs";
-import { RECOMMENDED_V1, chooseRoles, citationMode, compileWorkflow } from "../../electron/workflow-checks.mjs";
+import {
+  RECOMMENDED_V1, chooseRoles, choosePlanner, citationMode, compileWorkflow, planReviewRuns,
+  type CompiledWorkflow,
+} from "../../electron/workflow-checks.mjs";
 
-/** The workflow the engine runs: Recommended v1 compiled once; inputs and hashes never carry it. */
+/** The default workflow: Recommended v1 compiled once. A snapshot taken at Send replaces it per input; hashes never carry it. */
 export const WORKFLOW = compileWorkflow(RECOMMENDED_V1);
+
+/** How many commands a chain for this input holds: 2 with the plan review, 1 when the definition turns it off (read-only goals only). */
+export function expectedCommandCount(input: Pick<CoordinateGoalInput, "workflow" | "writeAuthorization">): 1 | 2 {
+  return planReviewRuns((input.workflow ?? WORKFLOW).checks, input.writeAuthorization !== undefined) ? 2 : 1;
+}
 
 type CitationMode = "read" | "quote";
 const VERDICT_LINE = "End with exactly one of these lines, as plain text with no formatting, on the last line: VERDICT: carry-out or VERDICT: revise or VERDICT: stop.";
@@ -307,6 +315,11 @@ export interface CoordinateGoalInput {
    * within it.
    */
   readonly allowedInstances?: readonly string[];
+  /**
+   * The workflow snapshotted at Send. Absent means Recommended v1. It selects
+   * which checks run; it never grants anything and never enters a command key.
+   */
+  readonly workflow?: CompiledWorkflow;
 }
 
 /** Exclusions applied on top of the base catalog filters. */
@@ -337,7 +350,7 @@ export interface CoordinateGoalState {
   readonly stopReason: string;
   readonly planningQuota: QuotaWord | null;
   readonly reviewQuota: QuotaWord | null;
-  readonly roles: readonly ["planning", "review"] | readonly ["planning", "review", "execution", "audit"] | readonly [];
+  readonly roles: readonly ["planning"] | readonly ["planning", "review"] | readonly ["planning", "review", "execution", "audit"] | readonly [];
   readonly commands: readonly CoordinateTurnCommand[];
   readonly quotaLabels: Readonly<Record<string, QuotaWord>>;
 }
@@ -685,9 +698,10 @@ export function replacementCommand(
   // A review's citation mode follows its own instance; a plan's follows the
   // reviewer it will be checked by. With no known reviewer we default to
   // "read" (today's wording) rather than guessing.
+  const { checks } = input.workflow ?? WORKFLOW;
   const text = role === "plan"
-    ? plannerText(input, counterpartInstanceId === undefined ? "read" : citationMode(counterpartInstanceId, WORKFLOW.checks))
-    : reviewText(input, citationMode(instance.instanceId, WORKFLOW.checks));
+    ? plannerText(input, counterpartInstanceId === undefined ? "read" : citationMode(counterpartInstanceId, checks))
+    : reviewText(input, citationMode(instance.instanceId, checks));
   assertContinuationPrompt(input, text);
   const command = turnCommand({
     commandId: commandKey(role, instance.instanceId, text, commandIdentitySendKey(input, sendKey), input.piCapacity),
@@ -824,6 +838,65 @@ export function evidenceCommand(
   return { ...command, ...(stdin ? { promptDelivery: "stdin" as const } : {}), auditInputEvidenceCoverage: actualCoverage, auditInputEvidenceText: evidenceText };
 }
 
+/** The chain a review-off, read-only definition runs: the planner only. */
+function planningOnlyState(
+  input: CoordinateGoalInput,
+  unique: readonly SyntheticCatalogInstance[],
+  usable: readonly SyntheticCatalogInstance[],
+  quotaLabels: Readonly<Record<string, QuotaWord>>,
+): CoordinateGoalState {
+  const plannerId = choosePlanner(usable.map((instance) => instance.instanceId));
+  const planner = usable.find((instance) => instance.instanceId === plannerId);
+  if (!planner) {
+    const allowed = input.allowedInstances === undefined ? null : new Set(input.allowedInstances);
+    const pool = allowed === null ? unique : unique.filter((instance) => allowed.has(instance.instanceId));
+    const blocked = pool.find((instance) => isUsable(instance) && (
+      Boolean(instance.environmentAvoided) || (input.avoidInstances ?? []).includes(instance.instanceId)));
+    return stopped(
+      quotaLabels,
+      blocked
+        ? `Stopped. ${harnessLabel(blocked)} cannot run on this machine right now, so no plan was assigned.`
+        : pool.some(creditsBlocked)
+          ? "Stopped. A model that requires extra usage credits was not selected, so no plan was assigned."
+          : pool.some(modelUnnamed)
+            ? "Stopped. A signed-in agent has no included model GoalPort can name, so an extra-credit model was not selected."
+            : "Stopped. No logged-in agent can run right now, so no plan was assigned.",
+    );
+  }
+  if (input.continuation &&
+      input.continuation.originalGoal.length + input.continuation.followUp.length > MAX_CONTINUATION_CHARS) {
+    return stopped(
+      quotaLabels,
+      "Stopped. The combined character length of the original goal and follow-up exceeds 100,000 characters, so no turn was sent.",
+    );
+  }
+  const planMessage = plannerText(input, "read");
+  if (input.continuation && utf8Bytes(planMessage) > MAX_CONTINUATION_PROMPT_BYTES) {
+    return stopped(
+      quotaLabels,
+      "Stopped. The assembled continuation prompt exceeded the 100,000-byte limit, so no turn was sent.",
+    );
+  }
+  const command = turnCommand({
+    commandId: commandKey("plan", planner.instanceId, planMessage, commandIdentitySendKey(input, input.sendKey), input.piCapacity),
+    piCapacity: input.piCapacity, instance: planner, workspacePath: input.workspacePath, text: planMessage,
+  });
+  if (authorizeCoordinateTurn(command).outcome !== "write-denied") {
+    return stopped(quotaLabels, "Stopped. The edit disposition was not deny, so no role was assigned.");
+  }
+  return {
+    planningHarness: harnessLabel(planner),
+    reviewHarness: null,
+    result: null,
+    stopReason: "One agent is assigned to plan. No model turn has been sent.",
+    planningQuota: quotaWord(planner.quota),
+    reviewQuota: null,
+    roles: ["planning"],
+    commands: [command],
+    quotaLabels,
+  };
+}
+
 /**
  * Pick two different catalog instances for a plan and a check.
  * The returned commands are not sent. A later session may send them.
@@ -843,6 +916,13 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
       quotaLabels,
       "Stopped. No agent catalog is connected, so no role was assigned.",
     );
+  }
+  const workflow = input.workflow ?? WORKFLOW;
+  if (!planReviewRuns(workflow.checks, input.writeAuthorization !== undefined)) {
+    // The definition turned the independent review off and this goal changes
+    // no files: one agent plans, nothing else is sent. Writing goals never
+    // reach here, so no write path can lose its review.
+    return planningOnlyState(input, unique, usable, quotaLabels);
   }
   if (usable.length < 2) {
     // The named sentence fires only when the blockings are the cause:
@@ -892,7 +972,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const pair = chooseRoles(usable.map((instance) => instance.instanceId), WORKFLOW.checks);
+  const pair = chooseRoles(usable.map((instance) => instance.instanceId), workflow.checks);
   const planner = usable.find((instance) => instance.instanceId === pair?.planner);
   const reviewer = usable.find((instance) => instance.instanceId === pair?.reviewer);
   if (!planner || !reviewer || planner.instanceId === reviewer.instanceId) {
@@ -911,7 +991,7 @@ export function coordinateGoal(input: CoordinateGoalInput): CoordinateGoalState 
     }
   }
 
-  const mode = citationMode(reviewer.instanceId, WORKFLOW.checks);
+  const mode = citationMode(reviewer.instanceId, workflow.checks);
   const planMessage = plannerText(input, mode);
   const reviewMessage = reviewText(input, mode);
 

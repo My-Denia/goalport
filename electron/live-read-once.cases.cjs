@@ -289,3 +289,14 @@ test('live follow-up eligibility is a capability check, not an exact pair or bud
  const live = { mode: codec.MODE, ready: true, initialRequestId: 'a', fromRequestId: 'a', rootRequestId: 'a', remainingReads: 6, readonly: true, pending: false, revoked: false, childRequestId: null, expiresAt: '2026-01-01T00:00:00Z', reason: null };
  assert.equal(codec.liveStatus(live)?.remainingReads, 6);
 });
+test('a review-off snapshot is never eligible; no snapshot behaves as Recommended', () => {
+ const ok = { ...admission('C:/ws'), maxTurns: 6, allowedInstances: ['pi', 'codex'] };
+ const def = (planReview, readWorkspace = 'preferred') => ({ schema: 1, id: 'my-0a1b2c3d', version: 1, name: 'Mine', parent: 'recommended@1',
+  modules: { checks: { planReview, reviewerNeeds: { readWorkspace }, requirementCitation: 'quote-when-reviewer-cannot-read' } } });
+ assert.equal(codec.eligible({ ...ok, workflowDefinition: def('off') }), false);
+ assert.equal(codec.eligible({ ...ok, workflowDefinition: def('on') }), true);
+ assert.equal(codec.eligible({ ...ok, workflowDefinition: undefined }), true);
+ assert.equal(codec.eligible({ ...ok, workflowDefinition: { schema: 1, id: 'bad' } }), false, 'a snapshot that cannot be read is never eligible');
+ assert.equal(codec.eligible({ ...ok, allowedInstances: ['pi', 'codex', 'claude'], workflowDefinition: def('on', 'required') }), true);
+ assert.equal(codec.eligible({ ...ok, workflowDefinition: def('on', 'required') }), false, 'reviewer must read files when the workflow requires it');
+});

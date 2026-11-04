@@ -1976,6 +1976,7 @@ describe("harness access panel and scoped rounds", () => {
     save?: (record: Record<string, unknown>, call: number) => Record<string, unknown>;
     launch: (command: { commandId: string; modelSelection: { instanceId: string } }, call: number) => Promise<Record<string, unknown>>;
     records?: Array<Record<string, unknown>> | (() => Promise<Array<Record<string, unknown>>>);
+    workflows?: Array<Record<string, unknown>>;
   }) {
     const order: string[] = [];
     const authorizations: AccessPayload[] = [];
@@ -2036,6 +2037,7 @@ describe("harness access panel and scoped rounds", () => {
         saveCalls += 1;
         return options.save ? options.save(record, saveCalls) : saveCoordinationRecordForTest(saved, record);
       },
+      ...(options.workflows ? { workflowsList: async () => ({ workflows: options.workflows }) } : {}),
       coordinationRecords: async () => (typeof options.records === "function" ? options.records() : (options.records ?? saved)),
     } as never;
     return {
@@ -2176,8 +2178,9 @@ describe("harness access panel and scoped rounds", () => {
     await openDraftWithPanel();
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
     typeMessage("plan the helper");
-    sendMessage();
+    // Issue #68: with one agent Send is held and the reason sits beside it, so nothing can be pressed or authorized.
     expect(await screen.findByText(/An independent check needs two agents that can run, so select at least two\./)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
     expect(bridge.order).not.toContain("authorize");
     expect(bridge.order.filter((item) => item === "launch")).toHaveLength(0);
   });
@@ -2255,6 +2258,73 @@ describe("harness access panel and scoped rounds", () => {
     expect((screen.getByRole("textbox", { name: "Project folder" }) as HTMLInputElement).value).toBe("/work/goal");
     expect(bridge.launchCount()).toBe(0);
     expect(screen.queryByText(/This send will not use Codex/)).toBeNull();
+  });
+
+  it("Use again keeps the workflow the result ran under, and the access panel says the plan is not reviewed", async () => {
+    const quick = { schema: 1, id: "my-0a1b2c3d", version: 1, name: "Quick plans", parent: "recommended@1",
+      modules: { checks: { planReview: "off", reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } } };
+    scopedBridge({
+      providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+      records: [{
+        requestId: "blocked-quick", workspacePath: "/work/goal", goal: "Explain the failure.",
+        planningHarness: "Codex", reviewHarness: null, planText: null, reviewText: null, result: null,
+        verdict: "failed", stopReason: "Codex cannot run its tools on this machine right now, so the plan was not completed.",
+        planningQuota: null, reviewQuota: null, savedAt: "2026-10-16T02:00:00.000Z",
+        workflow: { id: "my-0a1b2c3d", version: 1, name: "Quick plans", planReview: "off" }, workflowDefinition: quick,
+        environmentBlocked: { role: "planning", instanceId: "codex", harness: "Codex", detail: "helper crashed" },
+      }],
+      launch: async (command) => planOrReview(command),
+      workflows: [quick],
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+    expect(await screen.findByText("One of Codex and Claude will plan this goal. Independent review is off in Quick plans. Nothing runs until you press Send.")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/plan and check this goal/);
+  });
+
+  describe("a draft made from a saved result follows the workflow as it is saved now", () => {
+    const resultWith = (planReview: "on" | "off") => ({
+      schema: 1, id: "my-0a1b2c3d", version: 1, name: "Quick plans", parent: "recommended@1",
+      modules: { checks: { planReview, reviewerNeeds: { readWorkspace: "preferred" }, requirementCitation: "quote-when-reviewer-cannot-read" } },
+    });
+    const blockedRecord = (used: Record<string, unknown>) => ({
+      requestId: "blocked-quick", workspacePath: "/work/goal", goal: "Explain the failure.",
+      planningHarness: "Codex", reviewHarness: null, planText: null, reviewText: null, result: null,
+      verdict: "failed", stopReason: "Codex cannot run its tools on this machine right now, so the plan was not completed.",
+      planningQuota: null, reviewQuota: null, savedAt: "2026-10-16T02:00:00.000Z",
+      workflow: { id: "my-0a1b2c3d", version: 1, name: "Quick plans", planReview: "off" }, workflowDefinition: used,
+      environmentBlocked: { role: "planning", instanceId: "codex", harness: "Codex", detail: "helper crashed" },
+    });
+
+    it("a result that ran with review off, then edited to review on: the draft shows review on and Send checks the plan", async () => {
+      const bridge = scopedBridge({
+        providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+        records: [blockedRecord(resultWith("off"))],
+        launch: async (command) => planOrReview(command),
+        workflows: [{ ...resultWith("on"), version: 2 }],
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+      expect(await screen.findByText(/will plan and check this goal/)).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/Independent review is off/);
+      sendMessage();
+      await waitFor(() => expect(bridge.launchCount()).toBe(2));
+    });
+
+    it("a workflow that was deleted: the draft says so in one plain line and uses Recommended", async () => {
+      const bridge = scopedBridge({
+        providers: [usableHarness("codex", "Codex"), usableHarness("claude", "Claude")],
+        records: [blockedRecord(resultWith("off"))],
+        launch: async (command) => planOrReview(command),
+        workflows: [],
+      });
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Use again Codex" }));
+      expect(await screen.findByText(/The workflow this goal used is no longer saved, so Recommended workflow is selected\./)).toBeTruthy();
+      expect(await screen.findByText(/will plan and check this goal/)).toBeTruthy();
+      sendMessage();
+      await waitFor(() => expect(bridge.launchCount()).toBe(2));
+    });
   });
 
   it("runs an environment failure through a takeover to the terminal view", async () => {
@@ -3551,9 +3621,10 @@ describe("one in-window repair", () => {
       await screen.findByRole("checkbox", { name: "Keep working after closing" });
       fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
       typeMessage("One harness is not a check");
-      sendMessage();
-      expect(await screen.findAllByRole("alert")).toHaveLength(1);
-      expect(screen.getByRole("alert").textContent).toContain("select at least two");
+      // Issue #68: Send is held and says why beside the button (it used to open an alert after the press).
+      expect((await screen.findByRole("status", { name: "" })).textContent).toContain("select at least two");
+      expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryAllByRole("alert")).toHaveLength(0);
       fireEvent.click(screen.getByRole("checkbox", { name: "Select Codex" }));
       fireEvent.click(screen.getByRole("checkbox", { name: "Keep working after closing" }));
       sendMessage();
